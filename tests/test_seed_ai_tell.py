@@ -64,6 +64,9 @@ DENSITY = "## Density is the finding"
 RULE_ZERO = "## Rule zero: never edit named or borrowed text"
 DISPOSITIONS = "## Three dispositions"
 KEEP = "## Keep by default"
+AUTHORSHIP = "## Never a verdict on authorship"
+STRUCTURAL = "## Structural families: what no word search catches"
+CURRENCY = "## How to refresh the catalogue"
 
 # Where the covering clause for each corpus pattern has to live.
 EXEMPT_REGION, CATALOGUE_REGION, KEEP_REGION = "exemption", "catalogue", "keep"
@@ -705,6 +708,264 @@ class TriggerPrecisionTest(unittest.TestCase):
         self.assertGreaterEqual(len(carrying), 2,
                                 "the must-fire prompts share no vocabulary with the "
                                 "description: %r" % self.prompts("Must fire:"))
+
+
+class AuthorshipTest(unittest.TestCase):
+    """The one claim this skill must never make.
+
+    A catalogue of tells is one short step from a detector, and detectors of this
+    kind are pseudoscience with a known victim list. The disclaimer is not
+    decoration: it is the clause that keeps the file on the author's own side of
+    the desk, so it is pinned rather than left to survive edits by luck.
+    """
+
+    def setUp(self):
+        self.section = section(body(skill_text()), AUTHORSHIP)
+
+    def test_the_section_survives(self):
+        for clause in ("Nothing here measures authorship",
+                       "never to assess who wrote something",
+                       "never as input to a grade or a moderation decision"):
+            self.assertIn(clause, flowed(self.section),
+                          "the authorship disclaimer lost %r" % clause)
+
+    def test_it_names_the_population_that_gets_hurt(self):
+        self.assertIn("ESL", self.section)
+
+
+class StructuralFamilyTest(unittest.TestCase):
+    """The families a word-level table cannot hold.
+
+    The lexical catalogue passed a document two independent readers then found
+    forty tells in, because every one of those tells was a property of sentence
+    or paragraph construction rather than of a word. Each family here therefore
+    has to carry a recognition test a reader can actually run, which is why the
+    test below insists the recognition line be a question: a description of a
+    pattern is not a procedure for finding one.
+    """
+
+    # Every construction the two reviews reported, by the name this file gives it.
+    REPORTED = (
+        "Negation-then-correction",
+        "Comparative aphorism",
+        "Rule of three",
+        "Sentence-final restatement",
+        "Grand summary pivot",
+        "Question as heading",
+        "Knowing aside",
+        "Self-certifying candour",
+        "Repeated signature phrase",
+        "Unsourced precision",
+    )
+
+    def setUp(self):
+        self.body = body(skill_text())
+        self.section = section(self.body, STRUCTURAL)
+
+    def families(self):
+        """{name: block} for every `### ` block in the structural section."""
+        parts = re.split(r"^### (.+)$", self.section, flags=re.M)[1:]
+        return dict(zip(parts[0::2], parts[1::2]))
+
+    def test_the_section_exists_and_parsed(self):
+        self.assertGreaterEqual(len(self.families()), len(self.REPORTED),
+                                "only %d families parsed" % len(self.families()))
+
+    def test_every_construction_the_reviewers_found_has_a_family(self):
+        names = " | ".join(self.families())
+        for reported in self.REPORTED:
+            self.assertIn(reported, names,
+                          "no family covers %r, which both reviews reported"
+                          % reported)
+
+    def test_every_family_carries_all_four_parts(self):
+        for name, block in self.families().items():
+            for label in ("**Recognition test.**", "**Disposition.**",
+                          "**Before.**", "**After.**"):
+                self.assertIn(label, block, "family %r is missing %s" % (name, label))
+
+    def test_every_recognition_test_is_a_question_a_reader_can_run(self):
+        """A structural pattern cannot be grepped, so the recognition test IS the
+        implementation. A family that only describes itself is unactionable."""
+        for name, block in self.families().items():
+            line = flowed(re.search(r"\*\*Recognition test\.\*\*(.+?)\n\*\*",
+                                    block, re.S).group(1))
+            self.assertIn("?", line,
+                          "family %r describes itself instead of asking the reader "
+                          "something they can answer: %r" % (name, line.strip()))
+            self.assertGreater(len(line.split()), 8,
+                               "family %r has a recognition test too short to apply"
+                               % name)
+
+    def test_every_family_leads_with_exactly_one_disposition(self):
+        vocabulary = re.findall(r"^\*\*([A-Z][a-z]+)\*\*",
+                                section(self.body, DISPOSITIONS), re.M)
+        self.assertEqual(vocabulary, ["Rewrite", "Delete", "Keep"])
+        verb = re.compile(r"(?<![\w-])(%s)(?![\w-])" % "|".join(vocabulary))
+        for name, block in self.families().items():
+            text = re.search(r"\*\*Disposition\.\*\*\s*(.+)", block).group(1)
+            self.assertIsNotNone(verb.match(text),
+                                 "family %r does not lead with a disposition: %r"
+                                 % (name, text))
+            first = re.split(r"(?<=[.?!])\s", text)[0]
+            self.assertEqual(len(verb.findall(first)), 1,
+                             "family %r gives two dispositions in one breath: %r"
+                             % (name, first))
+
+    def test_every_family_shows_a_repair_that_changes_something(self):
+        for name, block in self.families().items():
+            before = backticked(re.search(r"\*\*Before\.\*\*(.+?)\n\*\*After",
+                                          block, re.S).group(1))
+            after = backticked(re.search(r"\*\*After\.\*\*(.+)", block, re.S).group(1))
+            self.assertTrue(before, "family %r has no worked before" % name)
+            self.assertTrue(after, "family %r has no worked after" % name)
+            self.assertNotEqual(before[0].strip(), after[0].strip(),
+                                "family %r shows the same text twice" % name)
+
+    def test_the_worked_examples_are_quoted_so_rule_zero_covers_them(self):
+        """A before/after pair is a mention. Left bare it would be a use, and the
+        file's own self-audit would report it."""
+        for name, block in self.families().items():
+            pair = block[block.find("**Before.**"):]
+            bare = prose_only(pair)
+            self.assertEqual(bare.strip().replace("*", "").replace(".", ""),
+                             "Before After",
+                             "family %r has worked-example text outside backticks, "
+                             "so it reads as the file's own voice" % name)
+
+
+class StructuralDensityTest(unittest.TestCase):
+    """Antithesis and the rule of three are ordinary technical prose in ones and
+    twos. The finding is the rate, so the rule has to be a rate, and the rate has
+    to be justified against something measured rather than picked.
+    """
+
+    def setUp(self):
+        self.section = section(body(skill_text()), STRUCTURAL)
+
+    def numbers(self):
+        floor = re.search(r"(\d+) or more surviving instances of one family",
+                          self.section)
+        rate = re.search(r"(\d+) or more per thousand words", self.section)
+        self.assertIsNotNone(floor, "no per-family floor")
+        self.assertIsNotNone(rate, "no per-family rate")
+        return int(floor.group(1)), int(rate.group(1))
+
+    def test_the_rule_has_both_a_floor_and_a_rate(self):
+        """Either alone is wrong. A rate alone fires on a 200-word note with one
+        antithesis; a count alone fires on a long document that is not dense."""
+        floor, rate = self.numbers()
+        self.assertGreaterEqual(floor, 3, "a floor of %d is not a pile-up" % floor)
+        self.assertGreaterEqual(rate, 1)
+        self.assertIn("Both figures", flowed(self.section),
+                      "the rule must say the two figures are joint, not either/or")
+
+    def test_the_rate_is_justified_against_a_measurement(self):
+        text = flowed(self.section)
+        for evidence in ("21,926 words", "0.05 per thousand"):
+            self.assertIn(evidence, text,
+                          "the structural rate cites no measurement: missing %r"
+                          % evidence)
+
+    def test_the_measured_human_baseline_sits_under_the_threshold(self):
+        """The number is only defensible if the human corpus clears it."""
+        _, rate = self.numbers()
+        measured = float(re.search(r"([\d.]+) per thousand", flowed(self.section))
+                         .group(1))
+        self.assertLess(measured, rate,
+                        "the threshold %d is at or under the measured human rate "
+                        "%.2f, so human prose would fire" % (rate, measured))
+
+    def test_the_shortlist_is_not_sold_as_a_detector(self):
+        self.assertIn("shortlist", flowed(self.section).lower())
+        self.assertIn("not a detector", flowed(self.section).lower())
+
+
+class CatalogueCurrencyTest(unittest.TestCase):
+    """The catalogue is a snapshot of three moving sources.
+
+    Before this section the file said only to fetch the source again, which is a
+    wish rather than a procedure: it named no command, no comparison, no place to
+    write the answer down, and no way for a reader to tell that the file was
+    already out of date.
+    """
+
+    ISO = r"(\d{4})-(\d{2})-(\d{2})"
+
+    def setUp(self):
+        self.body = body(skill_text())
+        self.section = section(self.body, CURRENCY)
+
+    def banner(self):
+        m = re.search(r"\*\*Catalogue reviewed %s\. Due for review %s\.\*\*"
+                      % (self.ISO, self.ISO), self.body)
+        self.assertIsNotNone(m, "no currency banner in SKILL.md")
+        return m
+
+    def dates(self):
+        import datetime
+        g = [int(x) for x in self.banner().groups()]
+        return (datetime.date(*g[:3]), datetime.date(*g[3:]))
+
+    def test_the_banner_is_the_first_thing_under_the_title(self):
+        """Staleness a reader has to go looking for is staleness nobody sees."""
+        first_section = self.body.find("\n## ")
+        self.assertLess(self.banner().start(), first_section,
+                        "the currency banner is buried below a section heading")
+
+    def test_the_review_date_is_in_the_future_of_the_pull(self):
+        reviewed, due = self.dates()
+        self.assertGreater(due, reviewed)
+
+    def test_the_interval_matches_the_one_the_file_states(self):
+        reviewed, due = self.dates()
+        self.assertIn("six months", flowed(self.section),
+                      "the file states no review interval")
+        self.assertTrue(150 <= (due - reviewed).days <= 200,
+                        "banner spans %d days but the file says six months"
+                        % (due - reviewed).days)
+
+    def test_the_banner_says_what_an_overdue_reader_does(self):
+        self.assertIn("Past that date", flowed(self.body))
+
+    def test_every_source_is_named_with_a_url_a_date_and_a_version_stamp(self):
+        rows = [cells(l) for t in tables(self.section) for l in t[2:]
+                if not set(l) <= set("|-")]
+        self.assertGreaterEqual(len(rows), 3,
+                                "fewer than three sources recorded: %r" % rows)
+        for row in rows:
+            self.assertEqual(len(row), 3, "source row %r is not name/pulled/stamp" % row)
+            self.assertRegex(row[1], self.ISO, "source %r has no pull date" % row[0])
+            self.assertTrue(row[2].strip(), "source %r has no version stamp" % row[0])
+        joined = " ".join(" ".join(r) for r in rows)
+        for url in ("claudisms.ai", "Signs of AI writing", "hn.algolia.com"):
+            self.assertIn(url, joined, "source %r is not recorded" % url)
+
+    def test_the_procedure_gives_a_command_rather_than_an_intention(self):
+        text = flowed(self.section)
+        self.assertIn("jq -r '.updated, .count'", text,
+                      "no runnable check against the source's own version stamp")
+        self.assertIn(".terms[].id", text, "no way to diff term by term")
+
+    def test_the_procedure_covers_both_directions_of_drift(self):
+        text = flowed(self.section)
+        self.assertIn("Fading, not deleted", text,
+                      "no rule for a pattern that has gone stale")
+        self.assertIn("newly common", text,
+                      "no rule for a pattern that is newly common")
+
+    def test_a_retired_pattern_is_archived_rather_than_dropped(self):
+        """Repo constraint: nothing is ever destructively removed. A deleted row
+        loses the record that the pattern was ever considered."""
+        self.assertIn("Fading", section(self.body, CURRENCY))
+        self.assertRegex(section(self.body, CURRENCY),
+                         r"(?s)Fading, not deleted.*%s" % self.ISO,
+                         "a demoted pattern carries no date")
+
+    def test_the_source_that_was_already_here_is_still_credited(self):
+        self.assertIn("https://claudisms.ai", self.section)
+        self.assertIn("CC0", flowed(self.section))
+
 
 
 if __name__ == "__main__":

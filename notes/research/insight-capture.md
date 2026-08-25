@@ -155,14 +155,20 @@ Docs confirm and add:
  "hook_event_name":"PreCompact","compaction_trigger":"auto"}
 ```
 
-### Two measured discrepancies with the docs — trust the measurement
+### Three measured discrepancies with the docs — trust the measurement
 
 - **`SessionEnd`**: docs show `session_end_reason`; the CLI 2.1.243 payload I captured has
   **`reason`** (value `"other"`). A hook reading `session_end_reason` would get `null`.
 - **`SubagentStop`**: docs do not list `agent_transcript_path`; the real payload has it.
   It points at the subagent's own `.../subagents/agent-*.jsonl`.
 
-`PreCompact` was **not** captured empirically (see section 8).
+- **`PreCompact`**: docs show `compaction_trigger` and `permission_mode`; the payload
+  captured on 2026-08-25 has **`trigger`** and no `permission_mode` at all. It also carries
+  two fields the docs do not list, `prompt_id` and `custom_instructions`. A hook reading
+  `compaction_trigger` to tell an auto-compaction from a manual one gets `null` and cannot
+  distinguish them.
+
+`PreCompact` is now captured empirically; section 8 item 1 is closed.
 
 ---
 
@@ -493,11 +499,10 @@ routing target for step 3 (which repo's notes does a LOCAL item belong to).
 
 ## 8. What I could NOT verify
 
-1. **`PreCompact` payload, empirically.** I could not trigger compaction from a headless
-   `claude -p` run. The field list in section 2 for `PreCompact` is from the official docs
-   only — and given that the docs were *wrong* about `SessionEnd.reason` on this CLI
-   version, `compaction_trigger` should be re-checked against a live payload before any
-   code depends on it.
+1. ~~**`PreCompact` payload, empirically.**~~ **RESOLVED 2026-08-25.** `claude -p "/compact"`
+   does trigger compaction headlessly; the earlier attempt failed for another reason. The
+   captured payload settled it, and the docs were wrong here too: the field is `trigger`,
+   not `compaction_trigger`, and `permission_mode` is absent. Recorded in section 2.
 2. **Whether the `outputStyle` key in `settings.json` still works.** I passed
    `{"outputStyle":"Explanatory"}` via `--settings` and the run produced no insight blocks —
    but the model was Haiku on a trivial task, so this is not evidence either way. The
