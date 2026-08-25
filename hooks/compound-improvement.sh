@@ -99,6 +99,39 @@ prune_stale_state() {
   return 0
 }
 
+# ---------------------------------------------------------------- edit detection
+# Does this Bash command write to a file? The PostToolUse matcher has to include Bash,
+# because in a bypass-permissions session the model is instructed to change files with
+# sed, heredocs and inline interpreters. Under a Write|Edit matcher the hook then sees
+# almost nothing: measured on one such session, 4 counted edits against dozens of real
+# ones, so the checkpoint went silent in exactly the long autonomous session it exists
+# for.
+#
+# The result is a lower bound by construction. A heredoc into `python3 -` that calls
+# write_text is caught by the interpreter signatures; a script that assembles its target
+# path at runtime is not visible in the command string at all. Undercounting only delays
+# a checkpoint, while overcounting fires it on `ls` and teaches the user to ignore it, so
+# this errs toward missing.
+mutates_file() {
+  # Drop descriptor duplications and device redirects first, or `cmd 2>/dev/null` reads
+  # as a write.
+  probe="$(printf '%s' "$1" | sed -e 's/[0-9]*>&[0-9-]*//g' -e 's#[0-9]*>>*[[:space:]]*/dev/[a-zA-Z]*##g')"
+  printf '%s' "$probe" | grep -qE \
+    '>[[:space:]]*[^&|>[:space:]]|sed[[:space:]]+(-[^[:space:]]+[[:space:]]+)*-i|[[:space:]]tee[[:space:]]|(^|[[:space:];&|(])(cp|mv|install|patch|truncate|dd|rsync)[[:space:]]|git[[:space:]]+(apply|restore|checkout[[:space:]]+--|am)|write_text|writeFileSync|writeFile\(|\bopen\([^)]*["'"'"']w'
+}
+
+# Paths in this edit that are durable prose other people will read. `ai-tell-audit` has
+# no trigger of its own: its description names a README, but nothing connects editing one
+# to invoking it, so it fires only if the session happens to think of it.
+durable_prose() {
+  # Anything that is not a path character becomes a separator, which is portable in a way
+  # that a tr set full of quotes and backticks is not.
+  printf '%s' "$1" | sed 's/[^A-Za-z0-9_./-]/ /g' | tr -s ' ' '\n' \
+    | grep -E '(^|/)(README|CONTRIBUTING|CHANGELOG|CODE_OF_CONDUCT)[^/]*$|(^|/)docs?/.*[.](md|rst|txt)$' \
+    | head -4
+}
+
+
 emit() { # $1 = context text, $2 = hookEventName
   jq -n --arg ctx "$1" --arg ev "$2" \
     '{suppressOutput:true, hookSpecificOutput:{hookEventName:$ev, additionalContext:$ctx}}'
@@ -124,6 +157,12 @@ case "$MODE" in
     emit "[skill-compounder] Before starting implementation, check whether an existing skill already solves this — the session skill list, ~/.claude/skills/, ./.claude/skills/. Invoke the 'skill-compounder' skill for the full check. Disregard if this turn is not implementation work." "UserPromptSubmit"
     ;;
   edit)
+    tool="$(printf '%s' "$payload" | jq -r '.tool_name // ""' 2>/dev/null)"
+    target="$(printf '%s' "$payload" | jq -r '.tool_input.file_path // ""' 2>/dev/null)"
+    if [ "$tool" = "Bash" ]; then
+      target="$(printf '%s' "$payload" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+      mutates_file "$target" || exit 0
+    fi
     claim_once edit || exit 0
     # One byte appended per edit, and the count is the file size. A read-modify-write
     # loses events under concurrency, and edits arrive in bursts: measured at 4-way
@@ -134,11 +173,19 @@ case "$MODE" in
     printf 'x' >> "$counter" 2>/dev/null || exit 0
     n="$(wc -c < "$counter" 2>/dev/null | tr -d ' ')"
     case "$n" in ''|*[!0-9]*) exit 0 ;; esac
-    if [ $(( n % EDIT_EVERY )) -ne 0 ]; then
-      prune_stale_state
+    if [ $(( n % EDIT_EVERY )) -eq 0 ]; then
+      emit "[skill-compounder] Checkpoint after $n file edits. (a) Is the procedure you are working through right now BOTH costly to have gotten right AND likely to recur? (b) Did a skill you invoked this session misfire? If either is yes, invoke the 'skill-compounder' skill and follow it. If neither, disregard." "PostToolUse"
       exit 0
     fi
-    emit "[skill-compounder] Checkpoint after $n file edits. (a) Is the procedure you are working through right now BOTH costly to have gotten right AND likely to recur? (b) Did a skill you invoked this session misfire? If either is yes, invoke the 'skill-compounder' skill and follow it. If neither, disregard." "PostToolUse"
+    # Not a checkpoint turn. Remind once per file per session that this is prose.
+    seen="$STATE_DIR/$sid.prose"
+    for path in $(durable_prose "$target"); do
+      base="$(basename "$path")"
+      grep -Fqx "$base" "$seen" 2>/dev/null && continue
+      printf '%s\n' "$base" >> "$seen" 2>/dev/null || break
+      emit "[skill-compounder] $base is durable prose other people will read. Before it ships, invoke the 'ai-tell-audit' skill over the passages you changed. Disregard if this edit is not prose." "PostToolUse"
+      exit 0
+    done
     ;;
   *) exit 0 ;;
 esac

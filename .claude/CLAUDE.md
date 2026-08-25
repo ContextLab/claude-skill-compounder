@@ -87,6 +87,14 @@ scripts to the same events with the same matchers, so adding a hook to one and f
 other fails a test. A plugin cannot carry `statusLine`, which is why the installer stays
 primary; see `docs/DESIGN.md`.
 
+**The edit checkpoint counts `Bash`, not just `Write|Edit`.** `mutates_file()` in
+`hooks/compound-improvement.sh` inspects `tool_input.command` and counts only commands
+that write. Detection from a command string is a lower bound on purpose: a heredoc into
+`python3 -` calling `write_text` is caught, a runtime-assembled path is not. Undercounting
+delays a checkpoint; counting `ls` teaches the user to ignore it. A second branch fires
+`ai-tell-audit` once per durable-prose file per session, because that skill's description
+names a README but nothing otherwise connects editing one to invoking it.
+
 **With both wirings active every hook fires twice**, so any new hook that counts or
 throttles needs the `claim_once()` guard in `hooks/compound-improvement.sh`. Reasoning in
 `docs/DESIGN.md`.
@@ -144,6 +152,8 @@ built, and `notes/research/` for the evidence behind the seed-pool selection, th
 queue, and the contribution mechanics. Read them for reasoning, not for the current state
 of the code.
 
-The four threshold constants (>15 min, >=2 occurrences, 12 edits, 20 min) are unvalidated.
-`bin/skillreport` is the instrument that would settle them, and it needs real usage across
-several repositories over real time. Do not tune them before that data exists.
+The two hook constants (12 edits, 20 minutes) are unvalidated. `bin/skillreport` is the
+instrument that would settle them, and it needs real usage across several repositories
+over real time. Do not tune them before that data exists. The skill's own threshold is
+deliberately not a number — it asks for a nameable dead end and a second occurrence — so
+there is nothing there to tune.

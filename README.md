@@ -169,14 +169,20 @@ so `yes` and `continue` never trigger it.
 ### 2. During work, notice what is worth keeping
 
 Every 12 file edits, a `PostToolUse` hook asks whether a given procedure clears the bar.
+It counts `Bash` alongside `Write` and `Edit`, because a session told to edit with `sed`,
+heredocs and inline interpreters produces almost no `Write` calls, and the checkpoint then
+goes quiet in the long autonomous sessions it exists for. Read-only commands are filtered
+out by inspecting the command string, so `ls` never counts toward a checkpoint.
 **Both** conditions must hold:
 
-- **Costly**, meaning >15 minutes of trial-and-error, a non-obvious ordering constraint,
-  or an error a fresh session would predictably repeat, **and**
-- **Recurring**, meaning it has already happened twice, or it is a standing part of the
-  workflow.
+- **Costly**: name the specific dead end in one sentence, and what a fresh session would
+  have done instead. If you cannot name it, it was not costly, it was just work. **And**
+- **Recurring**: point at the second occurrence, in a prior session, earlier in this one,
+  or an open issue. "It seems like the sort of thing that recurs" is not a second one.
 
-One without the other gets a note, not a skill. Forging costs several subagent rounds.
+Both want a **concrete referent** rather than a judgement, because both are otherwise
+loose enough to say yes to nearly any non-trivial work, and a threshold that always
+resolves to yes is worse than none. One without the other gets a note, not a skill.
 
 When both hold, the session runs the **forging protocol**:
 
@@ -198,6 +204,12 @@ will bite a cold session six weeks later. Its checklist: cold-start executabilit
 precision (3 prompts that should fire, 3 that should not), every asserted command actually
 run, unhappy paths, overlap with existing skills, and scope creep.
 
+**Never hand a reviewer a list of what not to flag.** Scoping a brief that way reads as
+instruction about what the answer should be, and the review narrows to match. Measured on
+this repo's own documentation: the same file, reviewed by one agent given a "do not flag
+these" list and by one given only the principle, produced **1 finding and 4** — and the
+unprimed reviewer defended two passages the primed brief would have condemned.
+
 ### 3. When a skill misfires: fix, document, or retire
 
 Never silently work around a bad skill, because the workaround costs the same time again
@@ -206,8 +218,13 @@ wrong, fix that and then re-run the full red-team loop. Retire it only when neit
 
 Retirement requires **independent concurrence**. Ask a second fresh agent the *neutral*
 question, *"should this be kept, fixed, or retired?"* Never "confirm this deletion", which
-is a leading prompt any agent will (obligingly) rubber-stamp. Retiring moves the skill to
-`~/.claude/skills-archive/` with a `WHY-ARCHIVED.md`. Nothing is ever `rm -rf`'d.
+is a leading prompt any agent will (obligingly) rubber-stamp.
+
+Retiring archives the skill with a `WHY-ARCHIVED.md`, and it archives the **source, not
+the link**: most skills here are symlinks into a checkout, so moving
+`~/.claude/skills/<name>` moves the link, leaves the real directory where the next install
+resurrects it, and writes the tombstone into live source. Resolve with `realpath` first,
+move the resolved directory, then drop the dangling link. Nothing is ever `rm -rf`'d.
 
 ---
 
@@ -216,7 +233,7 @@ is a leading prompt any agent will (obligingly) rubber-stamp. Retiring moves the
 While a skill is being forged, your status line shows live progress:
 
 ```
-my-project git:(main)  ⣻ forge parallel-agents-one-codebase ▕██████······▏ 4/8  50% · red-team round 1
+my-project git:(main)  ⣻ forge parallel-agents-one-codebase ▕██████······▏ 6/12  50% · red-team round 1
 ```
 
 The tail alternates between what is happening right now and a one-line summary of what
@@ -319,7 +336,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 
 ## Tuning
 
-Noisy reminders are a tuning problem. All five are environment variables, but they are not
+Noisy reminders are a tuning problem. All seven are environment variables, but they are not
 all read by the same component, so they do not all go in the same place in
 `~/.claude/settings.json`:
 
@@ -328,20 +345,24 @@ all read by the same component, so they do not all go in the same place in
 |`CI_EDIT_EVERY`|`12`|the hook entries|Edits between "is this worth crystallizing?" checkpoints|
 |`CI_PROMPT_COOLDOWN`|`1200`|the hook entries|Seconds between "does a skill exist?" reminders|
 |`CI_PROMPT_MIN_CHARS`|`60`|the hook entries|Shorter prompts never trigger a reminder|
+|`CI_CLAIM_TTL_MIN`|`60`|the hook entries|Minutes before a stale double-fire claim is pruned|
+|`CI_PRUNE_EVERY`|`25`|the hook entries|Hook invocations between sweeps of expired claims|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
-Only the three `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is read by
+Only the five `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is read by
 `statusline/statusline.sh`, so setting it on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it
 belongs in the session-wide `env` block. Set it anywhere narrower and they disagree about
 where state lives.
 
-**All four thresholds are unvalidated.** `CI_EDIT_EVERY=12`, `CI_PROMPT_COOLDOWN=1200`,
-and the skill's own ">15 minutes" and ">=2 occurrences" were picked by judgement and
-nothing has measured them since. `skillreport` is the instrument that would settle them,
-and it needs real usage across several repos over real time before any of these numbers
-should move. Until then, tuning them is guesswork with extra steps.
+**Both hook thresholds are unvalidated.** `CI_EDIT_EVERY=12` and
+`CI_PROMPT_COOLDOWN=1200` were picked by judgement and nothing has measured them since.
+`skillreport` is the instrument that would settle them, and it needs real usage across
+several repos over real time before either number should move. Until then, tuning them is
+guesswork with extra steps. The skill's own threshold is deliberately not a number: a
+duration is a judgement a session can talk itself past, so it asks for a nameable dead end
+and a second occurrence instead.
 
 The one adjustment worth making without data: if a reminder fires often enough that you
 learn to read past it, raise `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`. By that point it

@@ -113,7 +113,7 @@ The repo is both a `curl | bash` install and a Claude Code plugin. Verified on
 What the plugin path gives you for free:
 
 - `hooks/hooks.json` fires. `UserPromptSubmit`, `PostToolUse` with the
-  `Write|Edit` matcher, and `Stop` all reached the scripts. Validation passing is not
+  `Write|Edit|Bash` matcher, and `Stop` all reached the scripts. Validation passing is not
   the same as a hook running, so this was checked by dumping the payloads.
 - `bin/` lands on the Bash tool's `PATH`. A probe binary that existed only inside the
   plugin resolved from there, which is the test that actually proves it (a name the

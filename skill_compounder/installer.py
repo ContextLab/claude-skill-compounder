@@ -37,7 +37,7 @@ INSIGHT_MARKER = "insight-capture.sh"
 # exactly our own is theirs, so recognition is now an exact comparison against the command
 # we write, recorded at install time so uninstall can still find it if app_home moves.
 STATUSLINE_RECORD = "installed-statusline.json"
-EDIT_MATCHER = "Write|Edit"
+EDIT_MATCHER = "Write|Edit|Bash"
 
 DEFAULT_STATE = Path.home() / ".claude" / "skill-compounder"
 

@@ -60,7 +60,7 @@ class InstallerTest(unittest.TestCase):
                             for g in ups for h in g["hooks"]))
         self.assertTrue(any("compound-improvement.sh\" edit" in h["command"]
                             for g in ptu for h in g["hooks"]))
-        self.assertEqual(ptu[0]["matcher"], "Write|Edit")
+        self.assertEqual(ptu[0]["matcher"], "Write|Edit|Bash")
         self.assertIn("statusline.sh", s["statusLine"]["command"])
         self.assertEqual(s["statusLine"]["refreshInterval"], 1)
 
