@@ -23,6 +23,11 @@
 # event idempotent, so running both paths is harmless rather than quietly wrong.
 set -uo pipefail
 
+# HOME can be unset (cron, a stripped env, a container). Under `set -u` that aborted the
+# script with an unbound-variable error and a non-zero exit, which breaks the one promise
+# a hook has to keep. Default it before anything reads it.
+: "${HOME:=/tmp}"
+
 MODE="${1:-edit}"
 EDIT_EVERY="${CI_EDIT_EVERY:-12}"
 PROMPT_COOLDOWN="${CI_PROMPT_COOLDOWN:-1200}"
@@ -70,6 +75,30 @@ claim_once() {
   return 0
 }
 
+prune_stale_state() {
+  # Claim markers are directories, and they nest: <sid>.seen/<mode>-<id>/. An earlier
+  # version matched only '*.seen*', which left the inner markers in place, so the parent
+  # was never empty, rmdir always failed, and one inode leaked per edit forever. -depth
+  # visits children before parents, so a single pass empties the markers and then removes
+  # the directory that held them.
+  #
+  # Markers age out after CI_CLAIM_TTL_MIN minutes, not seven days: a duplicate delivery
+  # arrives within milliseconds of the first, and keeping a week of them means find walks
+  # tens of thousands of directories.
+  #
+  # This runs on the throttled paths too, not only when a reminder is emitted. Behind the
+  # emit it would have fired about once in EDIT_EVERY * PRUNE_EVERY events, roughly 300,
+  # rather than the one in 25 the sampling claims.
+  CLAIM_TTL_MIN="${CI_CLAIM_TTL_MIN:-60}"
+  PRUNE_EVERY="${CI_PRUNE_EVERY:-25}"
+  [ $(( ${RANDOM:-0} % PRUNE_EVERY )) -eq 0 ] || return 0
+  find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
+  find "$STATE_DIR" -mindepth 2 -depth -type d -mmin "+$CLAIM_TTL_MIN" -exec rmdir {} + 2>/dev/null
+  # No -mmin on this pass: removing the markers above just reset the parent's mtime.
+  find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -name '*.seen' -empty -exec rmdir {} + 2>/dev/null
+  return 0
+}
+
 emit() { # $1 = context text, $2 = hookEventName
   jq -n --arg ctx "$1" --arg ev "$2" \
     '{suppressOutput:true, hookSpecificOutput:{hookEventName:$ev, additionalContext:$ctx}}'
@@ -88,6 +117,7 @@ case "$MODE" in
     [ -f "$stamp" ] && last="$(cat "$stamp" 2>/dev/null || true)"
     case "$last" in ''|*[!0-9]*) last="" ;; esac
     if [ -n "$last" ] && [ $(( now - last )) -lt "$PROMPT_COOLDOWN" ]; then
+      prune_stale_state
       exit 0
     fi
     printf '%s' "$now" > "$stamp"
@@ -95,41 +125,23 @@ case "$MODE" in
     ;;
   edit)
     claim_once edit || exit 0
+    # One byte appended per edit, and the count is the file size. A read-modify-write
+    # loses events under concurrency, and edits arrive in bursts: measured at 4-way
+    # parallelism the old counter recorded 12 of 60, so a 12-edit checkpoint fired about
+    # five times too rarely and skillreport's conversion denominator was inflated to
+    # match. An O_APPEND write of one byte is atomic, so nothing is lost.
     counter="$STATE_DIR/$sid.edits"
-    n=0; [ -f "$counter" ] && n="$(cat "$counter" 2>/dev/null || echo 0)"
-    case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    n=$(( n + 1 ))
-    printf '%s' "$n" > "$counter"
-    [ $(( n % EDIT_EVERY )) -ne 0 ] && exit 0
+    printf 'x' >> "$counter" 2>/dev/null || exit 0
+    n="$(wc -c < "$counter" 2>/dev/null | tr -d ' ')"
+    case "$n" in ''|*[!0-9]*) exit 0 ;; esac
+    if [ $(( n % EDIT_EVERY )) -ne 0 ]; then
+      prune_stale_state
+      exit 0
+    fi
     emit "[skill-compounder] Checkpoint after $n file edits. (a) Is the procedure you are working through right now BOTH costly to have gotten right AND likely to recur? (b) Did a skill you invoked this session misfire? If either is yes, invoke the 'skill-compounder' skill and follow it. If neither, disregard." "PostToolUse"
     ;;
   *) exit 0 ;;
 esac
 
-# Opportunistic pruning of stale per-session state.
-#
-# Claim markers are directories, and they nest: <sid>.seen/<mode>-<id>/. An earlier
-# version matched only '*.seen*', which left the inner markers in place, so the parent
-# was never empty, rmdir always failed, and one inode leaked per edit forever. -depth
-# visits children before parents, so a single pass empties the markers and then removes
-# the directory that held them. -mindepth 1 keeps $STATE_DIR itself out of it.
-#
-# Markers age out after CI_CLAIM_TTL_MIN minutes, not seven days. A duplicate delivery
-# arrives within milliseconds of the first, so an hour is already enormous, and keeping a
-# week of them means find walks tens of thousands of directories on the hot path. Measured
-# on the leaking version: 10k markers cost 1.25s per event, 50k cost 5.39s, and the hook
-# timeout is 10s.
-#
-# The sweep itself runs about one event in CI_PRUNE_EVERY, because paying for a directory
-# walk on every single Write is what made the cost visible in the first place.
-CLAIM_TTL_MIN="${CI_CLAIM_TTL_MIN:-60}"
-PRUNE_EVERY="${CI_PRUNE_EVERY:-25}"
-if [ $(( ${RANDOM:-0} % PRUNE_EVERY )) -eq 0 ]; then
-  find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
-  find "$STATE_DIR" -mindepth 2 -depth -type d -mmin "+$CLAIM_TTL_MIN" -exec rmdir {} + 2>/dev/null
-  # No -mmin on this pass: removing the markers above just reset the parent's mtime, so
-  # an age test would never match it and the emptied directory would linger forever.
-  # An empty .seen holds nothing worth keeping, and mkdir -p recreates it on demand.
-  find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -name '*.seen' -empty -exec rmdir {} + 2>/dev/null
-fi
+prune_stale_state
 exit 0

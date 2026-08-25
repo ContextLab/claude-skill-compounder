@@ -143,6 +143,18 @@ hash_of() {
 mkdir -p "$DIR" 2>/dev/null || exit 0
 file="$DIR/$week.jsonl"
 dupes="$DIR/.dedup-count"
+# One directory per captured hash, used purely as an atomic claim. Cheap to create and
+# pruned with the queue, so it never needs its own lifecycle.
+CLAIMS="$DIR/.claims"
+mkdir -p "$CLAIMS" 2>/dev/null || CLAIMS="$DIR"
+
+# Both duplicate paths, the atomic claim and the queue grep, report through here, so the
+# count stays honest whichever one caught it.
+note_duplicate() {
+  n=0; [ -f "$dupes" ] && n="$(cat "$dupes" 2>/dev/null || echo 0)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$(( n + 1 ))" > "$dupes" 2>/dev/null
+}
 
 written=0
 while IFS="$(printf '\t')" read -r src norm json; do
@@ -153,10 +165,20 @@ while IFS="$(printf '\t')" read -r src norm json; do
   [ -z "$h" ] && continue
   # Dedup is against the whole queue, not just this week, and the record is appended
   # before the next candidate is hashed, so a repeat inside one turn is caught too.
+  # Claim the hash with mkdir before the grep. mkdir is atomic; grep-then-append is a
+  # read-then-write, and this hook runs on Stop, which BOTH install paths deliver. Twelve
+  # concurrent identical payloads produced six records against a wanted one. The claim
+  # settles the race; the grep below still catches repeats across earlier weeks, and a
+  # claim that cannot be written falls through to the grep rather than dropping the
+  # candidate.
+  if mkdir "$CLAIMS/$h" 2>/dev/null; then
+    :
+  elif [ -d "$CLAIMS/$h" ]; then
+    note_duplicate
+    continue
+  fi
   if grep -F -q "\"hash\":\"$h\"" "$DIR"/*.jsonl 2>/dev/null; then
-    n=0; [ -f "$dupes" ] && n="$(cat "$dupes" 2>/dev/null || echo 0)"
-    case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    printf '%s' "$(( n + 1 ))" > "$dupes" 2>/dev/null
+    note_duplicate
     continue
   fi
   rec="$(jq -c -n --arg ts "$ts" --arg week "$week" --arg source "$src" \

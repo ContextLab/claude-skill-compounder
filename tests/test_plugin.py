@@ -232,9 +232,29 @@ class HookIdempotenceTest(unittest.TestCase):
                        "hook_event_name": "PostToolUse"}
             self.run_hook("edit", payload, CI_EDIT_EVERY="100")
             self.run_hook("edit", payload, CI_EDIT_EVERY="100")   # the plugin's copy
-            counted.append(int((self.state / "reminders" / "s2.edits").read_text()))
+            # The counter is one appended byte per edit, so its size is the count.
+            counted.append((self.state / "reminders" / "s2.edits").stat().st_size)
         self.assertEqual(counted, [1, 2, 3, 4],
                          "four distinct edits delivered twice each must count as four")
+
+    def test_the_counter_does_not_lose_concurrent_edits(self):
+        """A read-modify-write loses most of a burst, and edits arrive in bursts.
+
+        Measured on the previous implementation at four-way parallelism: 12 of 60
+        counted. The 12-edit checkpoint then fired about five times too rarely while
+        still appearing to work, which is the failure mode this whole package is about.
+        """
+        import concurrent.futures
+        n = 60
+        def one(i):
+            return self.run_hook("edit", {"session_id": "burst",
+                                          "tool_use_id": "toolu_burst_%d" % i},
+                                 CI_EDIT_EVERY="10000")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(one, range(n)))
+        counted = (self.state / "reminders" / "burst.edits").stat().st_size
+        self.assertEqual(counted, n,
+                         "%d concurrent edits counted as %d" % (n, counted))
 
     def test_distinct_sessions_do_not_share_claims(self):
         payload = {"prompt_id": "p-same", "prompt": "y" * 120}

@@ -37,10 +37,27 @@ jobs:
         # metadata, and that must never reach main again.
         run: python3 -m pip install --quiet pyyaml
 
-      - name: Record the shells under test
+      - name: Install zsh
+        # ubuntu-latest has no zsh, so "record the version" quietly recorded nothing and
+        # the zsh half of the portability claim went untested on the runner that matters.
         run: |
+          if ! command -v zsh >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update && sudo apt-get install -y zsh
+            else brew install zsh; fi
+          fi
           bash --version | head -1
-          zsh --version || echo "no zsh on this runner"
+          zsh --version
+
+      - name: Parse and smoke every shell script under both shells
+        run: |
+          set -e
+          for f in hooks/*.sh statusline/*.sh bin/*; do
+            case "$f" in *.json) continue ;; esac
+            head -1 "$f" | grep -q '^#!' || continue
+            bash -n "$f"
+            zsh -n "$f"
+          done
+          echo "all scripts parse under bash and zsh"
 
       - name: Run the suite
         run: ./run_tests.sh

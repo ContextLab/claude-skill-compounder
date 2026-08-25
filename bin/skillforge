@@ -53,10 +53,21 @@ project_root() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '
 
 int_or_zero() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
 
-# Red-team rounds are not stored during a forge, only the step budget is. SKILL.md
-# budgets steps as 2 + 2*rounds (one build step, one write step, then a review and a
-# revision step per round), so rounds = max(0, (steps - 2) / 2).
-rounds_from_steps() {
+# Red-team rounds are not stored during a forge, only the step budget and the step
+# reached. SKILL.md budgets steps as 2 + 2*rounds: one step to dispatch the builder, one
+# for its draft, then a review step and a revision step per round.
+#
+# So the budget implies the PLANNED rounds, and the step reached implies the COMPLETED
+# ones. Reporting the planned count on an outcome record is a lie the ledger tells about
+# itself: a forge abandoned at step 3 of 8 recorded three rounds when it had finished
+# none. A start record carries the plan; a done or fail record carries what happened.
+rounds_planned() {
+  r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
+  [ "$r" -lt 0 ] && r=0
+  printf '%s' "$r"
+}
+
+rounds_completed() { # <step reached>
   r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
   [ "$r" -lt 0 ] && r=0
   printf '%s' "$r"
@@ -66,16 +77,20 @@ rounds_from_steps() {
 # runs, so a single short write reaches the file and concurrent forges cannot interleave
 # half a record. A ledger failure must never break a forge, hence the bare returns.
 ledger_append() { # <event> <name> <steps> <summary> [step] [phase] [duration] [rounds]
+  # `rounds` on a start record is the plan; on a done or fail record it is the count
+  # actually completed, and `rounds_planned` records what was budgeted alongside it.
   line="$(jq -n -c \
     --arg event "$1" --arg name "$2" --arg summary "${4:-}" \
     --arg project "$(project_root)" \
     --argjson ts "$(now)" --argjson steps "$(int_or_zero "${3:-0}")" \
     --arg step "${5:-}" --arg phase "${6:-}" --arg duration "${7:-}" --arg rounds "${8:-}" \
+    --arg planned "${9:-}" \
     '{event:$event, name:$name, ts:$ts, steps:$steps, summary:$summary, project:$project}
      + (if $step     == "" then {} else {step:     ($step|tonumber)}     end)
      + (if $phase    == "" then {} else {phase:     $phase}              end)
      + (if $duration == "" then {} else {duration: ($duration|tonumber)} end)
-     + (if $rounds   == "" then {} else {rounds:   ($rounds|tonumber)}   end)' 2>/dev/null)"
+     + (if $rounds   == "" then {} else {rounds:   ($rounds|tonumber)}   end)
+     + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)' 2>/dev/null)"
   [ -n "$line" ] || return 0
   printf '%s\n' "$line" >> "$LEDGER" 2>/dev/null || return 0
   return 0
@@ -90,7 +105,7 @@ ledger_close() { # <event> <phase>
   l_dur=$(( $(now) - l_started ))
   [ "$l_dur" -lt 0 ] && l_dur=0
   ledger_append "$1" "$l_name" "$l_steps" "$l_summary" \
-    "$l_step" "$2" "$l_dur" "$(rounds_from_steps "$l_steps")"
+    "$l_step" "$2" "$l_dur" "$(rounds_completed "$l_step")" "$(rounds_planned "$l_steps")"
 }
 
 cmd="${1:-}"; shift 2>/dev/null || true

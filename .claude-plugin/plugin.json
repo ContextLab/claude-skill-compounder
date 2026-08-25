@@ -1,7 +1,7 @@
 {
   "name": "skill-compounder",
   "version": "0.2.0",
-  "description": "Turn hard-won procedures into permanent, red-teamed skills. Ships the compounding loop, four seed skills, the forge ledger, and the insight queue.",
+  "description": "Turn hard-won procedures into permanent, red-teamed skills. Ships the compounding loop, the seed pool, the contribute-back skill, the forge ledger, and the insight queue.",
   "author": {
     "name": "Jeremy Manning"
   },

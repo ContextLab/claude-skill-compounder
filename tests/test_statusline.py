@@ -5,10 +5,13 @@ The clock is pinned with SKILLFORGE_NOW so the animation is deterministic."""
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+APP = Path(__file__).resolve().parent.parent
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = REPO / "bin" / "skillforge"
@@ -144,6 +147,47 @@ class StatusLineTest(unittest.TestCase):
             self.render(script=WRAPPER)
         calls = len(counter.read_text(encoding="utf-8").split())
         self.assertEqual(calls, 1, "base must be cached, not re-run on every refresh")
+
+
+class ShellPortabilityTest(unittest.TestCase):
+    """The status line runs under whatever shell the user has.
+
+    `status` is read-only in zsh, where it aliases $?. Assigning to it aborted the eval
+    and the whole forge segment rendered empty, with no error anywhere: every zsh user
+    saw nothing while the tests, running under bash, passed.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name) / "state"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def render_with(self, shell):
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+               "HOME": self.tmp.name,
+               "SKILL_COMPOUNDER_STATE": str(self.state),
+               "SKILLFORGE_NOW": "1000"}
+        forge = subprocess.run([str(APP / "bin" / "skillforge"), "start", "portable", "4",
+                                "rendering under both shells"],
+                               capture_output=True, text=True, env=env)
+        self.assertEqual(forge.returncode, 0, forge.stderr)
+        out = subprocess.run([shell, str(APP / "statusline" / "skillforge-status.sh")],
+                             input='{"session_id":"x"}', capture_output=True, text=True,
+                             env=env)
+        self.assertEqual(out.returncode, 0, "%s: %s" % (shell, out.stderr))
+        return out.stdout
+
+    def test_bash_and_zsh_render_the_same_segment(self):
+        if shutil.which("zsh") is None:
+            self.skipTest("zsh is not installed here; CI installs it")
+        under_bash = self.render_with("bash")
+        self.assertIn("portable", under_bash)
+        self.setUp()
+        under_zsh = self.render_with("zsh")
+        self.assertEqual(under_bash, under_zsh,
+                         "the forge segment must render identically under both shells")
 
 
 if __name__ == "__main__":
