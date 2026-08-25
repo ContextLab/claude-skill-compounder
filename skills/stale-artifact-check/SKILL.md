@@ -37,9 +37,9 @@ printf 'CANARY-%s-%s\n' "$(date +%s)" "$(od -An -N4 -tx1 /dev/urandom | tr -d ' 
 **Paste the literal token into every command that follows.** Do not put it in a shell
 variable and reuse it later: separate tool calls do not share shell state, so an `export` in
 one call is gone by the next, and a `grep` for an empty variable matches every file and
-reports a canary that is not there. This exact failure has already cost this repository one
-red-team round on another skill. The examples below all show `CANARY-EPOCH-TOKEN`, which is
-a placeholder; substitute your real token everywhere it appears.
+reports a canary that is not there. That failure is silent and it reports success, which is
+why it is worth the repetition. The examples below all show `CANARY-EPOCH-TOKEN`, which is a
+placeholder; substitute your real token everywhere it appears.
 
 **2. Insert it on a line the run must execute.** The file form is the default because
 nothing in the toolchain can hide it.
