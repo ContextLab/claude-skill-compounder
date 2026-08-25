@@ -109,8 +109,17 @@ anything. Each one is here on evidence that the failure is common, not on a hunc
 first four that evidence is multiple independent reports in `anthropics/claude-code`, laid
 out in [`notes/research/seed-skill-candidates.md`](notes/research/seed-skill-candidates.md).
 `ai-tell-audit` came from a different place: a published catalogue of Claude-specific
-writing tells at [claudisms.ai](https://claudisms.ai), plus discussion-board threads where
-people name what they notice.
+writing tells at [claudisms.ai](https://claudisms.ai), Wikipedia's "Signs of AI writing",
+and discussion-board threads where people name what they notice. Ten structural families
+sit on top of those word lists, because a word search cannot see sentence construction.
+The skill records what each source said at the last pull and ships a guarded command that
+reports whether any of them has moved, so the catalogue can be brought forward as those
+lists change.
+
+A reviewer who had not seen it ran the whole procedure over twelve documents it was not
+built from. It edited none of the eight human ones. Four machine-drafted documents also
+came through unedited, which is the error it makes: prose generated as reference material
+carries few of these patterns, and the skill states that limit.
 
 |Skill|Fires when|The failure it prevents|
 |-|-|-|

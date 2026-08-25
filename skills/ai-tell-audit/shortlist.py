@@ -60,6 +60,7 @@ def strip_markup(text):
 
     text = re.sub(r"\A---\n.*?\n---\n", blank, text, flags=re.S)   # frontmatter
     text = re.sub(r"```.*?```", blank, text, flags=re.S)           # fenced code
+    text = re.sub(r"```.*\Z", blank, text, flags=re.S)             # unclosed fence
     text = _blank_indented_code(text, blank)                       # indented code
     text = re.sub(r"`[^`\n]*`", blank, text)                       # inline code
     text = re.sub(r"<[^>\n]+>", blank, text)                       # html and rst roles
@@ -156,16 +157,19 @@ def shortlist(text):
 
 
 def catalogue_rows(skill_md):
-    """Every backticked pattern in a two-column table of SKILL.md.
+    """Every two-column catalogue row, as (row label, [pattern strings]).
+
+    The unit is the ROW, not the string. A row that lists eight synonyms is one
+    rule with one threshold: counting its strings separately let a 46-word
+    document reach a breadth floor of 8 out of a single row, and let one
+    occurrence of `It is worth noting` count twice because `worth [X]` and
+    `worth noting` both match it.
 
     Parsed out of the document rather than copied here, so the counts this mode
     reports are the counts of the rows the reader is actually applying.
-    Deduplicated case-insensitively. The same pattern appears in more than one
-    table (`Some would say` in one, `some would say` in another), and counting
-    both turned one occurrence into two row matches: two real instances reported
-    as four and crossed a floor of three, manufacturing a finding.
+    Rows are also deduplicated case-insensitively across tables.
     """
-    seen, in_table = {}, False
+    rows, seen, in_table = [], set(), False
     for line in skill_md.split("\n"):
         if not line.startswith("|"):
             in_table = False
@@ -175,9 +179,12 @@ def catalogue_rows(skill_md):
             in_table = True
             continue
         if in_table and len(cells) == 2:
-            for term in re.findall(r"`([^`]+)`", cells[0]):
-                seen.setdefault(term.lower(), term)
-    return sorted(seen.values(), key=str.lower)
+            terms = [x for x in re.findall(r"`([^`]+)`", cells[0])
+                     if x.lower() not in seen and not seen.add(x.lower())]
+            if terms:
+                label = re.sub(r"\s+", " ", cells[0])
+                rows.append((label[:60], terms))
+    return rows
 
 
 def row_regex(term):
@@ -190,14 +197,41 @@ def row_regex(term):
     return re.compile(prefix + body + suffix, re.IGNORECASE)
 
 
+DIVIDER = re.compile(r"(?m)(?<=\n)\n-{3,}[ \t]*$")
+
+
 def rows(text, skill_md):
-    """[(term, line, matched)] for every catalogue row string in the document."""
+    """[(row label, line, matched)] with each SPAN counted once.
+
+    When two patterns in the same row match the same span, or overlapping spans,
+    it is one instance. Spans are claimed left to right, longest first, so
+    `It is worth noting` is one match under `worth [X]`, not two.
+    """
     flowed, per_char = unwrap(strip_markup(text))
-    hits = []
-    for term in catalogue_rows(skill_md):
-        for m in row_regex(term).finditer(flowed):
-            line = per_char[m.start()] if m.start() < len(per_char) else 0
-            hits.append((term, line, m.group(0)))
+    claimed, hits = [], []
+    candidates = []
+    for label, terms in catalogue_rows(skill_md):
+        for term in terms:
+            if term.strip("-") == "" and len(term) >= 3:
+                # A thematic break is a real divider only on its own line after a
+                # blank one. strip_markup blanks those, so match the original: the
+                # row otherwise fired on `o---o---o` and never on a real divider.
+                finder = DIVIDER.finditer(text)
+                for m in finder:
+                    candidates.append((m.start(), -len(m.group(0)), label,
+                                       m.group(0).strip(), True))
+                continue
+            for m in row_regex(term).finditer(flowed):
+                candidates.append((m.start(), -(m.end() - m.start()), label,
+                                   m.group(0), False))
+    for start, neglen, label, matched, literal in sorted(candidates):
+        end = start - neglen
+        if any(start < e and s < end for s, e, lit in claimed if lit == literal):
+            continue
+        claimed.append((start, end, literal))
+        line = (text[:start].count("\n") + 1 if literal else
+                (per_char[start] if start < len(per_char) else 0))
+        hits.append((label, line, matched))
     return sorted(hits, key=lambda h: h[1])
 
 
@@ -256,13 +290,13 @@ def report(path, words_only=False, skips=(), skill_md=None):
         return
     found = rows(text, skill_md)
     counted = {}
-    for term, line, matched in found:
-        counted.setdefault(term, []).append((line, matched))
+    for label, line, matched in found:
+        counted.setdefault(label, []).append((line, matched))
     print("%s: %d row matches across %d catalogue rows (candidates to read, "
           "not findings)" % (path, len(found), len(counted)))
-    for term in sorted(counted, key=lambda k: -len(counted[k])):
-        where = ", ".join("L%d" % line for line, _ in counted[term][:6])
-        print("  %-24s %3d  %s" % (term, len(counted[term]), where))
+    for label in sorted(counted, key=lambda k: -len(counted[k])):
+        where = ", ".join("L%d" % line for line, _ in counted[label][:6])
+        print("  %-42s %3d  %s" % (label[:42], len(counted[label]), where))
 
 
 def main(argv):

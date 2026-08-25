@@ -58,8 +58,18 @@ CORPUS = ["testing-methodology.rst", "submitting-patches.txt"]
 # Verbatim Linux coding-style.rst v5.15. An earlier version ordered all of it
 # rewritten under "any unnamed opposition".
 CONCESSION = "concession-rebuttal.rst"
+# A specification that coins four terms and uses each twice. Repeated
+# signature phrase fired on it at 4 instances and ordered them varied.
+DEFINED_TERMS = "defined-terms.md"
 # Mentions rather than uses. Every hit must sit inside a list item or a quote.
 RULE_ZERO_FIXTURE = "contributing-banned-words.md"
+
+# Words whose loss in a rewrite carries no claim, so dropping one is not a
+# dropped fact. Deliberately short: anything longer starts excusing real losses.
+STOPWORDS = {"this", "that", "does", "will", "your", "with", "from", "have",
+             "been", "they", "them", "than", "then", "into", "only", "just",
+             "what", "when", "which", "about", "there", "these", "those",
+             "would", "could", "should", "very", "much", "more", "most"}
 
 EM_DASH = "\u2014"  # written as an escape so this file passes its own check
 
@@ -380,38 +390,29 @@ class DispositionTest(unittest.TestCase):
             self.assertTrue(pattern.strip(), "an empty pattern cell")
 
 
-class CrossTableConsistencyTest(unittest.TestCase):
-    """The fast path summarises the catalogue, so it must not contradict it.
-
-    A term appearing in both tables with opposite lead dispositions gives a reader
-    a different answer depending on which table they reached first, and the fast
-    path exists precisely so that a hurried reader never reaches the second one.
+class OneRowPerConstructionTest(unittest.TestCase):
+    """The fast path used to restate sixteen rows. It is gone, and this replaces
+    the consistency check it needed: a construction gets one row, so it gets one
+    disposition and one threshold. Two rows for one construction is two thresholds.
     """
 
     def setUp(self):
         self.rows = catalogue_rows(body(skill_text()))
 
-    def lead(self, disposition):
-        """The verb a reader acts on: the first disposition word in the cell."""
-        low = disposition.lower()
-        hits = [(low.find(d), d) for d in ("rewrite", "delete", "keep") if d in low]
-        hits = [h for h in hits if h[0] >= 0]
-        return min(hits)[1] if hits else None
-
-    def test_a_term_in_two_tables_leads_with_the_same_disposition(self):
-        leads = {}
-        for pattern, disposition in self.rows:
-            verb = self.lead(disposition)
-            if verb is None:
-                continue
+    def test_no_string_appears_in_two_rows(self):
+        seen = {}
+        for pattern, _ in self.rows:
             for term in backticked(pattern):
-                key = term.strip().lower()
-                leads.setdefault(key, set()).add(verb)
-        conflicts = {t: sorted(v) for t, v in leads.items() if len(v) > 1}
-        self.assertEqual(
-            conflicts, {},
-            "these terms lead with different dispositions in different tables: %s"
-            % conflicts)
+                seen.setdefault(term.strip().lower(), []).append(pattern[:40])
+        duplicated = {t: v for t, v in seen.items() if len(v) > 1}
+        self.assertEqual(duplicated, {},
+                         "a pattern string in two rows is counted twice and judged "
+                         "twice: %s" % duplicated)
+
+    def test_a_row_gives_exactly_one_lead_disposition(self):
+        for pattern, fix in self.rows:
+            lead = re.match(r"(Rewrite|Delete|Keep)\b", fix)
+            self.assertIsNotNone(lead, "row %r leads with no disposition" % pattern[:40])
 
 
 class RuleOrderingTest(unittest.TestCase):
@@ -450,10 +451,11 @@ class RuleOrderingTest(unittest.TestCase):
 
     def test_keep_by_default_precedes_the_catalogue_it_exempts(self):
         """A reviewer reading the file the way a working session reads it stopped
-        before line 406 and never opened `Keep by default`, which is the only place
+        before `Keep by default` and never opened it, though it is the only place
         the concession-versus-fabrication recognition test appears in full. The
         verdict came out right by luck. An exemption a reader reaches after the
-        rows it exempts is an exemption that does not run."""
+        rows it exempts is an exemption that does not run, so it is pinned above
+        the first table rather than at a line number that moves."""
         keep, _ = section_span(self.body, KEEP)
         first_row = self.body.find("\n|-|-|\n")
         self.assertNotEqual(first_row, -1, "no catalogue table found")
@@ -485,13 +487,8 @@ class RuleOrderingTest(unittest.TestCase):
                          % (rate, length, rate * length // 1000, step))
         self.assertIn("There is a step at the boundary", text,
                       "the file claims a smooth boundary it does not have")
-        breadth = int(re.search(r"At \*\*(\d+) or more\*\*", text).group(1))
-        self.assertGreaterEqual(breadth, 6,
-                                "a breadth floor of %d is under the highest raw "
-                                "distinct-row count measured in human prose" % breadth)
-        self.assertIn("under 1000 editable words", text,
-                      "the breadth rule states no length window, so it would also "
-                      "fire on long documents where the rate already applies")
+        self.assertIn("The rows still apply at any length.", text,
+                      "nothing says what does apply below the length floor")
         self.assertLessEqual(rate, 10,
                              "a document-wide rate of %d per thousand is denser than "
                              "any measured document, so it can never fire" % rate)
@@ -693,6 +690,49 @@ class ConcessionAndRebuttalTest(unittest.TestCase):
             self.assertIn(self.COVERING[term], flowed_body,
                           "%s:%d relies on %r, whose covering clause is gone"
                           % (CONCESSION, line_no, term))
+
+
+class DefinedTermsTest(unittest.TestCase):
+    """Consistent terminology is what a specification is for.
+
+    Repeated signature phrase counts each occurrence after the first, so a 4000-word
+    spec coining four terms and using each twice reached 4 instances at 1.0 per
+    thousand and ordered its own vocabulary varied. That is the damage the family
+    was never meant to do.
+    """
+
+    def setUp(self):
+        self.body = body(skill_text())
+        self.text = fixture(DEFINED_TERMS)
+
+    def test_the_fixture_repeats_the_terms_it_defines(self):
+        flat = " ".join(self.text.split()).lower()
+        for term in ("settled frame", "provisional frame", "quiet window",
+                     "replay boundary"):
+            self.assertGreaterEqual(
+                flat.count(term), 2,
+                "%r is no longer repeated, so the fixture proves nothing" % term)
+        self.assertIn("**settled frame**", self.text.lower(),
+                      "the fixture no longer marks its terms as definitions")
+
+    def test_the_family_exempts_a_term_the_document_defines(self):
+        families = section(self.body, STRUCTURAL)
+        block = re.split(r"^### ", families, flags=re.M)
+        signature = [b for b in block if b.startswith("Repeated signature phrase")]
+        self.assertEqual(len(signature), 1, "the family is gone")
+        text = flowed(signature[0])
+        self.assertIn("**Exempt, and not counted:** a term the document defines", text,
+                      "a defined term is still counted as a signature")
+        self.assertIn("consistent technical sense", text)
+        self.assertIn("varying them is the damage", text,
+                      "the exemption states no reason, so a reader may override it")
+
+    def test_no_catalogue_string_fires_on_the_fixture(self):
+        for term, line_no, matched, line in scan(self.text,
+                                                 catalogue_terms(self.body)):
+            self.fail("%s:%d matches %r (%r) in a specification that is correct "
+                      "writing:\n  %s"
+                      % (DEFINED_TERMS, line_no, term, matched, line.strip()))
 
 
 class RuleZeroTest(unittest.TestCase):
@@ -1104,28 +1144,33 @@ class StructuralDensityTest(unittest.TestCase):
             round(1000.0 * surviving / words, 1),
             "the stated human rate is not surviving instances over editable words")
 
-    def test_the_breadth_floor_clears_every_human_document_measured(self):
-        """The floor exists to catch short generated prose, and the whole risk is
-        that it also catches short human prose. The evidence table records the
-        surviving distinct-row count for every document measured; the floor has to
-        sit above every human one and below the machine one, or it is decoration.
-        """
-        floor = int(re.search(r"At \*\*(\d+) or more\*\*",
-                              flowed(section(body(skill_text()), DENSITY))).group(1))
-        rows = [c for line in self.evidence.splitlines() if line.startswith("|")
-                for c in [[x.strip() for x in line.strip("|").split("|")]]
-                if len(c) == 5 and c[4].strip("* ").isdigit()]
-        self.assertGreaterEqual(len(rows), 6,
-                                "the breadth table has lost its measurements: %r" % rows)
-        human = [int(c[4].strip("* ")) for c in rows if "machine" not in c[0]]
-        machine = [int(c[4].strip("* ")) for c in rows if "machine" in c[0]]
-        self.assertTrue(machine, "no machine-drafted document left to separate from")
-        self.assertGreater(floor, max(human),
-                           "a breadth floor of %d fires on a human document measured "
-                           "at %d surviving distinct rows" % (floor, max(human)))
-        self.assertLessEqual(floor, max(machine),
-                            "a breadth floor of %d is above the machine document at "
-                            "%d, so it can never fire" % (floor, max(machine)))
+    def test_the_evidence_table_still_records_zero_surviving_for_human_prose(self):
+        """The corpus claim is that no human document fires. Editing a cell of the
+        table to say otherwise survived every test, and that table is the only
+        record behind the claim."""
+        evidence = (SKILL_DIR / EVIDENCE).read_text()
+        rows = [[c.strip() for c in line.strip("|").split("|")]
+                for line in evidence.splitlines() if line.startswith("|")]
+        data = [r for r in rows if len(r) == 5 and r[1].strip("* ").isdigit()]
+        self.assertGreaterEqual(len(data), 6,
+                                "the measurement table has lost its rows: %r" % data)
+        for row in data:
+            self.assertEqual(row[4].strip("* "), "0",
+                             "%s records %s surviving instances; the corpus claim is "
+                             "that no human document fires" % (row[0], row[4]))
+
+    def test_the_short_document_limit_is_stated_rather_than_implied(self):
+        """A breadth rule was drafted and removed. What has to survive it is the
+        admission: under 1000 words only the rows apply, so short generated prose
+        can pass. An undocumented limit is worse than a documented one."""
+        text = flowed(section(body(skill_text()), DENSITY))
+        self.assertIn("**Known limit: short machine-drafted prose can pass.**", text)
+        self.assertIn("A threshold nobody can rerun is not a threshold;", text)
+        self.assertNotIn("Breadth, for a document under", text,
+                         "the breadth rule is back without its calibration")
+        evidence = flowed((SKILL_DIR / EVIDENCE).read_text())
+        self.assertIn("why there is no rule for it", evidence,
+                      "the evidence file does not record why the rule was dropped")
 
     def test_the_shortlist_is_not_sold_as_a_detector(self):
         """The claim was stated three times in three places. It is stated once now,
@@ -1134,11 +1179,13 @@ class StructuralDensityTest(unittest.TestCase):
         everything."""
         text = flowed(self.section)
         self.assertIn("shortlist", text.lower())
-        self.assertIn("The script cannot reach a verdict, and step 4 is where the "
-                      "finding is.", text)
+        self.assertIn("**The script cannot reach a verdict.**", text)
+        self.assertIn("Step 5 is where the damage is prevented", text,
+                      "the warning still points only at step 4, but skipping step 5 "
+                      "is what damaged three human documents")
         self.assertIn("covers two of the ten families", text)
-        self.assertIn("Every\nmatch is still a candidate to read".replace("\n", " "),
-                      text)
+        self.assertIn("Every match is still only a candidate", text,
+                      "the script's output no longer says a match is not a finding")
 
 
 class CatalogueCurrencyTest(unittest.TestCase):
@@ -1276,21 +1323,12 @@ class MutationGuardTest(unittest.TestCase):
     tests green. They are grouped so the reason each exists stays attached to it.
     """
 
-    # A fast-path row and the fuller row it summarises. Two of the four cannot be
-    # matched by substring, which is why the pairing is written down.
-    FAST_PATH_PROSE = {
-        "One-sentence paragraphs throughout": "four short declaratives in a row",
-        "A rhetorical question you then answer": "or a rhetorical question you then answer",
-        "A bolded lead-in on every bullet": "A bolded term plus a colon plus an explanation",
-        "A trailing engagement question": "or a question to the reader",
-    }
-
     # Family -> a string that must be in its Before and must NOT be in its After.
     # Swapping the pair was previously invisible: only inequality was asserted.
     DIRECTION = {
         "Negation-then-correction": ", not on guesswork",
         "Comparative aphorism": "is worse than",
-        "Rule of three": "reliable, and",
+        "Rule of three": "fast, reliable, and easy",
         "Sentence-final restatement": "so an acknowledgement",
         "Grand summary pivot": "comes down to one idea",
         "Question as heading": "Why does any of this",
@@ -1375,10 +1413,28 @@ class MutationGuardTest(unittest.TestCase):
                               "the AFTER for %r introduces %r, which the BEFORE does "
                               "not carry: a rewrite that adds a fact is a fabrication"
                               % (name, token))
+            # The other direction. Rule of three's after silently deleted
+            # `reliable`, a true claim, which this file's own rule calls a failed
+            # rewrite. A guard that only watches for added tokens cannot see that.
+            disposition = re.search(r"\*\*Disposition\.\*\*\s*(.+)", block).group(1)
+            may_drop = re.search(r"(?i)\b(delete|drop|deleting)\b", disposition)
+            if may_drop:
+                continue
+            # `matter` and `matters` are the same claim; a crude stem keeps the
+            # guard from reporting inflection as a lost fact.
+            stem = lambda w: w.lower().rstrip("s")
+            words = lambda x: {stem(w) for w in re.findall(r"[A-Za-z]{4,}",
+                                                           flowed(x))}
+            dropped = words(before) - words(after) - {stem(w) for w in STOPWORDS}
+            self.assertEqual(
+                dropped, set(),
+                "the AFTER for %r drops %s, and its disposition (%r) does not say to "
+                "delete anything: a rewrite that loses a claim is a failed rewrite"
+                % (name, sorted(dropped), disposition[:60]))
 
     def test_the_file_forbids_an_after_that_invents_a_fact(self):
         text = flowed(section(self.body, STRUCTURAL))
-        self.assertIn("No After invents a fact", text)
+        self.assertIn("no After invents or drops a fact", text)
         self.assertIn("the disposition is keep, not rewrite", text,
                       "no instruction for the case where the plain version needs a "
                       "fact the author does not have")
@@ -1399,7 +1455,7 @@ class MutationGuardTest(unittest.TestCase):
         words = int(re.search(r"(\d+) editable words", out).group(1))
         matches = int(re.search(r"(\d+) shortlist matches", out).group(1))
         stated_words = int(re.search(r"has \*\*(\d+) editable words\*\*", text).group(1))
-        stated_matches = int(re.search(r"the same \*\*(\d+)\s*candidate\s*matches\*\*",
+        stated_matches = int(re.search(r"and \*\*(\d+)\s*candidate\s*matches\*\*",
                                        text).group(1))
         self.assertEqual(stated_words, words,
                          "the file states %d editable words for the README; the "
@@ -1417,7 +1473,7 @@ class MutationGuardTest(unittest.TestCase):
         self.assertIn("not stated here", text,
                       "the file states a document-wide verdict for a document whose "
                       "paragraph read no command reproduces")
-        self.assertIn("no command here reproduces them",
+        self.assertIn("no command here reproduces any of them",
                       flowed((SKILL_DIR / EVIDENCE).read_text()),
                       "figures from documents outside this repository are presented "
                       "as if a reader could check them")
@@ -1479,7 +1535,7 @@ class ProcedureTest(unittest.TestCase):
         titles = [t for _, t in self.steps()]
         joined = " | ".join(titles).lower()
         exempt = next(i for i, t in enumerate(titles) if "exemption" in t.lower())
-        count = next(i for i, t in enumerate(titles) if "what survives" in t.lower())
+        count = next(i for i, t in enumerate(titles) if "survivor" in t.lower())
         self.assertLess(exempt, count,
                         "counting is ordered before the exemption: %s" % joined)
 
@@ -1621,47 +1677,80 @@ class ShortlistScriptTest(unittest.TestCase):
                          "three skipped bullets of one word each should drop three "
                          "words; a bullet marker is punctuation, not a word")
 
-    def test_the_script_and_this_suite_count_the_same_rows(self):
+    def test_the_script_and_this_suite_agree_on_the_same_fixture(self):
         """Two implementations of one rule drift, and the shipped one is what a
-        reader runs while this suite guards the other. They are pinned to each
-        other on the fixture built for exactly these patterns."""
-        import subprocess
-        fixture = FIXTURES / "testing-methodology.rst"
-        out = subprocess.run(
-            [sys.executable, str(self.SCRIPT), "--rows", str(fixture)],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL,
-            check=True).stdout
-        script_counts = {}
-        for line in out.splitlines():
-            m = re.match(r"^  (.+?)\s\s+(\d+)\s+L", line)
-            if m:
-                script_counts[m.group(1).strip()] = int(m.group(2))
-        terms = catalogue_terms(body(skill_text()))
-        suite_counts = {}
-        for term, _, _, _ in scan(fixture.read_text(), terms):
-            suite_counts[term] = suite_counts.get(term, 0) + 1
-        self.assertTrue(script_counts, "the script reported no rows:\n%s" % out)
-        shared = set(script_counts) & set(suite_counts)
-        self.assertGreaterEqual(len(shared), 3,
-                                "the two scanners share almost nothing: %r vs %r"
-                                % (sorted(script_counts), sorted(suite_counts)))
-        for term in sorted(shared):
-            self.assertEqual(
-                script_counts[term], suite_counts[term],
-                "the shipped script counts %r %d times and this suite counts it %d; "
-                "the reader and the guard disagree"
-                % (term, script_counts[term], suite_counts[term]))
+        reader runs while this suite guards the other.
 
-    def test_the_script_docstring_agrees_with_the_skill(self):
-        """A cold reader found the script claiming 21,926 words where SKILL.md
-        claimed 21,024. Two figures for one measurement, and the one inside the
-        tool is the one a reader trusts while running it."""
-        doc = (SKILL_DIR / "shortlist.py").read_text()
-        stated = re.search(r"In ([\d,]+) editable words", doc)
-        self.assertIsNotNone(stated, "the script no longer cites the corpus")
-        self.assertIn(stated.group(1), flowed((SKILL_DIR / EVIDENCE).read_text()),
-                      "the script cites %r words of human prose and SKILL.md does "
-                      "not state that figure anywhere" % stated.group(1))
+        They cannot be compared key by key any more, and their totals are not
+        equal by design: the script reports per ROW, merges overlapping spans, and
+        excludes markup, while this suite scans per string over the raw file. All
+        three differences remove matches and none adds one, so the invariant is
+        directional. The script may never report MORE than the suite, and must
+        still report something, or a scanner that found nothing would pass.
+        """
+        import subprocess
+        for name, overlapping in (("testing-methodology.rst", False),
+                                  ("contributing-banned-words.md", True)):
+            fixture_path = FIXTURES / name
+            out = subprocess.run(
+                [sys.executable, str(self.SCRIPT), "--rows", str(fixture_path)],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                check=True).stdout
+            script_total = int(re.search(r"(\d+) row matches", out).group(1))
+            suite_total = len(scan(fixture_path.read_text(),
+                                   catalogue_terms(body(skill_text()))))
+            self.assertLessEqual(
+                script_total, suite_total,
+                "%s: the script reports %d row matches where this suite finds %d "
+                "string matches; merging spans can only reduce the count"
+                % (name, script_total, suite_total))
+            self.assertGreater(script_total, 0,
+                               "%s: the shipped script found nothing, so the "
+                               "comparison above proves nothing" % name)
+            if not overlapping:
+                self.assertGreaterEqual(
+                    script_total, suite_total // 4,
+                    "%s: the script reports %d against the suite's %d; that is not "
+                    "markup exclusion, it is a scanner that stopped working"
+                    % (name, script_total, suite_total))
+
+    def test_one_occurrence_counts_once_however_many_strings_match_it(self):
+        """`It is worth noting` matches `worth [X]` and `worth noting`, which are
+        one row and one occurrence. It printed as two."""
+        out = self.run_on("It is worth noting that X. It is worth noting that Y.\n",
+                          "--rows")
+        self.assertIn("2 row matches across 1 catalogue rows", out,
+                      "one occurrence counted more than once:\n%s" % out)
+
+    def test_a_row_of_synonyms_is_one_row(self):
+        """The generic-vocabulary row carries eight strings. Counting them as
+        eight rows let a 46-word document reach a distinct-row floor of 8 out of
+        one row of the weakest family in the file."""
+        doc = ("We navigate the landscape of the realm, a testament to how we foster "
+               "and harness it, and shed light on the way to pave the way forward.\n")
+        out = self.run_on(doc, "--rows")
+        self.assertIn("across 1 catalogue rows", out,
+                      "a single row reported as several:\n%s" % out)
+
+    def test_the_divider_row_fires_on_dividers_and_not_on_diagrams(self):
+        """It shipped inverted: `strip_markup` blanked real dividers before
+        matching, so three `---` lines printed 0 and the ASCII art `o---o---o`
+        printed 4."""
+        real = self.run_on("One.\n\n---\n\nTwo.\n\n---\n\nThree.\n", "--rows")
+        self.assertIn("2 row matches", real, "real dividers still invisible:\n%s" % real)
+        art = self.run_on("A diagram:\n\n    o---o---o\n\nEnd.\n", "--rows")
+        self.assertIn("0 row matches", art, "ASCII art still fires:\n%s" % art)
+        setext = self.run_on("Heading\n---\n\nBody.\n", "--rows")
+        self.assertIn("0 row matches", setext,
+                      "a setext H2 underline read as a divider:\n%s" % setext)
+
+    def test_an_unclosed_code_fence_is_still_code(self):
+        prose = "one two three four five six seven eight\n"
+        unclosed = prose + "\n```\n" + " ".join(["code"] * 40) + "\n"
+        self.assertEqual(int(re.search(r"(\d+) editable", self.run_on(prose)).group(1)),
+                         int(re.search(r"(\d+) editable",
+                                       self.run_on(unclosed)).group(1)),
+                         "text after an unclosed fence was counted as prose")
 
     def test_match_context_is_read_off_the_original_text(self):
         """Step 5 judges the exemption by reading the context the script prints.
@@ -1737,18 +1826,32 @@ class LoadBearingClaimTest(unittest.TestCase):
         "Headings are prose: counted, and editable.",
         # What a repair may not do.
         "A rewrite that changes what the sentence claims is a failed rewrite.",
-        "No After invents a fact.",
+        "no After invents or drops a fact.",
+        "**drops no claim the\nbefore made**".replace("\n", " "),
         "the disposition is keep, not rewrite",
         # What the tooling can and cannot settle.
-        "The script cannot reach a verdict, and step 4 is where the finding is.",
+        "**Step 5 is where the damage is prevented, and step 4 is where the "
+        "finding is made.**",
+        "The margin on real human prose is one instance.",
+        "**The script cannot reach a verdict.**",
         "A pass that runs the command and stops has not audited anything; it has "
         "approved everything.",
         # Scope of rule zero and of the exemption.
         "Skip the region, not the file.",
-        # Round 4: breadth, the only rule that sees short generated prose.
-        "**Breadth, for a document under 1000 editable words.**",
-        "Count the **distinct rows and families with at least one surviving instance**",
-        "That is the discrimination: breadth, not depth.",
+        # One meaning for "surviving", stated once, after it carried two.
+        "a **surviving** instance is one that got past step 5 and counts toward a "
+        "threshold; nothing else uses the word",
+        # A defined term is terminology, not a signature.
+        "**Exempt, and not counted:** a term the document defines",
+        "varying them is the damage",
+        # Round 5: mutations that survived 112 tests.
+        "Edit a pattern when it reaches **3 or more surviving instances in",
+        "The disposition is the note, not the edit",
+        "no construction is governed by\nboth a row and a family".replace("\n", " "),
+        "The rows still apply at any length.",
+        # Round 5: the limit that replaced the withdrawn breadth rule.
+        "**Known limit: short machine-drafted prose can pass.**",
+        "A threshold nobody can rerun is not a threshold;",
         # The concession test's stated limit, and its one window.
         "**What this test does not do.** It separates answered from unanswered, "
         "never real from invented.",
@@ -1791,17 +1894,18 @@ class LoadBearingClaimTest(unittest.TestCase):
         "that a reader could check?**",
         "the correct output on that file is zero edits",
         # A row that describes a construction needs a counting unit.
-        "**A row that describes a construction counts once per paragraph**",
+        "**The row is the unit everywhere**",
+        "counts **once per paragraph**",
         # The measured claims about human prose.
 
     )
 
     # Claims that moved to sources/EVIDENCE.md when the evidence narrative did.
     EVIDENCE_CLAIMS = (
-        "**32 row matches across the first three, 19 in the fourth, 0 surviving "
+        "**24 row matches across the first three, 19 in the fourth, 0 surviving "
         "anywhere**",
         "**13,560 editable words**",
-        "no command here reproduces them",
+        "**no command here\nreproduces any of them**".replace("\n", " "),
     )
 
     def setUp(self):
@@ -1833,7 +1937,6 @@ class LoadBearingClaimTest(unittest.TestCase):
             ("is left alone", "is edited anyway"),
             ("the request decides, not the file", "the file decides, not the request"),
             ("em dash is a weak signal", "em dash is a strong signal"),
-            ("breadth, not depth", "depth, not breadth"),
         ):
             self.assertIn(phrase, self.body, "missing %r" % phrase)
             self.assertNotIn(forbidden, self.body.lower(),

@@ -12,6 +12,11 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 export PYTHONPATH="$PWD"
+# Importing a module under skills/ writes a __pycache__ beside it, and a seed skill
+# asserts its own directory ships no build artifacts. Without this the guard fails
+# depending on whether anything imported the module first, which is flakiness, not a
+# finding.
+export PYTHONDONTWRITEBYTECODE=1
 TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
 
 fail=0
