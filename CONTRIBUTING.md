@@ -27,41 +27,53 @@ confirmation before any network write. If you would rather do it by hand, the sa
 are available directly:
 
 ```bash
-skillcontrib preflight <path-to-skill-dir>     # frontmatter and size limits
-skillcontrib whoami                            # maintainer path or fork path
-skillcontrib dedup <skill-name> --description "<the description line>"
+skillcontrib preflight <path-to-skill-dir>              # does it load and is it addressable
+skillcontrib whoami --repo <owner>/<repo>               # maintainer path or fork path
+skillcontrib dedup <skill-name> --repo <owner>/<repo> \
+  --description "<the description line>"
 ```
+
+Pass `--repo` every time. It defaults to this repo, and a duplicate check aimed at the
+wrong repo answers "clean" for free.
 
 `skillcontrib` never writes anything to the network. It reads.
 
-**Take the duplicate check seriously.** Exit code 3 means possible duplicates were found
-and a human has to look. Exit 4 means the contribution already exists. Exit 5 means a
-maintainer already declined an equivalent proposal, and reopening it without reading that
-review first wastes everyone's time. The check reads GitHub's search index, which lags
-pull request creation by a few minutes, so it can miss something opened moments ago.
+**Take the duplicate check seriously.** Exit 9 means the skill already exists in the
+upstream tree. Exit 4 means an equivalent contribution is already open or merged. Exit 5
+means a pull request that added this skill was closed without merging, which may be a
+rejection or a revision the author superseded: read it before deciding. Exit 3 means
+possible duplicates were found and a human has to look. The pull request probes read
+GitHub's search index, which lags creation by a few minutes, so they can miss something
+opened moments ago.
 
 ## Skill format
 
-Only the six portable frontmatter keys: `name`, `description`, `license`,
-`compatibility`, `metadata`, `allowed-tools`. Custom keys do not survive outside Claude
-Code, and a seed skill should.
+**What is actually checked.** `skillcontrib preflight <skill-dir>` enforces three things,
+and they are the three that stop a skill from working: `SKILL.md` exists, the frontmatter
+parses with a real YAML parser (PyYAML, or ruby's psych as a fallback), and `name` matches
+the directory name. Claude Code addresses a skill by its directory, so a mismatch makes it
+unreachable. Everything in the rest of this section is review guidance, weighed by a human,
+not a gate.
 
-**Quote the description.** An unquoted `: ` inside it makes the whole frontmatter fail to
-parse as YAML, after which the skill loads with empty metadata and silently never fires.
-CI runs `claude plugin validate --strict`, which catches it, and so does
-`skillcontrib preflight`.
+An earlier version of the checker also enforced key portability and length limits. Measured
+against the 156 skills installed on one developer machine it hard-failed 46 of them,
+including four shipped by Anthropic, while an independent parse found 0 of 156 unparseable.
+Those checks were removed rather than re-tuned, because none of them is what a contribution
+is gated on. Please do not add them back to the gate.
 
-The limits, and where each number comes from. Two are hard, because past them the skill
-does not load correctly. The rest are guidance, measured against what actually ships, and
-`skillcontrib preflight --strict` enforces them when you want that.
+**Quote the description** when it contains a colon followed by a space, or use a YAML block
+scalar. An unquoted `: ` inside a plain scalar makes the frontmatter fail to parse, after
+which the skill loads with empty metadata and silently never fires. CI runs
+`claude plugin validate --strict`, which catches it.
 
-|Limit|Value|Basis|
+Review guidance, with where each number comes from:
+
+|Guidance|Value|Basis|
 |-|-|-|
-|`description`, hard|1024 chars|The cap the upstream skills repo validates against (anthropics/skills #1635)|
-|`description`, advisory|500 chars|Best-practice margin. 29 of 156 installed skills exceed it, so it cannot be a hard failure|
-|Frontmatter total, hard|1536 chars|Measured external truncation point for `description` plus `when_to_use`|
-|Frontmatter total, advisory|1024 chars|House guidance|
-|Body, advisory|500 lines|The documented ceiling. 86% of 105 surveyed skills comply and the median is 200, but real ones exceed it|
+|`description`|Aim under 500 chars; 1024 is the cap the upstream skills repo validates against (anthropics/skills #1635)|29 of 156 installed skills exceed 500, so it is a target, not a rule|
+|Frontmatter total|Under 1024 chars|Measured truncation of `description` plus `when_to_use` starts at 1536|
+|Body|Aim near 200 lines, under 500|Median of 105 surveyed skills is 200; 86% are under 500, and the ones above it are reference-heavy|
+|Frontmatter keys|Prefer `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools`|Only these are portable outside Claude Code. Others work in Claude Code and 44 installed skills use them|
 
 `description` is a trigger clause, not a summary: write it as "Use when …" and put the
 negative scope in the same sentence ("Do NOT use for …"). It is the sentence that decides

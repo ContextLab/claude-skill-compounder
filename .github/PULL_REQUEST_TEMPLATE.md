@@ -48,14 +48,14 @@ upstream tree, then every pull request in any state, then description overlap:
 paste the output, including sub-threshold fuzzy rows
 ```
 
-Exit code: <!-- 0, or 3/4/5/9 with an explanation of why this is not a duplicate -->
+Exit code: <!-- 0, or 3/4/5/9/18 with an explanation of why this is not a duplicate -->
 
 ## Checklist
 
-- [ ] `skillcontrib preflight <skill-dir>` passes, warnings included or explained
-- [ ] Only the six portable frontmatter keys, and the description is quoted
+- [ ] `skillcontrib preflight <skill-dir>` passes
+- [ ] Frontmatter parses, `name` matches the directory, description quoted if it holds a colon
 - [ ] Every file in the skill directory is included, not only `SKILL.md`
 - [ ] `description` is a "Use when …" clause with the negative scope, at most 500 chars
-- [ ] Body at most 500 lines, or a reason it needs more
+- [ ] Body near 200 lines, or a reason it needs more
 - [ ] `./run_tests.sh` passes in full
 - [ ] No mocks, no em-dashes
