@@ -127,6 +127,7 @@ The exit code is the whole contract:
 |5|A pull request that proposed this skill was CLOSED without merging|Stop and read it|
 |9|The skill already exists in the upstream tree|Stop. Improve the existing one|
 |18|Upstream is archived|Stop. Find the successor repo|
+|19|The tree listing was truncated, so clean cannot be certified|Check by hand. Do not read this as clean|
 |8|A lookup failed|A failed lookup is not a clean one. Fix it, or stop|
 
 Exit 5 is deliberately hard to trigger: it requires a pull request to have **added** the
@@ -166,9 +167,12 @@ git add <skills-dir>/<name>
 git commit -m "Add <name> skill"
 ```
 
-Use whatever layout the tree probe found upstream for `<skills-dir>`; a repo that keeps
-skills at `plugins/<x>/skills/` does not want a new top-level `skills/`. Everything above
-is local. Nothing has left the machine.
+Use the layout the tree probe reported for `<skills-dir>`. A clean `skillcontrib dedup`
+prints an `upstream keeps skills under:` line naming the directories that actually hold
+`SKILL.md` files and how many are in each; a repo that keeps skills at
+`plugins/<x>/skills/` does not want a new top-level `skills/`. If that line says no
+`SKILL.md` was found anywhere, ask the user rather than inventing a layout. Everything
+above is local. Nothing has left the machine.
 
 ### 5b. The consent gates
 
@@ -224,9 +228,13 @@ already exists.
 - **W1.** `gh repo fork <owner>/<repo> --remote --remote-name fork`, run inside the clone.
   This creates a repository under the user's account. It is the first write, and it is
   why no earlier step is allowed to need a fork.
-- **W2.** If the fork already existed and is behind, `gh repo sync <owner>/<repo>` before
-  pushing. **This is a write too**, not a check: it fast-forwards the fork. A branch cut
-  from a stale fork produces a diff full of other people's reverts.
+- **W2.** If the fork already existed and is behind, `gh repo sync <fork-owner>/<repo>`
+  before pushing. **This is a write too**, not a check: it fast-forwards the fork. A
+  branch cut from a stale fork produces a diff full of other people's reverts.
+  The argument is the **destination**, so it must name the fork. Everywhere else in this
+  file `<owner>/<repo>` means upstream, and passing that here would fast-forward
+  upstream's default branch instead: a write to a repo the user was never shown at G3 or
+  G5, which succeeds for real when upstream is itself a fork.
 - **W3.** `git push -u fork add-skill-<name>`. To the fork, never to upstream.
 - **W4.** Open the pull request against upstream with an explicit cross-repo head:
 
@@ -250,7 +258,7 @@ it does not exist, you skipped a gate.
 |Push identity mismatch|`skillcontrib whoami` prints both and warns|Resolve before W1. The pull request and the commits would land under different accounts|
 |Read-only collaborator|The permission line reads `read` or `triage`|Fork path. The bare 204 check would call it a maintainer and be wrong|
 |Fork already exists|`gh repo view <owner>/<repo> --json isFork,parent`|Reuse it and sync at 6b W2. Do not create a second one|
-|Fork stale behind upstream|Compare the fork's default-branch SHA to upstream's|`gh repo sync`, inside the write sequence, never before the gates|
+|Fork stale behind upstream|Compare the fork's default-branch SHA to upstream's|`gh repo sync <fork-owner>/<repo>`, inside the write sequence, never before the gates. The argument is the destination: naming upstream writes to upstream|
 |Branch name collision|`gh api repos/<owner>/<repo>/branches/<name>` returns 200, not 404|Suffix the branch (`add-skill-<name>-2`). Never force-update someone's branch|
 |Upstream archived|`skillcontrib` exits 18|Stop. Find the successor repo|
 |Rate limited|`gh api rate_limit --jq .resources.graphql`|Wait for the reset it names. These queries drain graphql, not search|
@@ -275,3 +283,22 @@ it does not exist, you skipped a gate.
 - **A fork is not a way to get a working copy.** `git clone` is. Reaching for a fork to
   stage the change is what quietly turns a read-only preparation step into the first
   irreversible write.
+
+## Known limitations
+
+These are real and unfixed. Read them as part of the procedure, not as small print.
+
+- **The dedup probes cannot prove absence.** The tree probe sees one commit of one
+  branch; the pull request probes read a search index that lags by minutes; a very large
+  repo truncates the tree listing entirely (exit 19). A clean result means nothing was
+  found, not that nothing is there.
+- **Fuzzy matching is name-shaped, not meaning-shaped.** The same idea proposed under a
+  genuinely different name and vocabulary will not be found by any probe here. Only a
+  human who knows the domain catches that, which is why G2 shows the user every row.
+- **The gates are instructions, not enforcement.** Nothing in the tooling can stop a
+  session from skipping to section 6; `skillcontrib` simply has no write in it. The
+  guarantee is that the tool cannot write, not that the procedure cannot be skipped.
+- **The tests check this document and the tool, not a real contribution.** One test
+  executes the read-only staging block against a local git repo. No test opens a pull
+  request, so the write sequence in section 6 is verified by flag inspection and by
+  reading `gh`'s help, not by having been run end to end.

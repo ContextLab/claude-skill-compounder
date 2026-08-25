@@ -24,10 +24,11 @@
 #   8   a read-only lookup failed (network, GitHub unreachable, rate limit, unknown repo)
 #   9   the skill already exists in the upstream tree
 #   18  the upstream repo is archived and rejects writes
+#   19  the upstream tree listing came back truncated, so "clean" cannot be certified
 #   10  preflight: skill directory not found
 #   11  preflight: SKILL.md not found
 #   12  preflight: frontmatter missing, or it does not parse as YAML
-#   17  preflight: name is missing, or does not match the directory
+#   17  preflight: name or description is missing, or name does not match the directory
 #
 # Codes 13 to 16 are retired. They enforced portable-key and length limits that
 # hard-failed 46 of 156 real installed skills, including four shipped by Anthropic,
@@ -84,8 +85,9 @@ skillcontrib: read-only reconnaissance before proposing a skill upstream.
 
   skillcontrib preflight <skill-dir>
         Only what genuinely blocks a contribution: SKILL.md exists, the frontmatter
-        parses with a real YAML parser, and `name` matches the directory. Length,
-        style, and key-portability advice belongs in review, not in a gate.
+        parses with a real YAML parser, `name` matches the directory, and a non-empty
+        `description` exists (without one the skill never fires). Length, style, and
+        key-portability advice belongs in review, not in a gate.
 
 --repo defaults to ContextLab/claude-skill-compounder. Pass it explicitly whenever the
 target is anything else; a silent default aimed at the wrong repo answers "clean" for
@@ -100,11 +102,15 @@ require_gh() {
   # one sends the user off to re-authenticate a session that was never broken.
   authout=$(gh auth status 2>&1)
   if [ $? -ne 0 ]; then
+    # gh's own message is the evidence, so pass it through whole rather than guessing.
+    detail=$(printf '%s' "$authout" | tr '\n' ' ' | sed 's/  */ /g')
     case "$authout" in
+      *"GH_TOKEN is invalid"*|*"GITHUB_TOKEN is invalid"*|*"Bad credentials"*|*"invalid token"*)
+        fail 7 "the token in the environment is rejected by GitHub. Unset GH_TOKEN or GITHUB_TOKEN, or replace it. gh said: $detail" ;;
       *"not logged in"*|*"You are not logged into"*|*"gh auth login"*)
-        fail 7 "gh is not authenticated. Run 'gh auth login' yourself, then retry." ;;
+        fail 7 "gh is not authenticated. Run 'gh auth login' yourself, then retry. gh said: $detail" ;;
       *)
-        fail 8 "gh could not reach GitHub. This looks like a network problem, not a login problem: $(printf '%s' "$authout" | head -n 2 | tr '\n' ' ')" ;;
+        fail 8 "gh could not reach GitHub, which looks like a network problem rather than a login problem. gh said: $detail" ;;
     esac
   fi
   return 0
@@ -125,9 +131,13 @@ resolve_repo() {
 # gh acts as GH_TOKEN when that is set; git asks its credential helper chain, which on
 # a developer machine is often a keychain entry from a different account. Nothing else
 # in this workflow surfaces the second one, and it is the one the commits land under.
+# A credential helper that never answers hangs this probe: GIT_TERMINAL_PROMPT=0 only
+# suppresses git's own prompt, and closing stdin does not stop a helper that is waiting
+# on something else. There is no `timeout` binary on macOS, so perl's alarm is the
+# portable stand-in. A probe that cannot answer in five seconds reports "unknown".
 push_identity() {
   printf 'protocol=https\nhost=github.com\n\n' \
-    | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null \
+    | GIT_TERMINAL_PROMPT=0 perl -e 'alarm shift; exec @ARGV' 5 git credential fill 2>/dev/null \
     | awk -F= '/^username=/ {print $2; exit}'
 }
 
@@ -168,10 +178,21 @@ cmd_whoami() {
   # read-only and triage ones, who cannot push. The permission endpoint distinguishes
   # them, and gh prints the API error body on stdout when the call fails, so the exit
   # status, not the captured text, decides whether this is a real permission value.
-  if perm=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>/dev/null); then :; else perm=""; fi
+  # A failed lookup here is not the same as "no permission". 403 and 404 are real
+  # answers (no push access, not a collaborator); anything else means the question was
+  # never answered, and guessing "contributor" is how a maintainer gets sent to fork.
+  permout=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>&1)
+  if [ $? -eq 0 ]; then
+    perm="$permout"
+  else
+    case "$permout" in
+      *"Must have push access"*|*"HTTP 403"*) perm="none (403: no push access)" ;;
+      *"Not Found"*|*"HTTP 404"*) perm="none (404: not a collaborator)" ;;
+      *) fail 8 "could not read the permission level of $user on $repo, so the maintainer-or-fork decision cannot be made: $(printf '%s' "$permout" | tr '\n' ' ')" ;;
+    esac
+  fi
   case "$perm" in
     admin|write|maintain) role="maintainer"; path="branch directly on upstream; do not fork" ;;
-    "") perm="none (or not visible to this account)"; role="contributor"; path="fork the repo, branch on the fork" ;;
     *) role="contributor"; path="fork the repo, branch on the fork" ;;
   esac
 
@@ -239,11 +260,19 @@ cmd_dedup() {
   # both. Cost is one API call regardless of repo size.
   tree=$(gh api "repos/$repo/git/trees/$default_branch?recursive=1" 2>/dev/null)
   [ -n "$tree" ] || fail 8 "could not list the tree of $repo@$default_branch. A failed lookup is not a clean one."
+  truncated=0
   if [ "$(printf '%s' "$tree" | jq -r '.truncated')" = "true" ]; then
-    echo "WARNING: $repo's tree listing came back truncated, so the tree probe is incomplete." >&2
+    truncated=1
+    # On stdout, not just stderr. The caller pastes stdout into the consent gate, and a
+    # caveat that lives only on stderr disappears exactly when it matters.
+    echo "INCOMPLETE: $repo's tree listing came back truncated, so the tree probe did not"
+    echo "            see every path. A clean result below cannot be certified."
+    echo
   fi
+  # The filename is matched case-insensitively: a repo shipping `skill.md` is still a
+  # repo shipping that skill.
   hit=$(printf '%s' "$tree" | jq -r --arg key "$key" '
-    .tree[] | select(.path | endswith("/SKILL.md") or . == "SKILL.md") | .path
+    .tree[] | .path | select(ascii_downcase | endswith("/skill.md") or . == "skill.md")
     | select((split("/") | if length > 1 then .[-2] else "" end
               | ascii_downcase | gsub("[^a-z0-9]"; "")) == $key)' | head -n 1)
 
@@ -363,6 +392,25 @@ EOF
     exit 3
   fi
   echo
+  # Where does this repo actually keep skills? Section 5a of the skill tells the caller
+  # to use the layout the tree probe found, which is unfollowable if a clean result
+  # prints no layout at all.
+  layout=$(printf '%s' "$tree" | jq -r '
+    [.tree[].path | select(ascii_downcase | endswith("/skill.md"))
+     | split("/") | if length > 2 then (.[0:-2] | join("/")) else "(repository root)" end]
+    | group_by(.) | map({p: .[0], n: length}) | sort_by(-.n) | .[0:3]
+    | map("\(.p) (\(.n) skill(s))") | join(", ")')
+  if [ -n "$layout" ]; then
+    echo "upstream keeps skills under: $layout"
+  else
+    echo "upstream keeps skills under: no SKILL.md found anywhere; ask before inventing a layout."
+  fi
+  if [ "$truncated" -eq 1 ]; then
+    echo
+    echo "NOT CERTIFIED CLEAN: the tree listing was truncated (see above), so the skill"
+    echo "may already exist in a path this probe never saw. Check by hand before proposing."
+    exit 19
+  fi
   echo "CLEAN: no duplicate found."
   return 0
 }
@@ -416,6 +464,9 @@ if not isinstance(data, dict):
 name = data.get("name")
 if not isinstance(name, str) or not name.strip():
     print("ERR name is missing or empty"); raise SystemExit(0)
+desc = data.get("description")
+if not isinstance(desc, str) or not desc.strip():
+    print("ERR description is missing or empty"); raise SystemExit(0)
 print("OK %s" % name.strip())
 PYEOF
 )
@@ -442,6 +493,10 @@ name = data["name"]
 unless name.is_a?(String) && !name.strip.empty?
   puts "ERR name is missing or empty"; exit 0
 end
+desc = data["description"]
+unless desc.is_a?(String) && !desc.strip.empty?
+  puts "ERR description is missing or empty"; exit 0
+end
 puts "OK " + name.strip
 RBEOF
 )" "$md")
@@ -452,6 +507,10 @@ RBEOF
   [ -n "$parse" ] || fail 12 "$md: the $parser YAML check produced no result."
   case "$parse" in
     "ERR name is missing or empty") fail 17 "$md: name is missing or empty" ;;
+    "ERR description is missing or empty")
+      # A skill with no description never fires. This is exactly what preflight is for,
+      # and it was removed by accident along with the length limits.
+      fail 17 "$md: description is missing or empty. A skill without one never triggers." ;;
     ERR\ *) fail 12 "$md: ${parse#ERR }" ;;
   esac
   fm_name="${parse#OK }"

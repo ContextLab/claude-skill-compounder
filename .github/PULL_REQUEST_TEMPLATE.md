@@ -48,7 +48,7 @@ upstream tree, then every pull request in any state, then description overlap:
 paste the output, including sub-threshold fuzzy rows
 ```
 
-Exit code: <!-- 0, or 3/4/5/9/18 with an explanation of why this is not a duplicate -->
+Exit code: <!-- 0, or 3/4/5/9/18/19 with an explanation of why this is not a duplicate -->
 
 ## Checklist
 

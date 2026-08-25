@@ -42,16 +42,18 @@ wrong repo answers "clean" for free.
 upstream tree. Exit 4 means an equivalent contribution is already open or merged. Exit 5
 means a pull request that added this skill was closed without merging, which may be a
 rejection or a revision the author superseded: read it before deciding. Exit 3 means
-possible duplicates were found and a human has to look. The pull request probes read
+possible duplicates were found and a human has to look. Exit 19 means the upstream tree
+listing was truncated, so a clean result cannot be certified and you have to check by hand. The pull request probes read
 GitHub's search index, which lags creation by a few minutes, so they can miss something
 opened moments ago.
 
 ## Skill format
 
-**What is actually checked.** `skillcontrib preflight <skill-dir>` enforces three things,
-and they are the three that stop a skill from working: `SKILL.md` exists, the frontmatter
-parses with a real YAML parser (PyYAML, or ruby's psych as a fallback), and `name` matches
-the directory name. Claude Code addresses a skill by its directory, so a mismatch makes it
+**What is actually checked.** `skillcontrib preflight <skill-dir>` enforces four things,
+and they are the four that stop a skill from working: `SKILL.md` exists, the frontmatter
+parses with a real YAML parser (PyYAML, or ruby's psych as a fallback), `name` matches the
+directory name, and `description` is present and non-empty (a skill without one never
+fires). Claude Code addresses a skill by its directory, so a mismatch makes it
 unreachable. Everything in the rest of this section is review guidance, weighed by a human,
 not a gate.
 

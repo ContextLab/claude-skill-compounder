@@ -112,6 +112,18 @@ class PreflightTest(unittest.TestCase):
         self.assertEqual(r.returncode, 17)
         self.assertIn("name is missing", r.stderr)
 
+    def test_missing_description_is_code_17(self):
+        # A skill with no description never fires, so this is precisely what preflight
+        # is for. The check was removed by accident along with the length limits.
+        r = self.preflight(self.skill("nodesc", "---\nname: nodesc\n---\n\n# B\n"))
+        self.assertEqual(r.returncode, 17)
+        self.assertIn("description is missing or empty", r.stderr)
+
+    def test_empty_description_is_code_17(self):
+        r = self.preflight(self.skill("blankdesc", '---\nname: blankdesc\ndescription: "  "\n---\n\n# B\n'))
+        self.assertEqual(r.returncode, 17)
+        self.assertIn("description is missing or empty", r.stderr)
+
     def test_name_not_matching_the_directory_is_code_17(self):
         # Claude Code addresses a skill by its directory, so this makes it unreachable.
         r = self.preflight(self.skill("dirname", VALID % "some-other-name"))
@@ -217,7 +229,11 @@ class ShippedSkillTest(unittest.TestCase):
         self.assertTrue(desc.startswith("Use when"), desc[:60])
         self.assertIn("Do NOT use", desc)
 
-    # ------------------------------------------- the procedure, not the text order
+    # ---------------------------------------------------------- reading the document
+    #
+    # Everything below reads the SKILL.md as text. It does NOT execute the procedure.
+    # The one test that executes anything is ExecutableStagingTest, which runs the
+    # read-only staging block against a local git repository.
 
     def split_at_writes(self):
         text = self.text()
@@ -256,6 +272,19 @@ class ShippedSkillTest(unittest.TestCase):
         self.assertLess(fork_section.index("gh repo fork"), fork_section.index("git push"),
                         "the fork must precede the push on the fork path")
 
+    def test_repo_sync_targets_the_fork_and_never_upstream(self):
+        # `gh repo sync` writes to its argument: "Syncing uses the default branch of the
+        # source repository to update the matching branch on the destination." Naming
+        # upstream there fast-forwards upstream's default branch, an unconsented write
+        # that succeeds for real when upstream is itself a fork.
+        text = self.text()
+        occurrences = re.findall(r"`?gh repo sync ([^`\s]+)", text)
+        self.assertTrue(occurrences, "the stale-fork remedy must still be documented")
+        for target in occurrences:
+            self.assertIn("fork-owner", target,
+                          "gh repo sync must name the fork as its destination, got %r" % target)
+        self.assertNotIn("gh repo sync <owner>/<repo>", text)
+
     def test_dry_run_is_not_claimed_to_be_read_only(self):
         text = self.text()
         self.assertIn("May still push git changes", text)
@@ -268,6 +297,77 @@ class ShippedSkillTest(unittest.TestCase):
         for p in [self.SKILL_DIR / "SKILL.md", SCRIPT,
                   REPO / "CONTRIBUTING.md", REPO / ".github" / "PULL_REQUEST_TEMPLATE.md"]:
             self.assertNotIn("—", p.read_text(), "em-dash in %s" % p)
+
+
+class ExecutableStagingTest(unittest.TestCase):
+    """Runs the read-only staging block from the SKILL.md, for real, against real git.
+
+    This is the one test that executes the procedure rather than reading it. It proves
+    two things the document tests cannot: that the commands as written actually work,
+    and that running them leaves the upstream repository untouched. It uses a local
+    repository, so it needs no network and creates nothing on GitHub.
+    """
+
+    SKILL_DIR = REPO / "skills" / "contribute-skill"
+
+    def staging_block(self):
+        text = (self.SKILL_DIR / "SKILL.md").read_text()
+        section = text[text.index("### 5a."):text.index("### 5b.")]
+        blocks = re.findall(r"```bash\n(.*?)```", section, re.S)
+        self.assertEqual(len(blocks), 1, "5a must contain exactly one bash block")
+        return blocks[0]
+
+    def test_the_staging_block_runs_and_writes_nothing_upstream(self):
+        block = self.staging_block()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upstream = root / "upstream.git"
+            seed = root / "seed"
+            # A real upstream: a bare repo with one commit on its default branch.
+            subprocess.run(["git", "init", "--bare", "-b", "main", str(upstream)],
+                           check=True, capture_output=True)
+            seed.mkdir()
+            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+            for cmd in (["git", "init", "-b", "main"], ["git", "commit", "--allow-empty", "-m", "seed"],
+                        ["git", "remote", "add", "origin", str(upstream)],
+                        ["git", "push", "origin", "main"]):
+                subprocess.run(cmd, cwd=seed, check=True, capture_output=True, env=env)
+            before = subprocess.run(["git", "show-ref"], cwd=upstream,
+                                    capture_output=True, text=True).stdout
+
+            # A real skill to contribute, with a file besides SKILL.md so the `cp -R`
+            # is genuinely exercised.
+            src = root / "demo-skill"
+            (src / "scripts").mkdir(parents=True)
+            (src / "SKILL.md").write_text(VALID % "demo-skill")
+            (src / "scripts" / "run.sh").write_text("echo hi\n")
+
+            script = (block
+                      .replace("https://github.com/<owner>/<repo>.git", str(upstream))
+                      .replace("/tmp/contrib-<name>", str(root / "clone"))
+                      .replace("<path-to-skill-dir>", str(src))
+                      .replace("<skills-dir>", "skills")
+                      .replace("<name>", "demo-skill"))
+            r = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                               capture_output=True, text=True, env=env, cwd=str(root))
+            self.assertEqual(r.returncode, 0,
+                             "the staging block as written failed:\n%s\n%s" % (script, r.stderr))
+
+            clone = root / "clone"
+            listed = subprocess.run(["git", "show", "--name-only", "--pretty=format:", "HEAD"],
+                                    cwd=clone, capture_output=True, text=True).stdout
+            self.assertIn("skills/demo-skill/SKILL.md", listed)
+            self.assertIn("skills/demo-skill/scripts/run.sh", listed,
+                          "cp -R must carry the whole skill directory, not just SKILL.md")
+            branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                    cwd=clone, capture_output=True, text=True).stdout.strip()
+            self.assertEqual(branch, "add-skill-demo-skill")
+
+            after = subprocess.run(["git", "show-ref"], cwd=upstream,
+                                   capture_output=True, text=True).stdout
+            self.assertEqual(before, after,
+                             "staging must leave upstream untouched; refs changed")
 
 
 class ReadOnlyTest(unittest.TestCase):
@@ -413,6 +513,26 @@ class LiveDedupTest(unittest.TestCase):
         r = self.dedup("anything", repo="ContextLab/no-such-repo-zzqqx")
         self.assertEqual(r.returncode, 8, r.stdout + r.stderr)
         self.assertIn("could not resolve", r.stderr)
+
+    def test_a_truncated_tree_listing_is_not_reported_as_clean(self):
+        # torvalds/linux has ~72k paths, past the tree API's cap. Reporting rc 0 there
+        # would be a clean result the probe cannot actually support.
+        r = self.dedup("zzqqx-nonexistent-skill-name", repo="torvalds/linux")
+        self.assertEqual(r.returncode, 19, r.stdout[-800:])
+        self.assertIn("INCOMPLETE", r.stdout, "the caveat must be on stdout, not only stderr")
+        self.assertIn("NOT CERTIFIED CLEAN", r.stdout)
+        self.assertNotIn("CLEAN: no duplicate found", r.stdout)
+
+    def test_a_clean_result_reports_the_upstream_layout(self):
+        # Section 5a says to use the layout the tree probe found, which is unfollowable
+        # if a clean result prints no layout.
+        r = self.dedup("zzqqx-nonexistent-skill-name", repo=SKILLS_REPO)
+        self.assertEqual(r.returncode, 0, r.stdout[-800:])
+        self.assertIn("upstream keeps skills under:", r.stdout)
+
+    def test_a_nested_repo_reports_its_nested_layout(self):
+        r = self.dedup("zzqqx-nonexistent-skill-name", repo=NESTED_REPO)
+        self.assertRegex(r.stdout, r"upstream keeps skills under: plugins/\S+/skills")
 
     def test_the_target_repo_is_printed(self):
         r = self.dedup("zzqqx-nonexistent-skill-name")
