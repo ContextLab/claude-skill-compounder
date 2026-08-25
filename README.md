@@ -11,7 +11,7 @@ dance; the context window closes; next week a fresh session makes the same mista
 same order.
 
 `claude-skill-compounder` closes that loop. It installs the forging protocol as a skill,
-four seed skills that are useful on day one, hooks that keep asking the question, and a
+five seed skills that are useful on day one, hooks that keep asking the question, and a
 live status-line animation. All of it serves one principle:
 
 > **Compound improvement.** When a procedure is *costly to get right* and *likely to
@@ -48,7 +48,7 @@ They loop until the red-team report comes back clean.
 |Piece|What it does|
 |-|-|
 |`skills/skill-compounder/`|The doctrine: when to forge, how to forge, how to fix or retire a bad skill|
-|`skills/` (four more)|The seed pool, below. Useful before you have forged anything|
+|`skills/` (five more)|The seed pool, below. Useful before you have forged anything|
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
@@ -104,10 +104,13 @@ hooks claim an event once, so the second delivery does nothing.
 
 ## The seed pool
 
-Four skills ship with the package, so a fresh install is useful before you have forged
-anything. Each one is here because multiple independent people reported the failure in
-`anthropics/claude-code`. The evidence is in
-[`notes/research/seed-skill-candidates.md`](notes/research/seed-skill-candidates.md).
+Five skills ship with the package, so a fresh install is useful before you have forged
+anything. Each one is here on evidence that the failure is common, not on a hunch. For the
+first four that evidence is multiple independent reports in `anthropics/claude-code`, laid
+out in [`notes/research/seed-skill-candidates.md`](notes/research/seed-skill-candidates.md).
+`ai-tell-audit` came from a different place: a published catalogue of Claude-specific
+writing tells at [claudisms.ai](https://claudisms.ai), plus discussion-board threads where
+people name what they notice.
 
 |Skill|Fires when|The failure it prevents|
 |-|-|-|
@@ -115,6 +118,7 @@ anything. Each one is here because multiple independent people reported the fail
 |`session-handoff`|Context is about to be lost: compaction, a usage limit, the end of a session|A handoff that summarises the error instead of quoting it is not resumable. One user built a whole memory system from scratch rather than keep re-deriving state|
 |`stale-artifact-check`|Behavior after an edit is indistinguishable from behavior before it|You are debugging a copy that never contained your change: a non-editable `pip install`, a `.pyc` beside the source, an unrebuilt `dist/`. It hands general debugging to `superpowers:systematic-debugging` rather than compete for that trigger|
 |`no-silent-stub`|You are about to return a value you did not compute|A fake that does not look like a failure looks like a pass. One reported evaluation copied the expected answer into the actual answer column and scored 100%|
+|`ai-tell-audit`|You are about to publish a README, an issue, a PR description or docs|Prose a model drafted carries recognisable tells. The skill knows them and says, per pattern, whether to rewrite it, delete it, or keep it. It never judges who wrote anything, because automated detection scores human writing as machine-written often enough to be unusable|
 
 The loudest complaint in the corpus is deliberately **not** here:
 `superpowers:verification-before-completion` already owns that trigger, and two skills

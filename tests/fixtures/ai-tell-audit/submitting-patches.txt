@@ -1,0 +1,40 @@
+Submitting Patches
+==================
+
+Read this before you send anything to the list. It is short, it is not negotiable, and
+it has not changed much since 2005.
+
+1. Sign your work
+-----------------
+
+Every patch must carry a Signed-off-by line, and that line must give your real name
+(sorry, no pseudonyms and no anonymous contributions). The sign-off is a statement that
+you have the right to submit the patch under the project licence; it is not a copyright
+assignment, and it is not a promise that the patch is correct.
+
+Use the same address in the sign-off and in the From: header. If the two differ, add an
+explicit From: line as the first line of the message body, because some mailers rewrite
+the header and the archive then attributes the patch to the wrong person.
+
+2. Describe the change
+----------------------
+
+Write the message as an instruction to the tree, in the imperative: "make the parser
+reject an empty key", not "fixed a bug". Describe the defect before the fix. A reader
+three years from now has your message and the diff, and nothing else.
+
+Reference an earlier commit by its abbreviated object name and its subject, like
+1a2b3c4d5e6f ("make the parser reject an empty key"). Use at least twelve characters.
+Seven was enough in 2005; in a tree this size, collisions with shorter IDs are a real
+possibility, and an ambiguous reference in a commit message cannot be fixed later.
+
+3. Send it as plain text
+------------------------
+
+Send patches inline, one per message, as plain text. Attachments and quoted-printable
+encoding both arrive mangled on at least one widely used mail client, and a mangled
+patch cannot be applied. If you cannot make your mailer behave, send the patch to
+yourself first and apply what arrives before you send it to the list.
+
+Do not reformat code you are not changing. A patch that reindents a file is impossible
+to review, and the reviewer is the scarce resource here.

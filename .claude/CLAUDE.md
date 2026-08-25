@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code *configuration* package. It installs six skills, three hook wirings, four
+A Claude Code *configuration* package. It installs seven skills, three hook wirings, four
 CLIs, and a status-line wrapper into `~/.claude/`. There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
 `README.md` is the user-facing description. `docs/DESIGN.md` records the empirically
