@@ -1,7 +1,8 @@
 # 2026-08-25 (later) — implementing the whole roadmap
 
 Follows `2026-08-25-roadmap-session.md`, which produced the research and issues #2 to #6.
-This session implemented all of them on branch `roadmap-issues-2-6`.
+All of them implemented and merged as `fe814e8` (PR #7). Issues #1 through #6 are closed.
+403 tests over 12 files, no mocks, green on ubuntu and macos.
 
 ## Shape of the work
 
