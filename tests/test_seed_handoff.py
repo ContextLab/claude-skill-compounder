@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Tests the `session-handoff` seed skill against real files and real git repositories.
 
-The skill makes two headline claims, and both are executed here rather than inspected.
-"The resume command lands you on the recorded state" is tested by moving the branch tip,
-dirtying the tree, and running the command out of the handoff from an unrelated working
-directory. "The validator proves rather than pattern-matches" is tested by feeding it
-inputs shaped to satisfy the letter of every rule, including a fabricated sha pointed at a
-directory that is not a repository.
+The skill claims two things and both are executed here rather than inspected. "The resume
+command lands you on the recorded state" is tested by moving the branch tip, dirtying the
+tree, and running the command out of the handoff from an unrelated working directory. "The
+validator proves rather than pattern-matches" is tested with inputs shaped to satisfy the
+letter of every rule, including a fabricated sha aimed at a directory that is not a
+repository.
 
-The state-collection block in the SKILL.md is extracted and executed against four real
-environments (a normal repo, a detached HEAD, a repo with no commits, and a plain
-directory), because three of those print a plausible wrong answer to the obvious command.
+The state-collection block in the SKILL.md is extracted and executed against five real
+environments (a normal repo, a detached HEAD, a repo with no commits, a bare repo, and a
+plain directory), because four of those give a plausible wrong answer to the obvious
+command.
 
-No mocks: real files, the real bash validator, real git."""
+The skill deliberately does NOT preserve uncommitted work; a test here fails if that
+mechanism is reintroduced, because every version of it restores nothing while appearing to
+work. No mocks: real files, the real bash validator, real git."""
 
 import os
 import re
@@ -26,7 +29,6 @@ SKILL_DIR = REPO / "skills" / "session-handoff"
 SKILL_MD = SKILL_DIR / "SKILL.md"
 VALIDATOR = SKILL_DIR / "scripts" / "check-handoff.sh"
 FIXTURES = REPO / "tests" / "fixtures" / "session-handoff"
-PATCH_NAME = "2026-08-25-lease-expiry.patch"
 
 PORTABLE_KEYS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 MINIMAL_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
@@ -38,7 +40,6 @@ FIXTURE_SHA = "f882c1ac93d08b780caba472786173d2fdd45b78"
 FIXTURE_DATE = "2026-08-25T10:00:00+0000"
 FIXTURE_PATH = "/srv/checkouts/admission"  # where the fixture's repo lived; tests relocate it
 FIXTURE_SOURCE = "def is_expired(now, lease_end):\n    return now > lease_end\n"
-FIXTURE_DIRTY = FIXTURE_SOURCE + "\n\ndef renew(now, lease_end):\n    return now > lease_end\n"
 GIT_ID = ["-c", "user.name=Handoff Fixture", "-c", "user.email=fixture@example.invalid"]
 
 
@@ -55,18 +56,18 @@ def frontmatter(text):
 def _fence_scan(lines):
     """Yield (line, in_fence, is_delimiter), mirroring the validator's fence tracker.
 
-    A fence closes only on a backtick run at least as long as the one that opened it, so a
-    four-backtick block may contain three-backtick blocks."""
-    fence, flen = False, 0
+    Backtick and tilde fences both count, and a fence closes only on the same character in
+    a run at least as long as the opener."""
+    fence, flen, fch = False, 0, ""
     for line in lines:
-        m = re.match(r"^`+", line)
+        m = re.match(r"^(`+|~+)", line)
         if m and len(m.group(0)) >= 3:
-            n = len(m.group(0))
+            n, ch = len(m.group(0)), line[0]
             if not fence:
-                fence, flen = True, n
+                fence, flen, fch = True, n, ch
                 yield line, True, True
                 continue
-            if n >= flen:
+            if ch == fch and n >= flen:
                 fence = False
                 yield line, False, True
                 continue
@@ -102,46 +103,43 @@ def template_block(text):
 
 
 def template_sections(text):
-    return [h for h in sections_of(template_block(text))]
+    return list(sections_of(template_block(text)))
 
 
 def documented_sections(text):
     return [m.group(1) for m in re.finditer(r"^\|`(## [^`]+)`\|", text, re.MULTILINE)]
 
 
-def replace_section(doc, heading, new_body):
-    lines, out, i, found = doc.splitlines(), [], 0, False
+def _edit_section(doc, heading, new_body=None):
+    """Replace a section's body, or drop the section entirely when new_body is None."""
+    lines = doc.splitlines()
     flags = list(_fence_scan(lines))
+    out, i, found = [], 0, False
     while i < len(lines):
-        out.append(lines[i])
         line, in_fence, is_delim = flags[i]
         if line == heading and not in_fence and not is_delim:
             found = True
+            if new_body is not None:
+                out.append(lines[i])
             i += 1
             while i < len(lines) and not (lines[i].startswith("## ")
                                           and not flags[i][1] and not flags[i][2]):
                 i += 1
-            out.extend(["", *new_body.splitlines(), ""])
-            continue
-        i += 1
-    assert found, f"{heading} not present, cannot replace it"
-    return "\n".join(out) + "\n"
-
-
-def drop_section(doc, heading):
-    lines, out, i = doc.splitlines(), [], 0
-    flags = list(_fence_scan(lines))
-    while i < len(lines):
-        line, in_fence, is_delim = flags[i]
-        if line == heading and not in_fence and not is_delim:
-            i += 1
-            while i < len(lines) and not (lines[i].startswith("## ")
-                                          and not flags[i][1] and not flags[i][2]):
-                i += 1
+            if new_body is not None:
+                out.extend(["", *new_body.splitlines(), ""])
             continue
         out.append(lines[i])
         i += 1
+    assert found, f"{heading} not present"
     return "\n".join(out) + "\n"
+
+
+def replace_section(doc, heading, new_body):
+    return _edit_section(doc, heading, new_body)
+
+
+def drop_section(doc, heading):
+    return _edit_section(doc, heading, None)
 
 
 def fenced_lines(body):
@@ -150,11 +148,10 @@ def fenced_lines(body):
 
 
 def bash_block(text, heading):
-    """The first ```bash block inside a SKILL.md section."""
     body = sections_of(text)[heading]
     out, started = [], False
     for line, in_fence, is_delim in _fence_scan(body.splitlines()):
-        if is_delim and not started and line.strip().startswith("```"):
+        if is_delim and not started:
             started = True
             continue
         if is_delim and started:
@@ -165,17 +162,15 @@ def bash_block(text, heading):
     return "\n".join(out)
 
 
-def run_validator(path, env=None, skill_md=None, minimal=False):
-    args = [str(VALIDATOR)] + (["--minimal"] if minimal else []) + [str(path)]
-    if skill_md:
-        args.append(str(skill_md))
+def run_validator(path, env=None, skill_md=None):
+    args = [str(VALIDATOR), str(path)] + ([str(skill_md)] if skill_md else [])
     return subprocess.run(args, capture_output=True, text=True,
                           env=env or {"PATH": MINIMAL_PATH, "HOME": "/nonexistent"})
 
 
 class TempRepoCase(unittest.TestCase):
-    """A temp root holding the repository the good fixture describes, with the handoff and
-    its patch in the repo's own notes/ directory, exactly as the skill prescribes."""
+    """A temp root holding the repository the good fixture describes, with the handoff in
+    the repo's own notes/ directory, exactly as the skill prescribes."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -189,8 +184,8 @@ class TempRepoCase(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "Widen the lease window to a half-open interval",
                  extra={"GIT_AUTHOR_DATE": FIXTURE_DATE, "GIT_COMMITTER_DATE": FIXTURE_DATE})
-        (self.repo / "admission.py").write_text(FIXTURE_DIRTY)
-        (self.repo / "notes" / PATCH_NAME).write_text((FIXTURES / PATCH_NAME).read_text())
+        (self.repo / "admission.py").write_text(
+            FIXTURE_SOURCE + "\n\ndef renew(now, lease_end):\n    return now > lease_end\n")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -241,31 +236,47 @@ class TemplateContractTest(unittest.TestCase):
         cmds = fenced_lines(sections_of(template_block(self.text))["## Resume command"])
         joined = "\n".join(cmds)
         self.assertTrue(cmds[0].startswith("cd "), f"resume must be anchored: {cmds[0]}")
+        self.assertRegex(cmds[0], r'cd\s+["\']', "the cd path must be quoted; paths contain spaces")
         self.assertIn("sha", joined, "the resume command must check out the recorded sha")
         self.assertIn("stash", joined, "a dirty tree aborts a bare checkout; stash first")
         self.assertRegex(joined, r"git checkout -B|git switch -C|git switch --force-create",
                          "landing on a bare sha detaches HEAD, which phase 2 calls broken")
 
-    def test_template_state_records_the_uncommitted_work(self):
+    def test_the_skill_does_not_claim_to_preserve_uncommitted_work(self):
+        """Every serialisation of a dirty tree tried here restored nothing while looking
+        like it worked, so the skill states the boundary instead. Reintroducing a patch or
+        an implicit stash-and-restore needs its own red-team round, not a quiet edit."""
+        self.assertNotIn("git apply", self.text,
+                         "a patch is atomic: one binary file or one conflicting hunk "
+                         "restores nothing at all")
+        self.assertNotIn(".patch", self.text)
         state = sections_of(template_block(self.text))["## State"]
-        for marker in ("branch:", "commit:", "uncommitted:"):
-            self.assertRegex(state, rf"(?m)^{marker}",
-                             f"the state section must carry {marker}")
+        self.assertRegex(state, r"(?i)not carried",
+                         "the template must say plainly that uncommitted work is not carried")
+        emergency = sections_of(self.text)["## If you have almost no context left, start here"]
+        self.assertRegex(emergency, r"(?i)does not preserve uncommitted work",
+                         "the reader who only reads the emergency section must be told too")
+
+    def test_the_skill_does_not_offer_a_partial_validation_mode(self):
+        """A mode that validates the re-derivable half and blesses the absence of the rest
+        manufactures confidence rather than measuring it."""
+        self.assertNotIn("--minimal", self.text)
+        self.assertNotIn("--minimal", VALIDATOR.read_text())
 
 
 class DocumentedCommandsTest(unittest.TestCase):
     """The state-collection block in the SKILL.md, executed against real environments.
 
-    Three of the four print a plausible wrong answer to the obvious command, which is the
+    Four of the five give a plausible wrong answer to the obvious command, which is the
     whole reason the block is shaped the way it is."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.env = {"PATH": MINIMAL_PATH, "HOME": str(self.root)}
-        block = bash_block(read_skill(), "## If you have almost no context left, do only this")
-        self.script = block.replace("T=<topic>", "T=lease-expiry")
-        self.assertNotIn("<", self.script, "the fallback block must be runnable once T is set")
+        self.script = bash_block(read_skill(),
+                                 "## If you have almost no context left, start here")
+        self.assertNotIn("<", self.script, "the emergency block must be runnable as pasted")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -289,8 +300,7 @@ class DocumentedCommandsTest(unittest.TestCase):
         return d
 
     def test_a_normal_repo_reports_its_branch_and_full_sha(self):
-        d = self.make_repo("normal")
-        out = self.collect(d)
+        out = self.collect(self.make_repo("normal"))
         self.assertEqual(out[0], "main")
         self.assertRegex(out[1], r"^[0-9a-f]{40}$")
 
@@ -298,8 +308,8 @@ class DocumentedCommandsTest(unittest.TestCase):
         d = self.make_repo("detached")
         sha = subprocess.run(["git", "-C", str(d), "rev-parse", "HEAD"], capture_output=True,
                              text=True, env=self.env).stdout.strip()
-        subprocess.run(["git", "-C", str(d), "checkout", "-q", "--detach", sha], env=self.env,
-                       check=True)
+        subprocess.run(["git", "-C", str(d), "checkout", "-q", "--detach", sha],
+                       env=self.env, check=True)
         abbrev = subprocess.run(["git", "-C", str(d), "rev-parse", "--abbrev-ref", "HEAD"],
                                 capture_output=True, text=True, env=self.env).stdout.strip()
         self.assertEqual(abbrev, "HEAD", "precondition: the obvious command returns HEAD here")
@@ -312,9 +322,19 @@ class DocumentedCommandsTest(unittest.TestCase):
         self.assertEqual(raw.returncode, 128)
         self.assertEqual(raw.stdout.strip(), "HEAD",
                          "precondition: rev-parse prints HEAD on stdout while failing")
-        out = self.collect(d)
-        self.assertEqual(out[0], "main")
-        self.assertEqual(out[1], "none (no commits yet)")
+        self.assertEqual(self.collect(d)[:2], ["main", "none (no commits yet)"])
+
+    def test_a_bare_repo_is_not_also_reported_as_not_a_repository(self):
+        """`A && { ...; } || C` runs C when anything inside the braces fails, and
+        `git status` fails in a bare repo. The block uses if/then/else for this."""
+        src = self.make_repo("src")
+        bare = self.root / "bare.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)],
+                       env=self.env, check=True)
+        out = self.collect(bare)
+        self.assertNotIn("none (not a git repository)", out,
+                         f"a bare repo reported itself as both a repo and not one: {out}")
+        self.assertRegex(out[1], r"^[0-9a-f]{40}$")
 
     def test_a_plain_directory_is_not_reported_as_a_detached_head(self):
         d = self.root / "plain"
@@ -326,6 +346,14 @@ class DocumentedCommandsTest(unittest.TestCase):
                          "precondition: the unguarded form lies here")
         self.assertEqual(self.collect(d), ["none (not a git repository)"])
 
+    def test_the_emergency_block_does_not_shout_help_text_in_a_non_repo(self):
+        """At zero context budget, a stray `git diff` dumps ~70 lines of usage."""
+        d = self.root / "plain2"
+        d.mkdir()
+        r = subprocess.run(["bash", "-c", self.script], capture_output=True, text=True,
+                           cwd=str(d), env=self.env)
+        self.assertLess(len(r.stderr.splitlines()), 5, f"noisy stderr:\n{r.stderr}")
+
 
 class ValidatorTest(TempRepoCase):
 
@@ -334,6 +362,7 @@ class ValidatorTest(TempRepoCase):
 
     def test_the_repo_reproduces_the_sha_and_the_porcelain_the_fixture_names(self):
         self.assertEqual(self.git("rev-parse", "HEAD"), FIXTURE_SHA)
+        self.place(self.good_doc())
         porcelain = subprocess.run(["git", "-C", str(self.repo), "status", "--porcelain"],
                                    capture_output=True, text=True, env=self.env).stdout
         self.assertEqual(porcelain, " M admission.py\n?? notes/\n")
@@ -344,7 +373,6 @@ class ValidatorTest(TempRepoCase):
         self.assertEqual(r.returncode, 0, f"good fixture rejected:\n{r.stdout}{r.stderr}")
 
     def test_the_unrelocated_fixture_is_rejected_because_its_repo_is_not_here(self):
-        """Reachability is enforced, not skipped when the path is absent."""
         r = run_validator(FIXTURES / "good-handoff.md", env=self.env)
         self.assertEqual(r.returncode, 1)
         self.assertIn("UNREACHABLE_REPO", r.stdout)
@@ -371,47 +399,84 @@ class ValidatorTest(TempRepoCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("EMPTY_SECTION ## Next", r.stdout)
 
-    def test_a_missing_state_section_does_not_cascade_into_contradictory_rejects(self):
+    def test_a_missing_state_section_does_not_cascade(self):
         r = self.check(drop_section(self.good_doc(), "## State"))
         self.assertEqual(r.returncode, 1)
         self.assertIn("MISSING_SECTION ## State", r.stdout)
-        for noise in ("NO_BRANCH", "NO_SHA", "NO_UNCOMMITTED_LINE"):
+        for noise in ("NO_BRANCH", "NO_SHA"):
             self.assertNotIn(noise, r.stdout,
                              f"{noise} names a section that is absent:\n{r.stdout}")
 
 
+class ValidatorRobustnessTest(TempRepoCase):
+    """The validator must reject, never abort. An abort reads as a pass to anyone who is
+    not watching stderr, and silently skips every rule after it."""
+
+    def test_prose_in_the_resume_section_rejects_instead_of_crashing(self):
+        doc = replace_section(self.good_doc(), "## Resume command",
+                              "Just pick up where we left off.")
+        doc = re.sub(r"^repro: .*$", "", doc, flags=re.MULTILINE)
+        r = self.check(doc)
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("unbound variable", r.stderr, f"the script crashed:\n{r.stderr}")
+        self.assertEqual(r.stderr.strip(), "", f"unexpected stderr:\n{r.stderr}")
+        self.assertIn("NO_RESUME_COMMAND", r.stdout)
+        self.assertIn("UNVERIFIABLE_COMMIT", r.stdout)
+        self.assertIn("NO_REPRO", r.stdout,
+                      "rules after the failure point must still run:\n" + r.stdout)
+
+    def test_a_tilde_fence_containing_a_heading_does_not_truncate_its_section(self):
+        state = sections_of(self.good_doc())["## State"]
+        injected = state.replace(f"commit: {FIXTURE_SHA}",
+                                 "~~~\n## Tree\nsome pasted listing\n~~~\n\n"
+                                 f"commit: {FIXTURE_SHA}")
+        r = self.check(replace_section(self.good_doc(), "## State", injected))
+        self.assertEqual(r.returncode, 0, f"a tilde fence broke section parsing:\n{r.stdout}")
+
+
 class FenceAwarenessTest(TempRepoCase):
-    """B3: pasted output is the point of the document, so it must not be parsed as markup."""
+    """Pasted output is the point of the document, so it must not be parsed as markup, and
+    must not be punished for containing words the author never wrote."""
 
     def test_the_fixture_really_does_paste_output_containing_headings(self):
         doc = self.good_doc()
         raw = len([l for l in doc.splitlines() if l.startswith("## ")])
-        real = len(sections_of(doc))
-        self.assertGreater(raw, real,
+        self.assertGreater(raw, len(sections_of(doc)),
                            "this test is only meaningful if the fixture pastes '## ' lines "
                            "inside a fence; it no longer does")
-        self.assertIn("## Tree", sections_of(doc)["## Broken"],
-                      "the pasted heading must land inside the Broken section's body")
+        self.assertIn("## Tree", sections_of(doc)["## Broken"])
 
     def test_a_repro_line_below_pasted_headings_is_still_found(self):
         r = self.check(self.good_doc())
         self.assertEqual(r.returncode, 0)
-        self.assertNotIn("NO_REPRO", r.stdout,
-                         "the repro line sits below a fence containing '## ' lines")
+        self.assertNotIn("NO_REPRO", r.stdout)
 
-    def test_obeying_the_iron_law_does_not_force_a_truncation_reject(self):
-        """Pasting in full must not be punished, and trimming must not be the way out."""
-        clean = self.check(self.good_doc())
-        self.assertEqual(clean.returncode, 0)
-        trimmed = self.check(replace_section(
-            self.good_doc(), "## Broken",
-            "- test_handoff_has_state\n\n```\nAssertionError ... (truncated)\n```\n\n"
-            "repro: python3 -m pytest -q"))
-        self.assertIn("TRUNCATED_OUTPUT", trimmed.stdout)
+    def test_pasted_output_is_never_read_as_an_elision(self):
+        """A real traceback frame in etc.py, and a tool that truncates its own output, are
+        both correctly pasted. Rejecting them would make editing the paste the only way to
+        pass, which is exactly what the Iron Law forbids."""
+        self.assertIn('File "/usr/lib/python3.11/etc.py"', self.good_doc(),
+                      "the fixture must keep pinning this")
+        self.assertEqual(self.check(self.good_doc()).returncode, 0)
+
+        doc = replace_section(self.good_doc(), "## Broken",
+                              "- test_x\n\n```\nE  AssertionError: expected 1\n"
+                              "E  ...(truncated by pytest)\n```\n\nrepro: python3 -m pytest -q")
+        r = self.check(doc)
+        self.assertEqual(r.returncode, 0,
+                         f"a tool's own truncation notice is not the author's:\n{r.stdout}")
+
+    def test_an_elision_written_by_the_author_is_still_rejected(self):
+        doc = replace_section(self.good_doc(), "## Broken",
+                              "- test_x fails with an AssertionError (truncated)\n\n"
+                              "```\nE  AssertionError\n```\n\nrepro: python3 -m pytest -q")
+        r = self.check(doc)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("TRUNCATED_OUTPUT", r.stdout)
 
 
 class FabricatedStateTest(TempRepoCase):
-    """B1: there must be no path on which a sha is accepted without being checked."""
+    """There must be no path on which a sha is accepted without being checked."""
 
     def test_a_fake_sha_pointed_at_a_directory_that_is_not_a_repo_is_rejected(self):
         plain = self.root / "notarepo"
@@ -444,10 +509,8 @@ class FabricatedStateTest(TempRepoCase):
     def test_a_plain_directory_must_be_recorded_as_one(self):
         plain = self.root / "plain"
         (plain / "notes").mkdir(parents=True)
-        doc = self.good_doc().replace(str(self.repo), str(plain))
         p = plain / "notes" / "h.md"
-        p.write_text(doc)
-        (plain / "notes" / PATCH_NAME).write_text((FIXTURES / PATCH_NAME).read_text())
+        p.write_text(self.good_doc().replace(str(self.repo), str(plain)))
         r = run_validator(p, env=self.env)
         self.assertEqual(r.returncode, 1)
         self.assertIn("BRANCH_CONTRADICTS_REPO", r.stdout)
@@ -459,9 +522,8 @@ class FabricatedStateTest(TempRepoCase):
         self.git("symbolic-ref", "HEAD", "refs/heads/main", repo=unborn)
         doc = (self.good_doc().replace(str(self.repo), str(unborn))
                .replace(f"branch: {FIXTURE_BRANCH}", "branch: main")
-               .replace(f"commit: {FIXTURE_SHA}", "commit: none (no commits yet)")
-               .replace("uncommitted: notes/" + PATCH_NAME, "uncommitted: none"))
-        doc = replace_section(doc, "## Resume command", f"```bash\ncd {unborn}\ngit status\n```")
+               .replace(f"commit: {FIXTURE_SHA}", "commit: none (no commits yet)"))
+        doc = replace_section(doc, "## Resume command", f'```bash\ncd "{unborn}"\ngit status\n```')
         p = unborn / "notes" / "h.md"
         p.write_text(doc)
         r = run_validator(p, env=self.env)
@@ -473,36 +535,8 @@ class FabricatedStateTest(TempRepoCase):
         self.assertIn("NO_SHA", r.stdout)
 
 
-class UncommittedWorkTest(TempRepoCase):
-    """B2: git status records filenames; the content lives only in the patch."""
-
-    def test_the_uncommitted_line_is_mandatory(self):
-        doc = self.good_doc().replace(f"uncommitted: notes/{PATCH_NAME}\n", "")
-        r = self.check(doc)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("NO_UNCOMMITTED_LINE", r.stdout)
-
-    def test_a_named_patch_that_is_not_there_is_rejected(self):
-        (self.repo / "notes" / PATCH_NAME).unlink()
-        r = self.check(self.good_doc())
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("MISSING_PATCH", r.stdout)
-
-    def test_a_patch_the_resume_command_never_applies_is_rejected(self):
-        doc = self.good_doc().replace(f"git apply notes/{PATCH_NAME}\n", "")
-        r = self.check(doc)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("NO_PATCH_APPLY", r.stdout)
-
-    def test_applying_a_patch_that_was_never_recorded_is_rejected(self):
-        doc = self.good_doc().replace(f"uncommitted: notes/{PATCH_NAME}", "uncommitted: none")
-        r = self.check(doc)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("STRAY_PATCH_APPLY", r.stdout)
-
-
 class ResumeCommandTest(TempRepoCase):
-    """B2: the command must land on the recorded state in the case it exists for."""
+    """The command must land on the recorded state in the case it exists for."""
 
     def resume_from(self, doc, cwd=None):
         command = "\n".join(fenced_lines(sections_of(doc)["## Resume command"]))
@@ -515,7 +549,7 @@ class ResumeCommandTest(TempRepoCase):
         self.git("commit", "-q", "-a", "-m", "later work on the same branch")
         moved = self.git("rev-parse", "HEAD")
         self.assertNotEqual(moved, FIXTURE_SHA)
-        (self.repo / "admission.py").write_text(FIXTURE_SOURCE + "\n# later work\n# uncommitted\n")
+        (self.repo / "admission.py").write_text(FIXTURE_SOURCE + "\n# later\n# uncommitted\n")
         self.assertTrue(self.git("status", "--porcelain"), "precondition: the tree is dirty")
         return moved
 
@@ -525,7 +559,6 @@ class ResumeCommandTest(TempRepoCase):
         self.assertEqual(run_validator(self.repo / "notes" / "2026-08-25-lease-expiry.md",
                                        env=self.env).returncode, 0)
         moved = self.move_the_tip_and_dirty_the_tree()
-
         r = self.resume_from(doc)
         self.assertEqual(r.returncode, 0,
                          f"resume failed on the state it exists for:\n{r.stdout}{r.stderr}")
@@ -534,63 +567,64 @@ class ResumeCommandTest(TempRepoCase):
                          f"landed on {head}, not the recorded {FIXTURE_SHA} (tip was {moved})")
 
     def test_resume_leaves_a_named_branch_not_a_detached_head(self):
-        doc = self.good_doc()
         self.move_the_tip_and_dirty_the_tree()
-        self.resume_from(doc)
+        self.resume_from(self.good_doc())
         self.assertEqual(self.git("symbolic-ref", "--quiet", "--short", "HEAD"),
                          "resume/lease-expiry",
                          "phase 2 calls a detached HEAD broken, so resume must not create one")
 
-    def test_resume_restores_the_uncommitted_work_and_keeps_what_it_displaced(self):
-        doc = self.good_doc()
+    def test_what_the_resume_displaces_is_findable_afterwards(self):
         self.move_the_tip_and_dirty_the_tree()
-        self.resume_from(doc)
-        self.assertIn("def renew", (self.repo / "admission.py").read_text(),
-                      "the patch must put the uncommitted work back")
-        self.assertEqual(len(self.git("stash", "list").splitlines()), 1,
-                         "the work the resume displaced must be recoverable, not discarded")
+        self.resume_from(self.good_doc())
+        stashes = self.git("stash", "list")
+        self.assertEqual(len(stashes.splitlines()), 1,
+                         "the tree the resume parked must be recoverable, not discarded")
+        self.assertIn("before resuming", stashes,
+                      "the stash must be labelled so the user can find it")
 
     def test_resume_works_from_an_unrelated_working_directory(self):
-        doc = self.good_doc()
         self.move_the_tip_and_dirty_the_tree()
         elsewhere = self.root / "elsewhere"
         elsewhere.mkdir()
-        r = self.resume_from(doc, cwd=elsewhere)
+        r = self.resume_from(self.good_doc(), cwd=elsewhere)
         self.assertEqual(r.returncode, 0, f"{r.stdout}{r.stderr}")
         self.assertEqual(self.git("rev-parse", "HEAD"), FIXTURE_SHA)
 
-    def test_a_relative_cd_is_rejected_because_it_depends_on_the_caller(self):
-        doc = self.good_doc().replace(f"cd {self.repo}", "cd ..")
-        r = self.check(doc)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("RESUME_PATH_NOT_ABSOLUTE", r.stdout)
-
-    def test_a_path_with_an_escaped_space_is_not_a_false_unreachable(self):
+    def test_a_repo_path_containing_a_space_validates_and_runs(self):
         spaced = self.root / "my repo"
         (spaced / "notes").mkdir(parents=True)
         self.git("init", "-q", repo=spaced)
+        self.git("symbolic-ref", "HEAD", "refs/heads/main", repo=spaced)
         (spaced / "f").write_text("f")
         self.git("add", "-A", repo=spaced)
         self.git("commit", "-q", "-m", "c", repo=spaced)
         sha = self.git("rev-parse", "HEAD", repo=spaced)
-        doc = (self.good_doc().replace(str(self.repo), str(spaced).replace(" ", "\\ "))
-               .replace(FIXTURE_SHA, sha)
-               .replace(f"uncommitted: notes/{PATCH_NAME}", "uncommitted: none")
-               .replace(f"git apply notes/{PATCH_NAME}\n", ""))
+        doc = (self.good_doc().replace(str(self.repo), str(spaced))
+               .replace(f"branch: {FIXTURE_BRANCH}", "branch: main")
+               .replace(FIXTURE_SHA, sha))
         p = spaced / "notes" / "h.md"
         p.write_text(doc)
         r = run_validator(p, env=self.env)
-        self.assertNotIn("UNREACHABLE_REPO", r.stdout, r.stdout)
+        self.assertEqual(r.returncode, 0, f"a path with a space was rejected:\n{r.stdout}")
+        run = self.resume_from(doc)
+        self.assertEqual(run.returncode, 0, f"the quoted cd must run:\n{run.stderr}")
+        self.assertEqual(self.git("rev-parse", "HEAD", repo=spaced), sha)
+
+    def test_a_relative_cd_is_rejected_because_it_depends_on_the_caller(self):
+        r = self.check(self.good_doc().replace(f'cd "{self.repo}"', "cd .."))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("RESUME_PATH_NOT_ABSOLUTE", r.stdout)
 
     def test_a_branch_only_resume_command_is_rejected(self):
-        r = self.check(self.good_doc().replace(f"git checkout -B resume/lease-expiry {FIXTURE_SHA}",
-                                               f"git checkout {FIXTURE_BRANCH}"))
+        r = self.check(self.good_doc().replace(
+            f"git checkout -B resume/lease-expiry {FIXTURE_SHA}",
+            f"git checkout {FIXTURE_BRANCH}"))
         self.assertEqual(r.returncode, 1)
         self.assertIn("RESUME_MISSING_SHA", r.stdout)
 
     def test_merely_mentioning_the_sha_is_not_checking_it_out(self):
-        r = self.check(self.good_doc().replace(f"git checkout -B resume/lease-expiry {FIXTURE_SHA}",
-                                               f"echo {FIXTURE_SHA}"))
+        r = self.check(self.good_doc().replace(
+            f"git checkout -B resume/lease-expiry {FIXTURE_SHA}", f"echo {FIXTURE_SHA}"))
         self.assertEqual(r.returncode, 1)
         self.assertIn("RESUME_DOES_NOT_CHECKOUT", r.stdout)
 
@@ -598,38 +632,6 @@ class ResumeCommandTest(TempRepoCase):
         r = self.check(self.good_doc().replace(f"branch: {FIXTURE_BRANCH}", "branch: HEAD"))
         self.assertEqual(r.returncode, 1)
         self.assertIn("BRANCH_IS_HEAD", r.stdout)
-
-
-class MinimalModeTest(TempRepoCase):
-    """B7: the emergency fallback must produce a document that actually passes."""
-
-    def minimal_doc(self):
-        state = sections_of(self.good_doc())["## State"]
-        resume = sections_of(self.good_doc())["## Resume command"]
-        return (f"# 2026-08-25 handoff: lease-expiry\n\n## State\n{state}\n"
-                f"\n## Resume command\n{resume}\n")
-
-    def test_the_two_section_fallback_passes_in_minimal_mode(self):
-        r = self.check(self.minimal_doc(), minimal=True)
-        self.assertEqual(r.returncode, 0,
-                         f"the fallback this skill prescribes must validate:\n{r.stdout}")
-
-    def test_minimal_mode_lists_the_remaining_sections_as_work_not_as_rejects(self):
-        r = self.check(self.minimal_doc(), minimal=True)
-        self.assertNotIn("REJECT", r.stdout)
-        for heading in ("## Broken", "## Dead ends", "## Next"):
-            self.assertIn(heading, r.stderr)
-
-    def test_minimal_mode_still_polices_the_two_sections_it_judges(self):
-        doc = self.minimal_doc().replace(f"commit: {FIXTURE_SHA}", "commit: " + "deadbeef" * 5)
-        r = self.check(doc, minimal=True)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("UNKNOWN_COMMIT", r.stdout)
-
-    def test_the_same_document_is_rejected_in_full_mode(self):
-        r = self.check(self.minimal_doc())
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("MISSING_SECTION", r.stdout)
 
 
 class HostileInputTest(TempRepoCase):
@@ -658,11 +660,9 @@ class HostileInputTest(TempRepoCase):
             re.sub(r"^repro: .*$", "repro: true", self.good_doc(), flags=re.MULTILINE),
             "TRIVIAL_REPRO")
 
-    def test_a_bare_ellipsis_line_is_rejected(self):
-        self.assert_rejected_with(replace_section(
-            self.good_doc(), "## Broken",
-            "- t\n\n```\nTraceback:\n...\nAssertionError\n```\n\nrepro: python3 -m pytest -q"),
-            "TRUNCATED_OUTPUT")
+    def test_a_bare_ellipsis_standing_in_for_prose_is_rejected(self):
+        self.assert_rejected_with(
+            replace_section(self.good_doc(), "## Dead ends", "..."), "TRUNCATED_OUTPUT")
 
     def test_tbd_is_not_an_answer(self):
         self.assert_rejected_with(
@@ -716,7 +716,8 @@ class RenameDriftTest(TempRepoCase):
         copy = self.root / "SKILL.md"
         copy.write_text(read_skill().replace(
             "## Done and verified\n\n- <what changed>.",
-            "## Mirror\n\nbranch: <a second branch line>\n\n## Done and verified\n\n- <what changed>."))
+            "## Mirror\n\nbranch: <a second branch line>\n\n"
+            "## Done and verified\n\n- <what changed>."))
         r = self.check(self.good_doc(), skill_md=copy)
         self.assertEqual(r.returncode, 2, f"ambiguity must not be resolved silently:\n{r.stdout}")
         self.assertIn("must be unique", r.stderr)
@@ -764,8 +765,8 @@ class HouseStyleTest(unittest.TestCase):
         self.assertTrue(keys <= PORTABLE_KEYS, f"non-portable keys: {keys - PORTABLE_KEYS}")
 
     def test_name_matches_directory(self):
-        m = re.search(r"^name: *(\S+)", self.fm, re.MULTILINE)
-        self.assertEqual(m.group(1), SKILL_DIR.name)
+        self.assertEqual(re.search(r"^name: *(\S+)", self.fm, re.MULTILINE).group(1),
+                         SKILL_DIR.name)
 
     def test_frontmatter_under_1024_chars(self):
         self.assertLessEqual(len(self.fm), 1024, f"frontmatter is {len(self.fm)} chars")
@@ -783,13 +784,13 @@ class HouseStyleTest(unittest.TestCase):
     def test_body_under_500_lines(self):
         self.assertLessEqual(len(self.text.split("\n---\n", 1)[1].splitlines()), 500)
 
-    def test_the_minimal_fallback_comes_before_the_rationale(self):
+    def test_the_emergency_section_comes_before_the_rationale(self):
         lines = self.text.splitlines()
-        fallback = next(i for i, l in enumerate(lines)
-                        if l.startswith("## If you have almost no context"))
+        first = next(i for i, l in enumerate(lines)
+                     if l.startswith("## If you have almost no context"))
         rationale = next(i for i, l in enumerate(lines) if l.startswith("## Why this exists"))
-        self.assertLess(fallback, 40, f"the minimal fallback starts at line {fallback + 1}")
-        self.assertLess(fallback, rationale, "the rationale must sit below the procedure")
+        self.assertLess(first, 40, f"the emergency section starts at line {first + 1}")
+        self.assertLess(first, rationale, "the rationale must sit below the procedure")
 
     def test_no_em_dashes_anywhere_in_the_skill(self):
         em_dash = "\u2014"  # escaped so this file passes its own check

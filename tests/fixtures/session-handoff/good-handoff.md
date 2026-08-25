@@ -3,17 +3,17 @@
 ## Resume command
 
 ```bash
-cd /srv/checkouts/admission
+cd "/srv/checkouts/admission"
 git stash push --message "before resuming 2026-08-25" || true
 git checkout -B resume/lease-expiry f882c1ac93d08b780caba472786173d2fdd45b78
-git apply notes/2026-08-25-lease-expiry.patch
 ```
 
 ## State
 
 branch: fix/lease-expiry
 commit: f882c1ac93d08b780caba472786173d2fdd45b78
-uncommitted: notes/2026-08-25-lease-expiry.patch
+uncommitted work: NOT carried by this handoff. The dirty `admission.py` was stashed as
+`wip-lease-renew`; see `## Next`.
 
 ```
 $ git status --porcelain
@@ -35,8 +35,8 @@ f882c1a Widen the lease window to a half-open interval
 
 ## Done but NOT verified
 
-- The uncommitted `renew()` in the patch reuses the same comparison. Nothing covers it,
-  and this repository has no test file yet.
+- The stashed `renew()` reuses the same comparison. Nothing covers it, and this
+  repository has no test file yet.
 
 ## Broken
 
@@ -45,6 +45,8 @@ f882c1a Widen the lease window to a half-open interval
 ```
 $ python3 -m pytest tests/test_notes.py -q
 FAILED tests/test_notes.py::test_handoff_has_state
+  File "/usr/lib/python3.11/etc.py", line 41, in _render
+    return template.render(**fields)
 E       AssertionError: the rendered note is missing its State heading
 E       rendered note was:
 ## Tree
@@ -80,9 +82,9 @@ repro: python3 -m pytest tests/test_notes.py::test_handoff_has_state -q
 
 ## Next
 
-1. Inject a `Clock` into `Scheduler` so the boundary case is testable without sleeping.
-2. Write a test covering the `renew()` path at the boundary.
-3. Run the full suite before committing.
+1. `git stash pop stash^{/wip-lease-renew}` to get the uncommitted `renew()` back.
+2. Inject a `Clock` into `Scheduler` so the boundary case is testable without sleeping.
+3. Write a test covering the `renew()` path at the boundary.
 
 ## Watch out for
 

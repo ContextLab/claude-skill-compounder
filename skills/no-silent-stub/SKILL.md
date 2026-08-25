@@ -1,6 +1,6 @@
 ---
 name: no-silent-stub
-description: "Use when about to hand back a value you did not actually compute: a hardcoded result, an empty collection standing in for logic, an `except: pass`, a mock on a live path, a TODO that returns, a test scored against its own input, or a fallback a caller cannot tell apart from a real answer, usually because a key, dependency, or service is out of reach. Do NOT use for documented default parameters, typed-optional returns the caller must check, or test doubles a project has deliberately chosen."
+description: "Use when about to hand back a value you did not actually compute, or a no-op import shim: a hardcoded result, an empty collection standing in for logic, an `except: pass`, a mock on a live path, a TODO that returns, a test scored against its own input, or a fallback a caller cannot tell from a real answer, because a key, dependency, or service is out of reach. Do NOT use for documented default parameters, typed-optional returns the caller must check, or test doubles a project chose on purpose."
 ---
 
 # Fail loudly, never plausibly
@@ -41,18 +41,36 @@ engineering. The single question that separates them:
 
 The right column is not worse code. It is code that reports success it did not achieve.
 
-## Taxonomy: eight shapes, and how each one hides
+## Taxonomy: nine shapes, and how each one hides
 
-|Shape|Signature in the source|How it passes review|Scan|
-|-|-|-|-|
-|Hardcoded return|parameters accepted, none read, a literal handed back|the type is right and the call site works|diff only|
-|Swallowed exception|`except: pass`, or a handler with no log and no re-raise|the happy path is untouched, so tests stay green|bare `except:` only|
-|Indistinguishable fallback|`if not api_key: return 1.0`|1.0 is a legal exchange rate; totals still look sane|yes|
-|Mock on a live path|`MagicMock` outside `tests/`|it returns whatever the demo needed|yes|
-|TODO that returns|a marker comment directly above `return []`|the marker reads as a plan, not as a live defect|yes|
-|Self-scoring check|`actual = row["expected"]`, `is_correct = True`|the score is 100%, which nobody investigates|yes|
-|Retry exhaustion|a loop of attempts, then `return []` after the last one|"no incidents" and "could not reach the incident service" print identically|yes|
-|Cache-miss default|`hit = cache.get(k)`, `if hit is None: return DEFAULT`|every miss looks like a hit with boring data|yes|
+|Shape|Signature in the source|How it passes review|
+|-|-|-|
+|Hardcoded return|parameters accepted, none read, a literal handed back|the type is right and the call site works|
+|Swallowed exception|`except: pass`, or a handler with no log and no re-raise|the happy path is untouched, so tests stay green|
+|Indistinguishable fallback|`if not api_key: return 1.0`|1.0 is a legal exchange rate; totals still look sane|
+|Mock on a live path|`MagicMock` outside `tests/`|it returns whatever the demo needed|
+|TODO that returns|a marker comment directly above `return []`|the marker reads as a plan, not as a live defect|
+|Self-scoring check|`actual = row["expected"]`, `is_correct = True`|the score is 100%, which nobody investigates|
+|Retry exhaustion|a loop of attempts, then `return []` after the last one|"no incidents" and "could not reach the incident service" print identically|
+|Cache-miss default|`hit = cache.get(k)`, `if hit is None: return DEFAULT`|every miss looks like a hit with boring data|
+|Import shim|a module written so `import client` succeeds, with no-op methods behind it|nothing returns a wrong value yet, so nothing looks wrong|
+
+The last one is the quietest, and it arrives as a reasonable request: *"the vendor SDK is
+not on PyPI, just make `client.py` importable and we will swap it later."* There is no
+value-shaped hole to point at, which is exactly why it slips through. A shim whose methods
+do nothing is a stub for every call site at once. Write the module so importing it works
+and **calling** it raises, naming the missing package:
+
+```python
+class Client:
+    def __init__(self, *_, **__):
+        raise NotImplementedError(
+            "vendorsdk is not installed and is not on PyPI; obtain the wheel from "
+            "the vendor portal before calling Client()")
+```
+
+Now the import succeeds, the type checker is happy, the module is importable for the
+unrelated work that needed it, and the first real call says exactly what is missing.
 
 The `Scan` column is what phase 4's script actually detects, measured rather than hoped.
 Two shapes are wider than any mechanical rule can safely be; see "What this scan is worth".
@@ -100,10 +118,17 @@ Descend this ladder only as far as correctness forces you.
    missing, not what the function is called:
    `raise RuntimeError("fetch_exchange_rate: FX_API_KEY is not set; cannot fetch a real rate")`.
    A caller reading that log knows what to fix without opening the file.
-2. **Fail the test.** If a test is red because the implementation is incomplete, the test
-   is correct and the implementation is not. Never widen an assertion, add `skip`/`xfail`,
-   loosen a tolerance, or catch-and-continue to turn red green. A test that cannot reach
-   the real service should fail as unreachable, not pass against a substitute.
+2. **Fail the test, or skip it in a way the suite reports.** If a test is red because the
+   implementation is incomplete, the test is correct and the implementation is not. Never
+   widen an assertion, loosen a tolerance, or catch-and-continue to turn red green.
+
+   A skip is not automatically a stub. `@pytest.mark.skipif(not os.getenv("PGHOST"),
+   reason="needs a live Postgres")` is good engineering: the precondition is named in the
+   source, the runner prints it as skipped rather than passed, and a reader of the summary
+   can see the coverage is missing. That is the opposite of hiding. What is a stub:
+   a bare `@pytest.mark.skip` with no reason, an `xfail` slapped on a test that was passing
+   yesterday, or a skip whose condition is really "this fails and I do not know why".
+   The test: **does the suite output tell someone this was not checked, and why?**
 3. **Return an explicit sentinel the type system forces callers to handle.** Legitimate
    only when the absent value is a normal outcome the caller has something to do about,
    and the signature says so: `Optional[T]`, a `Result` type, an enum member such as
@@ -120,87 +145,87 @@ Descend this ladder only as far as correctness forces you.
 Whichever rung you land on, put the blocker in the code and in the reply, not only one.
 
 **Then check that your raise survives.** A raise three frames below an unchanged
-`except Exception: pass` is a stub with extra steps. Walk the call chain to the nearest
-caller that reports to a human and confirm nothing eats it on the way:
+`except Exception as exc: pass` is a stub with extra steps. This is not hypothetical.
+`fetch_exchange_rate`, fixed exactly as rung 1 prescribes, was run from a caller that
+wrapped it in `except Exception as exc: return 0.0`. The program printed `TOTAL 0.00` and
+exited 0. The raise was correct and the user still got an invented number.
+
+So run the fixed code and look at what a human sees. If the failure does not reach the
+output, walk up the callers and find the handler that ate it. Every handler between your
+raise and the surface has to either re-raise or report:
 
 ```bash
-grep -rnE 'except (Exception|BaseException)?\s*:' <callers> | grep -v raise
+git grep -nE 'except[^:]*:' -- <the files between your raise and main>
 ```
 
-Verified case: a fixed `fetch_exchange_rate` raised correctly, and the caller still
-printed `TOTAL 0.00`, because an outer handler swallowed it. The fix is not done until
-the failure reaches a human.
+That pattern matches `except:`, `except Exception:` and `except Exception as exc:` alike.
+Two narrowings to avoid, both of which were tried and both of which fail silently: naming
+the types (`except (Exception|BaseException)?\s*:`) misses `as exc`, the form that actually
+bites, and `\b` is unsupported by `git grep`, so the whole check matches nothing and reads
+as clean. Read each hit and ask whether your new exception passes through it. The fix is
+not done until the failure reaches a human.
 
-## Phase 4: scan what you wrote
+## Phase 4: re-read your own diff before you claim anything
 
-Locate the script (it moves with the install; do not guess a relative path):
+There is no script here, and that is a finding rather than an omission. Two independent
+red-team rounds built their own corpora (308 kLOC and 893 kLOC of third-party Python) and
+measured a scanner written for exactly this: **8% precision**, blind to every stub in
+exception form, and its grep floor could not match `except X:` followed by `pass` on the
+next line, which is how anyone actually formats it. A linter at 8% gets switched off within
+a day and takes the doctrine with it. The distinguishing question survived both rounds
+because it is the part a reader does.
+
+So read the diff. `git diff` plus `git status --porcelain` for the files you created,
+which a plain diff does not show.
+
+For every `return`, every handler, and every new function in it, ask the phase 2 question
+once: **can a caller tell this apart from success?** Three passes, each cheap:
+
+1. **Every value you return.** Trace it back to an input. If you cannot, it was written
+   down rather than derived, and phase 3 applies.
+2. **Every `except`.** Say out loud what a caller sees when that handler runs. If the
+   answer is the same thing it sees on success, that is the defect.
+3. **Every function you added.** Does it read its arguments? A function that ignores what
+   it was given and hands back a literal is not implemented, whatever its body looks like.
+
+A worked example, three lines from the diff of a real change:
+
+```python
+def fetch_exchange_rate(pair):
+    api_key = os.environ.get("FX_API_KEY")
+    if not api_key:
+        return 1.0
+```
+
+Pass 1 flags it: `1.0` traces back to nothing. Pass 2 is quiet, there is no handler. Pass 3
+is quiet, `pair` is read on the other branch. One of three passes is enough. Now the
+question: can a caller tell? A rate of 1.0 is a legal rate. Totals still balance. Nothing
+in the return type, the signature, or the docstring says "this might be invented". So it is
+the defect, and rung 1 applies: raise, naming `FX_API_KEY`.
+
+Contrast the case no pass and no tool ever reaches:
+
+```python
+rate = RATES.get(region)
+if rate is None:
+    rate = BLENDED_US_AVERAGE
+```
+
+`region` is read, the arithmetic is real, the value is plausible, and the output is
+byte-identical to a correct answer. Only the question catches this one. That is why phase 2
+is the skill and phase 4 is only its application to your own work.
+
+Markers are worth a look, but treat them as a reminder and not a check, because they only
+find the stubs that were considerate enough to announce themselves:
 
 ```bash
-SCAN=$(ls ~/.claude/skills/no-silent-stub/scripts/stub-scan.py \
-          ~/.claude/plugins/cache/*/*/*/skills/no-silent-stub/scripts/stub-scan.py \
-          2>/dev/null | head -1)
-python3 "$SCAN" --diff            # what this branch added, against HEAD
-python3 "$SCAN" --diff --base main
+git diff -U0 -- '*.py' '*.js' '*.ts' '*.go' '*.rb' '*.sh' \
+  | grep -nE 'TODO|FIXME|XXX|for now|placeholder|MagicMock|@pytest\.mark\.skip'
 ```
 
-`--diff` is the posture that works: it reads only the lines you added, untracked new files
-included (a brand-new module is invisible to plain `git diff`, which is how the commonest
-case of all used to scan clean), so its volume is
-bounded by your own change, and the shapes it confuses with stubs (a base-class default, an
-always-constant implementation) are pre-existing architecture rather than something you
-wrote in the last hour. Non-Python added lines get the grep floor applied to them
-automatically. Exit 1 means findings, 0 means clean, 2 means it could not run.
-
-Triage of an existing tree is the other mode, `python3 "$SCAN" <dir>`, and it is much
-weaker. Read on before trusting it.
-
-### What this scan is worth
-
-Measured against 308,000 lines of third-party libraries (`requests`, `click`, `jinja2`,
-`urllib3`, `dateutil`, `pyyaml`, `numpy`), code neither this skill nor its fixtures ever
-saw:
-
-|Corpus|Mode|Findings|True|
-|-|-|-|-|
-|308 kLOC of third-party libraries|triage, first cut|413|~1%|
-|308 kLOC of third-party libraries|triage, as shipped|2|1|
-|36 kLOC of the standard library|triage, as shipped|3|3 (all real bare `except:`)|
-|4 kLOC of unplanted real diff|`--diff`|0|n/a, nothing was wrong in it|
-|7 planted stubs in a scratch repo|`--diff`|7|7, and nothing extra|
-
-All 18 first-cut findings in `requests` were read individually and every one was false:
-`except OSError: return False` inside `is_ipv4_address`, where the boolean is the answer,
-and a documented no-op override hook. That reading is what cut the rule set down. Note the
-last two rows measure different things: the unplanted diff is a precision check, the
-planted one is only a recall check, since those stubs were written to be found.
-
-The rules were cut until that held. `constant-stub` scored 0 of 6 on that corpus and is
-suppressed in triage mode entirely, because "ignores its parameters and returns a literal"
-describes a deliberate base-class default (`click`'s `list_commands`, `dateutil`'s
-`tzname`) exactly as well as it describes a stub. That difference is semantic, and no AST
-pass reaches it. `except SpecificError: pass` was dropped from the rule set for the same
-reason: on real code it is an optional-import probe or a candidate-file loop far more often
-than a swallowed failure. Both are still in the taxonomy above, because you can tell the
-difference and a grep cannot.
-
-Findings name one of eight rules, so you can tell what was matched:
-`constant-stub`, `swallowed-exception`, `marker-return`, `mock-outside-tests`,
-`self-scoring-eval`, `retry-exhaustion-empty`, `cache-miss-default`, `credential-fallback`,
-plus `test-widening` and `floor-match` on a diff, and `unscanned-language` for what it
-could not parse.
-
-**The scan is Python only.** Anything else is reported as `unscanned-language` rather than
-passed over. For those files, and any time the script is not to hand, the floor is:
-
-```bash
-git diff -U0 | grep -nE 'TODO|FIXME|for now|placeholder|return \[\]|return \{\}|except[^:]*:\s*pass|catch\s*\([^)]*\)\s*\{\s*\}|MagicMock|pytest\.mark\.(skip|xfail)'
-```
-
-Account for every hit, one by one. Then read the diff for what no scan reaches: **an
-unmarked fallback with no guard has no syntactic tell.** A function that reads its
-arguments, does real arithmetic, and returns a plausible average for the unknown branch
-passes every mechanical check ever written, and prints a number identical to the real one.
-A clean report is a floor. Phase 2 is the part that actually works.
+The pathspec matters: without it the first hit is documentation discussing stubs, which
+is how this file's own earlier draft flagged itself thirteen times. Account for every hit.
+Then re-read for the ones that left no mark.
 
 ## Phase 5: the reporting duty
 
@@ -223,6 +248,16 @@ This phase is narrow on purpose. It covers one thing: naming the fake you were a
 ship, or did ship. Verifying a completion claim in general belongs to
 `superpowers:verification-before-completion`; invoke that for the evidence-before-assertion
 discipline rather than repeating it here.
+
+## Neighbours
+
+Two other tools cover adjacent ground, and reaching for the right one saves time:
+
+|Tool|Reach for it when|
+|-|-|
+|this skill|you are **writing** the code, at the moment the real thing turns out to be unavailable|
+|`pr-review-toolkit:silent-failure-hunter`|you are **reviewing** a diff someone already wrote and want error handling and fallbacks hunted across it. It is an agent, not a skill, so nothing competes for a trigger here|
+|`superpowers:verification-before-completion`|you are about to claim done, and the question is evidence in general rather than a fake in particular|
 
 ## Red flags
 
@@ -274,5 +309,5 @@ Each of these thoughts means stop and return to phase 2:
 |1 Recognize|Notice the value-shaped hole|You can name what is out of reach|
 |2 Distinguish|Ask whether a caller can tell this from success|A mechanism makes it visible, or it is a defect|
 |3 Fail loudly|Raise naming the precondition; else fail the test; else typed sentinel; else ask|The failure reaches the caller unmissed|
-|4 Scan|Run `stub-scan.py` on the diff, then read for the unmarked fallback|Every finding accounted for, one by one|
+|4 Re-read|Ask the phase 2 question of every return, handler and new function in your diff|Each one traced to an input, or fixed|
 |5 Report|Say what is unimplemented, why, what finishes it, what is unverified|No success claim outruns the code|
