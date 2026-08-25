@@ -43,16 +43,19 @@ The right column is not worse code. It is code that reports success it did not a
 
 ## Taxonomy: eight shapes, and how each one hides
 
-|Shape|Signature in the source|How it passes review|
-|-|-|-|
-|Hardcoded return|parameters accepted, none read, a literal handed back|the type is right and the call site works|
-|Swallowed exception|`except: pass`, or a handler with no log and no re-raise|the happy path is untouched, so tests stay green|
-|Indistinguishable fallback|`if not api_key: return 1.0`|1.0 is a legal exchange rate; totals still look sane|
-|Mock on a live path|`MagicMock` imported outside `tests/`|it returns whatever the demo needed|
-|TODO that returns|a marker comment directly above `return []`|the marker reads as a plan, not as a live defect|
-|Self-scoring check|`actual = row["expected"]`, `is_correct = True`|the score is 100%, which nobody investigates|
-|Retry exhaustion|a loop of attempts, then `return []` after the last one|"no incidents" and "could not reach the incident service" print identically|
-|Cache-miss default|`hit = cache.get(k)`, `if hit is None: return DEFAULT`|every miss looks like a hit with boring data|
+|Shape|Signature in the source|How it passes review|Scan|
+|-|-|-|-|
+|Hardcoded return|parameters accepted, none read, a literal handed back|the type is right and the call site works|diff only|
+|Swallowed exception|`except: pass`, or a handler with no log and no re-raise|the happy path is untouched, so tests stay green|bare `except:` only|
+|Indistinguishable fallback|`if not api_key: return 1.0`|1.0 is a legal exchange rate; totals still look sane|yes|
+|Mock on a live path|`MagicMock` outside `tests/`|it returns whatever the demo needed|yes|
+|TODO that returns|a marker comment directly above `return []`|the marker reads as a plan, not as a live defect|yes|
+|Self-scoring check|`actual = row["expected"]`, `is_correct = True`|the score is 100%, which nobody investigates|yes|
+|Retry exhaustion|a loop of attempts, then `return []` after the last one|"no incidents" and "could not reach the incident service" print identically|yes|
+|Cache-miss default|`hit = cache.get(k)`, `if hit is None: return DEFAULT`|every miss looks like a hit with boring data|yes|
+
+The `Scan` column is what phase 4's script actually detects, measured rather than hoped.
+Two shapes are wider than any mechanical rule can safely be; see "What this scan is worth".
 
 ## Phase 1: recognize the moment
 
@@ -70,6 +73,24 @@ Ask it out loud, about the specific line: *can a caller tell this apart from suc
 If the answer is yes, name the mechanism that makes it so: the parameter in the signature,
 the `Optional` in the annotation, the exception in the docstring, the `tests/` in the path.
 No mechanism means the answer is no, whatever the intention was.
+
+### Two cases where the answer is not "raise"
+
+Both of these were answered wrongly, and confidently, before they were written down here.
+
+- **A designed cold-start path.** A recommender with no history for a new user returning
+  popular items is not a stub. The absence of history is an expected input, the behaviour
+  is specified, and the caller wanted a list. Raising here breaks working software. The
+  tell that separates it from a fallback: the empty case was designed for, not discovered
+  when the real thing turned out to be unreachable. If it is documented and tested, it is a
+  feature.
+- **Genuinely best-effort work.** A telemetry post inside `except Exception: pass` swallows
+  a real error, but making it raise takes down the caller for something nobody consumes.
+  The fix is rung 5 of phase 3, not rung 1: log at error level with the exception attached.
+  Silent is still wrong; fatal is also wrong.
+
+The question is never "is there a default here". It is "can the caller tell". Where the
+caller wanted the default and the contract says so, you are looking at a feature.
 
 ## Phase 3: choose the loudest failure that is still correct
 
@@ -90,31 +111,96 @@ Descend this ladder only as far as correctness forces you.
    or you have just built a quieter stub.
 4. **Escalate to the user.** When the missing thing is a decision rather than a value, stop
    and ask. Guessing a decision is the most expensive stub of all.
+5. **Log at error level and continue.** The bottom rung, and correct in exactly one case:
+   the work is genuinely best-effort and its failure must not stop the caller (telemetry,
+   a cache warm, an optional cleanup). Conditions: the caller never consumes a return
+   value, the log carries the exception, and the level is `error` or `warning`, never
+   `debug`. If any of those is false, go back up the ladder.
 
 Whichever rung you land on, put the blocker in the code and in the reply, not only one.
 
-## Phase 4: scan the diff before you claim anything
-
-Mechanical first pass over changed files:
+**Then check that your raise survives.** A raise three frames below an unchanged
+`except Exception: pass` is a stub with extra steps. Walk the call chain to the nearest
+caller that reports to a human and confirm nothing eats it on the way:
 
 ```bash
-python3 skills/no-silent-stub/scripts/stub-scan.py path/to/changed/dir
+grep -rnE 'except (Exception|BaseException)?\s*:' <callers> | grep -v raise
 ```
 
-It exits 1 with one finding per line (`path:line: rule: message`) across eight rules:
+Verified case: a fixed `fetch_exchange_rate` raised correctly, and the caller still
+printed `TOTAL 0.00`, because an outer handler swallowed it. The fix is not done until
+the failure reaches a human.
+
+## Phase 4: scan what you wrote
+
+Locate the script (it moves with the install; do not guess a relative path):
+
+```bash
+SCAN=$(ls ~/.claude/skills/no-silent-stub/scripts/stub-scan.py \
+          ~/.claude/plugins/cache/*/*/*/skills/no-silent-stub/scripts/stub-scan.py \
+          2>/dev/null | head -1)
+python3 "$SCAN" --diff            # what this branch added, against HEAD
+python3 "$SCAN" --diff --base main
+```
+
+`--diff` is the posture that works: it reads only the lines you added, untracked new files
+included (a brand-new module is invisible to plain `git diff`, which is how the commonest
+case of all used to scan clean), so its volume is
+bounded by your own change, and the shapes it confuses with stubs (a base-class default, an
+always-constant implementation) are pre-existing architecture rather than something you
+wrote in the last hour. Non-Python added lines get the grep floor applied to them
+automatically. Exit 1 means findings, 0 means clean, 2 means it could not run.
+
+Triage of an existing tree is the other mode, `python3 "$SCAN" <dir>`, and it is much
+weaker. Read on before trusting it.
+
+### What this scan is worth
+
+Measured against 308,000 lines of third-party libraries (`requests`, `click`, `jinja2`,
+`urllib3`, `dateutil`, `pyyaml`, `numpy`), code neither this skill nor its fixtures ever
+saw:
+
+|Corpus|Mode|Findings|True|
+|-|-|-|-|
+|308 kLOC of third-party libraries|triage, first cut|413|~1%|
+|308 kLOC of third-party libraries|triage, as shipped|2|1|
+|36 kLOC of the standard library|triage, as shipped|3|3 (all real bare `except:`)|
+|4 kLOC of unplanted real diff|`--diff`|0|n/a, nothing was wrong in it|
+|7 planted stubs in a scratch repo|`--diff`|7|7, and nothing extra|
+
+All 18 first-cut findings in `requests` were read individually and every one was false:
+`except OSError: return False` inside `is_ipv4_address`, where the boolean is the answer,
+and a documented no-op override hook. That reading is what cut the rule set down. Note the
+last two rows measure different things: the unplanted diff is a precision check, the
+planted one is only a recall check, since those stubs were written to be found.
+
+The rules were cut until that held. `constant-stub` scored 0 of 6 on that corpus and is
+suppressed in triage mode entirely, because "ignores its parameters and returns a literal"
+describes a deliberate base-class default (`click`'s `list_commands`, `dateutil`'s
+`tzname`) exactly as well as it describes a stub. That difference is semantic, and no AST
+pass reaches it. `except SpecificError: pass` was dropped from the rule set for the same
+reason: on real code it is an optional-import probe or a candidate-file loop far more often
+than a swallowed failure. Both are still in the taxonomy above, because you can tell the
+difference and a grep cannot.
+
+Findings name one of eight rules, so you can tell what was matched:
 `constant-stub`, `swallowed-exception`, `marker-return`, `mock-outside-tests`,
-`self-scoring-eval`, `retry-exhaustion-empty`, `cache-miss-default`, `credential-fallback`.
-Without the script, the grep floor:
+`self-scoring-eval`, `retry-exhaustion-empty`, `cache-miss-default`, `credential-fallback`,
+plus `test-widening` and `floor-match` on a diff, and `unscanned-language` for what it
+could not parse.
+
+**The scan is Python only.** Anything else is reported as `unscanned-language` rather than
+passed over. For those files, and any time the script is not to hand, the floor is:
 
 ```bash
-git diff -U0 | grep -nE 'TODO|FIXME|for now|placeholder|return \[\]|return \{\}|except[^:]*:\s*pass|MagicMock|pytest\.mark\.(skip|xfail)'
+git diff -U0 | grep -nE 'TODO|FIXME|for now|placeholder|return \[\]|return \{\}|except[^:]*:\s*pass|catch\s*\([^)]*\)\s*\{\s*\}|MagicMock|pytest\.mark\.(skip|xfail)'
 ```
 
-Account for every hit, one by one. Then read the diff for what the scan cannot see: **an
-unmarked fallback with no guard is invisible to any grep.** A function that reads its
+Account for every hit, one by one. Then read the diff for what no scan reaches: **an
+unmarked fallback with no guard has no syntactic tell.** A function that reads its
 arguments, does real arithmetic, and returns a plausible average for the unknown branch
-passes every mechanical check ever written. That is why phase 2 is a question and phase 4
-is only a floor.
+passes every mechanical check ever written, and prints a number identical to the real one.
+A clean report is a floor. Phase 2 is the part that actually works.
 
 ## Phase 5: the reporting duty
 
@@ -132,6 +218,11 @@ State, in the reply:
 Never write "done", "working", or "tests pass" for a path whose real implementation never
 executed. "The parser is complete except the CSV branch, which raises because the spec for
 quoted newlines is undecided" is a good report. "Parser done" is not.
+
+This phase is narrow on purpose. It covers one thing: naming the fake you were about to
+ship, or did ship. Verifying a completion claim in general belongs to
+`superpowers:verification-before-completion`; invoke that for the evidence-before-assertion
+discipline rather than repeating it here.
 
 ## Red flags
 
