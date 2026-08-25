@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+# skillcontrib: read-only reconnaissance for proposing a skill to an upstream repo.
+#
+#   skillcontrib dedup <skill-name> [--description <text>] [--repo <r>] [--override-rejected]
+#   skillcontrib whoami [--repo <r>]
+#   skillcontrib preflight <skill-dir>
+#   skillcontrib --help
+#
+# This script performs NO network writes. It only reads: no forking, no branch
+# creation, no uploading of commits, no opening of pull requests. Those steps belong
+# to the contribute-skill skill, behind its consent gates, where a human sees each
+# one before it happens.
+#
+# Exit codes
+#   0   clean / success
+#   2   usage error
+#   3   possible duplicates present. The caller MUST ask the user.
+#   4   a pull request that PROPOSED this skill is OPEN or MERGED.
+#   5   a pull request that PROPOSED this skill was CLOSED without merging.
+#       Blocks unless --override-rejected. It may be a rejection or a superseded
+#       revision, and the difference is not machine-readable: a human has to look.
+#   6   gh or jq is not installed
+#   7   gh is not authenticated
+#   8   a read-only lookup failed (network, GitHub unreachable, rate limit, unknown repo)
+#   9   the skill already exists in the upstream tree
+#   18  the upstream repo is archived and rejects writes
+#   19  the upstream tree listing came back truncated, so "clean" cannot be certified
+#   10  preflight: skill directory not found
+#   11  preflight: SKILL.md not found
+#   12  preflight: frontmatter missing, or it does not parse as YAML
+#   17  preflight: name or description is missing, or name does not match the directory
+#
+# Codes 13 to 16 are retired. They enforced portable-key and length limits that
+# hard-failed 46 of 156 real installed skills, including four shipped by Anthropic,
+# while an independent parse found 0 of 156 actually unparseable. A contribution is
+# not gated on those numbers, so the checks are gone rather than re-tuned. The
+# numbers are left unused so old output cannot be misread.
+set -uo pipefail
+
+DEFAULT_REPO="ContextLab/claude-skill-compounder"
+
+# A pull request PROPOSED a skill when it adds <path>/SKILL.md outright: no deletions
+# on that path, and at least PROPOSAL_MIN_ADDED added lines. The floor is the smallest
+# shipping SKILL.md in the survey (36 lines). Without this evidence a one-line typo fix
+# inside an existing skill reads as a rejected proposal, which trains reflexive use of
+# --override-rejected and destroys the value of the block.
+PROPOSAL_MIN_ADDED=30
+
+FUZZY_THRESHOLD=25   # percent token overlap at or above which a fuzzy row is counted
+FUZZY_TERMS=2        # how many description tokens get their own search query
+STOPWORDS='["when","this","that","with","from","into","your","must","should","would",
+            "user","users","skill","skills","claude","code","uses","using","used",
+            "want","wants","need","needs","only","also","have","been","them","then",
+            "than","they","what","which","does","doing","make","makes","made","about",
+            "will","just","like","some","such","each","more","most","other","after",
+            "before","because","between","never","always","every","there","here"]'
+
+fail() { code="$1"; shift; echo "skillcontrib: $*" >&2; exit "$code"; }
+
+# Fold a skill name to a comparison key. A raw path lookup is case-exact and
+# separator-exact, so `Internal-Comms` and `internal_comms` both slip past a repo that
+# ships `internal-comms`. Lowercase and drop every non-alphanumeric character.
+norm() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'; }
+
+usage() {
+  cat <<'USAGE'
+skillcontrib: read-only reconnaissance before proposing a skill upstream.
+
+  skillcontrib dedup <skill-name> [--description <text>] [--repo OWNER/REPO]
+                                  [--override-rejected]
+        Duplicate check in three probes, cheapest first:
+          tree     one recursive listing of the upstream default branch, matching any
+                   directory ending in <name>/SKILL.md at any depth, compared on a
+                   normalised key so case and separators cannot defeat it
+          files    does any pull request, in any state, ADD <name>/SKILL.md outright
+          fuzzy    do the description tokens overlap pull request titles
+        Prints every hit, sub-threshold fuzzy ones included, and never decides for
+        you: exit 3 means "ask the user", 4, 5, 9 and 18 mean "stop".
+
+  skillcontrib whoami [--repo OWNER/REPO]
+        Print the acting identity, its permission level on the repo, and the identity
+        git would actually use to upload a branch. `maintainer` means branch directly
+        on upstream; `contributor` means the fork path. Read-only and triage
+        collaborators are contributors, not maintainers.
+
+  skillcontrib preflight <skill-dir>
+        Only what genuinely blocks a contribution: SKILL.md exists, the frontmatter
+        parses with a real YAML parser, `name` matches the directory, and a non-empty
+        `description` exists (without one the skill never fires). Length, style, and
+        key-portability advice belongs in review, not in a gate.
+
+--repo defaults to ContextLab/claude-skill-compounder. Pass it explicitly whenever the
+target is anything else; a silent default aimed at the wrong repo answers "clean" for
+free. Exit codes are documented at the top of this script.
+USAGE
+}
+
+require_gh() {
+  command -v gh >/dev/null 2>&1 || fail 6 "gh is not installed. Install it from https://cli.github.com and retry."
+  command -v jq >/dev/null 2>&1 || fail 6 "jq is required."
+  # A network outage and a missing login both make this call fail. Reporting the wrong
+  # one sends the user off to re-authenticate a session that was never broken.
+  authout=$(gh auth status 2>&1)
+  if [ $? -ne 0 ]; then
+    # gh's own message is the evidence, so pass it through whole rather than guessing.
+    detail=$(printf '%s' "$authout" | tr '\n' ' ' | sed 's/  */ /g')
+    case "$authout" in
+      *"GH_TOKEN is invalid"*|*"GITHUB_TOKEN is invalid"*|*"Bad credentials"*|*"invalid token"*)
+        fail 7 "the token in the environment is rejected by GitHub. Unset GH_TOKEN or GITHUB_TOKEN, or replace it. gh said: $detail" ;;
+      *"not logged in"*|*"You are not logged into"*|*"gh auth login"*)
+        fail 7 "gh is not authenticated. Run 'gh auth login' yourself, then retry. gh said: $detail" ;;
+      *)
+        fail 8 "gh could not reach GitHub, which looks like a network problem rather than a login problem. gh said: $detail" ;;
+    esac
+  fi
+  return 0
+}
+
+# Resolve the repo and refuse an archived one. A search against a repo that does not
+# exist answers an empty list with a zero exit status, indistinguishable from "no
+# duplicate found", so this call (which 404s properly) has to run first.
+resolve_repo() {
+  repo_json=$(gh repo view "$repo" --json isArchived,defaultBranchRef 2>/dev/null)
+  [ -n "$repo_json" ] || fail 8 "could not resolve $repo. Check the name, your network, and 'gh api rate_limit'."
+  archived=$(printf '%s' "$repo_json" | jq -r '.isArchived')
+  default_branch=$(printf '%s' "$repo_json" | jq -r '.defaultBranchRef.name // "main"')
+  return 0
+}
+
+# The identity gh reports and the identity git uploads with are two different things.
+# gh acts as GH_TOKEN when that is set; git asks its credential helper chain, which on
+# a developer machine is often a keychain entry from a different account. Nothing else
+# in this workflow surfaces the second one, and it is the one the commits land under.
+# A credential helper that never answers hangs this probe: GIT_TERMINAL_PROMPT=0 only
+# suppresses git's own prompt, and closing stdin does not stop a helper that is waiting
+# on something else. There is no `timeout` binary on macOS, so perl's alarm is the
+# portable stand-in. A probe that cannot answer in five seconds reports "unknown".
+push_identity() {
+  printf 'protocol=https\nhost=github.com\n\n' \
+    | GIT_TERMINAL_PROMPT=0 perl -e 'alarm shift; exec @ARGV' 5 git credential fill 2>/dev/null \
+    | awk -F= '/^username=/ {print $2; exit}'
+}
+
+identity_warnings() {
+  if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+    echo "WARNING: GH_TOKEN or GITHUB_TOKEN is set, so gh acts as that token's account."
+  fi
+  pusher=$(push_identity)
+  if [ -z "$pusher" ]; then
+    echo "push identity: unknown (no credential helper answered; confirm it by hand before any upload)"
+  else
+    echo "push identity: $pusher (from git credential fill)"
+    if [ -n "${1:-}" ] && [ "$pusher" != "$1" ]; then
+      echo "WARNING: gh acts as '$1' but git would upload as '$pusher'. The pull request and"
+      echo "         the commits would land under different accounts. Resolve this first."
+    fi
+  fi
+}
+
+# ------------------------------------------------------------------ whoami
+
+cmd_whoami() {
+  repo="$DEFAULT_REPO"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo) shift; repo="${1:-}"; [ -n "$repo" ] || fail 2 "--repo needs a value" ;;
+      -h|--help) usage; exit 0 ;;
+      *) fail 2 "unexpected argument to whoami: $1" ;;
+    esac
+    shift
+  done
+  require_gh
+
+  user=$(gh api user --jq .login 2>/dev/null)
+  [ -n "$user" ] || fail 8 "could not read the authenticated identity from gh api user."
+
+  # The bare collaborators/<user> endpoint answers 204 for ANY collaborator, including
+  # read-only and triage ones, who cannot push. The permission endpoint distinguishes
+  # them, and gh prints the API error body on stdout when the call fails, so the exit
+  # status, not the captured text, decides whether this is a real permission value.
+  # A failed lookup here is not the same as "no permission". 403 and 404 are real
+  # answers (no push access, not a collaborator); anything else means the question was
+  # never answered, and guessing "contributor" is how a maintainer gets sent to fork.
+  permout=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>&1)
+  if [ $? -eq 0 ]; then
+    perm="$permout"
+  else
+    case "$permout" in
+      *"Must have push access"*|*"HTTP 403"*) perm="none (403: no push access)" ;;
+      *"Not Found"*|*"HTTP 404"*) perm="none (404: not a collaborator)" ;;
+      *) fail 8 "could not read the permission level of $user on $repo, so the maintainer-or-fork decision cannot be made: $(printf '%s' "$permout" | tr '\n' ' ')" ;;
+    esac
+  fi
+  case "$perm" in
+    admin|write|maintain) role="maintainer"; path="branch directly on upstream; do not fork" ;;
+    *) role="contributor"; path="fork the repo, branch on the fork" ;;
+  esac
+
+  echo "acting as: $user"
+  echo "repo:      $repo"
+  echo "permission: $perm"
+  echo "role:      $role"
+  echo "path:      $path"
+  identity_warnings "$user"
+  resolve_repo
+  echo "archived:  $archived"
+  [ "$archived" = "true" ] && fail 18 "$repo is archived. It rejects forks, pushes, and pull requests."
+  return 0
+}
+
+# ------------------------------------------------------------------ dedup
+
+# The authoritative pull request lookup. Three details are load-bearing:
+#   1. --limit 100. The default page size is 30, so a sweep without it silently
+#      misses older pull requests and concludes "no duplicate".
+#   2. --state all really does return OPEN, CLOSED, and MERGED together. GitHub
+#      models a merged pull request as a closed one, and the JSON `state` field is
+#      what distinguishes MERGED from CLOSED-unmerged.
+#   3. Never reach for `gh api search/issues -f q=...`. Passing -f flips gh to POST,
+#      and POST /search/issues does not exist, so it answers 404. If the search API
+#      is needed for a qualifier gh pr list does not expose, it must be -X GET.
+# Two caveats the caller has to live with. This reads the search index, and the index
+# lags pull request creation by seconds to minutes, so a duplicate opened moments ago
+# can be invisible. And these queries drain the graphql budget, not the search one:
+# `.resources.graphql.remaining` was observed dropping while `.resources.search`
+# stayed put. gh's stderr is not swallowed; callers check the exit status.
+pr_search() {
+  gh pr list --repo "$repo" --state all --search "$1" --json "$2" --limit 100
+}
+
+cmd_dedup() {
+  name=""; desc=""; repo="$DEFAULT_REPO"; override=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --description) shift; desc="${1:-}" ;;
+      --repo) shift; repo="${1:-}"; [ -n "$repo" ] || fail 2 "--repo needs a value" ;;
+      --override-rejected) override=1 ;;
+      -h|--help) usage; exit 0 ;;
+      -*) fail 2 "unknown flag: $1" ;;
+      *) [ -z "$name" ] || fail 2 "dedup takes one skill name"; name="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || fail 2 "usage: skillcontrib dedup <skill-name> [--description <text>]"
+  require_gh
+  resolve_repo
+  [ "$archived" = "true" ] && fail 18 "$repo is archived. It rejects forks, pushes, and pull requests. Find the successor repo."
+  key=$(norm "$name")
+  [ -n "$key" ] || fail 2 "'$name' normalises to an empty key; give a name with letters or digits."
+
+  echo "repo:        $repo (pass --repo to target a different one)"
+  echo "skill name:  $name  (compared as: $key)"
+  if [ -n "$desc" ]; then echo "description: $desc"; else echo "description: (none given; the fuzzy probe did not run)"; fi
+  echo
+
+  # Probe 1: the whole tree, in one recursive call. A direct contents/<path> lookup was
+  # both case-exact and separator-exact, and it only ever looked at skills/<name>/, so
+  # it missed every nested layout (plugins/<x>/skills/<x>/SKILL.md is real and common).
+  # Matching any directory whose normalised name equals the key, at any depth, fixes
+  # both. Cost is one API call regardless of repo size.
+  tree=$(gh api "repos/$repo/git/trees/$default_branch?recursive=1" 2>/dev/null)
+  [ -n "$tree" ] || fail 8 "could not list the tree of $repo@$default_branch. A failed lookup is not a clean one."
+  truncated=0
+  if [ "$(printf '%s' "$tree" | jq -r '.truncated')" = "true" ]; then
+    truncated=1
+    # On stdout, not just stderr. The caller pastes stdout into the consent gate, and a
+    # caveat that lives only on stderr disappears exactly when it matters.
+    echo "INCOMPLETE: $repo's tree listing came back truncated, so the tree probe did not"
+    echo "            see every path. A clean result below cannot be certified."
+    echo
+  fi
+  # The filename is matched case-insensitively: a repo shipping `skill.md` is still a
+  # repo shipping that skill.
+  hit=$(printf '%s' "$tree" | jq -r --arg key "$key" '
+    .tree[] | .path | select(ascii_downcase | endswith("/skill.md") or . == "skill.md")
+    | select((split("/") | if length > 1 then .[-2] else "" end
+              | ascii_downcase | gsub("[^a-z0-9]"; "")) == $key)' | head -n 1)
+
+  if [ -n "$hit" ]; then
+    echo "ALREADY UPSTREAM: $hit exists in $repo (default branch $default_branch)."
+    upstream_name=$(gh api "repos/$repo/contents/$hit" -H "Accept: application/vnd.github.raw" 2>/dev/null | awk '
+        NR == 1 && !/^---[[:space:]]*$/ {exit}
+        /^name:/ {sub(/^name:[[:space:]]*/, ""); print; exit}
+        NR > 1 && /^---[[:space:]]*$/ {exit}')
+    if [ -n "$upstream_name" ]; then
+      echo "Its frontmatter declares name: $upstream_name"
+    else
+      echo "(no frontmatter name could be read from that file)"
+    fi
+    echo "Improve the existing skill instead of proposing a second copy."
+    exit 9
+  fi
+
+  results=$(pr_search "$name" "number,title,state,url,headRefName,files") \
+    || fail 8 "pull request lookup failed for $repo. A failed lookup is not a clean one."
+  [ -n "$results" ] || fail 8 "empty response from the pull request lookup for $repo."
+
+  # Probes 2 and 3 share one candidate pool. The fuzzy queries omit `files`, which is
+  # the expensive field, because only the exact probe needs it.
+  dtoks="[]"
+  if [ -n "$desc" ]; then
+    dtoks=$(printf '%s' "$desc" | jq -R -s --argjson stop "$STOPWORDS" '
+      ascii_downcase | [splits("[^a-z0-9]+")]
+      | map(select(length >= 4)) | map(select(. as $t | $stop | index($t) | not)) | unique')
+    for term in $(printf '%s' "$dtoks" | jq -r --argjson n "$FUZZY_TERMS" 'sort_by(-length, .)[:$n][]'); do
+      more=$(pr_search "$term" "number,title,state,url,headRefName") \
+        || fail 8 "fuzzy lookup failed for term '$term'. A failed lookup is not a clean one."
+      [ -n "$more" ] && results=$(printf '%s\n%s' "$results" "$more" | jq -s 'add')
+    done
+  fi
+
+  rows=$(printf '%s' "$results" | jq -r --arg key "$key" --argjson dtoks "$dtoks" \
+    --argjson stop "$STOPWORDS" --argjson thr "$FUZZY_THRESHOLD" --argjson minadd "$PROPOSAL_MIN_ADDED" '
+    def toks: ascii_downcase | [splits("[^a-z0-9]+")]
+      | map(select(length >= 4)) | map(select(. as $t | $stop | index($t) | not)) | unique;
+    def nk: ascii_downcase | gsub("[^a-z0-9]"; "");
+    def dirkey: split("/") | if length > 1 then .[-2] else "" end | nk;
+    def overlap($t): if ($dtoks | length) == 0 then 0
+      else (([$dtoks[] | select(. as $x | $t | index($x))] | length) * 100 / ($dtoks | length) | floor) end;
+    (unique_by(.number) | sort_by(-.number))
+    | map((.files // []) as $f
+          | . + {
+      proposes: ([$f[] | select(.path | endswith("/SKILL.md")) | select((.path | dirkey) == $key)
+                        | select(.deletions == 0 and .additions >= $minadd)] | length > 0),
+      touches:  ([$f[] | select((.path | dirkey) == $key)] | length > 0),
+      mentions: (((.title | nk) | contains($key)) or ((.headRefName | nk) | contains($key))),
+      score: overlap(.title | toks)})
+    | map(. + {kind: (if .proposes then "proposal"
+                      elif .touches then "touch"
+                      elif .mentions then "mention"
+                      else "fuzzy" end)})
+    | map(select(.proposes or .touches or .mentions or .score > 0))
+    | .[] | [ .kind, .state, (.score | tostring),
+              (if .score >= $thr then "above" else "below" end),
+              (.number | tostring), .url, .title ] | join("\t")')
+
+  prop_closed=0; prop_live=0; counted=0; shown_only=0
+  if [ -z "$rows" ]; then
+    echo "No matching pull request in any state."
+  else
+    printf '%-9s %-7s %-6s %-6s %-7s %s\n' KIND STATE SCORE BAND NUMBER TITLE
+    printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r kind state score band number url title; do
+      printf '%-9s %-7s %-6s %-6s %-7s %s\n' "$kind" "$state" "$score%" "$band" "#$number" "$title"
+      printf '          %s\n' "$url"
+    done
+  fi
+
+  # Tally in this shell. A `while read` in a pipeline runs in a subshell under bash, so
+  # counters set there would be lost; this loop reads from a here-document instead.
+  while IFS="$(printf '\t')" read -r kind state score band number url title; do
+    [ -n "${kind:-}" ] || continue
+    case "$kind" in
+      proposal) if [ "$state" = "CLOSED" ]; then prop_closed=$((prop_closed + 1))
+                else prop_live=$((prop_live + 1)); fi ;;
+      touch|mention) counted=$((counted + 1)) ;;
+      fuzzy) if [ "$band" = "above" ]; then counted=$((counted + 1)); else shown_only=$((shown_only + 1)); fi ;;
+    esac
+  done <<EOF
+$rows
+EOF
+
+  echo
+  echo "proposals CLOSED without merging: $prop_closed"
+  echo "proposals OPEN or MERGED:         $prop_live"
+  echo "other possible duplicates:        $counted"
+  echo "shown but not counted (below the $FUZZY_THRESHOLD% fuzzy threshold): $shown_only"
+  echo "note: the search index lags pull request creation, so a duplicate opened in the last few minutes may not appear above."
+  identity_warnings ""
+
+  if [ "$prop_closed" -gt 0 ] && [ "$override" -eq 0 ]; then
+    echo
+    echo "BLOCKED: a pull request that added this skill was closed without merging."
+    echo "That is not proof of rejection. It is equally often a revision the author"
+    echo "superseded with a later pull request. Open it, read why it closed, and look"
+    echo "for a successor by the same author before deciding anything."
+    echo "Pass --override-rejected only after the user has read it and said to proceed."
+    [ "$prop_live" -gt 0 ] && echo "ALSO: $prop_live open or merged proposal(s) above. Both apply."
+    exit 5
+  fi
+  if [ "$prop_closed" -gt 0 ]; then
+    echo
+    echo "OVERRIDE: a closed proposal was found and overridden by explicit request."
+  fi
+  if [ "$prop_live" -gt 0 ]; then
+    echo
+    echo "STOP: an equivalent contribution is already open or already merged."
+    exit 4
+  fi
+  if [ "$counted" -gt 0 ] || [ "$prop_closed" -gt 0 ]; then
+    echo
+    echo "ASK THE USER: possible duplicates above. Sub-threshold rows are printed too. Decide together."
+    exit 3
+  fi
+  echo
+  # Where does this repo actually keep skills? Section 5a of the skill tells the caller
+  # to use the layout the tree probe found, which is unfollowable if a clean result
+  # prints no layout at all.
+  layout=$(printf '%s' "$tree" | jq -r '
+    [.tree[].path | select(ascii_downcase | endswith("/skill.md"))
+     | split("/") | if length > 2 then (.[0:-2] | join("/")) else "(repository root)" end]
+    | group_by(.) | map({p: .[0], n: length}) | sort_by(-.n) | .[0:3]
+    | map("\(.p) (\(.n) skill(s))") | join(", ")')
+  if [ -n "$layout" ]; then
+    echo "upstream keeps skills under: $layout"
+  else
+    echo "upstream keeps skills under: no SKILL.md found anywhere; ask before inventing a layout."
+  fi
+  if [ "$truncated" -eq 1 ]; then
+    echo
+    echo "NOT CERTIFIED CLEAN: the tree listing was truncated (see above), so the skill"
+    echo "may already exist in a path this probe never saw. Check by hand before proposing."
+    exit 19
+  fi
+  echo "CLEAN: no duplicate found."
+  return 0
+}
+
+# ---------------------------------------------------------------- preflight
+
+# Deliberately narrow. An earlier version enforced portable-key, description-length,
+# and body-length limits; measured against 156 installed skills it hard-failed 46 of
+# them, including four shipped by Anthropic, while a real parse found 0 unparseable.
+# None of those numbers is what a contribution is gated on, so they are gone. What
+# remains is the set that actually stops a skill from loading or being addressable.
+cmd_preflight() {
+  dir=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -*) fail 2 "unknown flag: $1" ;;
+      *) [ -z "$dir" ] || fail 2 "preflight takes one directory"; dir="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$dir" ] || fail 2 "usage: skillcontrib preflight <skill-dir>"
+  [ -d "$dir" ] || fail 10 "skill directory not found: $dir"
+  md="$dir/SKILL.md"
+  [ -f "$md" ] || fail 11 "SKILL.md not found in $dir"
+  dirname_only=$(basename "$(cd "$dir" && pwd)")
+
+  # A real parser, not a substring test. The previous version flagged an unquoted ': '
+  # anywhere in the description, which rejects valid YAML block scalars (`description:
+  # >-` followed by an indented line holding a colon) and hit real shipping skills.
+  # PyYAML is absent from a stock macOS python3, so ruby's psych is the fallback. If
+  # neither exists the check cannot run, and that is a loud dependency error, never a
+  # silent pass: an unverified skill must not be able to look like a checked one.
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+    parser=python
+    parse=$(python3 - "$md" <<'PYEOF'
+import sys, yaml
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+if not text.startswith("---"):
+    print("ERR frontmatter missing: the file must start with a --- line"); raise SystemExit(0)
+parts = text.split("---\n", 2)
+if len(parts) < 3:
+    print("ERR frontmatter unterminated: no closing --- line"); raise SystemExit(0)
+try:
+    data = yaml.safe_load(parts[1])
+except Exception as e:
+    print("ERR frontmatter does not parse as YAML: %s" % str(e).replace("\n", " ")[:200])
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print("ERR frontmatter is not a mapping"); raise SystemExit(0)
+name = data.get("name")
+if not isinstance(name, str) or not name.strip():
+    print("ERR name is missing or empty"); raise SystemExit(0)
+desc = data.get("description")
+if not isinstance(desc, str) or not desc.strip():
+    print("ERR description is missing or empty"); raise SystemExit(0)
+print("OK %s" % name.strip())
+PYEOF
+)
+  elif command -v ruby >/dev/null 2>&1 && ruby -ryaml -e '' >/dev/null 2>&1; then
+    parser=ruby
+    parse=$(ruby -ryaml -e "$(cat <<'RBEOF'
+text = File.binread(ARGV[0]).force_encoding("UTF-8").scrub
+unless text.start_with?("---")
+  puts "ERR frontmatter missing: the file must start with a --- line"; exit 0
+end
+parts = text.split("---\n", 3)
+if parts.length < 3
+  puts "ERR frontmatter unterminated: no closing --- line"; exit 0
+end
+begin
+  data = YAML.safe_load(parts[1])
+rescue => e
+  puts "ERR frontmatter does not parse as YAML: " + e.message.gsub("\n", " ")[0, 200]; exit 0
+end
+unless data.is_a?(Hash)
+  puts "ERR frontmatter is not a mapping"; exit 0
+end
+name = data["name"]
+unless name.is_a?(String) && !name.strip.empty?
+  puts "ERR name is missing or empty"; exit 0
+end
+desc = data["description"]
+unless desc.is_a?(String) && !desc.strip.empty?
+  puts "ERR description is missing or empty"; exit 0
+end
+puts "OK " + name.strip
+RBEOF
+)" "$md")
+  else
+    fail 6 "no YAML parser available. Install PyYAML (python3 -m pip install pyyaml) or ruby. Frontmatter must not be checked by hand-rolled string matching."
+  fi
+
+  [ -n "$parse" ] || fail 12 "$md: the $parser YAML check produced no result."
+  case "$parse" in
+    "ERR name is missing or empty") fail 17 "$md: name is missing or empty" ;;
+    "ERR description is missing or empty")
+      # A skill with no description never fires. This is exactly what preflight is for,
+      # and it was removed by accident along with the length limits.
+      fail 17 "$md: description is missing or empty. A skill without one never triggers." ;;
+    ERR\ *) fail 12 "$md: ${parse#ERR }" ;;
+  esac
+  fm_name="${parse#OK }"
+
+  # Claude Code addresses a skill by its directory. A name that disagrees with the
+  # directory is the one metadata error that reliably makes the skill unreachable.
+  [ "$fm_name" = "$dirname_only" ] \
+    || fail 17 "name is '$fm_name' but the directory is '$dirname_only'. They must match."
+
+  extra=$(find "$dir" -type f ! -name SKILL.md | sed "s|^$dir/||" | sort | tr '\n' ' ')
+  echo "OK: $md"
+  echo "  name: $fm_name (matches the directory)"
+  if [ -n "$extra" ]; then
+    echo "  other files that must travel with it: $extra"
+  else
+    echo "  other files that must travel with it: (none)"
+  fi
+  return 0
+}
+
+cmd="${1:-}"; shift 2>/dev/null || true
+case "$cmd" in
+  dedup) cmd_dedup "$@" ;;
+  whoami) cmd_whoami "$@" ;;
+  preflight) cmd_preflight "$@" ;;
+  -h|--help|help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+  *) echo "skillcontrib: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
+esac

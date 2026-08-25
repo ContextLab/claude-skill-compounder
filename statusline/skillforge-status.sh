@@ -15,12 +15,16 @@ cat >/dev/null 2>&1   # payload is not needed: state is a single file, not sessi
 FILE="$DIR/current.json"
 [ -f "$FILE" ] || exit 0
 
-eval "$(jq -r '@sh "name=\(.name // "skill") summary=\(.summary // "") phase=\(.phase // "") step=\(.step // 0) steps=\(.steps // 1) status=\(.status // "active") finished=\(.finished // 0)"' "$FILE" 2>/dev/null)" || exit 0
+# `status` is READ-ONLY in zsh: it aliases $?. Assigning to it aborts with
+# "read-only variable: status", the eval fails, and the whole forge segment renders
+# empty with no error anywhere. The status line is invoked by whatever shell the user
+# has, so the name is `fstate` here and nowhere near a shell special.
+eval "$(jq -r '@sh "name=\(.name // "skill") summary=\(.summary // "") phase=\(.phase // "") step=\(.step // 0) steps=\(.steps // 1) fstate=\(.status // "active") finished=\(.finished // 0)"' "$FILE" 2>/dev/null)" || exit 0
 
 now="${SKILLFORGE_NOW:-$(date +%s)}"
 
 # Terminal states self-expire so the status line returns to normal unattended.
-case "$status" in
+case "$fstate" in
   done)   [ $(( now - finished )) -gt "${SKILLFORGE_DONE_TTL:-30}" ] && { rm -f "$FILE"; exit 0; } ;;
   failed) [ $(( now - finished )) -gt "${SKILLFORGE_FAIL_TTL:-60}" ] && { rm -f "$FILE"; exit 0; } ;;
 esac
@@ -53,7 +57,7 @@ while [ $i -lt "$WIDTH" ]; do
   if [ $i -lt $filled ]; then
     # Pulse the leading edge so the bar reads as live even between steps.
     # NOTE: braces are required — bash folds the multibyte glyph into the var name.
-    if [ $i -eq $(( filled - 1 )) ] && [ "$status" = "active" ] && [ $(( now % 2 )) -eq 0 ]; then
+    if [ $i -eq $(( filled - 1 )) ] && [ "$fstate" = "active" ] && [ $(( now % 2 )) -eq 0 ]; then
       bar="${bar}▓"
     else
       bar="${bar}█"
@@ -64,7 +68,7 @@ while [ $i -lt "$WIDTH" ]; do
   i=$(( i + 1 ))
 done
 
-case "$status" in
+case "$fstate" in
   done)
     printf '%s' "${G}✓${X} ${M}forge${X} ${C}${name}${X} ${G}▕${bar}▏${X} ${D}forged · ${phase}${X}"
     ;;

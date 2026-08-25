@@ -29,7 +29,15 @@ if [ -x "$BASE" ]; then
   cache="$CACHE_DIR/${key:-fallback}"
   now="$(date +%s)"
   if [ -f "$cache" ]; then
-    mtime="$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0)"
+    # GNU stat must be tried FIRST and the result validated. `stat -f` on GNU
+    # coreutils means "report on the filesystem", not "use this format", so
+    # `stat -f %m` there exits 0 and prints a mount point. A plain `A || B` chain
+    # therefore never reaches the GNU branch, the numeric guard zeroes the mtime,
+    # and the cache misses on every single render. On Linux that silently reran the
+    # user's base status line (usually a git call) once a second, which is the exact
+    # thing this cache exists to prevent. BSD stat has no -c, so it fails cleanly.
+    mtime="$(stat -c %Y "$cache" 2>/dev/null)"
+    case "$mtime" in ''|*[!0-9]*) mtime="$(stat -f %m "$cache" 2>/dev/null)" ;; esac
     case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
     [ $(( now - mtime )) -lt "$BASE_TTL" ] && base="$(cat "$cache" 2>/dev/null)"
   fi

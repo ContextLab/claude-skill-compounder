@@ -38,10 +38,12 @@ def main():
     for k, v in rep.items():
         print("  %-10s %s" % (k, v))
     print("\nNext steps:")
-    print("  1. Ensure %s is on your PATH (for `skillforge`)." % args.bin_dir)
+    print("  1. Ensure %s is on your PATH (for skillforge, skillreport,\n"
+          "     skillinsight, and skillcontrib)." % args.bin_dir)
     print("  2. jq is required: `brew install jq` / `apt install jq`.")
     print("  3. Hooks and skills load without a restart, but /hooks forces a reload.")
     print("  4. Try:  skillforge start demo 4 \"checking the animation\"  then  skillforge clear")
+    print("  5. `skillreport` shows what has been forged and whether it got reused.")
     return 0
 
 
