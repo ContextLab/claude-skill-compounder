@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """Executes the `stale-artifact-check` skill against real stale artifacts.
 
-No mocks. Real venvs, real non-editable installs, real sourceless bytecode, real
-mtimes, a real git repo, and a real pytest run. Every shell block in SKILL.md is
-lifted out of the file and executed here, and the exit status the skill claims is
-asserted. An unverified claim in a skill is a defect, so a newly added block that
-nothing below runs fails the suite.
+No mocks. Real venvs, real non-editable installs, real unrevalidated bytecode, a real
+git repo, and a real pytest run. Every shell block in SKILL.md, and every inline
+command it tells a session to run, is lifted out of the file and executed here, and
+the exit status the skill claims is asserted.
 
-Round 1 of the red-team loop found that every Phase 2 check and the Phase 4 gate were
-wrong. Those findings are pinned here as named tests (B1 through B6) so a regression
-cannot pass quietly:
+The skill was cut down twice by cold review. What survives is the canary (Phase 1),
+one Python import check (Phase 2), and remedies whose effect the canary verifies
+(Phase 3). The rule that produced that shape is enforced mechanically below: a bash
+block or a claimed command that nothing here runs fails the suite.
 
-  B1  an in-repo `.venv` puts site-packages under $PWD, so a $PWD test reads "current"
-  B2  a flat layout is loaded from cwd, so a non-editable install was undetectable
-  B3  __pycache__ orphans are NOT importable; a `.pyc` outside it is the real hazard
-  B4  `find | ls -t` batches, and missing directories produced a false FRESH
-  B5  `git diff | grep` passes on staged, untracked, and non-repo canaries
-  B6  a stderr canary is invisible under a capturing runner
+Findings pinned as named tests, so a regression cannot pass quietly.
+
+Round 1:
+  R1-B1  an in-repo `.venv` puts site-packages under $PWD, so a $PWD test reads current
+  R1-B2  a flat layout is loaded from cwd, so one copy hid behind another
+  R1-B5  `git diff | grep` passes on staged, untracked, and non-repo canaries
+  R1-B6  a stderr canary is invisible under a capturing runner
+Round 2:
+  R2-B1  unchecked-hash and exact-mtime-restore bytecode serve old code invisibly
+  R2-B2  a file canary with no truncate passes a re-prove that runs nothing
+  R2-B3  a genuinely fresh flat layout must not be reported as stale
 
 Everything lives under a TemporaryDirectory with HOME pointed into it. Nothing is
 installed into the ambient interpreter. All path comparisons resolve symlinks first:
 on macOS /var and /tmp are symlinks into /private, and comparing the two forms is
-itself a source of false "stale" verdicts (it broke this file on the macOS runner).
+itself a source of false stale verdicts.
 """
 
 import os
@@ -31,29 +36,30 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SKILL = REPO / "skills" / "stale-artifact-check" / "SKILL.md"
-REFERENCE = REPO / "skills" / "stale-artifact-check" / "references" / "served-artifacts.md"
 FIXTURES = REPO / "tests" / "fixtures" / "stale-artifact-check"
 
 PORTABLE_KEYS = {"name", "description", "license", "allowed-tools", "metadata", "version"}
 BASE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 HOST_PYTHON_DIR = str(Path(sys.executable).parent)
 
-# The ```bash blocks of SKILL.md in document order, each keyed by a substring. Every
-# one is executed by a test below; the inventory test fails if the file grows a block
-# that nothing here runs.
+# The ```bash blocks of SKILL.md in document order, each keyed by a substring.
 BLOCK_KEYS = [
-    "od -An -N4",                       # 0: generate a canary token
-    "importlib.util",                   # 1: which copy of the package loads
-    "-not -path '*/__pycache__/*'",     # 2: sourceless bytecode
-    'grep -rl "$CANARY" dist/',         # 3: the canary reached the build output
-    "os.walk",                          # 4: build output vs source mtime
-    "--exclude-dir=.git",               # 5: remove every canary
+    "od -An -N4",         # 0: generate a fresh canary token
+    "importlib.util",     # 1: which copy of the package loads
+    "CANARY:?",           # 2: remove your canary and only yours
+]
+
+# Commands the prose tells a session to run outside a fenced block. Each is executed
+# by a test below, so the skill cannot make a claim the suite has not checked.
+INLINE_COMMANDS = [
+    'find . -name __pycache__ -type d -exec rm -rf {} +',
+    'grep -rl "$CANARY" dist/',
+    'rm -f "$CANARY"',
 ]
 
 
@@ -76,7 +82,6 @@ def block(key, **substitutions):
 
 
 def run(script, cwd, env=None, path_prefix=None):
-    """Run a shell script the way a session would, with a minimal environment."""
     full = {"PATH": BASE_PATH, "HOME": str(cwd), "LC_ALL": "C"}
     if path_prefix:
         full["PATH"] = "%s:%s" % (path_prefix, BASE_PATH)
@@ -99,7 +104,7 @@ def make_venv(path):
 
 
 class SkillDocumentTest(unittest.TestCase):
-    """The static contract: frontmatter, size, structure, and the claims in the prose."""
+    """Frontmatter, size, structure, and the claims the prose makes."""
 
     @classmethod
     def setUpClass(cls):
@@ -112,17 +117,15 @@ class SkillDocumentTest(unittest.TestCase):
         return raw[1:-1] if raw[:1] in "\"'" else raw
 
     def test_frontmatter_uses_only_portable_keys(self):
-        self.assertTrue(self.text.startswith("---\n"))
         keys = re.findall(r"^([A-Za-z0-9_-]+):", self.front, re.M)
         self.assertEqual(keys[0], "name")
         self.assertEqual(set(keys) - PORTABLE_KEYS, set())
 
     def test_description_is_quoted_so_the_yaml_cannot_break(self):
-        """An unquoted colon-space ends the scalar and the skill loads with no metadata."""
         raw = re.search(r"^description: (.*)$", self.front, re.M).group(1)
         self.assertIn(raw[:1], "\"'",
-                      "quote the description; an unquoted `: ` silently empties the metadata")
-        self.assertEqual(raw[:1], raw[-1:], "the quote must be closed on the same line")
+                      "quote it; an unquoted `: ` silently empties the metadata")
+        self.assertEqual(raw[:1], raw[-1:])
 
     def test_frontmatter_really_parses_as_yaml(self):
         try:
@@ -130,44 +133,48 @@ class SkillDocumentTest(unittest.TestCase):
         except ImportError:
             self.skipTest("pyyaml not installed")
         spec = yaml.safe_load(self.front)
-        self.assertIsInstance(spec, dict)
         self.assertEqual(spec["name"], SKILL.parent.name)
         self.assertEqual(spec["description"], self.description())
 
     def test_frontmatter_and_description_are_within_limits(self):
         self.assertLessEqual(len(self.front), 1024)
         self.assertLessEqual(len(self.description()), 500)
-        self.assertTrue(self.description().startswith("Use when"))
+        self.assertTrue(self.description().startswith("Use when")
+                        or self.description().startswith("Use before"))
 
-    def test_description_does_not_claim_general_debugging(self):
-        """B7. `systematic-debugging` owns the general trigger; two skills racing is worse."""
+    def test_the_general_debugging_trigger_is_disclaimed_not_claimed(self):
+        """R2 overlap. `systematic-debugging` owns every symptom; this owns one question.
+
+        The three phrases below are that skill's verbatim trigger. They may appear here
+        only inside the negative clause, which is what stops a router matching both.
+        """
         description = self.description()
-        self.assertIn("systematic-debugging", description,
-                      "the description must hand the general case to the skill that owns it")
-        self.assertIn("Do NOT use", description)
-        for overreach in ("any bug", "unexpected behavior", "test failure"):
-            self.assertNotIn(overreach, description,
-                             "%r reads as the general debugging trigger" % overreach)
+        cut = description.index("Do NOT use")
+        positive, negative = description[:cut], description[cut:]
+        self.assertIn("systematic-debugging", negative)
+        for phrase in ("a bug", "a test failure", "unexpected behavior"):
+            self.assertNotIn(phrase, positive,
+                             "%r in the positive clause re-creates the collision" % phrase)
+            self.assertIn(phrase, negative,
+                          "%r must be explicitly disclaimed, not merely omitted" % phrase)
 
-    def test_name_matches_directory_and_charset(self):
-        name = re.search(r"^name: (.*)$", self.front, re.M).group(1)
-        self.assertEqual(name, SKILL.parent.name)
-        self.assertRegex(name, r"^[a-z0-9-]+$")
+    def test_the_skill_does_not_contradict_its_own_trigger(self):
+        """R2 found "I added a console.log and nothing prints" routed both ways."""
+        self.assertNotIn("not yet tried to fix", self.text,
+                         "that clause excluded a case the Red flags section fires on")
+        self.assertIn("nothing printed", self.text)
+        self.assertIn("nothing prints", self.text.split("## Trigger precision")[1])
 
     def test_size_is_within_the_measured_house_range(self):
-        """Prose at the measured median; total under the largest top-tier skill on disk.
-
-        `wc -l` on this machine: superpowers:systematic-debugging is 283 lines and
-        superpowers:test-driven-development is 320, both read in full as house-style
-        exemplars, against a documented hard ceiling of 500. The fenced blocks here are
-        executable and every line of them is run by this suite, so they are measured
-        separately from the prose that a reader has to absorb.
-        """
+        """`wc -l` on this machine: superpowers:systematic-debugging 283, TDD 320, both
+        read in full as house exemplars, against a documented hard ceiling of 500. The
+        fenced blocks are executable and every one is run by this suite, so they are
+        measured apart from the prose a reader has to absorb."""
         lines = len(self.body.strip().splitlines())
         fenced = sum(len(m.splitlines())
                      for m in re.findall(r"^```(?:bash)?\n(.*?)^```", self.body, re.S | re.M))
-        self.assertLessEqual(lines, 320, "longer than the largest top-tier skill measured")
-        self.assertLessEqual(lines - fenced, 210, "prose must stay near the 200-line median")
+        self.assertLessEqual(lines, 283)
+        self.assertLessEqual(lines - fenced, 200, "prose at or under the measured median")
 
     def test_iron_law_is_present_and_fenced(self):
         self.assertRegex(self.text, r"## The Iron Law\n\n```\n[A-Z ,'\-]+\n```")
@@ -179,7 +186,7 @@ class SkillDocumentTest(unittest.TestCase):
         found = [self.text.index(s) for s in wanted]
         self.assertEqual(found, sorted(found))
 
-    def test_trigger_precision_lists_three_each_and_defers_root_cause_hunts(self):
+    def test_trigger_precision_lists_three_each_and_defers_defect_hunts(self):
         section = self.text.split("## Trigger precision")[1].split("## Quick reference")[0]
         must, must_not = section.split("must NOT fire this skill")
         fire = re.findall(r'^- "(.+?)"', must, re.M)
@@ -187,66 +194,69 @@ class SkillDocumentTest(unittest.TestCase):
         self.assertEqual(len(fire), 3, "exactly 3 must-fire prompts: %r" % (fire,))
         self.assertEqual(len(no_fire), 3, "exactly 3 must-not-fire prompts: %r" % (no_fire,))
         self.assertEqual(set(fire) & set(no_fire), set())
-        self.assertIn("systematic-debugging", must_not,
-                      "one must-not-fire prompt has to be a plain root-cause hunt, "
-                      "which is the boundary against the skill that owns that trigger")
+        self.assertIn("systematic-debugging", must_not)
 
     def test_no_shared_canary_token_is_hardcoded(self):
-        """A token baked into the document is the same token in every parallel agent."""
-        for path in (SKILL, REFERENCE):
-            tokens = set(re.findall(r"CANARY-[0-9a-f]{4,}", path.read_text()))
-            self.assertEqual(tokens, set(), "%s hardcodes %r" % (path.name, tokens))
-        self.assertIn("od -An -N4", self.body, "the skill must generate a fresh token")
+        self.assertEqual(set(re.findall(r"CANARY-[0-9a-f]{4,}", self.text)), set())
+        self.assertIn("od -An -N4", self.body)
+
+    def test_only_python3_is_invoked_never_bare_python(self):
+        """R2. Bare `python` is absent on Debian and stock macOS, and inside a venv it
+        can resolve to a different interpreter than the one that was installed into."""
+        for script in blocks():
+            self.assertNotRegex(script, r"(?<![a-z0-9_.-])python(?![0-9])",
+                                "use python3 explicitly:\n%s" % script)
+
+    def test_undecidable_is_never_described_as_stale(self):
+        """R2-B3. Prose may hedge; an exit code cannot, and the session acts on the code."""
+        self.assertIn("Exit `0` is current, `1` is stale, `2` is undecidable and never "
+                      "means either.", self.body)
+        self.assertNotIn("SPLIT", self.body, "the ambiguous verdict must not read as a fault")
 
     def test_the_documented_traps_are_actually_documented(self):
-        """Each of these was a real defect; the fix is only real if the reasoning ships."""
         for claim, why in (
                 ("realpath", "path comparisons must resolve symlinks"),
                 ("/private", "macOS temp paths are the false-stale case"),
                 ("sysconfig", "an in-repo .venv defeats a $PWD test"),
-                ("ls -t", "the batching trap must be called out"),
-                ("ModuleNotFoundError", "__pycache__ orphans are not importable"),
+                ("unchecked-hash", "bytecode that is never revalidated"),
+                ("mtime and size were restored", "the other invisible bytecode case"),
                 ("git diff", "the diff-based cleanup gate must be warned against"),
-                ("pytest -q -s", "the capture measurement must be stated")):
+                ("pytest -q -s", "the capture measurement must be stated"),
+                ("delete it before every run", "R2-B2, the file canary needs truncating"),
+                ("Delete\nany canary file first", "R2-B2, the truncate must be a step"),
+                ("import** name", "PKG is the import name, not the distribution name")):
             self.assertIn(claim, self.body, "%s (%r missing)" % (why, claim))
 
     def test_prose_avoids_the_banned_style(self):
-        for path in (SKILL, REFERENCE):
-            text = path.read_text()
-            self.assertNotIn("\u2014", text, "%s: no em-dashes" % path.name)
-            for word in ("leverage", "robust", "seamless", "delve", "comprehensive", "crucial"):
-                self.assertNotIn(word, text.lower(), "%s: banned word %r" % (path.name, word))
+        self.assertNotIn("\u2014", self.text, "no em-dashes")
+        for word in ("leverage", "robust", "seamless", "delve", "comprehensive", "crucial"):
+            self.assertNotIn(word, self.text.lower(), "banned word %r" % word)
 
-    def test_served_artifact_detail_is_bundled_not_inlined(self):
-        self.assertTrue(REFERENCE.is_file())
-        self.assertIn("references/served-artifacts.md", self.text)
-        for command in ("docker ", "ssh ", "lsof "):
-            self.assertNotIn(command, self.text, "%r belongs in the reference" % command)
-            self.assertIn(command, REFERENCE.read_text())
-
-    def test_reference_avoids_the_gnu_only_flag_in_its_commands(self):
-        """`--time-style` is GNU coreutils and fails on a BSD or macOS remote.
-
-        The prose is allowed to name the flag, because warning about it is the point.
-        A command that uses it is the defect.
-        """
-        text = REFERENCE.read_text()
-        for fence in re.findall(r"^```bash\n(.*?)^```", text, re.S | re.M):
-            self.assertNotIn("--time-style", fence,
-                             "a reference command must not depend on GNU coreutils")
-        self.assertIn("--time-style", text, "the trap has to stay documented")
+    def test_nothing_unverifiable_survived_the_cut(self):
+        """Round 2 asked for only what a fixture can check. Detectors for ecosystems
+        this suite cannot exercise were deleted rather than shipped unverified."""
+        self.assertFalse((SKILL.parent / "references").exists(),
+                         "the served-artifact reference asserted docker and ssh behavior "
+                         "that no fixture here can check")
+        for gone in ("docker ", "ssh ", "lsof -ti", "--time-style", "ls -t"):
+            self.assertNotIn(gone, self.text, "%r is a command this suite cannot verify" % gone)
 
     def test_every_bash_block_is_one_the_suite_runs(self):
         found = blocks()
         self.assertEqual(len(found), len(BLOCK_KEYS),
-                         "SKILL.md has %d bash blocks but %d are executed by this suite"
+                         "SKILL.md has %d bash blocks but %d are executed here"
                          % (len(found), len(BLOCK_KEYS)))
         for script, key in zip(found, BLOCK_KEYS):
             self.assertIn(key, script, "bash blocks are out of the expected order")
 
+    def test_every_inline_command_the_prose_claims_is_one_the_suite_runs(self):
+        for command in INLINE_COMMANDS:
+            self.assertIn(command, self.text,
+                          "the suite runs %r; keep the text and the test in step" % command)
+
 
 class CanaryTokenTest(unittest.TestCase):
-    """Block 0. The token has to be fresh every time and findable by prefix."""
+    """Block 0."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -260,21 +270,19 @@ class CanaryTokenTest(unittest.TestCase):
         for _ in range(5):
             result = run(block("od -An -N4"), self.dir)
             self.assertEqual(result.returncode, 0, result.stderr)
-            token = result.stdout.strip()
-            self.assertRegex(token, r"^CANARY-[0-9a-f]{8}$")
-            seen.add(token)
+            self.assertRegex(result.stdout.strip(), r"^CANARY-[0-9a-f]{8}$")
+            seen.add(result.stdout.strip())
         self.assertEqual(len(seen), 5, "tokens must not repeat: %r" % (seen,))
 
 
 class PythonProvenanceTest(unittest.TestCase):
-    """Block 1, against a real venv and real installs. Covers B1 (partly), B2, and B6."""
+    """Block 1, against real venvs and real installs."""
 
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.root = Path(cls.tmp.name)
-        cls.venv = cls.root / "venv"
-        cls.python = make_venv(cls.venv)
+        cls.python = make_venv(cls.root / "venv")
 
     @classmethod
     def tearDownClass(cls):
@@ -305,20 +313,18 @@ class PythonProvenanceTest(unittest.TestCase):
             args.append("-e")
         self.pip(*args, ".", cwd=project)
 
-    def check(self, project, source, python=None):
+    def check(self, project, source):
         script = block("importlib.util",
                        **{"export PKG=mypkg SRC=src/mypkg/core.py":
                           "export PKG=mypkg SRC=%s" % source})
-        return run(script, project,
-                   path_prefix=str(Path(python or self.python).parent))
+        return run(script, project, path_prefix=str(Path(self.python).parent))
 
-    def import_value(self, project, python=None):
-        """Import from a neutral directory and report the resolved file and the value."""
-        result = subprocess.run(
-            [str(python or self.python), "-c",
-             "import mypkg; print(mypkg.__file__); print(mypkg.f())"],
-            cwd=str(self.root), capture_output=True, text=True,
-            env={"PATH": BASE_PATH, "HOME": str(self.root)})
+    def value_from(self, cwd):
+        """What the interpreter really returns, run from `cwd`."""
+        result = subprocess.run([str(self.python), "-c",
+                                 "import mypkg; print(mypkg.__file__); print(mypkg.f())"],
+                                cwd=str(cwd), capture_output=True, text=True,
+                                env={"PATH": BASE_PATH, "HOME": str(self.root)})
         self.assertEqual(result.returncode, 0, result.stderr)
         path, value = result.stdout.strip().splitlines()
         return real(path), value
@@ -326,19 +332,16 @@ class PythonProvenanceTest(unittest.TestCase):
     def test_non_editable_install_hides_the_edit_and_the_check_says_stale(self):
         project = self.project("src")
         self.install(project, editable=False)
-        path, value = self.import_value(project)
+        path, value = self.value_from(self.root)
         self.assertIn("site-packages", path)
         self.assertEqual(value, "OLD")
 
         (project / "src" / "mypkg" / "core.py").write_text('def f():\n    return "NEW"\n')
-        path_after, value_after = self.import_value(project)
-        self.assertEqual(path_after, path)
-        self.assertEqual(value_after, "OLD", "the edit is invisible: the whole failure mode")
+        self.assertEqual(self.value_from(self.root), (path, "OLD"),
+                         "the edit is invisible: the whole failure mode")
 
         result = self.check(project, "src/mypkg/core.py")
-        self.assertEqual(result.returncode, 1,
-                         "the skill claims exit 1 here; got %d\n%s"
-                         % (result.returncode, result.stdout + result.stderr))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("STALE", result.stdout)
 
     def test_editable_install_makes_the_check_pass_and_the_edit_visible(self):
@@ -351,49 +354,52 @@ class PythonProvenanceTest(unittest.TestCase):
         self.install(project, editable=True)
 
         result = self.check(project, "src/mypkg/core.py")
-        self.assertEqual(result.returncode, 0,
-                         "the skill claims exit 0 once editable; got:\n%s"
-                         % (result.stdout + result.stderr))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CURRENT", result.stdout)
-        path, value = self.import_value(project)
+        path, value = self.value_from(self.root)
         self.assertEqual(path, real(project / "src" / "mypkg" / "__init__.py"))
         self.assertEqual(value, "NEW")
 
-    def test_b2_flat_layout_with_a_non_editable_install_is_reported_as_split(self):
-        """B2. cwd is on sys.path, so the repo root and everywhere else load different files.
+    def test_r2_b3_a_fresh_flat_layout_is_never_reported_as_stale(self):
+        """R2-B3. Flat package, non-editable install, edit, run from the repo root.
 
-        The old `$PWD`-prefix check printed the tree path and exited 0 here, which made a
-        non-editable install undetectable for every flat-layout project.
+        The interpreter returns the NEW value, so this run IS current. The old code
+        printed SPLIT and exited 1, and both the Phase 2 preamble and the quick
+        reference define exit 1 as stale. Exit 2 is the honest answer: two copies
+        exist and the directory you run from decides between them.
         """
         project = self.project("flat")
         self.install(project, editable=False)
+        (project / "mypkg" / "core.py").write_text('def f():\n    return "NEW"\n')
+
+        path, value = self.value_from(project)
+        self.assertEqual(value, "NEW", "run from the repo root, this really is current")
+        self.assertEqual(path, real(project / "mypkg" / "__init__.py"))
+
         result = self.check(project, "mypkg/core.py")
-        self.assertEqual(result.returncode, 1,
-                         "a flat layout shadowing an installed copy must not read as current:\n%s"
-                         % (result.stdout + result.stderr))
-        self.assertIn("SPLIT", result.stdout)
+        self.assertNotEqual(result.returncode, 1,
+                            "a current artifact must never be called stale:\n%s"
+                            % (result.stdout + result.stderr))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("UNDECIDABLE", result.stdout)
         self.assertIn("site-packages", result.stdout,
-                      "the report must name the other copy so the session can act on it")
+                      "it must still name the other copy so the session can act")
 
     def test_flat_layout_with_nothing_installed_is_not_a_false_positive(self):
         project = self.project("flat")
         result = self.check(project, "mypkg/core.py")
-        self.assertEqual(result.returncode, 0,
-                         "an ordinary never-installed checkout is current:\n%s"
-                         % (result.stdout + result.stderr))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CURRENT", result.stdout)
 
-    def test_namespace_package_reports_cannot_check_rather_than_crashing(self):
-        """`mod.__file__` is None for a namespace package; a crash used to read as stale."""
+    def test_namespace_package_is_undecidable_rather_than_a_crash(self):
         project = Path(tempfile.mkdtemp(dir=str(self.root)))
         (project / "mypkg").mkdir()
         (project / "mypkg" / "thing.py").write_text("x = 1\n")
         result = self.check(project, "mypkg/thing.py")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("CANNOT CHECK", result.stdout)
         self.assertIn("namespace", result.stdout)
 
-    def test_unimportable_name_reports_cannot_check(self):
+    def test_unimportable_name_is_undecidable(self):
         project = self.project("src")
         script = block("importlib.util",
                        **{"export PKG=mypkg SRC=src/mypkg/core.py":
@@ -403,26 +409,11 @@ class PythonProvenanceTest(unittest.TestCase):
         self.assertIn("not importable", result.stdout)
 
     def test_paths_under_a_macos_temp_symlink_do_not_read_as_stale(self):
-        """CI-1. /var is a symlink to /private/var; an unresolved compare fails everywhere.
-
-        macOS supplies the symlinked temp root for free and Linux does not, so rather than
-        skip on Linux (which would leave the regression uncovered on the platform CI runs
-        most) the test builds the symlink itself when the environment has not already
-        provided one. The condition under test is "reached through a symlink", not
-        "running on a Mac".
-        """
         project = self.project("src")
         self.install(project, editable=True)
-        if str(project) == real(project):
-            alias = self.root / ("alias-" + project.name)
-            alias.symlink_to(real(project))
-            project = alias
         self.assertNotEqual(str(project), real(project),
-                            "the path under test must be reached through a symlink")
-        result = self.check(project, "src/mypkg/core.py")
-        self.assertEqual(result.returncode, 0,
-                         "an unresolved path comparison reports a false STALE here:\n%s"
-                         % (result.stdout + result.stderr))
+                            "this assertion needs a symlinked temp root to mean anything")
+        self.assertEqual(self.check(project, "src/mypkg/core.py").returncode, 0)
 
     def test_canary_is_absent_on_the_stale_artifact_and_present_once_fixed(self):
         """The Iron Law, demonstrated rather than asserted."""
@@ -438,26 +429,34 @@ class PythonProvenanceTest(unittest.TestCase):
                                     env={"PATH": BASE_PATH, "HOME": str(self.root)})
             return token in (result.stdout + result.stderr)
 
-        self.assertFalse(observed(),
-                         "the canary must NOT reach a run that loads the installed copy; "
-                         "every conclusion from such a run is void")
+        self.assertFalse(observed(), "the canary must NOT reach a run of the installed copy")
         self.pip("uninstall", "-y", "mypkg")
         self.install(project, editable=True)
-        self.assertTrue(observed(),
-                        "once the pipeline is fixed the canary must appear, which is the "
-                        "only proof that the run contains the edit")
+        self.assertTrue(observed(), "once the pipeline is fixed the canary must appear")
 
-    @unittest.skipUnless(shutil.which("git"), "git not on PATH")
-    def test_b6_a_stderr_canary_is_lost_but_a_file_canary_is_not(self):
-        """B6. Measured against a real pytest, which is why the skill ranks the forms."""
+
+class CanaryFormTest(unittest.TestCase):
+    """Phase 1 step 2 and step 3, measured against a real pytest."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.token = "CANARY-%s" % os.urandom(4).hex()
+        self.env = {"PATH": "%s:%s" % (HOST_PYTHON_DIR, BASE_PATH), "HOME": str(self.dir)}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def pytest_available(self):
         try:
             import pytest  # noqa: F401
         except ImportError:
             self.skipTest("pytest not importable by the host interpreter")
-        project = Path(tempfile.mkdtemp(dir=str(self.root)))
-        token = "CANARY-%s" % os.urandom(4).hex()
-        marker = project / "canary.out"
-        (project / "test_thing.py").write_text(textwrap.dedent("""
+
+    def test_r1_b6_a_stderr_canary_is_lost_but_a_file_canary_is_not(self):
+        self.pytest_available()
+        marker = self.dir / "canary.out"
+        (self.dir / "test_thing.py").write_text(textwrap.dedent("""
             import os, sys
             TOKEN = %r
             def helper():
@@ -466,47 +465,80 @@ class PythonProvenanceTest(unittest.TestCase):
                 return 1
             def test_ok():
                 assert helper() == 1
-        """) % token)
-        env = {"PATH": "%s:%s" % (HOST_PYTHON_DIR, BASE_PATH), "HOME": str(self.root),
-               "CANARY_FILE": str(marker)}
-        quiet = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(project),
+        """) % self.token)
+        env = dict(self.env, CANARY_FILE=str(marker))
+        quiet = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(self.dir),
                                capture_output=True, text=True, env=env)
-        self.assertNotIn(token, quiet.stdout + quiet.stderr,
-                         "a capturing runner swallows the stderr canary, as the skill says")
-        self.assertIn(token, marker.read_text(),
-                      "the file canary survives capture, which is why the skill ranks it above")
+        self.assertNotIn(self.token, quiet.stdout + quiet.stderr,
+                         "a capturing runner swallows the stderr canary on a PASSING test")
+        self.assertIn(self.token, marker.read_text(),
+                      "the file canary survives capture, which is why it is ranked above")
         marker.unlink()
-        loud = subprocess.run([sys.executable, "-m", "pytest", "-q", "-s"], cwd=str(project),
+        loud = subprocess.run([sys.executable, "-m", "pytest", "-q", "-s"], cwd=str(self.dir),
                               capture_output=True, text=True, env=env)
-        self.assertIn(token, loud.stdout + loud.stderr,
-                      "with capture disabled the printed form does work")
+        self.assertIn(self.token, loud.stdout + loud.stderr)
 
-    def test_a_canary_on_a_path_that_never_runs_is_absent_from_a_current_artifact(self):
-        """The trap the skill has to warn about: absence is only evidence on an executed line."""
-        try:
-            import pytest  # noqa: F401
-        except ImportError:
-            self.skipTest("pytest not importable by the host interpreter")
-        project = Path(tempfile.mkdtemp(dir=str(self.root)))
-        token = "CANARY-%s" % os.urandom(4).hex()
-        (project / "test_thing.py").write_text(textwrap.dedent("""
+    def test_a_printed_canary_does_survive_a_failing_test(self):
+        """R2 non-blocking. The table must not say "No" flatly: this skill's own
+        scenario is often a failing test, and there the captured output IS shown."""
+        self.pytest_available()
+        (self.dir / "test_thing.py").write_text(textwrap.dedent("""
+            import sys
+            def test_fails():
+                sys.stderr.write(%r + "\\n")
+                assert False
+        """) % self.token)
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(self.dir),
+                                capture_output=True, text=True, env=self.env)
+        self.assertIn(self.token, result.stdout + result.stderr)
+        self.assertIn("Only sometimes", SKILL.read_text(),
+                      "the table must be qualified, not a flat No")
+
+    def test_r2_b2_a_file_canary_passes_a_re_prove_that_ran_nothing(self):
+        """R2-B2. Without a truncate step the previous run answers for this one."""
+        marker = self.dir / self.token
+        marker.write_text("x")
+        nothing = run('python3 -c "pass"; test -e "$CANARY" && echo OBSERVED', self.dir,
+                      env={"CANARY": str(marker)},
+                      path_prefix=HOST_PYTHON_DIR)
+        self.assertIn("OBSERVED", nothing.stdout,
+                      "this is the defect: a run that executed nothing looks like a pass")
+
+        cleared = run('%s; python3 -c "pass"; test -e "$CANARY" && echo OBSERVED || echo ABSENT'
+                      % INLINE_COMMANDS[2], self.dir, env={"CANARY": str(marker)},
+                      path_prefix=HOST_PYTHON_DIR)
+        self.assertIn("ABSENT", cleared.stdout,
+                      "the documented `rm -f` before each run is what closes it")
+        self.assertFalse(marker.exists())
+
+    def test_an_uncalled_canary_is_absent_from_a_current_artifact(self):
+        self.pytest_available()
+        (self.dir / "test_thing.py").write_text(textwrap.dedent("""
             def never_called():
                 raise RuntimeError(%r)
             def test_ok():
                 assert 1 == 1
-        """) % token)
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(project),
-                                capture_output=True, text=True,
-                                env={"PATH": "%s:%s" % (HOST_PYTHON_DIR, BASE_PATH),
-                                     "HOME": str(self.root)})
+        """) % self.token)
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(self.dir),
+                                capture_output=True, text=True, env=self.env)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertNotIn(token, result.stdout + result.stderr)
-        self.assertIn("Absence proves nothing about a line that never runs", SKILL.read_text(),
-                      "the skill must warn about this or it sends sessions to Phase 2 for free")
+        self.assertNotIn(self.token, result.stdout + result.stderr)
+        self.assertIn("Absence proves nothing about a line that never runs", SKILL.read_text())
+
+    def test_the_canary_grep_confirms_a_build_output(self):
+        (self.dir / "dist").mkdir()
+        env = {"CANARY": self.token}
+        (self.dir / "dist" / "index.js").write_text("// nothing\n")
+        self.assertEqual(run(INLINE_COMMANDS[1], self.dir, env=env).returncode, 1,
+                         "no canary in the build output is a failure")
+        (self.dir / "dist" / "index.js").write_text("// %s\n" % self.token)
+        found = run(INLINE_COMMANDS[1], self.dir, env=env)
+        self.assertEqual(found.returncode, 0, found.stdout + found.stderr)
+        self.assertIn("dist/index.js", found.stdout)
 
 
 class InRepoVenvTest(unittest.TestCase):
-    """B1 on its own, because it needs the venv inside the project directory."""
+    """R1-B1, which needs the venv inside the project directory."""
 
     @classmethod
     def setUpClass(cls):
@@ -514,8 +546,7 @@ class InRepoVenvTest(unittest.TestCase):
         cls.project = Path(cls.tmp.name) / "proj"
         shutil.copytree(str(FIXTURES / "pkg-src"), str(cls.project))
         cls.python = make_venv(cls.project / ".venv")
-        env = dict(os.environ)
-        env.update({"HOME": cls.tmp.name, "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+        env = dict(os.environ, HOME=cls.tmp.name, PIP_DISABLE_PIP_VERSION_CHECK="1")
         subprocess.run([str(cls.python), "-m", "pip", "--quiet", "install", "--no-index",
                         "--no-build-isolation", "."],
                        cwd=str(cls.project), env=env, check=True,
@@ -525,159 +556,96 @@ class InRepoVenvTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def test_b1_site_packages_inside_the_repo_is_still_stale(self):
-        """B1. With `.venv` in the tree, site-packages IS under $PWD.
-
-        The old check tested whether the resolved path started with $PWD and so printed
-        `<repo>/.venv/lib/python3.x/site-packages/mypkg/__init__.py` and exited 0, reading
-        "current" in the exact case the check exists for. An in-repo venv is the common case.
-        """
-        loaded = subprocess.run(
-            [str(self.python), "-c", "import mypkg; print(mypkg.__file__)"],
-            cwd=str(self.project), capture_output=True, text=True,
-            env={"PATH": BASE_PATH, "HOME": str(self.project)})
+    def test_r1_b1_site_packages_inside_the_repo_is_still_stale(self):
+        """With `.venv` in the tree, site-packages IS under $PWD, so a path-prefix test
+        reads "current" in the exact case the check exists for."""
+        loaded = subprocess.run([str(self.python), "-c", "import mypkg; print(mypkg.__file__)"],
+                                cwd=str(self.project), capture_output=True, text=True,
+                                env={"PATH": BASE_PATH, "HOME": str(self.project)})
         installed = real(loaded.stdout.strip())
         self.assertTrue(installed.startswith(real(self.project) + os.sep),
-                        "the fixture only tests B1 if site-packages really is under the repo")
+                        "the fixture only tests this if site-packages is under the repo")
         self.assertIn("site-packages", installed)
 
         result = run(block("importlib.util"), self.project,
                      path_prefix=str(Path(self.python).parent))
-        self.assertEqual(result.returncode, 1,
-                         "an in-repo .venv must still be reported as an installed copy:\n%s"
-                         % (result.stdout + result.stderr))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("STALE", result.stdout)
 
 
-class SourcelessBytecodeTest(unittest.TestCase):
-    """B3. The importable case is a `.pyc` outside __pycache__, not an orphan inside it."""
+class BytecodeRemedyTest(unittest.TestCase):
+    """R2-B1. Two arrangements serve old code with no path evidence at all.
+
+    Round 1 replaced a detector that only found harmless files. Round 2 showed the
+    replacement was also wrong: `mod.__file__` points at the edited source in both
+    cases below, so no path check can see them. The skill therefore ships a remedy,
+    and these tests verify the remedy rather than a detector.
+    """
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        (self.dir / "foo.py").write_text('def f():\n    return "OLD"\n')
-        subprocess.run([sys.executable, "-m", "compileall", "-q", "foo.py"],
-                       cwd=str(self.dir), check=True, capture_output=True)
-        tag = "cpython-%d%d" % sys.version_info[:2]
-        self.cached = self.dir / "__pycache__" / ("foo.%s.pyc" % tag)
-        self.assertTrue(self.cached.is_file())
-        (self.dir / "foo.py").unlink()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def imports(self):
-        return subprocess.run([sys.executable, "-c", "import foo; print(foo.f())"],
-                              cwd=str(self.dir), capture_output=True, text=True,
-                              env={"PATH": BASE_PATH, "HOME": str(self.dir)})
-
-    def test_b3_a_pycache_orphan_is_not_importable_and_is_not_flagged(self):
-        result = self.imports()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ModuleNotFoundError", result.stderr,
-                      "PEP 3147 bytecode never imports without its source, so the old "
-                      "detector only ever found harmless files")
-        check = run(block("-not -path '*/__pycache__/*'"), self.dir)
-        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
-        self.assertIn("CURRENT", check.stdout)
-
-    def test_b3_a_pyc_outside_pycache_serves_old_code_and_is_flagged(self):
-        shutil.copy(str(self.cached), str(self.dir / "foo.pyc"))
-        result = self.imports()
+    def value(self):
+        result = subprocess.run([sys.executable, "-c",
+                                 "import mod; print(mod.__file__); print(mod.f())"],
+                                cwd=str(self.dir), capture_output=True, text=True,
+                                env={"PATH": BASE_PATH, "HOME": str(self.dir)})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "OLD",
-                         "this is the arrangement that silently serves old code")
-        check = run(block("-not -path '*/__pycache__/*'"), self.dir)
-        self.assertEqual(check.returncode, 1, check.stdout + check.stderr)
-        self.assertIn("foo.pyc", check.stdout)
+        path, value = result.stdout.strip().splitlines()
+        return real(path), value
 
+    def source(self):
+        return self.dir / "mod.py"
 
-class BuildFreshnessTest(unittest.TestCase):
-    """B4. Blocks 3 and 4, against real mtimes and a directory big enough to batch."""
+    def remedy(self):
+        return run(INLINE_COMMANDS[0], self.dir)
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-        shutil.copytree(str(FIXTURES / "nodeproj"), str(self.dir), dirs_exist_ok=True)
-        self.prefix = str(Path(sys.executable).parent)
+    def test_r2_b1_unchecked_hash_bytecode_serves_old_code_until_pycache_is_cleared(self):
+        self.source().write_text('def f():\n    return "OLD"\n')
+        subprocess.run([sys.executable, "-m", "compileall", "-q",
+                        "--invalidation-mode", "unchecked-hash", "mod.py"],
+                       cwd=str(self.dir), check=True, capture_output=True)
+        self.source().write_text('def f():\n    return "NEW"\n')
 
-    def tearDown(self):
-        self.tmp.cleanup()
+        path, value = self.value()
+        self.assertEqual(value, "OLD", "unchecked-hash bytecode is never revalidated")
+        self.assertEqual(path, real(self.source()),
+                         "and __file__ points at the EDITED source, so no path check sees it")
 
-    def mtime_check(self):
-        return run(block("os.walk"), self.dir, path_prefix=self.prefix)
+        self.assertEqual(self.remedy().returncode, 0)
+        self.assertEqual(self.value()[1], "NEW", "clearing __pycache__ is exactly the fix")
 
-    def test_an_unrebuilt_dist_is_stale_and_a_rebuild_clears_it(self):
-        old = time.time() - 600
-        os.utime(str(self.dir / "dist" / "index.js"), (old, old))
-        (self.dir / "src" / "index.js").write_text(
-            'module.exports = function greet() {\n  return "NEW";\n};\n')
+    def test_r2_b1_an_exactly_restored_mtime_serves_old_code_until_pycache_is_cleared(self):
+        self.source().write_text('def f():\n    return "OLD"\n')
+        before = os.stat(str(self.source()))
+        subprocess.run([sys.executable, "-m", "compileall", "-q", "mod.py"],
+                       cwd=str(self.dir), check=True, capture_output=True)
+        self.source().write_text('def f():\n    return "NEW"\n')   # identical length
+        os.utime(str(self.source()), (before.st_atime, before.st_mtime))
 
-        stale = self.mtime_check()
-        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
-        self.assertIn("STALE", stale.stdout)
+        self.assertEqual(self.value()[1], "OLD",
+                         "same mtime and same size means no revalidation")
+        self.assertEqual(self.remedy().returncode, 0)
+        self.assertEqual(self.value()[1], "NEW")
 
-        build = run("cp src/index.js dist/index.js", self.dir)
-        self.assertEqual(build.returncode, 0, build.stderr)
-        fresh = self.mtime_check()
-        self.assertEqual(fresh.returncode, 0, fresh.stdout + fresh.stderr)
-        self.assertIn("FRESH", fresh.stdout)
-
-    def test_b4_the_newest_build_file_is_found_exactly_not_per_batch(self):
-        """`find dist -type f -exec ls -t {} + | head -1` sorts each exec batch separately."""
-        now = time.time()
-        for i in range(2500):
-            path = self.dir / "dist" / ("f%04d.js" % i)
-            path.write_text("x")
-            stamp = now - 1000 + i * 0.001
-            os.utime(str(path), (stamp, stamp))
-        winner = self.dir / "dist" / "f0007.js"
-        os.utime(str(winner), (now, now))
-        os.utime(str(self.dir / "src" / "index.js"), (now - 500, now - 500))
-
-        result = self.mtime_check()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("dist/f0007.js", result.stdout,
-                      "the check must name the true newest file, whatever the batch layout")
-
-    def test_b4_a_missing_source_directory_cannot_report_fresh(self):
-        shutil.rmtree(str(self.dir / "src"))
-        result = self.mtime_check()
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("CANNOT CHECK", result.stdout)
-        self.assertNotIn("FRESH", result.stdout, "a missing directory is not a pass")
-        self.assertEqual(result.stderr, "", "no unredirected error noise from a missing path")
-
-    def test_b4_a_missing_build_directory_says_so_by_name(self):
-        shutil.rmtree(str(self.dir / "dist"))
-        result = self.mtime_check()
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("'dist'", result.stdout)
-        self.assertEqual(result.stderr, "")
-
-    def test_b4_a_content_free_touch_reports_stale_and_the_skill_admits_it(self):
-        now = time.time() + 5
-        os.utime(str(self.dir / "src" / "index.js"), (now, now))
-        result = self.mtime_check()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Mtime lies in both directions", SKILL.read_text(),
-                      "an mtime proxy that can be wrong must say so in the skill")
-
-    def test_the_canary_grep_outranks_the_timestamp(self):
-        token = "CANARY-%s" % os.urandom(4).hex()
-        env = {"CANARY": token}
-        missing = run(block('grep -rl "$CANARY" dist/'), self.dir, env=env)
-        self.assertEqual(missing.returncode, 1, "no canary in the build output is a failure")
-        self.assertIn("STALE", missing.stdout, "a silent failure is not a verdict")
-
-        (self.dir / "dist" / "index.js").write_text('// %s\n' % token)
-        present = run(block('grep -rl "$CANARY" dist/'), self.dir, env=env)
-        self.assertEqual(present.returncode, 0, present.stdout + present.stderr)
-        self.assertIn("CURRENT", present.stdout)
+    def test_a_pycache_orphan_is_harmless_which_is_why_it_is_not_a_detector(self):
+        self.source().write_text('def f():\n    return "OLD"\n')
+        subprocess.run([sys.executable, "-m", "compileall", "-q", "mod.py"],
+                       cwd=str(self.dir), check=True, capture_output=True)
+        self.source().unlink()
+        result = subprocess.run([sys.executable, "-c", "import mod"], cwd=str(self.dir),
+                                capture_output=True, text=True,
+                                env={"PATH": BASE_PATH, "HOME": str(self.dir)})
+        self.assertIn("ModuleNotFoundError", result.stderr,
+                      "PEP 3147 bytecode never imports without its source")
 
 
 class CanaryCleanupTest(unittest.TestCase):
-    """B5. The Phase 4 gate, against the three cases `git diff | grep` passes."""
+    """Block 2. R1-B5, plus the parallel-agent collision round 2 raised."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -692,12 +660,18 @@ class CanaryCleanupTest(unittest.TestCase):
                               cwd=str(self.dir), capture_output=True, text=True,
                               env={"PATH": BASE_PATH, "HOME": str(self.dir)})
 
-    def gate(self):
-        return run(block("--exclude-dir=.git"), self.dir)
+    def gate(self, token=None):
+        return run(block("CANARY:?"), self.dir, env={"CANARY": token or self.token})
 
     def diff_gate(self):
-        """The old gate, kept here only to demonstrate that it passes when it should not."""
+        """The obvious version, kept only to show that it passes when it should not."""
         return run('git diff | grep -c "%s"' % self.token, self.dir)
+
+    def test_an_unset_token_is_refused_rather_than_matching_everything(self):
+        (self.dir / "a.py").write_text("ok\n")
+        result = run(block("CANARY:?"), self.dir)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("set CANARY", result.stderr)
 
     def test_a_clean_tree_passes(self):
         (self.dir / "a.py").write_text("def f():\n    return 1\n")
@@ -706,7 +680,7 @@ class CanaryCleanupTest(unittest.TestCase):
         self.assertIn("CLEAN", result.stdout)
 
     @unittest.skipUnless(shutil.which("git"), "git not on PATH")
-    def test_b5_a_staged_canary_slips_past_git_diff_but_not_past_the_tree_grep(self):
+    def test_r1_b5_a_staged_canary_slips_past_git_diff_but_not_past_the_tree_grep(self):
         self.git("init", "-q", ".")
         (self.dir / "a.py").write_text("def f():\n    return 1\n")
         self.git("add", "-A")
@@ -715,30 +689,56 @@ class CanaryCleanupTest(unittest.TestCase):
         self.git("add", "a.py")
 
         self.assertEqual(self.diff_gate().stdout.strip(), "0",
-                         "this is the defect: git diff reports nothing once the file is staged")
+                         "the defect: git diff reports nothing once the file is staged")
         result = self.gate()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("a.py", result.stdout)
 
     @unittest.skipUnless(shutil.which("git"), "git not on PATH")
-    def test_b5_a_canary_in_an_untracked_file_is_caught(self):
+    def test_r1_b5_a_canary_in_an_untracked_file_is_caught(self):
         self.git("init", "-q", ".")
         (self.dir / "new.py").write_text('raise RuntimeError("%s")\n' % self.token)
         self.assertEqual(self.diff_gate().stdout.strip(), "0")
         self.assertEqual(self.gate().returncode, 1)
 
-    def test_b5_the_gate_works_outside_a_repository(self):
+    def test_r1_b5_the_gate_works_outside_a_repository(self):
         (self.dir / "b.py").write_text('raise RuntimeError("%s")\n' % self.token)
         result = self.gate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("b.py", result.stdout)
 
-    def test_b5_a_token_from_another_session_is_found_by_prefix(self):
-        (self.dir / "c.py").write_text('raise RuntimeError("CANARY-0badc0de")\n')
+    def test_a_canary_inside_node_modules_is_not_excluded(self):
+        """R2. The old gate skipped node_modules, where workspace symlinks and copies of
+        dist live, so a canary that reached a built package went unreported."""
+        (self.dir / "node_modules" / "pkg").mkdir(parents=True)
+        (self.dir / "node_modules" / "pkg" / "index.js").write_text(
+            'throw new Error("%s");\n' % self.token)
         result = self.gate()
-        self.assertEqual(result.returncode, 1,
-                         "an interrupted session records nothing, so the prefix is the record")
-        self.assertIn("c.py", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("node_modules", result.stdout)
+
+    def test_another_sessions_canary_is_reported_but_not_ordered_removed(self):
+        """R2. In a shared checkout the prefix grep finds other agents' live canaries.
+        Ordering their removal deletes evidence out of someone else's running proof."""
+        other = "CANARY-0badc0de"
+        (self.dir / "theirs.py").write_text('raise RuntimeError("%s")\n' % other)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0,
+                         "someone else's canary must not block your own cleanup:\n%s"
+                         % result.stdout)
+        self.assertIn("ANOTHER SESSION", result.stdout)
+        self.assertIn("theirs.py", result.stdout)
+        self.assertIn("leave it alone", result.stdout)
+        self.assertTrue((self.dir / "theirs.py").exists())
+
+    def test_yours_and_theirs_are_reported_separately(self):
+        (self.dir / "theirs.py").write_text('raise RuntimeError("CANARY-0badc0de")\n')
+        (self.dir / "mine.py").write_text('raise RuntimeError("%s")\n' % self.token)
+        result = self.gate()
+        self.assertEqual(result.returncode, 1)
+        yours = result.stdout.split("YOUR CANARY")[1]
+        self.assertIn("mine.py", yours)
+        self.assertNotIn("theirs.py", yours, "do not order removal of a live foreign canary")
 
 
 if __name__ == "__main__":

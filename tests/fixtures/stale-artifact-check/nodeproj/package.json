@@ -1,9 +1,0 @@
-{
-  "name": "nodeproj",
-  "version": "0.1.0",
-  "private": true,
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "cp src/index.js dist/index.js"
-  }
-}
