@@ -83,10 +83,9 @@ Requires `python3` (installer only), `jq` (hooks, CLIs, and status line), and
 Hooks and skills are picked up **without restarting Claude Code**, though `/hooks` forces
 a config reload if you want to be certain.
 
-### As a plugin instead
+### As a plugin
 
-The repo is also a valid Claude Code plugin, so you can load it without installing
-anything:
+The repo is a valid Claude Code plugin, so you can load it without installing anything:
 
 ```bash
 claude --plugin-dir /path/to/claude-skill-compounder
@@ -98,8 +97,8 @@ with skills you already have), the hooks, and `bin/` on the Bash tool's `PATH`. 
 `subagentStatusLine`, and `statusLine` is not among them. That is why the installer is
 the primary path.
 
-Running both at once is safe. Each event is claimed by its `prompt_id` or `tool_use_id`,
-so the duplicate delivery is a no-op rather than a silently halved `CI_EDIT_EVERY`.
+Running both at once is safe: each event carries a `prompt_id` or `tool_use_id`, and the
+hooks claim an event once, so the second delivery does nothing.
 
 ---
 
