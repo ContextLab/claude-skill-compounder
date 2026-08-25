@@ -80,6 +80,23 @@ context, and never the builder. A forked red-teamer already knows what the skill
 from now. Do not tell it the skill is expected to be good. Its brief: *"Here is a skill at
 `<path>`. Try to execute it cold. Where does it fail, mislead, or under-specify?"*
 
+**Never hand a reviewer a list of what not to flag.** This is the same failure as asking it
+to "confirm the deletion", and it is easier to commit because it feels like helpfulness. A
+brief that pre-classifies the allowed cases converts the review into a search for the
+findings you already expect, and you get your own judgement back with a second name on it.
+Measured on this repo's documentation: the same file, reviewed by one agent given a
+"do not flag these" list and by one given only the principle, produced **1 finding and 4**.
+The neutral reviewer also *defended* two passages the biased brief would have condemned,
+which is the half you lose entirely.
+
+State the standard. Do not enumerate the exceptions. If you believe a class of case is
+legitimate, that belief is exactly what needs testing, so let the reviewer reach it or
+reject it. Where a judgement call is genuinely open, say so and ask the reviewer to draw
+the line and defend it, rather than drawing it for them.
+
+Asking for hard verification is different and is fine: "run every command", "check every
+number against its source" constrains method, not conclusions.
+
 Required eval checklist:
 
 |Check|What it catches|
