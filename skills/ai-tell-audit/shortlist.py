@@ -51,7 +51,7 @@ SHORTLIST = [
 ]
 
 
-def strip_markup(text):
+def strip_markup(text, keep_dividers=False):
     """Blank every region that is markup rather than prose, keeping newlines so
     line numbers survive. Blanking rather than deleting is what lets the caller
     report a match against its line in the original file."""
@@ -66,7 +66,8 @@ def strip_markup(text):
     text = re.sub(r"<[^>\n]+>", blank, text)                       # html and rst roles
     text = re.sub(r"https?://\S+", blank, text)                    # urls
     text = re.sub(r"(?m)^\|.*$", blank, text)                      # table rows
-    text = re.sub(r"(?m)^[=~^`'\"*+#_-]{3,}\s*$", blank, text)     # rules, underlines
+    if not keep_dividers:                                          # rules, underlines
+        text = re.sub(r"(?m)^[=~^`'\"*+#_-]{3,}\s*$", blank, text)
     return text
 
 
@@ -197,7 +198,7 @@ def row_regex(term):
     return re.compile(prefix + body + suffix, re.IGNORECASE)
 
 
-DIVIDER = re.compile(r"(?m)(?<=\n)\n-{3,}[ \t]*$")
+DIVIDER = re.compile(r"(?m)(?<=\n\n)-{3,}[ \t]*$")
 
 
 def rows(text, skill_md):
@@ -216,7 +217,11 @@ def rows(text, skill_md):
                 # A thematic break is a real divider only on its own line after a
                 # blank one. strip_markup blanks those, so match the original: the
                 # row otherwise fired on `o---o---o` and never on a real divider.
-                finder = DIVIDER.finditer(text)
+                # Code, tables and indented blocks are blanked first, so a
+                # `---` inside a fence or a YAML document is not a divider;
+                # the thematic breaks themselves are the only markup kept.
+                finder = DIVIDER.finditer(
+                    strip_markup(text, keep_dividers=True))
                 for m in finder:
                     candidates.append((m.start(), -len(m.group(0)), label,
                                        m.group(0).strip(), True))

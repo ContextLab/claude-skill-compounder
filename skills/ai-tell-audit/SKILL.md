@@ -70,8 +70,8 @@ unnamed-opposition row are not, and the rule covers them the same way. File-wide
 row repeats it. Four cases that broke earlier versions:
 
 - `harness` is banned as a corporate verb. A `test harness` is a term of art: sqlite's
-  testing page uses it 11 times in the prose a tag strip produces, and needs zero edits at
-  any count.
+  testing page uses it 11 times as a whole word in the prose `shortlist.py --rows`
+  counts, 22 counting `harnesses` and the like, and needs zero edits at any count.
 - `the entire X` is an empty intensifier. `the entire filesystem` names a scope.
 - `robust` is an empty adjective. `robust against malicious attack` carries a claim that
   contrasts with "robust in normal use", and flattening it loses the contrast.
@@ -121,9 +121,10 @@ whole protection: a licence to fix what looks wrong is a licence to rewrite anyt
 
 **The margins on good human prose are thin.** The Go FAQ's "We understand that this is a
 point of contention" reads like an invented adversary and is saved by the count. PEP 465
-reaches exactly 3 on `worth [X]` and is saved only by step 5. Both come out right,
-neither comes out right by much, and that is the reason for every clause above that says
-to stop rather than to edit.
+stands at 4 on the `worth [X]` row and at 7 on `useful`, both over the figure of 3, and
+is saved only by step 5 reading each one and finding every one literal. Neither comes out
+right by much, and that is the reason for every clause above that says to stop rather
+than to edit.
 
 The document-wide figure counts every surviving instance, row and family alike. The
 per-pattern figure of 3 governs a **row**, whether the row gives a string or describes a
@@ -163,8 +164,8 @@ test fixtures; code, code fences, identifiers (`surface()` is a function name); 
 tables drawn in characters, and anything else whose layout carries the meaning;
 **page furniture**, meaning running headers and footers, page numbers, tables of
 contents and boilerplate the format repeats rather than the author. An RFC in plain text
-carries the same header 28 times, and counted as prose it feeds Repeated signature phrase
-a signature nobody wrote.
+carries the same running header 27 times, and counted as prose it feeds Repeated
+signature phrase a signature nobody wrote.
 
 **Skip the region, not the file.** A contribution guide under any of its spellings
 (`CONTRIBUTING.md`, `CONTRIBUTE.md`, `CodingGuidelines`) is skipped **where it lists
@@ -369,12 +370,14 @@ them. That has happened. Counts in `sources/EVIDENCE.md`.
 
 **Step 5 is where the damage is prevented, and step 4 is where the finding is made.**
 Skipping step 4 changed no verdict across a twelve-document corpus. Skipping step 5, the
-one-at-a-time exemption call, would have damaged three human documents, each sitting
-exactly on the floor of 3. The margin on real human prose is one instance. **The script cannot reach a verdict.** `shortlist.py`
-covers two of the ten families. On one machine-drafted document it reported 7 candidates
-and 2 survivors and fired nothing, while the paragraph read condemned the same document.
-Every family below except the first two is found only by reading. A pass that runs the
-command and stops has not audited anything; it has approved everything.
+one-at-a-time exemption call, damages human prose outright. The `names`/`naming` row
+stands at 16 in Linux's `coding-style.rst` (14 `names`, 2 `naming`) and 10 in git's
+`CodingGuidelines`; the `useful` row at 5 in Linux's `submitting-patches.rst` and 7 in
+PEP 465. All are far over the figure of 3 and all are literal. Step 5 is the only thing
+standing between those documents and a rewrite. **The script cannot reach a verdict.** `shortlist.py`
+covers two of the ten families and only the rows that are strings. Every family below
+except the first two is found only by reading. A pass that runs the command and stops has
+not audited anything; it has approved everything.
 
 **Counting them.** A family fires at **4 or more surviving instances of one family in the
 document** and **1 or more per thousand words**. Both figures. They cross at 4000 words,
@@ -406,14 +409,14 @@ revision-pinned human documents in `sources/EVIDENCE.md`, none was a finding.
 
 ### Negation-then-correction
 
-**Recognition test.** Look at the negated half on its own. Can you point at it? It
+**Recognition test.** Look at the negated half on its own. Can you point at it?
 **Keep it** when the negated half is something named elsewhere in the document, or
-something a reader could actually do or type. It fires when the negated half exists only to be
-rejected: an abstraction that appears nowhere else (`a hunch`, `noise`, `a wish`,
-`guesswork`), which leaves the positive half saying itself twice.
+something a reader could actually do or type. **It fires** when the negated half exists
+only to be rejected: an abstraction that appears nowhere else (`a hunch`, `noise`,
+`a wish`, `guesswork`), which leaves the positive half saying itself twice.
 **Disposition.** Rewrite: keep the half that carries the claim and drop the other. Keep
 the pair when both halves denote something concrete, which is the ordinary case in
-reference prose and was 15 of 16 in the human corpus.
+reference prose and was 15 of 15 across the three revision-pinned documents.
 **Before.** `Workers are scheduled on queue depth, not on guesswork.`
 **After.** `Workers are scheduled on queue depth.`
 

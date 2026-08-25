@@ -42,6 +42,14 @@ No mocks. Real files on disk, read through the same parser in every test.
 import os
 import re
 import sys
+
+# Importing or running shortlist.py writes a __pycache__ beside it, and
+# test_the_skill_directory_ships_no_build_artifacts below asserts the skill directory
+# stays clean. run_tests.sh exports PYTHONDONTWRITEBYTECODE, but this file is also run
+# directly (see .claude/CLAUDE.md), where nothing would set it. Setting it here means the
+# guard reports real artifacts rather than ones the test run just created.
+sys.dont_write_bytecode = True
+
 import unittest
 from pathlib import Path
 
@@ -1106,24 +1114,53 @@ class StructuralDensityTest(unittest.TestCase):
                         "the threshold %d is at or under the measured human rate "
                         "%.2f, so human prose would fire" % (rate, measured))
 
-    def test_the_threshold_stays_consistent_with_the_file_own_worked_verdict(self):
-        """Raising the rate to 9 survived every test: nothing asserted that a
-        threshold must still let anything through. The file states that one family
-        fires on a named document at a named rate, so a threshold above that rate
-        contradicts the file, and a floor above that count does too."""
+    def test_the_thresholds_stay_consistent_with_the_worked_verdict(self):
+        """Raising a threshold until nothing fires, or lowering it until human
+        prose does, both survived earlier suites. The worked verdict in the
+        evidence file is on a revision-pinned human document that must come out
+        clean, so the floors have to sit above every count it records."""
         floor, rate = self.numbers()
         text = flowed(self.evidence)
-        m = re.search(r"fires at (\d+) instances and ([\d.]+) per thousand", text)
-        self.assertIsNotNone(m, "the file states no worked verdict to check against")
-        surviving, stated = int(m.group(1)), float(m.group(2))
-        self.assertLessEqual(
-            rate, stated,
-            "the rate is %d per thousand but the file says a family fires on its "
-            "worked document at %.1f, so nothing would fire" % (rate, stated))
-        self.assertLessEqual(
-            floor, surviving,
-            "the floor is %d but the file's own worked verdict counts %d surviving"
-            % (floor, surviving))
+        self.assertIn("Nothing fires.", text,
+                      "the worked verdict no longer states an outcome")
+        self.assertIn("No row reaches 3 after\nthe exemption, no family reaches 4"
+                      .replace("\n", " "), text,
+                      "the worked verdict does not name the floors it clears")
+        stated_floor = int(re.search(r"no family reaches (\d+)", text).group(1))
+        self.assertEqual(
+            floor, stated_floor,
+            "the family floor is %d but the worked verdict clears %d; one of them "
+            "is stale" % (floor, stated_floor))
+        row_floor = int(re.search(r"No row reaches (\d+) after", text).group(1))
+        density = flowed(section(body(skill_text()), DENSITY))
+        self.assertEqual(
+            row_floor,
+            int(re.search(r"\*\*(\d+) or more surviving instances", density).group(1)),
+            "the row floor in the worked verdict does not match the density rule")
+        self.assertGreaterEqual(rate, 1)
+
+    def test_the_corpus_totals_add_up(self):
+        """`51 row matches` shipped for a round against a real total of 43. Every
+        total in the evidence file is a sum of parts the same file states, so the
+        sums are checked rather than trusted."""
+        text = flowed(self.evidence)
+        total, first_three, fourth = (int(x) for x in re.search(
+            r"\*\*(\d+) row matches\*\* \((\d+) across the first three, (\d+) in",
+            text).groups())
+        self.assertEqual(first_three + fourth, total,
+                         "%d + %d is %d, but the file says %d"
+                         % (first_three, fourth, first_three + fourth, total))
+        candidates = int(re.search(r"\*\*(\d+) shortlist candidates\*\*", text).group(1))
+        three = int(re.search(r"reports \*\*(\d+) candidate\s*matches\*\*",
+                              text).group(1))
+        adds = int(re.search(r"adds (\d+) more candidates", text).group(1))
+        self.assertEqual(three + adds, candidates,
+                         "%d + %d is %d, but the file says %d candidates"
+                         % (three, adds, three + adds, candidates))
+        explained = int(re.search(r"(?:^|\W)(\w+) are instructional contrasts",
+                                  text).group(1).replace("Fourteen", "14"))
+        self.assertEqual(explained + 1, three,
+                         "%d candidates, %d accounted for" % (three, explained))
 
     def test_the_human_corpus_figures_are_internally_consistent(self):
         """Inflating the corpus match count survived every test."""
@@ -1439,47 +1476,67 @@ class MutationGuardTest(unittest.TestCase):
                       "no instruction for the case where the plain version needs a "
                       "fact the author does not have")
 
-    def test_the_stated_measurements_are_reproducible_from_this_repository(self):
-        """Changing `16 shortlist matches` to 1600 survived every test. The README
-        figures are recomputed here from the shipped script; the human-corpus
-        figures cannot be, and the evidence file has to say so rather than imply
-        otherwise."""
-        text = flowed((SKILL_DIR / EVIDENCE).read_text())
+    def test_every_fixture_figure_recomputes_from_the_shipped_script(self):
+        """The evidence table quotes measurements. The rows for documents that
+        ship in this checkout must reproduce exactly, with no network and no pull,
+        or the file is asserting numbers nobody can check."""
+        import subprocess
+        evidence = (SKILL_DIR / EVIDENCE).read_text()
+        rows = [[c.strip() for c in line.strip("|").split("|")]
+                for line in evidence.splitlines() if line.startswith("|")]
+        checked = 0
+        for row in rows:
+            if len(row) != 5:
+                continue
+            m = re.search(r"`([\w.-]+)` fixture", row[0])
+            if not m:
+                continue
+            path = FIXTURES / m.group(1)
+            self.assertTrue(path.is_file(), "%s is quoted but absent" % m.group(1))
+            out = subprocess.run(
+                [sys.executable, str(SKILL_DIR / "shortlist.py"), "--rows", str(path)],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                check=True).stdout
+            words = int(re.search(r"(\d+) editable words", out).group(1))
+            matches, distinct = re.search(r"(\d+) row matches across (\d+)",
+                                          out).groups()
+            self.assertEqual(
+                [str(words), matches, distinct], [row[1], row[2], row[3]],
+                "%s: the table says %s words / %s matches / %s rows; the shipped "
+                "script says %d / %s / %s"
+                % (m.group(1), row[1], row[2], row[3], words, matches, distinct))
+            checked += 1
+        self.assertGreaterEqual(checked, 4,
+                                "only %d fixture rows in the table are checkable "
+                                "without a network pull" % checked)
+
+    def test_no_figure_anywhere_is_derived_from_this_repository_readme(self):
+        """The overfitting defect in its last location. Figures taken from this
+        repository's own README went stale whenever somebody edited it for an
+        unrelated reason, and took a test with them. Three separate rounds removed
+        one instance each; this forbids the fourth."""
         readme = REPO / "README.md"
         if not readme.is_file():
-            self.skipTest("no README.md to measure")
+            self.skipTest("no README.md to compare against")
         import subprocess
         out = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "shortlist.py"), str(readme)],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True).stdout
-        words = int(re.search(r"(\d+) editable words", out).group(1))
-        matches = int(re.search(r"(\d+) shortlist matches", out).group(1))
-        stated_words = int(re.search(r"has \*\*(\d+) editable words\*\*", text).group(1))
-        stated_matches = int(re.search(r"and \*\*(\d+)\s*candidate\s*matches\*\*",
-                                       text).group(1))
-        self.assertEqual(stated_words, words,
-                         "the file states %d editable words for the README; the "
-                         "shipped script says %d" % (stated_words, words))
-        self.assertEqual(stated_matches, matches,
-                         "the file states %d candidate matches for the README; the "
-                         "shipped script says %d" % (stated_matches, matches))
-        surviving = int(re.search(r"fires at (\d+) instances", text).group(1))
-        words = stated_words
-        self.assertLessEqual(surviving, matches)
-        self.assertEqual(
-            float(re.search(r"instances and ([\d.]+) per thousand", text).group(1)),
-            round(1000.0 * surviving / words, 1),
-            "the stated README rate is not surviving instances over editable words")
-        self.assertIn("not stated here", text,
-                      "the file states a document-wide verdict for a document whose "
-                      "paragraph read no command reproduces")
-        self.assertIn("no command here reproduces any of them",
+            [sys.executable, str(SKILL_DIR / "shortlist.py"), "--rows", str(readme)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            check=True).stdout
+        derived = set(re.findall(r"(\d+) editable words", out))
+        derived |= set(re.findall(r"(\d+) row matches across (\d+)", out)[0])
+        text = flowed(body(skill_text())) + flowed((SKILL_DIR / EVIDENCE).read_text())
+        for number in sorted(derived):
+            if len(number) < 3:
+                continue
+            self.assertNotIn(
+                number, text,
+                "the figure %r is a current measurement of this repository's README, "
+                "and quoting it couples the skill to a file that changes for reasons "
+                "unrelated to it" % number)
+        self.assertIn("No figure here comes from this repository's own README.",
                       flowed((SKILL_DIR / EVIDENCE).read_text()),
-                      "figures from documents outside this repository are presented "
-                      "as if a reader could check them")
-        self.assertNotIn("2354 editable words", flowed(self.body),
-                         "SKILL.md grades this repository's own README again, so a "
-                         "session auditing it reads the answer before doing the work")
+                      "the decoupling is not stated, so it will be undone")
 
     def test_every_url_points_at_a_source_this_file_actually_names(self):
         """Repointing the pull at example.invalid survived every test."""
@@ -1738,6 +1795,28 @@ class ShortlistScriptTest(unittest.TestCase):
         printed 4."""
         real = self.run_on("One.\n\n---\n\nTwo.\n\n---\n\nThree.\n", "--rows")
         self.assertIn("2 row matches", real, "real dividers still invisible:\n%s" % real)
+        self.assertIn("L3, L7", real,
+                      "the dividers are on lines 3 and 7; reporting anything else "
+                      "means the match starts on the blank line before them:\n%s" % real)
+        # The `---` must sit after a BLANK line inside the fence, or the regex
+        # alone would exclude it and the strip would prove nothing.
+        fenced = self.run_on(
+            "Text here.\n\n```\nfirst: 1\n\n---\n\nsecond: 2\n```\n\nMore text.\n",
+            "--rows")
+        self.assertIn("0 row matches", fenced,
+                      "a `---` inside a fenced block counted as a section divider; "
+                      "the scan must run on stripped text, not the original:\n%s"
+                      % fenced)
+        indented = self.run_on(
+            "Text here.\n\n    first\n\n    ---\n\n    second\n\nMore text.\n",
+            "--rows")
+        self.assertIn("0 row matches", indented,
+                      "a `---` inside an indented code block counted:\n%s" % indented)
+        frontmatter = self.run_on(
+            "---\ntitle: x\n---\n\nBody text.\n\n---\n\nMore body.\n", "--rows")
+        self.assertIn("1 row matches", frontmatter,
+                      "frontmatter delimiters counted as dividers:\n%s" % frontmatter)
+        self.assertIn("L7", frontmatter)
         art = self.run_on("A diagram:\n\n    o---o---o\n\nEnd.\n", "--rows")
         self.assertIn("0 row matches", art, "ASCII art still fires:\n%s" % art)
         setext = self.run_on("Heading\n---\n\nBody.\n", "--rows")
@@ -1832,7 +1911,7 @@ class LoadBearingClaimTest(unittest.TestCase):
         # What the tooling can and cannot settle.
         "**Step 5 is where the damage is prevented, and step 4 is where the "
         "finding is made.**",
-        "The margin on real human prose is one instance.",
+        "Step 5 is the only thing standing between those documents and a rewrite.",
         "**The script cannot reach a verdict.**",
         "A pass that runs the command and stops has not audited anything; it has "
         "approved everything.",
@@ -1883,7 +1962,7 @@ class LoadBearingClaimTest(unittest.TestCase):
         "Keep the pair when both halves denote something concrete",
         "a troubleshooting list, and any run of headings a reader scans",
         "test fixtures",
-        "It fires when the negated half exists only to be rejected",
+        "**It fires** when the negated half exists\nonly to be rejected".replace("\n", " "),
         "**Vary the repairs.**",
         "**Use it on a draft that is about to be published, whoever wrote it**",
         "Being asked whether they used a model is not, at any density, on any count.",

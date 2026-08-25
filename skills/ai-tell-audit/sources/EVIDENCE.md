@@ -17,12 +17,16 @@ wrote them, which is what the exemption has to survive.
 
 Re-measured in round 5, after the counter changed from strings to rows and began merging
 overlapping spans: **24 row matches across the first three, 19 in the fourth, 0 surviving
-anywhere**, so none of them fires. Every earlier figure here was higher because one
-occurrence of `It is worth noting` counted twice and a row of eight synonyms counted as
-eight rows. Three rows individually clear the per-row figure of 3, and every one is exempt
-before any count: `names` 16 times in `coding-style.rst` and 10 in git as the plain noun
-("function names"), and `useful` 5 times in one Linux document, each scoped ("useful at
-this step"), which that row's own keep clause covers. That is what applying the
+anywhere**, so none of them fires. Every earlier figure here was higher, for three
+reasons since fixed: one occurrence of `It is worth noting` counted twice, a row of eight
+synonyms counted as eight rows, and RST heading underlines counted as thematic breaks.
+
+**Two rows clear the per-row figure of 3, in three of the four documents**, and every
+instance is exempt before any count: the `names`/`naming` row 16 times in
+`coding-style.rst` (14 `names`, 2 `naming`) and 10 in git's `CodingGuidelines`, all the
+plain noun or gerund ("function names", "array names", "naming convention"), and the
+`useful` row 5 times in `submitting-patches.rst`, each scoped ("useful at this step"),
+which that row's own keep clause covers. That is what applying the
 exemption first buys, and it is why the exemption is stated above this paragraph rather
 than below. sqlite's "How SQLite Is Tested" is the fifth regression document and is
 deliberately **not** in these totals: it is HTML with no revision id, and no command here
@@ -30,22 +34,28 @@ turns it into text reproducibly.
 
 ## Where the structural figures come from
 
-**Where the figures come from.** Both counts below are printed by the shipped script, so
-a reader can rerun them. The three revision-pinned human documents in the density section
-come to **13,560 editable words**; `shortlist.py --rows` reports **15 candidate
+Both counts below are printed by the shipped script, so a reader who pulls the documents
+can rerun them. The three revision-pinned human documents in the density section come to
+**13,560 editable words**; `shortlist.py --rows` reports **15 candidate
 matches**, and read one by one **0 surviving instances: 0.0 per thousand words**.
 Fourteen are instructional contrasts of the form `octal escape sequences, not
 hexadecimal`, where both halves are things a reader could type; the fifteenth is a grep
 artefact. `coding-style.rst` adds 8 more candidates at 1.4 per thousand, every one an
 instructional contrast (`comments tell WHAT your code does, not HOW`), and 0 surviving.
 
-The README those tables cleared has **2354 editable words** and **16 candidate
-matches**. Read one by one, 4 are negation-then-correction and 3 are comparative
-aphorism. So negation-then-correction fires at 4 instances and 1.7 per thousand, and
-comparative aphorism does not, standing at 3 against a floor of 4. What the other eight
-families add to that document is deliberately **not stated here**: reaching it needs the
-step 4 paragraph read, and no command reproduces a paragraph read. A number nobody can
-rerun is the thing the Unsourced precision family is about.
+**No figure here comes from this repository's own README.** Earlier versions quoted its
+word count and its verdict. That file changes for reasons unrelated to this skill, so
+every such figure went stale on somebody else's commit and took a test with it. A skill
+that grades a moving target grades itself.
+
+The worked verdict below uses `coding-style.rst` instead, pinned at v5.15. It is the
+hardest document in the corpus for the structural families: 8 shortlist candidates at 1.4
+per thousand, every one an instructional contrast, and five paragraphs of concession and
+rebuttal that an earlier version ordered deleted. Nothing fires. No row reaches 3 after
+the exemption, no family reaches 4, and the document-wide figure needs the step 4
+paragraph read, which no command reproduces. That last point is the honest limit: this
+file states no document-wide verdict for any document, because a number nobody can rerun
+is the thing the Unsourced precision family is about.
 
 ## History
 
@@ -56,8 +66,9 @@ turns a read-only preparation"); `reaching for` twice, `the tell` once, `worth [
 times. `CONTRIBUTING.md` scored highest at 6 hits, all inside its own banned-word list.
 
 A later pass found the opposite failure, and it is the reason for the structural section.
-The lexical tables alone cleared a README of 2354 editable words. Two readers, each given
-the principle and no list of exclusions, reported forty constructions in it. Applying the
+The lexical tables alone cleared a README that two readers, each given the principle and
+no list of exclusions, then reported forty constructions in. No count from that document
+is quoted anywhere in this skill, for the reason given above. Applying the
 exemption, rule zero, and the recognition tests to those forty leaves one family over
 threshold and the document-wide figure over threshold, which is a smaller finding than
 forty and the correct one: unprimed readers over-flag, and the exemption architecture
@@ -67,9 +78,9 @@ property of sentence construction.
 Five human regression documents, all damaged by earlier versions: Linux
 `submitting-patches.rst`, git `CodingGuidelines`, curl `CONTRIBUTE.md`, sqlite's "How
 SQLite Is Tested", and Linux `coding-style.rst`. Each must come out with zero edits, and
-each does: 51 row matches and 23 shortlist candidates across the revision-pinned four, 0
-surviving either way. sqlite is the hardest,
-with `harness` 11 times as a term of art in the text a tag strip produces, which without
+each does: **43 row matches** (24 across the first three, 19 in `coding-style.rst`) and
+**23 shortlist candidates** across the revision-pinned four, 0 surviving either way. sqlite is the hardest,
+with `harness` 11 times as a whole word in the text a tag strip produces, which without
 the exemption is a dense row aimed straight at the damage. A fifth document joined the
 corpus in round 3: Linux `coding-style.rst` at v5.15, whose five concession-and-rebuttal
 paragraphs an earlier version of this file ordered deleted.
@@ -91,7 +102,10 @@ It was withdrawn for three reasons, each fatal on its own:
   distinct rows. The rule would not have fired on them either.
 
 What survives is the measurement of short human prose, which is what the rows have to
-stay clear of. Run `shortlist.py --rows` to reproduce any line.
+stay clear of. Run `shortlist.py --rows` to reproduce any line. The four fixture rows reproduce from
+this checkout alone; the rest need the pull first. PEP 465 is measured from the **rendered
+page** at `peps.python.org`, not the `.rst` source, which gives 9454 words for the same 41
+matches and 8 rows.
 
 | Document | Editable words | Row matches | Distinct rows | Surviving |
 |-|-|-|-|-|
@@ -102,7 +116,7 @@ stay clear of. Run `shortlist.py --rows` to reproduce any line.
 | `testing-methodology.rst` fixture | 412 | 19 | 5 | 0 |
 | curl `BUGS.md` at 8.4.0 | 2041 | 1 | 1 | 0 |
 | git `maintain-git` at v2.42.0 | 2601 | 3 | 2 | 0 |
-| PEP 465 | 10309 | 41 | 8 | 0 |
+| PEP 465, rendered page at peps.python.org | 10309 | 41 | 8 | 0 |
 | postgres nbtree README at REL_16 | 10758 | 28 | 4 | 0 |
 
 ## What is not reproducible
