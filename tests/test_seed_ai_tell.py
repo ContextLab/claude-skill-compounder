@@ -71,7 +71,11 @@ DISPOSITIONS = "## Three dispositions"
 KEEP = "## Keep by default"
 AUTHORSHIP = "## Never a verdict on authorship"
 STRUCTURAL = "## Structural families: what no word search catches"
-CURRENCY = "## How to refresh the catalogue"
+# The refresh procedure and the evidence narrative both live beside SKILL.md now:
+# a session auditing a document needs the rules, not their provenance, and a reader
+# who stops early must not be stopping before a rule.
+EVIDENCE = "sources/EVIDENCE.md"
+REFRESH = "sources/REFRESH.md"
 
 # Where the covering clause for each corpus pattern has to live.
 EXEMPT_REGION, CATALOGUE_REGION, KEEP_REGION = "exemption", "catalogue", "keep"
@@ -444,6 +448,21 @@ class RuleOrderingTest(unittest.TestCase):
                        "In reStructuredText it underlines a heading"):
             self.assertIn(clause, text, "missing exemption example: %r" % clause)
 
+    def test_keep_by_default_precedes_the_catalogue_it_exempts(self):
+        """A reviewer reading the file the way a working session reads it stopped
+        before line 406 and never opened `Keep by default`, which is the only place
+        the concession-versus-fabrication recognition test appears in full. The
+        verdict came out right by luck. An exemption a reader reaches after the
+        rows it exempts is an exemption that does not run."""
+        keep, _ = section_span(self.body, KEEP)
+        first_row = self.body.find("\n|-|-|\n")
+        self.assertNotEqual(first_row, -1, "no catalogue table found")
+        self.assertLess(keep, first_row,
+                        "`Keep by default` sits after the first catalogue table, so "
+                        "the rows are applied before their exemptions are read")
+        structural, _ = section_span(self.body, STRUCTURAL)
+        self.assertLess(keep, structural)
+
     def test_rule_zero_precedes_the_whole_catalogue(self):
         rule_zero, _ = section_span(self.body, RULE_ZERO)
         first_row = self.body.find("\n|-|-|\n")
@@ -458,11 +477,21 @@ class RuleOrderingTest(unittest.TestCase):
         text = flowed(section(self.body, DENSITY))
         rate = int(re.search(r"reach (\d+) per thousand words", text).group(1))
         length = int(re.search(r"at least (\d+)\s*editable words", text).group(1))
-        meet = int(re.search(r"meet at exactly (\d+) instances", text).group(1))
-        self.assertEqual(rate * length // 1000, meet,
+        step = int(re.search(r"at 1000\s*(\w+) instances do", text)
+                   .group(1).replace("six", "6"))
+        self.assertEqual(rate * length // 1000, step,
                          "%d per thousand over %d words is %d instances, but the "
-                         "file says they meet at %d"
-                         % (rate, length, rate * length // 1000, meet))
+                         "file says %d fire at the boundary"
+                         % (rate, length, rate * length // 1000, step))
+        self.assertIn("There is a step at the boundary", text,
+                      "the file claims a smooth boundary it does not have")
+        breadth = int(re.search(r"At \*\*(\d+) or more\*\*", text).group(1))
+        self.assertGreaterEqual(breadth, 6,
+                                "a breadth floor of %d is under the highest raw "
+                                "distinct-row count measured in human prose" % breadth)
+        self.assertIn("under 1000 editable words", text,
+                      "the breadth rule states no length window, so it would also "
+                      "fire on long documents where the rate already applies")
         self.assertLessEqual(rate, 10,
                              "a document-wide rate of %d per thousand is denser than "
                              "any measured document, so it can never fire" % rate)
@@ -617,10 +646,16 @@ class ConcessionAndRebuttalTest(unittest.TestCase):
             self.assertNotIn("any unnamed opposition", pattern,
                              "row %r still claims every unnamed opposition" % pattern)
         rows = [p for p, _ in catalogue_rows(self.body) if "unnamed opposition" in p]
-        self.assertEqual(len(rows), 2, "expected the two narrowed rows, got %r" % rows)
+        self.assertEqual(len(rows), 1,
+                         "expected exactly one narrowed row; the fast-path copy was "
+                         "removed because a second copy is a second threshold: %r" % rows)
         for pattern in rows:
-            self.assertIn("never rebuts", pattern,
-                          "row %r does not say which opposition it means" % pattern)
+            self.assertIn("unanswered within three sentences", pattern,
+                          "row %r does not say which opposition it means, or states a "
+                          "different window from Keep by default" % pattern)
+        keep = flowed(section(self.body, KEEP))
+        self.assertIn("read the next three sentences", keep,
+                      "the row and the Keep clause use different windows")
 
     def test_the_keep_clause_gives_a_recognition_test_a_reader_can_run(self):
         keep = flowed(section(self.body, KEEP))
@@ -994,6 +1029,7 @@ class StructuralDensityTest(unittest.TestCase):
 
     def setUp(self):
         self.section = section(body(skill_text()), STRUCTURAL)
+        self.evidence = (SKILL_DIR / EVIDENCE).read_text()
 
     def numbers(self):
         floor = re.search(r"(\d+) or more surviving instances of one family",
@@ -1013,17 +1049,19 @@ class StructuralDensityTest(unittest.TestCase):
                       "the rule must say the two figures are joint, not either/or")
 
     def test_the_rate_is_justified_against_a_measurement(self):
-        text = flowed(self.section)
+        text = flowed(self.evidence)
         for evidence in ("13,560 editable words", "0.0 per thousand"):
             self.assertIn(evidence, text,
                           "the structural rate cites no measurement: missing %r"
                           % evidence)
+        self.assertIn(EVIDENCE, flowed(self.section) + flowed(body(skill_text())),
+                      "SKILL.md does not say where its figures came from")
 
     def test_the_measured_human_baseline_sits_under_the_threshold(self):
         """The number is only defensible if the human corpus clears it."""
         _, rate = self.numbers()
         measured = float(re.search(r"surviving instances?: ([\d.]+) per thousand",
-                                   flowed(self.section)).group(1))
+                                   flowed(self.evidence)).group(1))
         self.assertLess(measured, rate,
                         "the threshold %d is at or under the measured human rate "
                         "%.2f, so human prose would fire" % (rate, measured))
@@ -1034,7 +1072,7 @@ class StructuralDensityTest(unittest.TestCase):
         fires on a named document at a named rate, so a threshold above that rate
         contradicts the file, and a floor above that count does too."""
         floor, rate = self.numbers()
-        text = flowed(self.section)
+        text = flowed(self.evidence)
         m = re.search(r"fires at (\d+) instances and ([\d.]+) per thousand", text)
         self.assertIsNotNone(m, "the file states no worked verdict to check against")
         surviving, stated = int(m.group(1)), float(m.group(2))
@@ -1049,7 +1087,7 @@ class StructuralDensityTest(unittest.TestCase):
 
     def test_the_human_corpus_figures_are_internally_consistent(self):
         """Inflating the corpus match count survived every test."""
-        text = flowed(self.section)
+        text = flowed(self.evidence)
         candidates = int(re.search(r"\*\*(\d+) candidate\s*matches\*\*", text).group(1))
         surviving = int(re.search(r"\*\*(\d+) surviving instances", text).group(1))
         words = int(re.search(r"\*\*([\d,]+) editable words\*\*",
@@ -1066,9 +1104,41 @@ class StructuralDensityTest(unittest.TestCase):
             round(1000.0 * surviving / words, 1),
             "the stated human rate is not surviving instances over editable words")
 
+    def test_the_breadth_floor_clears_every_human_document_measured(self):
+        """The floor exists to catch short generated prose, and the whole risk is
+        that it also catches short human prose. The evidence table records the
+        surviving distinct-row count for every document measured; the floor has to
+        sit above every human one and below the machine one, or it is decoration.
+        """
+        floor = int(re.search(r"At \*\*(\d+) or more\*\*",
+                              flowed(section(body(skill_text()), DENSITY))).group(1))
+        rows = [c for line in self.evidence.splitlines() if line.startswith("|")
+                for c in [[x.strip() for x in line.strip("|").split("|")]]
+                if len(c) == 5 and c[4].strip("* ").isdigit()]
+        self.assertGreaterEqual(len(rows), 6,
+                                "the breadth table has lost its measurements: %r" % rows)
+        human = [int(c[4].strip("* ")) for c in rows if "machine" not in c[0]]
+        machine = [int(c[4].strip("* ")) for c in rows if "machine" in c[0]]
+        self.assertTrue(machine, "no machine-drafted document left to separate from")
+        self.assertGreater(floor, max(human),
+                           "a breadth floor of %d fires on a human document measured "
+                           "at %d surviving distinct rows" % (floor, max(human)))
+        self.assertLessEqual(floor, max(machine),
+                            "a breadth floor of %d is above the machine document at "
+                            "%d, so it can never fire" % (floor, max(machine)))
+
     def test_the_shortlist_is_not_sold_as_a_detector(self):
-        self.assertIn("shortlist", flowed(self.section).lower())
-        self.assertIn("not a detector", flowed(self.section).lower())
+        """The claim was stated three times in three places. It is stated once now,
+        so the one statement has to carry it: the script covers two of ten
+        families, a match is a candidate, and stopping after it approves
+        everything."""
+        text = flowed(self.section)
+        self.assertIn("shortlist", text.lower())
+        self.assertIn("The script cannot reach a verdict, and step 4 is where the "
+                      "finding is.", text)
+        self.assertIn("covers two of the ten families", text)
+        self.assertIn("Every\nmatch is still a candidate to read".replace("\n", " "),
+                      text)
 
 
 class CatalogueCurrencyTest(unittest.TestCase):
@@ -1084,14 +1154,15 @@ class CatalogueCurrencyTest(unittest.TestCase):
 
     def setUp(self):
         self.body = body(skill_text())
-        self.pointer = section(self.body, CURRENCY)
-        self.section = (SKILL_DIR / "sources" / "REFRESH.md").read_text()
+        self.pointer = flowed(self.body[:self.body.index("\n## ")])
+        self.section = (SKILL_DIR / REFRESH).read_text()
 
     def test_skill_md_still_points_at_the_moved_procedure(self):
-        """Moving it out must not lose it. The pointer carries the filename and
-        the reason it is not inline: it fires on a date, not on a publish."""
+        """Moving it out must not lose it. The banner is the pointer, and it is
+        the first thing under the title, so a reader who opens nothing else still
+        learns the catalogue has a review date and where the procedure lives."""
         self.assertIn("sources/REFRESH.md", self.pointer)
-        self.assertIn("fails closed", flowed(self.pointer))
+        self.assertIn("fails closed", self.pointer)
 
     def test_the_pull_is_guarded_against_an_unreachable_source(self):
         """Measured: `curl -s <unreachable> | jq -r ...` prints nothing and exits
@@ -1238,24 +1309,26 @@ class MutationGuardTest(unittest.TestCase):
     def lead(self, fix):
         return re.match(r"[A-Za-z]+", fix).group(0)
 
-    def test_a_prose_fast_path_row_cannot_contradict_the_row_it_summarises(self):
-        """CrossTableConsistencyTest compares backticked terms only, so flipping
-        the disposition on a row written as prose was invisible. Nine rows in this
-        file carry no backticked term."""
-        by_pattern = {}
+    def test_no_pattern_string_appears_in_two_rows(self):
+        """The fast path used to restate sixteen rows, which gave a hurried reader
+        a second copy of each and made the script double-count: one occurrence of
+        `Some would say` printed as two row matches, because the two tables spelled
+        it differently. Two real instances then reported as four and crossed a
+        floor of three. The table is gone; this keeps it gone."""
+        seen = {}
         for pattern, fix in self.rows:
-            by_pattern.setdefault(pattern, self.lead(fix))
-        for summary, full in self.FAST_PATH_PROSE.items():
-            self.assertIn(summary, by_pattern,
-                          "the fast path no longer carries %r" % summary)
-            matches = [(p, self.lead(f)) for p, f in self.rows if full in p]
-            self.assertTrue(matches, "no catalogue row contains %r any more" % full)
-            for pattern, verb in matches:
-                self.assertEqual(
-                    by_pattern[summary], verb,
-                    "the fast path says %s for %r but the catalogue says %s for %r; "
-                    "a hurried reader never reaches the second one"
-                    % (by_pattern[summary], summary, verb, pattern))
+            for term in backticked(pattern):
+                seen.setdefault(term.strip().lower(), []).append(pattern)
+        duplicated = {t: v for t, v in seen.items() if len(v) > 1}
+        self.assertEqual(duplicated, {},
+                         "these pattern strings appear in more than one row, so each "
+                         "occurrence is counted twice: %s" % duplicated)
+
+    def test_prose_rows_are_unique_too(self):
+        """The same defect for rows that carry no backticked string."""
+        prose = [p for p, _ in self.rows if not backticked(p)]
+        self.assertEqual(sorted(prose), sorted(set(prose)),
+                         "a prose row is stated twice: %r" % prose)
 
     def test_no_catalogue_table_can_be_deleted_unnoticed(self):
         """A floor of 40 rows against 60 shipped means a whole table could go."""
@@ -1313,8 +1386,9 @@ class MutationGuardTest(unittest.TestCase):
     def test_the_stated_measurements_are_reproducible_from_this_repository(self):
         """Changing `16 shortlist matches` to 1600 survived every test. The README
         figures are recomputed here from the shipped script; the human-corpus
-        figures cannot be, and the file has to say so rather than imply otherwise."""
-        text = flowed(section(self.body, STRUCTURAL))
+        figures cannot be, and the evidence file has to say so rather than imply
+        otherwise."""
+        text = flowed((SKILL_DIR / EVIDENCE).read_text())
         readme = REPO / "README.md"
         if not readme.is_file():
             self.skipTest("no README.md to measure")
@@ -1343,9 +1417,13 @@ class MutationGuardTest(unittest.TestCase):
         self.assertIn("not stated here", text,
                       "the file states a document-wide verdict for a document whose "
                       "paragraph read no command reproduces")
-        self.assertIn("no command here reproduces them", flowed(self.body),
+        self.assertIn("no command here reproduces them",
+                      flowed((SKILL_DIR / EVIDENCE).read_text()),
                       "figures from documents outside this repository are presented "
                       "as if a reader could check them")
+        self.assertNotIn("2354 editable words", flowed(self.body),
+                         "SKILL.md grades this repository's own README again, so a "
+                         "session auditing it reads the answer before doing the work")
 
     def test_every_url_points_at_a_source_this_file_actually_names(self):
         """Repointing the pull at example.invalid survived every test."""
@@ -1581,7 +1659,7 @@ class ShortlistScriptTest(unittest.TestCase):
         doc = (SKILL_DIR / "shortlist.py").read_text()
         stated = re.search(r"In ([\d,]+) editable words", doc)
         self.assertIsNotNone(stated, "the script no longer cites the corpus")
-        self.assertIn(stated.group(1), flowed(body(skill_text())),
+        self.assertIn(stated.group(1), flowed((SKILL_DIR / EVIDENCE).read_text()),
                       "the script cites %r words of human prose and SKILL.md does "
                       "not state that figure anywhere" % stated.group(1))
 
@@ -1667,6 +1745,17 @@ class LoadBearingClaimTest(unittest.TestCase):
         "approved everything.",
         # Scope of rule zero and of the exemption.
         "Skip the region, not the file.",
+        # Round 4: breadth, the only rule that sees short generated prose.
+        "**Breadth, for a document under 1000 editable words.**",
+        "Count the **distinct rows and families with at least one surviving instance**",
+        "That is the discrimination: breadth, not depth.",
+        # The concession test's stated limit, and its one window.
+        "**What this test does not do.** It separates answered from unanswered, "
+        "never real from invented.",
+        "if it is fabricated and answered, this skill does not, and does not pretend "
+        "to.",
+        # Thin margins on real human prose.
+        "**The margins on good human prose are thin.**",
         # Page furniture: a plain-text RFC repeats its header 28 times.
         "**page furniture**, meaning running headers and footers",
         # The FAQ exemption. Without it the family orders every question heading in
@@ -1697,25 +1786,40 @@ class LoadBearingClaimTest(unittest.TestCase):
         "Being asked whether they used a model is not, at any density, on any count.",
         "**The em dash is a weak signal**",
         # Concession and rebuttal: the round-3 damage case.
-        "unnamed opposition the document never rebuts",
+        "unnamed opposition unanswered within three sentences",
         "read the next three sentences. Do they give a reason the view is wrong "
         "that a reader could check?**",
         "the correct output on that file is zero edits",
         # A row that describes a construction needs a counting unit.
         "**A row that describes a construction counts once per paragraph**",
         # The measured claims about human prose.
-        "**32 row matches across the first three, 19 in the fourth, 0 surviving anywhere**",
+
+    )
+
+    # Claims that moved to sources/EVIDENCE.md when the evidence narrative did.
+    EVIDENCE_CLAIMS = (
+        "**32 row matches across the first three, 19 in the fourth, 0 surviving "
+        "anywhere**",
         "**13,560 editable words**",
+        "no command here reproduces them",
     )
 
     def setUp(self):
         self.body = flowed(body(skill_text()))
+        self.evidence = flowed((SKILL_DIR / EVIDENCE).read_text())
 
     def test_every_load_bearing_claim_is_present_verbatim(self):
         missing = [c for c in self.CLAIMS if c not in self.body]
         self.assertEqual(missing, [],
                          "these claims are gone or reworded, and each one changes "
                          "what the skill does:\n  " + "\n  ".join(missing))
+
+    def test_the_moved_evidence_claims_are_present_verbatim(self):
+        """Moving a claim out of SKILL.md must not unpin it."""
+        missing = [c for c in self.EVIDENCE_CLAIMS if c not in self.evidence]
+        self.assertEqual(missing, [],
+                         "these claims are gone from sources/EVIDENCE.md:\n  "
+                         + "\n  ".join(missing))
 
     def test_the_negations_have_not_been_flipped(self):
         """A mutation that reverses a claim usually leaves its length alone, so
@@ -1729,6 +1833,7 @@ class LoadBearingClaimTest(unittest.TestCase):
             ("is left alone", "is edited anyway"),
             ("the request decides, not the file", "the file decides, not the request"),
             ("em dash is a weak signal", "em dash is a strong signal"),
+            ("breadth, not depth", "depth, not breadth"),
         ):
             self.assertIn(phrase, self.body, "missing %r" % phrase)
             self.assertNotIn(forbidden, self.body.lower(),

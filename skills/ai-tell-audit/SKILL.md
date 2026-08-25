@@ -97,37 +97,34 @@ would hide it in a long file. The document as a whole is a finding when survivin
 instances **across all patterns reach 6 per thousand words in a document of at least 1000
 editable words**, even when no single pattern does: the pile-up is spread rather than
 concentrated. Below 1000 words the rate is noise, and one bulleted list carries it: a
-765-word pull request description reached 12 per thousand off a single list. The rate and
-the length meet at exactly 6 instances, so there is no step at the boundary. **The narrower rule always wins.**
-A spread finding never licenses editing an instance whose own pattern or family is under
-threshold; what it licenses is the note. Say the count, the rate, and the three heaviest
-families, and hand it back. **Under every figure, an instance below threshold is left
-alone**, even where the plain version would read better. That is step 7, and it is the
+765-word pull request description reached 12 per thousand off a single list. There is a
+step at the boundary, and it is deliberate: at 999 words nothing fires on rate, at 1000
+six instances do. Short documents are covered by breadth instead.
+
+**Breadth, for a document under 1000 editable words.** Count the **distinct rows and
+families with at least one surviving instance**. At **8 or more**, the document is a
+finding whatever any single count says. Many different rows each firing once is what
+short generated prose looks like, and no other rule here can see it: a 368-word
+machine-drafted README carried 24 surviving distinct rows and produced zero edits under
+every other figure, because each row sat at 1 or 2 against a floor of 3. The highest
+surviving breadth in any human document measured is 0, and the highest raw distinct-row
+count under 1000 words is 5, every one exempt; the 765-word pull request body above is 9
+instances in one row, so breadth leaves it alone. That is the discrimination: breadth,
+not depth. The disposition is the note, not the edit, exactly as for the spread rule.
+Counts are in `sources/EVIDENCE.md`.
+
+**The narrower rule always wins.** A spread finding never licenses editing an instance
+whose own pattern or family is under threshold; what it licenses is the note. Say the
+count, the rate, and the three heaviest families, and hand it back. **Under every figure,
+an instance below threshold is left alone**, even where the plain version would read
+better. That is step 7, and it is the
 whole protection: a licence to fix what looks wrong is a licence to rewrite anything.
 
-Measured with `shortlist.py --rows` on four human documents pinned by revision, so every
-figure below can be rerun: Linux `submitting-patches.rst` at 83f71fbc66fb, git
-`CodingGuidelines` at 570e1e0d0ff6, curl `CONTRIBUTE.md` at 7e1001bcd699, and Linux
-`coding-style.rst` at tag v5.15. Together **13,560 editable words** for the first three,
-**5717** for the fourth. All four are external to this repository, so a rerun needs the
-pull first, and all four are human-authored rather than pre-LLM: curl's `CONTRIBUTE.md`
-at that pin carries a section on AI use added well after 2022. The claim is that people
-wrote them, which is what the exemption has to survive.
-
-**32 row matches across the first three, 19 in the fourth, 0 surviving anywhere**, so
-none of them fires. Four rows individually clear the per-row figure of 3, and every one is
-exempt before any count: `names` 14 times in `coding-style.rst` and 10 in git as the plain
-noun ("function names"), and `useful` 5 times in one Linux document, each scoped ("useful
-at this step"), which that row's own keep clause covers. That is what applying the
-exemption first buys, and it is why the exemption is stated above this paragraph rather
-than below. sqlite's "How SQLite Is Tested" is the fifth regression document and is
-deliberately **not** in these totals: it is HTML with no revision id, and no command here
-turns it into text reproducibly.
-
-Two older figures survive in this file, a 3715-word machine-register file carrying
-`load-bearing` 3 times and a 264-word PR body at 76 per thousand. They come from
-documents that are not in this repository and **no command here reproduces them**. They
-are recorded as history, not as evidence.
+**The margins on good human prose are thin.** The Go FAQ's "We understand that this is a
+point of contention" reads like an invented adversary and is saved by the count. PEP 465
+reaches exactly 3 on `worth [X]` and is saved only by step 5. Both come out right,
+neither comes out right by much, and that is the reason for every clause above that says
+to stop rather than to edit.
 
 The document-wide figure counts every surviving instance, row and family alike. The
 per-pattern figure of 3 governs a **row**, whether the row gives a string or describes a
@@ -227,32 +224,55 @@ version cannot state the same claim, keep the original. **Vary the repairs.** Tu
 substitution twice in a row: six dashes get a period, a comma, a parenthesis, a rebuilt
 clause, a colon, and one dash kept.
 
-## Fast path
+## Keep by default
 
-For a GitHub comment, a PR description, or anything short. Density still applies.
-The headed structural families are deliberately not summarised here: they are counted by
-a different rule, and a row that repeated one would give a hurried reader a second,
-looser threshold for the same construction.
+Flag at most; do not enforce.
 
-| Tell | Fix |
-|-|-|
-| `load-bearing` | Rewrite: name what depends on what |
-| `quietly` | Delete the adverb, or say who missed it |
-| `reaching for`, `reaches for` | Rewrite: "tries for", "wants" |
-| `worth [X]`, all of it | Delete. "Worth noting that X" is X |
-| `the tell`, `that's the tell` | Rewrite: say what the thing shows |
-| `lives`, `shape`, `surface` as a verb | Rewrite: "is", "structure", "report" |
-| `delve`, `dive into` | Rewrite: "look at", or cut the sentence whole |
-| `robust`, `seamless`, `comprehensive` | Rewrite: name the property |
-| `underscoring the importance of` | Delete the trailing clause |
-| `not just X but Y` and other clefts | Rewrite: drop the cleft, keep both claims plainly |
-| `Here's the thing:`, `Let that sink in.`, `Nobody talks about this.` | Delete. No content |
-| One-sentence paragraphs throughout | Rewrite: rejoin into real paragraphs |
-| A bolded lead-in on every bullet | Rewrite: bold the two that need it, or none |
-| A rhetorical question you then answer | Rewrite as a statement |
-| A trailing engagement question | Delete |
-| `Most people I've talked to`, `everyone I've worked with` | Delete the sentence. You cannot name and link people you did not talk to |
-| `Some would say`, `critics argue`, unnamed opposition the document never rebuts | Rewrite: name them and link, or delete the sentence. A view the document does rebut with a specific reason is concession and rebuttal, which is Keep |
+**`real`, `a real X`, `the real problem`.** claudisms.ai calls this a preference, and in
+technical prose it usually carries information no synonym does. Three cases broken by
+rewriting: "your real name (sorry, no pseudonyms)" lost its requirement as "your actual
+name"; "collisions with shorter IDs a real possibility" became "a possibility" and
+understated the risk; "real temporary directories" names genuine versus simulated.
+
+**Concession and rebuttal.** A belief the reader may actually carry, stated in the
+reader's own terms and then answered, is the backbone of a rationale document. It is not
+an invented adversary, and it is usually the argument the paragraph exists to make.
+
+Recognition test: **read the next three sentences. Do they give a reason the view is
+wrong that a reader could check?** A mechanism, a measurement, a counterexample, or a
+rule all count. If they do, keep the opening, and do not count it. What fires is the
+adversary raised and dropped: a position stated so vaguely that nothing could rebut it
+(`critics argue`, `some would say`, with no content), or one the document never returns
+to. A second question separates them when the first is close: could a reader say whether
+they agree? `some people will claim that having 8-character indentations makes
+the code move too far to the right` is a position a reader can check themselves against.
+`Some would say this is controversial` is not.
+
+**What this test does not do.** It separates answered from unanswered, never real from
+invented. A document that manufactures four adversaries and then answers each with a
+real measurement clears completely. That is deliberate: prose that argues against a
+position with checkable reasons gives the reader what they came for, whoever first
+held the position, and no test a reader can actually run tells an invented belief from a
+common one. If the opposition is fabricated **and** unanswered, the row above catches it;
+if it is fabricated and answered, this skill does not, and does not pretend to.
+
+Linux `coding-style.rst` at v5.15 opens five paragraphs this way and answers every one
+within two sentences. An earlier version of this file read all five as unnamed opposition
+and ordered them deleted, seven surviving instances against a floor of 3. The passages
+are kept verbatim in `tests/fixtures/ai-tell-audit/concession-rebuttal.rst`, and the
+correct output on that file is zero edits.
+
+**The em dash is a weak signal**, the most-cited tell on discussion boards and also the
+most defended, since many humans have always used it heavily. claudisms.ai bans it; that
+is house style, not evidence. A paragraph thick with em dashes is a prompt to read the
+prose, never a finding. Same for emoji and for two dashes in a sentence.
+
+## The catalogue
+
+Rows, grouped by family. Every one is counted at 3 per document, and every one runs after
+the exemption and rule zero. Density still applies. The headed structural families are
+further down and are counted by a different rule.
+
 
 ### Placement and borrowed-domain metaphors
 | Pattern | Disposition |
@@ -300,7 +320,7 @@ invented opposition and is not counted here.
 | Pattern | Disposition |
 |-|-|
 | `most people I've talked to`, `everyone I've worked with`, `nobody I know` | Delete the sentence, or make the point with no population behind it |
-| `in my experience, most teams`, `a lot of folks`, `critics argue`, `some would say`, unnamed opposition the document never rebuts | Rewrite: name them and link, or delete the sentence. Read the next three sentences first: if they give a reason the view is wrong, this row does not apply |
+| `in my experience, most teams`, `a lot of folks`, `critics argue`, `some would say`, unnamed opposition unanswered within three sentences | Rewrite: name them and link, or delete the sentence. Read the next three sentences first: if they give a reason the view is wrong, this row does not apply. That window is the same one Keep by default uses |
 | A paragraph with no argument under it | Delete. Not rewritable |
 
 ### Corporate and consultant register
@@ -340,46 +360,9 @@ Weightier than any word row, because a structure repeats where a word does not.
 
 ## Structural families: what no word search catches
 
-Every row above is a row: a string, or one named construction, counted at 3 per document.
-The families here are properties of how a sentence or a paragraph is built. No table of
-strings reaches them, and a pass that runs only the tables above will clear a document
-that is thick with them. That happened: the lexical tables cleared a 2356-word README,
-and two readers given only the principle and no exemptions reported forty constructions
-in the same file.
-
-**Counting them.** A family fires at **4 or more surviving instances of one family in the
-document** and **1 or more per thousand words**. Both figures. They cross at 4000 words,
-so neither is idle: below that the floor of 4 binds, above it the rate does. The
-exemption and rule zero run first here, as everywhere, and no construction is governed by
-both a row and a family.
-
-**A worked example is not a licence.** The before and after under each family show what
-the repair looks like. They are not edits this file endorses making on a single instance.
-Nothing is edited until its family reaches both figures.
-
-**No After invents a fact.** Every after below is reachable from its before by deletion or
-by plainer wording. None introduces a number, a filename, a measurement or a name the
-before did not carry. An earlier version replaced `(inevitably) be wrong for your
-workload` with an invented worker count and an invented throughput figure, which is the
-harm this file exists to prevent, committed in its own examples. If the plain version
-needs a fact you do not have, the disposition is keep, not rewrite.
-
-**Where the figures come from.** Both counts below are printed by the shipped script, so
-a reader can rerun them. The three revision-pinned human documents in the density section
-come to **13,560 editable words**; `shortlist.py --rows` reports **15 candidate
-matches**, and read one by one **0 surviving instances: 0.0 per thousand words**.
-Fourteen are instructional contrasts of the form `octal escape sequences, not
-hexadecimal`, where both halves are things a reader could type; the fifteenth is a grep
-artefact. `coding-style.rst` adds 8 more candidates at 1.4 per thousand, every one an
-instructional contrast (`comments tell WHAT your code does, not HOW`), and 0 surviving.
-
-The README those tables cleared has **2354 editable words** and the same **16 candidate
-matches**. Read one by one, 4 are negation-then-correction and 3 are comparative
-aphorism. So negation-then-correction fires at 4 instances and 1.7 per thousand, and
-comparative aphorism does not, standing at 3 against a floor of 4. What the other eight
-families add to that document is deliberately **not stated here**: reaching it needs the
-step 4 paragraph read, and no command reproduces a paragraph read. A number nobody can
-rerun is the thing the Unsourced precision family is about.
+These are properties of how a sentence or a paragraph is built, so no table of strings
+reaches them, and a pass that runs only the rows above will clear a document thick with
+them. That has happened. Counts in `sources/EVIDENCE.md`.
 
 **The script cannot reach a verdict, and step 4 is where the finding is.** `shortlist.py`
 covers two of the ten families. On one machine-drafted document it reported 7 candidates
@@ -387,21 +370,32 @@ and 2 survivors and fired nothing, while the paragraph read condemned the same d
 Every family below except the first two is found only by reading. A pass that runs the
 command and stops has not audited anything; it has approved everything.
 
-**What the labels mean.** `shortlist.py` prints a label per match. `cleft`, `bare`,
-`semicolon` and `isnt-about` are all negation-then-correction, and so is `rather-than`,
-which has no negated half to look at: ask the recognition test of the rejected
-alternative instead. `comparative` is comparative aphorism. No other label maps to a
-family, because no other family is greppable.
+**Counting them.** A family fires at **4 or more surviving instances of one family in the
+document** and **1 or more per thousand words**. Both figures. They cross at 4000 words,
+so neither is idle: below that the floor of 4 binds, above it the rate does. The
+exemption and rule zero run first here, as everywhere, and no construction is governed by
+both a row and a family.
 
-**A shortlist is not a detector.** `python3 shortlist.py <file>` prints the
-editable word count and the candidate matches for the two greppable families, with
-paragraphs unwrapped first. Unwrapping is load bearing in two directions: this
-repository hard wraps at about 90 characters, so `is worth` and `more than a proposal`
-fall on separate lines where no line-based grep sees them, while a phrase straddling a
-blank line is two paragraphs and must never match. The script joins the first and keeps
-the second apart, and reports each match at the line it starts on. Every match still has to be
-read, because in the human corpus none of the 16 was a finding. The other eight families
-have no shortlist at all: read the paragraphs.
+**A worked example is not a licence**, and **No After invents a fact.** The pairs below
+show what a repair looks like, not an edit to make on a single instance: nothing is edited
+until its family reaches both figures. Every after is reachable from its before by
+deletion or plainer wording, and introduces no number, filename, measurement or name the
+before did not carry. An earlier version repaired `(inevitably) be wrong for your
+workload` into an invented worker count and an invented throughput figure, which is the
+harm this file exists to prevent, committed in its own examples. If the plain version
+needs a fact you do not have, the disposition is keep, not rewrite.
+
+**The script's labels.** `cleft`, `bare`, `semicolon`, `isnt-about` and `rather-than`
+are all negation-then-correction; `comparative` is comparative aphorism; nothing else
+maps to a family, because nothing else is greppable. `rather than` has no negated half,
+so ask its recognition test of the rejected alternative.
+
+**Why the script unwraps.** Hard-wrapped prose splits a phrase across lines, so
+`is worth` and `more than a proposal` are invisible to a line-based grep; a phrase
+straddling a blank line is two paragraphs and must never match. The script joins the
+first, keeps the second apart, and reports each match at the line it starts on. Every
+match is still a candidate to read: across the four revision-pinned human documents,
+none of the 23 was a finding.
 
 ### Negation-then-correction
 
@@ -512,67 +506,6 @@ number and make the claim without it.
 **Before.** `roughly 40% faster than the previous scheduler`
 **After.** `faster than the previous scheduler`
 
-## Keep by default
-
-Flag at most; do not enforce.
-
-**`real`, `a real X`, `the real problem`.** claudisms.ai calls this a preference, and in
-technical prose it usually carries information no synonym does. Three cases broken by
-rewriting: "your real name (sorry, no pseudonyms)" lost its requirement as "your actual
-name"; "collisions with shorter IDs a real possibility" became "a possibility" and
-understated the risk; "real temporary directories" names genuine versus simulated.
-
-**Concession and rebuttal.** A belief the reader may actually carry, stated in the
-reader's own terms and then answered, is the backbone of a rationale document. It is not
-an invented adversary, and it is usually the argument the paragraph exists to make.
-
-Recognition test: **read the next three sentences. Do they give a reason the view is
-wrong that a reader could check?** A mechanism, a measurement, a counterexample, or a
-rule all count. If they do, keep the opening, and do not count it. What fires is the
-adversary raised and dropped: a position stated so vaguely that nothing could rebut it
-(`critics argue`, `some would say`, with no content), or one the document never returns
-to. A second question separates them when the first is close: could a reader say whether
-they agree? `some people will claim that having 8-character indentations makes
-the code move too far to the right` is a position a reader can check themselves against.
-`Some would say this is controversial` is not.
-
-Linux `coding-style.rst` at v5.15 opens five paragraphs this way and answers every one
-within two sentences. An earlier version of this file read all five as unnamed opposition
-and ordered them deleted, seven surviving instances against a floor of 3. The passages
-are kept verbatim in `tests/fixtures/ai-tell-audit/concession-rebuttal.rst`, and the
-correct output on that file is zero edits.
-
-**The em dash is a weak signal**, the most-cited tell on discussion boards and also the
-most defended, since many humans have always used it heavily. claudisms.ai bans it; that
-is house style, not evidence. A paragraph thick with em dashes is a prompt to read the
-prose, never a finding. Same for emoji and for two dashes in a sentence.
-
-## Worked example
-
-Ten documents written in one day: `load-bearing` 3 times across shipped skill files, the
-most frequent tell by a wide margin; `quietly` twice ("quietly assumes context", "quietly
-turns a read-only preparation"); `reaching for` twice, `the tell` once, `worth [X]` three
-times. `CONTRIBUTING.md` scored highest at 6 hits, all inside its own banned-word list.
-
-A later pass found the opposite failure, and it is the reason for the structural section.
-The lexical tables alone cleared a README of 2356 editable words. Two readers, each given
-the principle and no list of exclusions, reported forty constructions in it. Applying the
-exemption, rule zero, and the recognition tests to those forty leaves one family over
-threshold and the document-wide figure over threshold, which is a smaller finding than
-forty and the correct one: unprimed readers over-flag, and the exemption architecture
-exists to stop the skill doing the same. A catalogue of strings still cannot reach a
-property of sentence construction.
-
-Five human regression documents, all damaged by earlier versions: Linux
-`submitting-patches.rst`, git `CodingGuidelines`, curl `CONTRIBUTE.md`, sqlite's "How
-SQLite Is Tested", and Linux `coding-style.rst`. Each must come out with zero edits, and
-each does: 51 row matches and 23 shortlist candidates across the revision-pinned four, 0
-surviving either way. sqlite is the hardest,
-with `harness` 11 times as a term of art in the text a tag strip produces, which without
-the exemption is a dense row aimed straight at the damage. A fifth document joined the
-corpus in round 3: Linux `coding-style.rst` at v5.15, whose five concession-and-rebuttal
-paragraphs an earlier version of this file ordered deleted.
-
 ## Trigger precision
 
 Must fire:
@@ -587,13 +520,3 @@ Must NOT fire:
    for correctness: the precedence rule sends it to ordinary copy-editing.
 2. "Add explanatory comments to this parser." Code comments are out of scope.
 3. "Summarise what you found in the logs." A chat reply, not a published document.
-
-## How to refresh the catalogue
-
-The procedure moved to `sources/REFRESH.md`, with the source table, the guarded pull, the
-120-id diff, and the rules for a pattern that is newly common or fading. It fires on a
-date, not on "about to publish", so keeping it there keeps it out of every audit.
-
-Read it when the review date in the banner has passed, or when a new model generation
-ships. It fails closed at every step: an unreachable source stops the pass rather than
-reporting the whole catalogue as retired upstream.

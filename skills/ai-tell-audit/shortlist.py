@@ -160,8 +160,12 @@ def catalogue_rows(skill_md):
 
     Parsed out of the document rather than copied here, so the counts this mode
     reports are the counts of the rows the reader is actually applying.
+    Deduplicated case-insensitively. The same pattern appears in more than one
+    table (`Some would say` in one, `some would say` in another), and counting
+    both turned one occurrence into two row matches: two real instances reported
+    as four and crossed a floor of three, manufacturing a finding.
     """
-    terms, in_table = set(), False
+    seen, in_table = {}, False
     for line in skill_md.split("\n"):
         if not line.startswith("|"):
             in_table = False
@@ -171,8 +175,9 @@ def catalogue_rows(skill_md):
             in_table = True
             continue
         if in_table and len(cells) == 2:
-            terms |= set(re.findall(r"`([^`]+)`", cells[0]))
-    return sorted(terms)
+            for term in re.findall(r"`([^`]+)`", cells[0]):
+                seen.setdefault(term.lower(), term)
+    return sorted(seen.values(), key=str.lower)
 
 
 def row_regex(term):
