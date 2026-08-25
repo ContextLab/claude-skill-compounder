@@ -1,0 +1,17 @@
+# Local state written at runtime (never part of the repo).
+state/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+
+# tooling state (not part of the project)
+.omc/

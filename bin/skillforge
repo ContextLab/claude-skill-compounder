@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# skillforge — drives the live terminal animation shown while a skill is being forged.
+#
+# The session calls this at each transition of the builder/red-team loop; the status
+# line renders the animation from the state it writes (see statusline/).
+#
+#   skillforge start <name> <total-steps> <one-line summary...>
+#   skillforge step  <step-number> <what is happening now...>
+#   skillforge done  [message...]
+#   skillforge fail  <reason...>
+#   skillforge clear
+#   skillforge show
+#
+# State lives in ONE file, not a session-keyed one. This is deliberate: the id in
+# $CLAUDE_CODE_SESSION_ID and the .session_id delivered to hooks and the status line
+# are different values for the same session, so a session-keyed file written here
+# would never be found by the renderer. One forge at a time per machine.
+set -uo pipefail
+
+DIR="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/forge"
+mkdir -p "$DIR" 2>/dev/null || { echo "skillforge: cannot create $DIR" >&2; exit 1; }
+FILE="$DIR/current.json"
+
+command -v jq >/dev/null 2>&1 || { echo "skillforge: jq is required" >&2; exit 1; }
+
+now() { date +%s; }
+die() { echo "skillforge: $*" >&2; exit 2; }
+field() { jq -r --arg k "$1" '.[$k] // empty' "$FILE" 2>/dev/null; }
+update() { # jq expression applied to the state file
+  local tmp="$FILE.tmp.$$"
+  jq "$@" "$FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not update $FILE"; }
+}
+
+cmd="${1:-}"; shift 2>/dev/null || true
+
+case "$cmd" in
+  start)
+    name="${1:-}"; steps="${2:-}"; shift 2 2>/dev/null || true
+    summary="$*"
+    [ -z "$name" ] && die "usage: skillforge start <name> <total-steps> <summary...>"
+    case "$steps" in ''|*[!0-9]*) die "total-steps must be a positive integer" ;; esac
+    [ "$steps" -lt 1 ] && die "total-steps must be >= 1"
+    [ -z "$summary" ] && die "a one-line summary is required — it is what the user sees"
+    jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
+      '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
+        status:"active", started:$now, updated:$now}' > "$FILE" || die "could not write $FILE"
+    echo "skillforge: forging '$name' ($steps steps) — animation live in the status line"
+    ;;
+  step)
+    [ -f "$FILE" ] || die "no active forge; run 'skillforge start' first"
+    n="${1:-}"; shift 2>/dev/null || true
+    phase="$*"
+    case "$n" in ''|*[!0-9]*) die "usage: skillforge step <step-number> <phase...>" ;; esac
+    [ -z "$phase" ] && die "a phase description is required"
+    update --argjson n "$n" --arg p "$phase" --argjson now "$(now)" \
+      '.step = (if $n > .steps then .steps else $n end) | .phase = $p | .updated = $now'
+    echo "skillforge: [$n/$(field steps)] $phase"
+    ;;
+  done)
+    [ -f "$FILE" ] || exit 0
+    msg="${*:-clean red-team pass}"
+    update --arg p "$msg" --argjson now "$(now)" \
+      '.status="done" | .step=.steps | .phase=$p | .updated=$now | .finished=$now'
+    echo "skillforge: '$(field name)' complete — $msg"
+    ;;
+  fail)
+    [ -f "$FILE" ] || exit 0
+    reason="${*:-abandoned}"
+    update --arg p "$reason" --argjson now "$(now)" \
+      '.status="failed" | .phase=$p | .updated=$now | .finished=$now'
+    echo "skillforge: '$(field name)' abandoned — $reason"
+    ;;
+  clear) rm -f "$FILE"; echo "skillforge: cleared" ;;
+  show)  [ -f "$FILE" ] && cat "$FILE" || echo "no active forge" ;;
+  ""|-h|--help|help)
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *) die "unknown command '$cmd' (try: skillforge help)" ;;
+esac
