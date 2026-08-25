@@ -11,23 +11,26 @@ cd "$(dirname "$0")"
 export PYTHONPATH="$PWD"
 TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
 
-run_capped() {
-  if command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift @ARGV; exec @ARGV' "$TEST_TIMEOUT" "$@"
-  else
-    "$@"
-  fi
-}
+if command -v perl >/dev/null 2>&1; then
+  run_capped() { perl -e 'alarm shift @ARGV; exec @ARGV' "$TEST_TIMEOUT" "$@"; }
+else
+  echo "WARNING: perl is not installed, so test files run UNCAPPED. A hang will not be" >&2
+  echo "         reported as a failure; it will just look like the suite is still going." >&2
+  run_capped() { "$@"; }
+fi
 
 fail=0
 for t in tests/test_*.py; do
   echo "=== $t ==="
   start=$(date +%s)
-  if ! run_capped python3 "$t" -v; then
-    rc=$?
+  # Capture the status directly. `if ! cmd; then rc=$?` records the status of the
+  # negation, which is always 0, so the timeout diagnostic below never printed.
+  run_capped python3 "$t" -v
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     elapsed=$(( $(date +%s) - start ))
     if [ "$rc" -ge 128 ]; then
-      echo "!!! $t was killed after ${elapsed}s (cap ${TEST_TIMEOUT}s). Treat a hang as a failure."
+      echo "!!! $t was killed after ${elapsed}s (cap ${TEST_TIMEOUT}s). A hang is a failure."
     fi
     fail=1
   fi

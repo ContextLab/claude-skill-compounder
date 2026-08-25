@@ -49,13 +49,24 @@ now="${CI_NOW:-$(date +%s)}"
 # An event with no usable id is always claimed, since suppressing an unidentifiable
 # event would lose reminders on any future payload shape that drops these fields.
 claim_once() {
-  local id dir
+  local id dir marker
   id="$(printf '%s' "$payload" | jq -r '.tool_use_id // .prompt_id // empty' 2>/dev/null)"
   [ -z "$id" ] && return 0
-  id="$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_')"
+  # Truncate as well as sanitise. A pathologically long id would exceed NAME_MAX, mkdir
+  # would fail with ENAMETOOLONG, and the hook would read that as "already claimed" and
+  # go silent forever. 96 characters is far longer than any real id and safely under the
+  # limit everywhere.
+  id="$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
   dir="$STATE_DIR/$sid.seen"
   mkdir -p "$dir" 2>/dev/null || return 0
-  mkdir "$dir/$1-$id" 2>/dev/null || return 1
+  marker="$dir/$1-$id"
+  # Fail OPEN, not closed. mkdir failing because the marker exists is a duplicate; mkdir
+  # failing for any other reason (read-only state, a full disk) must not silently disable
+  # every reminder for the rest of the session. Distinguish the two by testing the marker.
+  if mkdir "$marker" 2>/dev/null; then
+    return 0
+  fi
+  [ -d "$marker" ] && return 1
   return 0
 }
 
@@ -97,14 +108,28 @@ esac
 
 # Opportunistic pruning of stale per-session state.
 #
-# Claim markers are directories, and they nest: <sid>.seen/<mode>-<id>/. Matching only
-# '*.seen*' left the inner markers in place, so the parent was never empty, rmdir always
-# failed, and the markers accumulated for the life of the machine. -depth visits children
-# before parents, so one pass empties the markers and then removes the .seen directory
-# that held them. -mindepth 1 keeps $STATE_DIR itself out of it.
+# Claim markers are directories, and they nest: <sid>.seen/<mode>-<id>/. An earlier
+# version matched only '*.seen*', which left the inner markers in place, so the parent
+# was never empty, rmdir always failed, and one inode leaked per edit forever. -depth
+# visits children before parents, so a single pass empties the markers and then removes
+# the directory that held them. -mindepth 1 keeps $STATE_DIR itself out of it.
 #
-# A directory's mtime moves whenever its contents change, so an active session's .seen
-# stays fresh and only genuinely idle state ages out.
-find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
-find "$STATE_DIR" -mindepth 1 -depth -type d -mtime +7 -exec rmdir {} + 2>/dev/null
+# Markers age out after CI_CLAIM_TTL_MIN minutes, not seven days. A duplicate delivery
+# arrives within milliseconds of the first, so an hour is already enormous, and keeping a
+# week of them means find walks tens of thousands of directories on the hot path. Measured
+# on the leaking version: 10k markers cost 1.25s per event, 50k cost 5.39s, and the hook
+# timeout is 10s.
+#
+# The sweep itself runs about one event in CI_PRUNE_EVERY, because paying for a directory
+# walk on every single Write is what made the cost visible in the first place.
+CLAIM_TTL_MIN="${CI_CLAIM_TTL_MIN:-60}"
+PRUNE_EVERY="${CI_PRUNE_EVERY:-25}"
+if [ $(( ${RANDOM:-0} % PRUNE_EVERY )) -eq 0 ]; then
+  find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
+  find "$STATE_DIR" -mindepth 2 -depth -type d -mmin "+$CLAIM_TTL_MIN" -exec rmdir {} + 2>/dev/null
+  # No -mmin on this pass: removing the markers above just reset the parent's mtime, so
+  # an age test would never match it and the emptied directory would linger forever.
+  # An empty .seen holds nothing worth keeping, and mkdir -p recreates it on demand.
+  find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -name '*.seen' -empty -exec rmdir {} + 2>/dev/null
+fi
 exit 0

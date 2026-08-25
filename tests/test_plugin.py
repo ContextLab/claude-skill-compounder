@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -91,9 +92,22 @@ class ManifestTest(unittest.TestCase):
                 self.assertEqual(s_cmd.replace(str(APP), "ROOT"),
                                  p_cmd.replace("${CLAUDE_PLUGIN_ROOT}", "ROOT"))
 
-        s_matchers = [g.get("matcher") for g in settings["PostToolUse"]]
-        p_matchers = [m for m, _c in plugin["PostToolUse"]]
-        self.assertEqual(s_matchers, p_matchers, "PostToolUse matchers must agree")
+        # Matchers AND timeouts, on every event. An earlier version compared matchers
+        # only for PostToolUse, so a plugin hook could carry a 1-second timeout while the
+        # installer's carried 10 and nothing noticed. The timeout is the only backstop
+        # against a slow hook, so a silent disagreement there is worth catching.
+        for event in settings:
+            s_matchers = [g.get("matcher") for g in settings[event]]
+            p_matchers = [m for m, _c in plugin[event]]
+            self.assertEqual(s_matchers, p_matchers,
+                             "%s matchers must agree" % event)
+
+        spec = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+        for event in settings:
+            s_timeouts = sorted(h.get("timeout") for g in settings[event] for h in g["hooks"])
+            p_timeouts = sorted(h.get("timeout")
+                                for g in spec["hooks"][event] for h in g["hooks"])
+            self.assertEqual(s_timeouts, p_timeouts, "%s timeouts must agree" % event)
 
     @unittest.skipUnless(shutil.which("claude"), "claude CLI not on PATH")
     def test_claude_plugin_validate_strict_passes(self):
@@ -228,6 +242,49 @@ class HookIdempotenceTest(unittest.TestCase):
         b = self.run_hook("prompt", dict(payload, session_id="beta"))
         self.assertIn("skill-compounder", a)
         self.assertIn("skill-compounder", b, "a claim must not leak across sessions")
+
+    def test_a_broken_state_directory_fails_open(self):
+        """A claim that cannot be written must not silence every later reminder.
+
+        mkdir failing because the marker exists is a duplicate. mkdir failing because the
+        state directory is read-only or the disk is full is not, and treating the two the
+        same would disable the reminders for the rest of the session with no error
+        anywhere. Losing reminders is the worse failure, so this fails open.
+        """
+        reminders = self.state / "reminders"
+        reminders.mkdir(parents=True)
+        (reminders / "s9.seen").mkdir()
+        os.chmod(str(reminders / "s9.seen"), 0o500)          # no write permission
+        try:
+            out = self.run_hook("prompt", {"session_id": "s9", "prompt_id": "p-x",
+                                           "prompt": "q" * 120})
+            self.assertIn("skill-compounder", out,
+                          "an unwritable claim directory must not suppress the reminder")
+        finally:
+            os.chmod(str(reminders / "s9.seen"), 0o700)
+
+    def test_claim_markers_do_not_leak(self):
+        """The prune must actually empty the nested markers.
+
+        Matching only '*.seen*' left the children behind, so the parent was never empty,
+        rmdir always failed, and one directory leaked per file edit for the life of the
+        machine. At 10,000 markers the prune itself cost 1.25 seconds on every event.
+        """
+        reminders = self.state / "reminders"
+        seen = reminders / "old.seen"
+        seen.mkdir(parents=True)
+        for i in range(5):
+            (seen / ("edit-t%d" % i)).mkdir()
+        old = time.time() - 60 * 60 * 24 * 3
+        for p in list(seen.iterdir()) + [seen]:
+            os.utime(str(p), (old, old))
+        # CI_PRUNE_EVERY=1 makes the sweep deterministic instead of sampled.
+        self.run_hook("prompt", {"session_id": "fresh", "prompt_id": "p-z",
+                                 "prompt": "r" * 120},
+                      CI_PRUNE_EVERY="1", CI_CLAIM_TTL_MIN="60")
+        left = [p for p in reminders.rglob("*") if p.is_dir() and p.name.startswith("edit-")]
+        self.assertEqual(left, [], "stale claim markers were not pruned: %s" % left)
+        self.assertFalse(seen.exists(), "the emptied .seen directory should go too")
 
     def test_an_event_with_no_id_still_fires(self):
         """Losing reminders is worse than a rare duplicate, so an unidentifiable

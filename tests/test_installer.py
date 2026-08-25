@@ -206,6 +206,56 @@ class InstallerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.do_install()
 
+    def test_install_never_destroys_something_the_user_already_had(self):
+        """The blast radius grew from two names to ten, and one of them is `session-handoff`.
+
+        The previous implementation called shutil.rmtree on whatever sat at the
+        destination. A user with their own skill by that name lost it on install, and
+        uninstall then removed our link as "ours" and left them with nothing at all.
+        """
+        theirs_skill = self.claude / "skills" / "session-handoff"
+        theirs_skill.mkdir(parents=True)
+        (theirs_skill / "SKILL.md").write_text("THEIR OWN SKILL\n", encoding="utf-8")
+        self.bin.mkdir(parents=True, exist_ok=True)
+        theirs_cli = self.bin / "skillforge"
+        theirs_cli.write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
+
+        rep = self.do_install()
+
+        self.assertTrue(theirs_skill.is_dir() and not theirs_skill.is_symlink())
+        self.assertEqual((theirs_skill / "SKILL.md").read_text(encoding="utf-8"),
+                         "THEIR OWN SKILL\n", "the user's own skill was overwritten")
+        self.assertEqual(theirs_cli.read_text(encoding="utf-8"),
+                         "#!/bin/sh\necho theirs\n", "the user's own script was overwritten")
+        self.assertIn("NOT LINKED", rep["skills"], "a collision must be reported, not silent")
+        self.assertIn("session-handoff", rep["skills"])
+        self.assertIn("NOT LINKED", rep["cli"])
+
+        # And uninstall must not remove what it never linked.
+        self.do_uninstall()
+        self.assertTrue((theirs_skill / "SKILL.md").exists())
+        self.assertTrue(theirs_cli.exists())
+
+    def test_a_users_own_statusline_script_is_not_mistaken_for_ours(self):
+        """`statusline.sh` as a bare substring matches other people's scripts too.
+
+        A user whose status line is ~/bin/git-statusline.sh had it treated as ours:
+        never saved to original-statusline.json, never called by the wrapper, and gone
+        after uninstall. The marker now includes the directory component.
+        """
+        for command in ('"/usr/local/bin/my-statusline.sh"',
+                        '"$HOME/bin/git-statusline.sh"'):
+            with self.subTest(command=command):
+                self.setUp()
+                self.write_settings({"statusLine": {"type": "command", "command": command}})
+                self.do_install()
+                saved = Path(self.state) / "original-statusline.json"
+                self.assertTrue(saved.exists(),
+                                "their status line must be preserved: %s" % command)
+                self.do_uninstall()
+                self.assertEqual(self.read()["statusLine"]["command"], command,
+                                 "their status line must come back verbatim")
+
     def test_uninstall_leaves_a_foreign_file_at_the_symlink_path(self):
         real = self.bin / "skillforge"
         real.write_text("#!/bin/sh\necho not ours\n", encoding="utf-8")

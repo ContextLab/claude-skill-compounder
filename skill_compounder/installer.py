@@ -30,7 +30,10 @@ from pathlib import Path
 # Markers identify our entries so install is idempotent and uninstall is surgical.
 HOOK_MARKER = "compound-improvement.sh"
 INSIGHT_MARKER = "insight-capture.sh"
-STATUSLINE_MARKER = "statusline.sh"
+# The directory component is load-bearing. A bare "statusline.sh" also matches a user's
+# own ~/bin/git-statusline.sh or /usr/local/bin/my-statusline.sh, and install_statusline
+# would then treat their script as ours: never saved, never called, and gone at uninstall.
+STATUSLINE_MARKER = "/statusline/statusline.sh"
 EDIT_MATCHER = "Write|Edit"
 
 DEFAULT_STATE = Path.home() / ".claude" / "skill-compounder"
@@ -198,15 +201,24 @@ def remove_statusline(settings, state_dir):
 # -------------------------------------------------------------------------- symlinks
 
 def _symlink_force(src, dst):
+    """Link src to dst, replacing only a link or file we could have made ourselves.
+
+    Anything else at that path belongs to the user and is left exactly where it is.
+    The previous version called shutil.rmtree on it. With one skill and one CLI that
+    was already wrong; with a seed pool it is a data-loss bug waiting for anyone who
+    already has a skill called `session-handoff`, and uninstall would then remove the
+    link as "ours" and leave them with nothing.
+    """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.is_symlink() or dst.exists():
-        if dst.is_symlink() or dst.is_file():
-            dst.unlink()
-        else:
-            shutil.rmtree(str(dst))
+    if dst.is_symlink():
+        if os.path.realpath(str(dst)) == os.path.realpath(str(src)):
+            return "linked"                       # already ours, nothing to do
+        dst.unlink()                              # a stale link of ours, or a dangling one
+    elif dst.exists():
+        return "skipped (something else is already there)"
     dst.symlink_to(str(src))
-    return str(dst)
+    return "linked"
 
 
 def _unlink_if_ours(dst, expected_src):
@@ -239,7 +251,18 @@ def _cli_files(app_home):
 
 
 def _link_all(sources, dest_dir):
-    return [_symlink_force(src, Path(dest_dir) / src.name) for src in sources]
+    """Link each source, reporting per name so a collision is visible rather than silent."""
+    linked, skipped = [], []
+    for src in sources:
+        result = _symlink_force(src, Path(dest_dir) / src.name)
+        (linked if result == "linked" else skipped).append(src.name)
+    parts = []
+    if linked:
+        parts.append(", ".join(linked))
+    if skipped:
+        parts.append("NOT LINKED, you already have something by that name: "
+                     + ", ".join(skipped))
+    return "; ".join(parts) or "(none found)"
 
 
 def _unlink_all(sources, dest_dir):
@@ -272,12 +295,8 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
     write_settings(settings_path, settings)
     report["settings"] = str(settings_path)
 
-    report["skills"] = ", ".join(
-        Path(p).name for p in _link_all(_skill_dirs(app_home), claude_dir / "skills")
-    ) or "(none found)"
-    report["cli"] = ", ".join(
-        Path(p).name for p in _link_all(_cli_files(app_home), Path(bin_dir))
-    ) or "(none found)"
+    report["skills"] = _link_all(_skill_dirs(app_home), claude_dir / "skills")
+    report["cli"] = _link_all(_cli_files(app_home), Path(bin_dir))
     report["state"] = state_dir
     return report
 
