@@ -9,6 +9,11 @@
 #   merge-conflict  mid-merge with an unmerged path, where `git stash push` exits 1.
 #   stranger-stash  clean tree with somebody else's older stash already on the stack.
 #   scaffold50      50 untracked files under one directory, which a rollup hides.
+#   staged-rename   a staged rename carrying an unstaged edit, status code RM.
+#   submodule       a submodule-only change, which `stash push --all` creates no entry for.
+#   no-remote       the standard state with origin removed, so the reset target cannot resolve.
+#   backup-branch-exists  the standard state plus a ref literally named `backup`.
+#   mid-rebase      stopped at a rebase `break`, where the index is clean but git is busy.
 #
 # Creates <target-dir>/origin.git (bare) and <target-dir>/repo (the working clone).
 # No ambient git config is required; identity is passed per invocation.
@@ -88,6 +93,49 @@ scaffold50)
     echo "generated $i" > "scaffold/f$i.txt"
     i=$((i + 1))
   done
+  ;;
+
+staged-rename)
+  # `RM` matches no hand-written list of dirty status codes.
+  g mv README.md FINAL-REPORT.md
+  echo 'TWO HOURS OF WORK' >> FINAL-REPORT.md
+  printf 'PRECIOUS PLAN: do not lose this\n' > NOTES-DO-NOT-LOSE.md
+  mkdir -p build
+  echo 'API_TOKEN=sk-not-a-real-token' > build/.env.local
+  ;;
+
+submodule)
+  g -c protocol.file.allow=always submodule add -q "$target/origin.git" sub
+  g commit -qm 'add submodule'
+  echo 'dirty in the submodule' >> sub/README.md
+  ;;
+
+no-remote)
+  printf 'PRECIOUS PLAN: do not lose this\n' > NOTES-DO-NOT-LOSE.md
+  mkdir -p build
+  echo 'API_TOKEN=sk-not-a-real-token' > build/.env.local
+  g remote remove origin
+  ;;
+
+backup-branch-exists)
+  # A ref named `backup` makes any `backup/<name>` branch fail with `cannot lock ref`.
+  g branch backup
+  printf 'PRECIOUS PLAN: do not lose this\n' > NOTES-DO-NOT-LOSE.md
+  mkdir -p build
+  echo 'API_TOKEN=sk-not-a-real-token' > build/.env.local
+  ;;
+
+mid-rebase)
+  # Stopped at a `break`: the index is clean, a stash succeeds, and the old script ran
+  # `reset --hard` to completion with the rebase still in progress.
+  g checkout -qb feature
+  echo 'feature work' >> README.md
+  g commit -qam 'feature commit'
+  g checkout -q main
+  printf 'PRECIOUS PLAN: do not lose this\n' > NOTES-DO-NOT-LOSE.md
+  mkdir -p build
+  echo 'API_TOKEN=sk-not-a-real-token' > build/.env.local
+  GIT_SEQUENCE_EDITOR='sed -i.bak 1s/^pick/break/' g rebase -i main feature >/dev/null 2>&1 || true
   ;;
 
 *)

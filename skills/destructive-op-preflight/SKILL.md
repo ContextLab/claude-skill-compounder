@@ -1,67 +1,80 @@
 ---
 name: destructive-op-preflight
-description: "Use when about to run a command that can destroy work no commit or backup can bring back: git reset --hard, checkout -f, checkout -- , restore --worktree, clean, stash drop, branch -D, rebase, reflog expire, gc --prune=now, filter-repo, push --force, rm -rf, a bulk delete or overwrite loop, or a database reset, drop, truncate, or migration rollback. Use when a safety flag has just refused. Do NOT use for ordinary edits, commits, non-force pushes, branch creation, or reversible refactors."
+description: "Use when the next command could destroy work that nothing can bring back: it discards uncommitted or untracked changes, drops commits that were never pushed, overwrites what a remote already has, or removes files no version control is tracking. Also use when a safety flag has just refused an operation. Do NOT use for reversible work: ordinary edits, commits, non-force pushes, creating branches, dry runs that only print what would happen, or history edits the reflog can undo."
 ---
 
 # Destructive-op preflight
 
 You are about to run a command whose failure mode is silent and permanent. The cost of
-being wrong is not a broken build; it is somebody's afternoon, or their production data.
-Enumerate what dies, prove it comes back, and only then run it.
+being wrong is not a broken build; it is somebody's afternoon. Enumerate what dies, prove
+it comes back, and only then run it.
+
+This skill covers git and the filesystem. That is the whole scope.
 
 ## The Iron Law
 
 ```text
-NO DESTRUCTIVE COMMAND WITHOUT A PER-PATH BLAST-RADIUS MANIFEST
-AND A RECOVERY WHOSE CONTENTS YOU HAVE DIFFED AGAINST IT.
+NO DESTRUCTIVE COMMAND UNTIL A RECOVERY EXISTS
+AND THE WORKING TREE HAS BEEN PROVED EMPTY OF EVERYTHING IT HOLDS.
 ```
 
-Per-path means one line per file, never one line per category. Diffed means a command
-printed the difference between what is at risk and what the recovery holds, and it printed
-nothing. Intent is not recovery. A stash you have not listed is not recovery.
+Proved empty means a command printed the residue and the residue was nothing. Not a list
+you wrote and checked off: a list git produced after the recovery was taken. Intent is not
+recovery, and a stash you have not measured is not coverage.
 
-## Phase 1: locate
+Code blocks below are tagged. A `safe` block only reads state and can be run as written; a
+`destructive` block is the thing this procedure gates. This repository's tests execute
+every `safe` block against a real fixture and assert its exit status, so what is written
+here is what runs.
+
+## Phase 1: locate, and refuse to start on unstable ground
 
 ```bash safe
-pwd -P && git rev-parse --show-toplevel && git rev-parse --abbrev-ref HEAD
+pwd -P && git rev-parse --show-toplevel && git rev-parse --is-bare-repository
+git rev-parse --abbrev-ref HEAD
 git rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo 'NO UPSTREAM: every commit here is unpushed'
 ```
 
 Compare `pwd -P`, not `pwd`. On macOS `/tmp` is a symlink to `/private/tmp`, so plain `pwd`
-and the toplevel disagree in a way that means nothing. If the resolved paths still differ,
-you are in a subdirectory, which is fine; if the toplevel is not the repo you meant, stop.
+and the toplevel disagree in a way that means nothing.
 
-Read the branch with `rev-parse --abbrev-ref HEAD`, not `branch --show-current`: on a
-detached HEAD the latter prints an empty line, and a detached HEAD is the one place where
-the reflog is the *only* reference holding your commits. If it prints `HEAD`, you are
-detached: create a branch before anything else.
+Read `--is-bare-repository` **before** interpreting the branch. A bare repo has no working
+tree to enumerate, its destructive surface is refs rather than files, and it reports `HEAD`
+for the branch, which would otherwise look like a detached HEAD. In a non-bare repo, a
+literal `HEAD` from `--abbrev-ref HEAD` does mean detached, and that is the one place where
+the reflog is the only thing holding your commits: create a branch before anything else.
 
-If either command fatals you are not in a work tree. `git rev-parse --is-bare-repository`
-returns `true` for a bare repo, where there is no working tree to enumerate and the only
-destructive surface is refs. For a target outside any repo, skip to
-"Targets git does not cover".
-
-## Phase 2: enumerate every path, do not summarize
+Then refuse to proceed while git is mid-operation. This check is the script's, not git's:
+stopped at a `break` or `edit` during a rebase the index is clean, a stash succeeds, and
+`reset --hard` runs to completion at rc=0 with the rebase still in progress.
 
 ```bash safe
-git -c core.quotePath=false status --porcelain -uall --ignored
+git rev-parse --git-dir
+ls "$(git rev-parse --git-dir)" | grep -E '^(rebase-merge|rebase-apply|MERGE_HEAD|CHERRY_PICK_HEAD|REVERT_HEAD|BISECT_LOG)$' || echo 'no operation in progress'
+```
+
+## Phase 2: enumerate everything that is not clean
+
+Do not enumerate the status codes you can think of. `git status` reports only what is *not*
+clean, so take every line it prints and subtract nothing. A code nobody anticipated then
+fails closed instead of vanishing:
+
+```bash safe
+git status --porcelain -z -uall --ignored | tr '\0' '\n'
 git log --oneline '@{u}'..HEAD 2>/dev/null || git log --oneline -20
 git stash list
 ```
 
-`-uall` is load-bearing. Without it, 50 doomed files under `scaffold/` print as the single
-line `Would remove scaffold/`, and `git clean -nd` has the same defect. The report this
-skill exists to prevent lost 2,229 untracked files; a directory rollup would have described
-that as one line. `--ignored` adds the `!!` rows, which is where `.env.local` lives.
+Three flags are load-bearing. `-uall` expands directories, so 50 doomed files under
+`scaffold/` list individually instead of as the single line `Would remove scaffold/`; the
+report behind this skill lost 2,229 untracked files, which a rollup would have described in
+one line. `--ignored` adds the `!!` rows, which is where `.env.local` lives. `-z` stops git
+quoting paths that contain spaces, and splits a rename into its new and old path on
+separate lines rather than the unparseable `old -> new`.
 
-Read the status codes as risk classes: `??` untracked and `!!` ignored have no git object
-at all, ` M` and ` D` are unstaged and have none either, and `M ` or `A ` are staged, so
-only their content survives. Capture the at-risk set now, while the tree still has it:
-
-```bash safe
-git -c core.quotePath=false status --porcelain -uall --ignored | grep -E '^(\?\?|!!| M| D|MM|AM)' | cut -c4- | sort > "${TMPDIR:-/tmp}"/preflight-at-risk.txt
-git -c core.quotePath=false status --porcelain -uall --ignored | grep -cE '^(\?\?|!!| M| D|MM|AM)'
-```
+That last one matters more than it looks. A staged rename carrying an unstaged edit is code
+`RM`, and any hand-written list of "the dirty codes" misses it, along with `UU`, `AA`, ` T`,
+`MD` and `AD`. Two hours of work in a renamed file reads as an empty blast radius.
 
 For a filesystem target, count symlinks too. `find -type f` reports `1` for a tree whose
 only entry is a symlink to somebody else's data:
@@ -72,18 +85,18 @@ find build \( -type f -o -type l \) | head -5
 ```
 
 The manifest is one line per path from that output, plus one line per unpushed commit. Not
-per category. A five-line rollup satisfies every wording of "write a manifest" and tells
-you nothing:
+per category: a five-line rollup satisfies every wording of "write a manifest" and tells you
+nothing.
 
 ```text
 BLAST RADIUS: git reset --hard origin/main && git clean -fdx
   branch main @ /abs/path, upstream origin/main
   commit  4e80d28 feature                     -> reflog + backup branch
-  M  src/app.py            (staged)           -> dangling blob, content only
+  RM report.md -> FINAL-REPORT.md  (staged rename, unstaged edit) -> NOTHING
    M README.md             (unstaged)         -> NOTHING
   ?? NOTES-DO-NOT-LOSE.md  (untracked)        -> NOTHING
   !! build/.env.local      (ignored)          -> NOTHING
-COVERAGE GATE: comm -23 at-risk covered  =>  must print nothing
+RESIDUE GATE: git status after the stash must print nothing at all
 ```
 
 ## Phase 3: what is actually recoverable
@@ -108,8 +121,7 @@ Five traps that have each caused a real loss:
 
 - **`git stash push --include-untracked` does not stash ignored files.** It takes `??` and
   leaves `!!` on disk, so a `clean -fdx` after it still destroys `.env.local`. Only
-  `git stash push --all` covers both. Verified: with `build/` ignored, `-u` stashed one
-  file and left `build/.env.local` sitting on disk.
+  `git stash push --all` covers both.
 - **`git checkout -- <path>` does not revert a staged mutation.** It restores the working
   tree from the index, and the index is where the bad content already is. Reverting a
   staged change to HEAD takes `git restore --staged --worktree <path>`, which destroys
@@ -121,80 +133,99 @@ Five traps that have each caused a real loss:
   `rm -rf tree/link/` where `link -> ../outside` deleted the contents of `outside`, which
   no enumeration of `tree` ever mentioned. Resolve the target with `realpath` first and
   never write the trailing slash.
-- **An unset variable makes `rm -rf "${VAR}/build"` into `rm -rf /build`.** Set
-  `set -u`, or test the variable (`[ -n "${VAR:-}" ] || exit 1`) in the same invocation.
-  This is the most famous instance of this whole failure class.
+- **An unset variable makes `rm -rf "${VAR}/build"` into `rm -rf /build`.** Use `set -u`,
+  or test it (`[ -n "${VAR:-}" ] || exit 1`) in the same invocation. This is the most
+  famous instance of the whole failure class.
 
-## Phase 4: make it recoverable, then prove the coverage
+## Phase 4: take the recovery, then measure the residue
 
-```bash safe
-git stash push --all -m "preflight-$(date +%Y%m%d-%H%M%S)"
-git branch "backup/preflight-$(date +%Y%m%d-%H%M%S)"
-cp -a build "build.preflight-bak"
-```
+`git stash push --all` is the default move: it covers tracked, untracked and ignored files
+in one object. For commits, a named branch outlives the reflog. For a path git does not
+track, the copy is the recovery.
 
-`--all` on a repo with an ignored `node_modules` or `.venv` is slow and large. Scope it
-(`git stash push --all -- src/ config/`) or copy those paths aside instead, but then say
-in the manifest which ignored paths you chose not to cover and why.
-
-Listing a stash is not proof of coverage; the coverage gate is a diff, and it must print
-nothing:
+Then prove coverage by subtraction rather than by comparing path lists. Path lists are
+where the last version of this skill broke: `status` quotes paths with spaces and
+`stash show` does not, renames arrive as `old -> new`, and an unanticipated status code
+silently contributes nothing to compare. The residue check has none of those failure modes,
+because git computes both sides:
 
 ```bash safe-seq
-git -c core.quotePath=false status --porcelain -uall --ignored | grep -E '^(\?\?|!!| M| D|MM|AM)' | cut -c4- | sort > "${TMPDIR:-/tmp}"/preflight-at-risk.txt
-git stash push --all -q -m preflight-proof
-git stash show --include-untracked --name-only 'stash@{0}' | sort > "${TMPDIR:-/tmp}"/preflight-covered.txt
-comm -23 "${TMPDIR:-/tmp}"/preflight-at-risk.txt "${TMPDIR:-/tmp}"/preflight-covered.txt > "${TMPDIR:-/tmp}"/preflight-uncovered.txt
-test ! -s "${TMPDIR:-/tmp}"/preflight-uncovered.txt
+git stash push --all -q -m "preflight-proof-$$"
+RESIDUE=$(git status --porcelain -uall --ignored)
 git stash pop --index -q
+printf '%s\n' "$RESIDUE"
+test -z "$RESIDUE"
 ```
 
-Any path `comm` prints is at risk and uncovered, and the destructive command does not run
-until it is covered or the user has said to abandon it. The gate fires on absence rather
-than trusting you: if Phase 2 never ran, the at-risk file does not exist,
-`comm` exits non-zero, and the gate fails. Skipping the enumeration cannot look like
-passing it.
+Capture the residue and pop *before* asserting on it, so a failed check hands the tree back
+instead of leaving it stashed with no explanation. If the residue is empty, everything that
+was not clean is inside the stash. If anything remains, the stash does **not** cover it and
+the destructive command does not run.
+This is what catches the cases nobody enumerated: a submodule-only change, for instance,
+makes `stash push --all` exit 0 having created no entry at all, and the residue check fails
+closed on the ` M sub` line still sitting there.
 
-If you cannot construct a recovery (the target is outside a repo, the disk is full, the
-database has no dump), **stop and ask.** Handing the user a one-line question costs a
-minute. #23913 cost 2,229 files.
+Empty directories are the one thing this cannot see, because git does not track them and
+`status` never reports them. If the target's structure matters, copy it aside.
+
+If you cannot construct a recovery, **stop and ask.** A one-line question costs a minute.
+The incident behind this skill cost 2,229 files.
 
 ### The exit ramp for reproducible artifacts
 
-`rm -rf node_modules && npm ci`, `rm -rf .venv && uv sync`, `rm -rf target dist build` when
-every byte is regenerated by a committed lockfile: enumerate once to confirm nothing else is
-in there, then go. The test is whether a committed file regenerates it byte-for-byte. It
-fails the moment the directory also holds `.env.local`, a downloaded model, or a data
-volume, which is why Phase 2 lists ignored files instead of assuming.
+`rm -rf node_modules && npm ci`, `rm -rf .venv && uv sync`, `rm -rf target dist` when every
+byte is regenerated from a committed lockfile: enumerate once to confirm nothing else is in
+there, then go. The test is whether a committed file regenerates it byte-for-byte. It fails
+the moment the directory also holds `.env.local`, a downloaded model, or a data volume,
+which is why Phase 2 lists ignored files instead of assuming.
 
 ## Phase 5: run it as one guarded script
 
-Four unchained lines is the bug, not the fix. Mid-merge, `git stash push` exits 1 with
-`could not write index`, and the unchained `git reset --hard` on the next line then runs
-with no recovery in existence. Chain it, check it, and say so when it aborts:
+Unchained lines are the bug, not the fix. Mid-merge, `git stash push` exits 1 with
+`could not write index`, and an unchained `git reset --hard` on the next line runs anyway
+with no recovery in existence. Every failure after the stash must also say where the work
+went, or the user is left with an emptied tree and no idea it is recoverable.
 
 ```bash destructive
 set -euo pipefail
-STAMP=$(date +%Y%m%d-%H%M%S)
-BEFORE=$(git rev-parse -q --verify refs/stash || true)
-git stash push --all -m "preflight-$STAMP" || { echo "ABORTED: stash failed, no recovery exists, destructive command NOT run" >&2; exit 1; }
-AFTER=$(git rev-parse -q --verify refs/stash || true)
-if [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ]; then MINE=yes; else MINE=no; fi
-if [ "$MINE" = yes ]; then git stash show --include-untracked --name-only 'stash@{0}'; fi
-git branch "backup/preflight-$STAMP"
-git reset --hard origin/main
-if [ "$MINE" = yes ]; then git stash pop --index; else echo "no preflight stash of ours; nothing to restore"; fi
+TARGET="${TARGET:?set TARGET to the commit you are resetting to}"
+STAMP="preflight-$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
+ours() { git stash list --format='%gd %gs' | grep -F "$STAMP" | head -1 | cut -d' ' -f1; }
+trap 'rc=$?; [ "$rc" -eq 0 ] && exit 0
+      echo "ABORTED rc=$rc: the destructive command did not complete." >&2
+      w=$(ours || true); if [ -n "$w" ]; then
+        echo "YOUR WORK IS IN THE STASH $w (message $STAMP). Restore: git stash pop --index $w" >&2
+      else echo "No preflight stash exists; the tree is as you left it." >&2; fi' EXIT
+GITDIR=$(git rev-parse --git-dir)
+for f in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+  [ -e "$GITDIR/$f" ] && { echo "ABORTED: $f exists, an operation is in progress." >&2; exit 1; }
+done
+git rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null || { echo "ABORTED: '$TARGET' does not resolve." >&2; exit 1; }
+git stash push --all -m "$STAMP" || { echo "ABORTED: stash failed, no recovery exists." >&2; exit 1; }
+MINE=$(ours || true)
+test -z "$(git status --porcelain -uall --ignored)" || { echo "ABORTED: these paths are not in the stash:" >&2; git status --porcelain -uall --ignored >&2; exit 1; }
+git branch "backup-$STAMP"
+git reset --hard "$TARGET"
+if [ -n "$MINE" ]; then git stash pop --index "$(ours || true)"; else echo "Nothing was stashed; nothing to restore."; fi
+trap - EXIT
 ```
 
-`BEFORE`/`AFTER` is not ceremony. On a clean tree `git stash push` prints
-`No local changes to save` and exits **0**, so an unguarded `git stash pop` at the end pops
-somebody else's older stash: it injects last week's content into the tree and destroys the
-recovery artifact Phase 2 just told the user to enumerate. Comparing the ref proves the
-stash on top is the one this run created.
+Four details are load-bearing, each of them a bug found by review:
 
-The stash carries the working tree, including untracked and ignored files. The backup
-branch carries the commits the reset is about to drop, under a name that outlives the
-reflog. You need both; neither covers the other.
+- **Resolve `TARGET` before the stash.** With no remote, `git reset --hard origin/main`
+  fatals; checking it first means the abort happens while the tree is still intact rather
+  than after it has been emptied.
+- **Identify your stash by its unique message, never by position.** On a clean tree
+  `git stash push` prints `No local changes to save` and exits **0**, creating nothing.
+  Comparing the top of `refs/stash` before and after only proves the top changed: if
+  another process stashes in between, that comparison says the entry is yours and you pop
+  and delete somebody else's work. Matching `$STAMP` re-resolves correctly even when a
+  concurrent push shifts your entry from `stash@{0}` to `stash@{1}`.
+- **`backup-$STAMP`, not `backup/$STAMP`.** A pre-existing branch named `backup` makes the
+  slashed form fail with `cannot lock ref`, and that failure lands after the tree is
+  already stashed.
+- **The `EXIT` trap covers every abort path**, including the ones `set -e` takes silently.
+  It is the difference between "aborted" and "aborted, and here is where your work is".
 
 Afterwards, re-run the Phase 2 enumeration and diff it against the manifest. A surprise
 here is a finding, not noise.
@@ -208,33 +239,27 @@ realpath build
 cp -a build "${TMPDIR:-/tmp}/preflight-$(date +%Y%m%d-%H%M%S)-build"
 ```
 
-Resolve the path with `realpath` before deleting it, confirm the resolved parent is inside
-the tree you meant, and copy before removing. In a bare repo, the destructive surface is
-refs rather than files: `git for-each-ref` is the enumeration and a bundle
-(`git bundle create`) is the recovery.
+Resolve with `realpath` before deleting, confirm the resolved parent is the tree you meant,
+and copy before removing. In a bare repo the surface is refs: `git for-each-ref` enumerates
+and `git bundle create` is the recovery. For a SQLite file, the same discipline needs a
+census rather than a row count, and the procedure is in
+[references/sqlite-preflight.md](references/sqlite-preflight.md). Longer git recovery
+material is in [references/git-recoverability.md](references/git-recoverability.md).
+
+Other databases are deliberately out of scope. Advice about wiping a production database
+that nobody has executed is worse than no advice, so this skill does not offer any.
 
 ## Never escalate a safety flag that just refused
 
-A rejected safe flag is information. It means your model of the remote or the schema is
-wrong. Going around it converts a caught mistake into an uncaught one.
+A rejected safe flag is information: your model of the remote or the tree is wrong. Going
+around it converts a caught mistake into an uncaught one.
 
 |Refused|Never follow with|Do instead|
 |-|-|-|
 |`git push --force-with-lease`|`git push --force`|`git fetch`, then read what moved|
-|`prisma db push` warning|`--force-reset`|`--accept-data-loss` only after dumping|
 |`git stash push` non-zero|running the command anyway|fix the merge or unreadable file first|
+|An in-progress rebase or merge|stashing past it|finish or abort the operation|
 |A hook or sandbox denial|disabling the hook|treat the denial as the answer|
-
-## Datastores
-
-For any database reset, drop, truncate, or migration rollback: prove the backup exists,
-**and prove it restores into an empty scratch database with the same row count**, before
-touching the real one. A restore into a scratch database that already has rows can report
-success and a plausible count while having applied nothing. Per-tool commands and their
-verification status are in
-[references/datastore-preflight.md](references/datastore-preflight.md). Longer git
-recovery material is in
-[references/git-recoverability.md](references/git-recoverability.md).
 
 ## Red flags
 
@@ -257,40 +282,45 @@ Each of these is a thought, not an observation. If you notice one, you are in Ph
 
 |Excuse|Reality|
 |-|-|
-|"It's just a scratch branch"|`git status --porcelain` costs 200ms and tells you. The branch name says nothing about the working tree.|
-|"I already checked"|Checked when? Before your last three edits, or after? Re-run the enumeration in the same invocation as the command.|
-|"The stash succeeded"|Did you read its exit status, or the fact that the next line ran? Mid-merge it exits 1 and stashes nothing, and on a clean tree it exits 0 and stashes nothing. Compare `refs/stash` before and after.|
+|"It's just a scratch branch"|`git status` costs 200ms and tells you. The branch name says nothing about the working tree.|
+|"I already checked"|Checked when? Before your last three edits, or after? Enumerate in the same invocation as the command.|
+|"The stash succeeded"|Did you read its exit status, or only notice the next line ran? Mid-merge it exits 1 and stashes nothing; on a clean tree it exits 0 and stashes nothing. Measure the residue instead of trusting it.|
+|"The manifest was empty, so nothing is at risk"|An empty manifest more often means the enumeration missed a status code. A staged rename with an edit is `RM`, which every hand-written code list omits.|
 |"The user asked me to"|The user asked for an outcome. They did not ask to lose the file they never mentioned because it was never in a commit.|
 |"I generated these files, so they are disposable"|#23913: "The user said 'scaffolding' and the agent deleted everything matching the file extension." 2,229 untracked files.|
 |"Untracked means unimportant"|Untracked means `.env.local`, the migration plan, the notes file. Untracked and ignored are the only categories with no recovery path at all.|
-|"It's under /tmp so nothing matters"|`/tmp` is where the dump you just took lives, and where editors keep unsaved buffers. It is also a symlink on macOS, so your path checks are comparing different strings.|
+|"It's under /tmp so nothing matters"|`/tmp` is where the copy you just took lives. It is also a symlink on macOS, so your path comparisons are comparing different strings.|
 |"I'm in a worktree, the main tree is safe"|Worktrees share one object store and one `refs/stash`. `gc --prune=now` and `reflog expire` reach every tree, and `stash pop` here pops a stash pushed there.|
-|"The tests will catch it"|Tests exercise tracked code. No test suite has ever failed because an untracked file was deleted, which is precisely the category with no recovery.|
+|"The tests will catch it"|Tests exercise tracked code. No suite has ever failed because an untracked file was deleted, which is exactly the category with no recovery.|
 |"It's all committed"|Committed is not pushed, and staged is not committed. Both die to `reset --hard`.|
 |"I put a safeguard in place"|#34327: Claude claimed it had written a git hook to block `reset --hard`. The hook did not exist on disk. Assert the file, do not assert the memory.|
 |"The reflog has my back"|The reflog covers commits. Your untracked file was never an object. It has no reflog entry and never will.|
 |"`--force-with-lease` failed, so `--force`"|#70378. The lease failed because the remote moved. Forcing does not resolve that; it overwrites it.|
-|"Resetting the dev database is harmless"|#36183: `prisma db push --force-reset`, run in the background, wiped production. Confirm which database the connection string points at.|
 |"Stopping to ask is slower"|One question costs a minute. #32938 cost 11 hours of inference output.|
 
 ## Trigger precision
 
 MUST fire:
-1. "clear the local commits on this branch and sync to origin/main"
-2. "delete the scaffolding files you generated, I only want the real source"
-3. "the migration is stuck, just reset the dev database and re-run it"
+1. "start fresh, blow away everything not checked in"
+2. "clear the local commits on this branch and sync to origin/main"
+3. "delete the scaffolding files you generated, I only want the real source"
 
 MUST NOT fire:
-1. "commit these changes and push them to my feature branch"
-2. "make a branch called spike/retry-logic and switch to it"
-3. "refactor this function into two smaller ones and update the callers"
+1. "run `git clean -nd` and tell me what it would remove"
+2. "squash my last three commits with an interactive rebase before I push"
+3. "commit these changes and push them to my feature branch"
+
+The first must-fire names no command at all, and the first two must-nots name commands this
+skill cares about deeply. That is the point: the trigger is the irreversibility of the
+outcome, not the vocabulary. A dry run prints and changes nothing. An interactive rebase of
+unpushed commits stays in the reflog.
 
 ## Quick reference
 
 |Phase|Do|Done when|
 |-|-|-|
-|1 Locate|`pwd -P`, toplevel, `rev-parse --abbrev-ref HEAD`, upstream|Paths resolve to the intended repo and HEAD is not detached|
-|2 Enumerate|`status --porcelain -uall --ignored`, `log @{u}..HEAD`, `find \( -type f -o -type l \)`|A manifest with one line per path, and the at-risk list saved to a file|
-|3 Classify|Read the recoverability table and the five traps|Every at-risk path has a named recovery source or the word NOTHING|
-|4 Protect|`stash push --all`, `branch backup/...`, `cp -a`, dump and test-restore|`comm -23 at-risk covered` printed nothing|
-|5 Run|One guarded script: chained, exit-checked, `refs/stash` compared|The abort path is explicit and the re-enumeration matches the manifest|
+|1 Locate|`pwd -P`, toplevel, bare check, `rev-parse --abbrev-ref HEAD`, in-progress check|Right repo, HEAD understood, no rebase or merge underway|
+|2 Enumerate|`status --porcelain -z -uall --ignored`, unpushed log, `find \( -type f -o -type l \)`|A manifest with one line per path, taken from what git printed|
+|3 Classify|The recoverability table and the five traps|Every path has a named recovery source or the word NOTHING|
+|4 Protect|`stash push --all`, `branch`, `cp -a`|`git status` after the stash printed nothing at all|
+|5 Run|One guarded script: target resolved first, stash matched by message, `EXIT` trap|The abort path names where the work is, and re-enumeration matches|

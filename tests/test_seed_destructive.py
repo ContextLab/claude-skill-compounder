@@ -44,10 +44,6 @@ IGNORED_SECRET = "build/.env.local"
 
 MIN_PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
 
-# Scratch filenames the skill's own commands write under $TMPDIR. Each test points
-# TMPDIR at its own directory, so a stale file cannot make the coverage gate look like it
-# passed and two concurrent runs of this suite cannot delete each other's files.
-SCRATCH = ("preflight-at-risk.txt", "preflight-covered.txt", "preflight-uncovered.txt")
 
 # Commands that can destroy work. A `destructive` fence is never executed by the command
 # sweep, so it has to earn the tag: at least one line must match this.
@@ -61,7 +57,7 @@ DESTRUCTIVE = re.compile(
 RECOVERY = re.compile(r"(git stash push|git stash pop|git branch |cp -a |pg_dump|mysqldump)")
 # Guard machinery: the exit-status and ref checks that make the sequence safe. These are
 # inspections, so they may sit in a destructive fence without being executed separately.
-GUARD = re.compile(r"(rev-parse -q --verify refs/stash|git stash show|git stash list)")
+GUARD = re.compile(r"(git rev-parse|git stash show|git stash list|git status)")
 # Anything that runs a program. Used to prove nothing unverified hides in a script fence.
 INVOCATION = re.compile(r"^\s*(git|rm|cp|mv|find|sqlite3|psql|mysql|npm|npx)\b")
 
@@ -155,12 +151,6 @@ class SeedSkillFixture(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def clear_scratch(self):
-        for name in SCRATCH:
-            (self.scratch / name).unlink(missing_ok=True)
-
-    def scratch_text(self, name):
-        return (self.scratch / name).read_text(encoding="utf-8")
 
     def make_fixture(self, mode="standard"):
         """Build a fresh copy of a burned-repo fixture. Returns the working clone."""
@@ -178,9 +168,15 @@ class SeedSkillFixture(unittest.TestCase):
         return subprocess.run(cmd, shell=True, cwd=str(cwd), capture_output=True,
                               text=True, env=self.env)
 
-    def bash(self, script, cwd):
+    def bash(self, script, cwd, **extra_env):
+        env = dict(self.env)
+        env.update(extra_env)
         return subprocess.run(["bash", "-c", script], cwd=str(cwd), capture_output=True,
-                              text=True, env=self.env)
+                              text=True, env=env)
+
+    def run_prescribed(self, repo, target="origin/main"):
+        """Execute the Phase 5 script exactly as the artifact prints it."""
+        return self.bash(prescribed_script(), repo, TARGET=target)
 
     def git(self, repo, *args):
         r = self.sh("git " + " ".join(args), repo)
@@ -234,24 +230,43 @@ class SkillDocumentTest(SeedSkillFixture):
         self.assertTrue(value.startswith('"') and value.endswith('"'),
                         "a description containing ': ' must be quoted")
 
-    def test_description_names_the_history_rewriting_commands(self):
-        """`reflog expire` and `gc --prune=now` destroy the skill's own fallback, so a
-        session has to be able to recognise them from the trigger alone."""
+    def test_description_describes_the_situation_not_a_command_vocabulary(self):
+        """A description that is a list of command tokens both over-fires on dry runs and
+        under-fires on paraphrase. It must name the irreversible outcome instead."""
         d = parse_frontmatter(split_frontmatter(read_skill())[0])["description"]
-        for token in ("reflog expire", "gc --prune=now", "branch -D", "checkout -f",
-                      "rebase", "filter-repo"):
-            self.assertIn(token, d, "description omits %r" % token)
+        tokens = re.findall(
+            r"(--hard|-rf|--force\b|git clean|stash drop|branch -D|reflog expire"
+            r"|gc --prune|filter-repo|\brebase\b|checkout|truncate|drop table)", d.lower())
+        self.assertLessEqual(len(set(tokens)), 1,
+                             "description reads as a command list: %s" % sorted(set(tokens)))
+        for phrase in ("uncommitted", "untracked", "never pushed", "reflog"):
+            self.assertIn(phrase, d.lower(), "description omits %r" % phrase)
+
+    def test_datastore_scope_is_cut_from_the_skill_body(self):
+        """Six of eight engines were self-declared unverified. Unverified advice about
+        wiping a production database is the worst place to keep a defect."""
+        body = split_frontmatter(read_skill())[1]
+        self.assertNotIn("## Datastores", body)
+        d = parse_frontmatter(split_frontmatter(read_skill())[0])["description"].lower()
+        for word in ("database", "migration", "truncate", "rollback", "sql"):
+            self.assertNotIn(word, d, "description still claims database scope via %r" % word)
+        for engine in ("postgres", "mysql", "prisma", "alembic", "django"):
+            self.assertNotIn(engine, body.lower(),
+                             "%s advice must not live in the skill body" % engine)
+        ref = (SKILL_DIR / "references" / "sqlite-preflight.md").read_text(encoding="utf-8")
+        self.assertIn("the one datastore whose procedure was executed end to end", ref)
 
     def test_body_stays_under_the_line_ceiling(self):
         _, body = split_frontmatter(read_skill())
         n = len(body.strip().splitlines())
         self.assertLessEqual(n, MAX_BODY_LINES, "body is %d lines" % n)
 
-    def test_iron_law_is_stated_exactly_once_and_demands_per_path(self):
+    def test_iron_law_is_stated_exactly_once_and_demands_a_measured_residue(self):
         body = split_frontmatter(read_skill())[1]
-        self.assertEqual(body.count("NO DESTRUCTIVE COMMAND WITHOUT"), 1)
-        law = re.search(r"```text\n(NO DESTRUCTIVE COMMAND WITHOUT.*?)```", body, re.S)
-        self.assertIn("PER-PATH", law.group(1))
+        self.assertEqual(body.count("NO DESTRUCTIVE COMMAND UNTIL"), 1)
+        law = re.search(r"```text\n(NO DESTRUCTIVE COMMAND UNTIL.*?)```", body, re.S)
+        self.assertIn("PROVED EMPTY", law.group(1),
+                      "the law must demand a measured residue, not a checked-off list")
 
     def test_bundled_references_exist_and_are_linked(self):
         body = split_frontmatter(read_skill())[1]
@@ -261,20 +276,6 @@ class SkillDocumentTest(SeedSkillFixture):
             self.assertTrue((SKILL_DIR / rel).is_file(), "missing bundled file: %s" % rel)
         on_disk = {"references/" + p.name for p in (SKILL_DIR / "references").iterdir()}
         self.assertEqual(on_disk, linked, "every bundled reference must be linked")
-
-    def test_unverified_datastore_claims_are_labelled_as_such(self):
-        """This repo treats an unverified claim in a skill as a defect. The tools for
-        these engines are not installed here, so the reference must say so rather than
-        implying the commands were run."""
-        ref = (SKILL_DIR / "references" / "datastore-preflight.md").read_text(
-            encoding="utf-8")
-        for engine in ("Postgres", "MySQL", "Prisma", "Rails", "Alembic", "Django"):
-            block = re.search(r"^## %s\n(.*?)(?=^## |\Z)" % engine, ref, re.S | re.M)
-            self.assertIsNotNone(block, "no section for %s" % engine)
-            self.assertIn("NOT VERIFIED", block.group(1),
-                          "%s section must carry a verification-status note" % engine)
-        sqlite = re.search(r"^## SQLite\n(.*?)(?=^## |\Z)", ref, re.S | re.M)
-        self.assertIn("VERIFIED", sqlite.group(1))
 
     def test_no_em_dashes_anywhere_in_the_skill(self):
         for path in sorted(SKILL_DIR.rglob("*.md")):
@@ -304,24 +305,28 @@ class TriggerPrecisionTest(SeedSkillFixture):
         self.assertEqual(len(no_fire), 3, no_fire)
         self.assertEqual(set(fire) & set(no_fire), set())
 
-    def test_must_not_prompts_avoid_every_destructive_word_the_description_names(self):
-        """A must-not prompt containing the description's own trigger vocabulary would
-        prove nothing: the discrimination has to hold on prompts that share no keyword."""
+    def test_trigger_does_not_depend_on_sharing_words_with_the_prompt(self):
+        """A keyword-matching description misses the paraphrase that carries the real
+        risk. At least one must-fire prompt has to work with no vocabulary in common."""
         description = parse_frontmatter(split_frontmatter(read_skill())[0])["description"]
-        vocabulary = re.findall(
-            r"(reset --hard|checkout -f|checkout --|restore --worktree|clean|stash drop"
-            r"|branch -d|reflog expire|gc --prune|filter-repo|rebase|--force|rm -rf"
-            r"|truncate|rollback|\bdrop\b|\breset\b)",
-            description.lower())
-        self.assertGreaterEqual(len(set(vocabulary)), 8,
-                                "the description must name the destructive commands: %s"
-                                % sorted(set(vocabulary)))
+        desc_words = set(re.findall(r"[a-z]{4,}", description.lower()))
+        fire, _ = self.prompts()
+        overlaps = []
+        for prompt in fire:
+            shared = set(re.findall(r"[a-z]{4,}", prompt.lower())) & desc_words
+            overlaps.append((prompt, shared))
+        self.assertTrue(any(not shared for _, shared in overlaps),
+                        "every must-fire prompt shares vocabulary with the description, so "
+                        "the trigger is keyword matching: %s" % overlaps)
+
+    def test_must_not_prompts_include_the_adversarial_near_misses(self):
+        """A dry run and a reflog-reversible history edit both name commands this skill
+        cares about, and both must be refused."""
         _, no_fire = self.prompts()
-        for prompt in no_fire:
-            for word in set(vocabulary):
-                self.assertNotIn(word, prompt.lower(),
-                                 "must-not prompt %r contains trigger word %r"
-                                 % (prompt, word))
+        joined = " ".join(no_fire).lower()
+        self.assertIn("-nd", joined, "a dry-run prompt must be in the must-not set")
+        self.assertIn("rebase", joined,
+                      "a reflog-reversible rebase must be in the must-not set")
 
     def test_must_not_prompts_land_inside_the_declared_negative_scope(self):
         description = parse_frontmatter(split_frontmatter(read_skill())[0])["description"]
@@ -362,7 +367,7 @@ class LossDemonstrationTest(SeedSkillFixture):
         original = (repo / DOOMED).read_bytes()
         secret = (repo / IGNORED_SECRET).read_bytes()
 
-        r = self.bash(prescribed_script(), repo)
+        r = self.run_prescribed(repo)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
         self.assertTrue((repo / DOOMED).is_file(), "the recovery-first sequence must save it")
@@ -372,7 +377,7 @@ class LossDemonstrationTest(SeedSkillFixture):
                         "the ignored credential must survive as well")
         self.assertEqual((repo / IGNORED_SECRET).read_bytes(), secret)
         # The unpushed commit is not in the stash; the backup branch is what returns it.
-        backups = self.git(repo, "branch", "--list", "'backup/*'").split()
+        backups = self.git(repo, "branch", "--list", "'backup-*'").split()
         self.assertTrue(backups, "the sequence must leave a named backup of the commits")
         self.assertIn("def feature",
                       self.git(repo, "show", "%s:src/feature.py" % backups[0]))
@@ -406,7 +411,7 @@ class LossDemonstrationTest(SeedSkillFixture):
 
 
 class RedTeamRound1Test(SeedSkillFixture):
-    """One test per blocking finding from the cold-agent review."""
+    """One test per blocking finding from the first cold-agent review."""
 
     def test_b1_prescribed_script_aborts_when_the_stash_fails(self):
         """Mid-merge, `git stash push` exits 1 and stashes nothing. The unchained draft
@@ -414,19 +419,15 @@ class RedTeamRound1Test(SeedSkillFixture):
         repo = self.make_fixture("merge-conflict")
         before_head = self.head(repo)
 
-        # Confirm the fixture really does break the stash, rather than assuming it.
         probe = self.sh("git stash push --all -m probe", repo)
         self.assertNotEqual(probe.returncode, 0, "fixture must make `stash push` fail")
         self.assertEqual(self.git(repo, "stash", "list").strip(), "")
 
-        r = self.bash(prescribed_script(), repo)
+        r = self.run_prescribed(repo)
         self.assertNotEqual(r.returncode, 0, "the script must abort, not continue")
-        self.assertIn("ABORTED", r.stdout + r.stderr,
-                      "the failure path must say so out loud")
-        # The destructive line must not have run.
+        self.assertIn("ABORTED", r.stdout + r.stderr)
         self.assertEqual(self.head(repo), before_head, "reset --hard must not have run")
-        self.assertTrue((repo / DOOMED).is_file(),
-                        "the untracked file must still be on disk after the abort")
+        self.assertTrue((repo / DOOMED).is_file())
 
     def test_b2_prescribed_script_never_pops_a_stash_it_did_not_create(self):
         """On a clean tree `git stash push` prints `No local changes to save` and exits 0.
@@ -436,15 +437,13 @@ class RedTeamRound1Test(SeedSkillFixture):
         self.assertIn("old-unrelated-work", stash_before)
         readme_before = (repo / "README.md").read_bytes()
 
-        r = self.bash(prescribed_script(), repo)
+        r = self.run_prescribed(repo)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
         self.assertEqual((repo / "README.md").read_bytes(), readme_before,
                          "the stranger's stash must not be injected into the tree")
         self.assertEqual(self.git(repo, "stash", "list").strip(), stash_before,
                          "the stranger's stash must still be on the stack")
-        self.assertNotIn("LAST WEEKS UNRELATED WORK",
-                         (repo / "README.md").read_text(encoding="utf-8"))
 
     def test_b3_include_untracked_misses_ignored_files_and_all_does_not(self):
         """The gap that made the first draft's manifest wrong: `-u` leaves `!!` on disk."""
@@ -452,62 +451,15 @@ class RedTeamRound1Test(SeedSkillFixture):
         self.git(repo, "stash", "push", "--include-untracked", "-q", "-m", "u")
         self.assertTrue((repo / IGNORED_SECRET).is_file(),
                         "`-u` leaves the ignored credential on disk, unstashed")
-        self.assertNotIn(IGNORED_SECRET,
-                         self.git(repo, "stash", "show", "--include-untracked",
-                                  "--name-only", "'stash@{0}'"))
         self.git(repo, "stash", "pop", "-q")
 
         self.git(repo, "stash", "push", "--all", "-q", "-m", "a")
         self.assertFalse((repo / IGNORED_SECRET).exists(),
                          "`--all` takes the ignored file into the stash")
-        self.assertIn(IGNORED_SECRET,
-                      self.git(repo, "stash", "show", "--include-untracked",
-                               "--name-only", "'stash@{0}'"))
         self.git(repo, "stash", "pop", "-q")
         self.assertTrue((repo / IGNORED_SECRET).is_file())
 
-        # And the skill must prescribe the one that works.
         self.assertIn("git stash push --all", prescribed_script())
-        self.assertNotIn("git stash push --include-untracked -m", prescribed_script())
-
-    def test_b4_coverage_gate_fails_when_a_path_is_uncovered(self):
-        """The manifest was theatre because nothing checked it. The gate is a diff, so an
-        uncovered path makes it exit non-zero rather than reading as fine."""
-        repo = self.make_fixture()
-        capture = ("git -c core.quotePath=false status --porcelain -uall --ignored "
-                   "| grep -E '^(\\?\\?|!!| M| D|MM|AM)' | cut -c4- | sort "
-                   '> "$TMPDIR"/preflight-at-risk.txt')
-        gate = ("git stash show --include-untracked --name-only 'stash@{0}' | sort "
-                '> "$TMPDIR"/preflight-covered.txt; '
-                'comm -23 "$TMPDIR"/preflight-at-risk.txt "$TMPDIR"/preflight-covered.txt '
-                '> "$TMPDIR"/preflight-uncovered.txt; '
-                'test ! -s "$TMPDIR"/preflight-uncovered.txt')
-
-        # An under-covering recovery (`-u`, which misses the ignored file) must fail it.
-        r = self.bash("%s; git stash push --include-untracked -q -m weak; %s"
-                      % (capture, gate), repo)
-        self.assertNotEqual(r.returncode, 0, "the gate must reject an uncovered path")
-        self.assertIn(IGNORED_SECRET, self.scratch_text("preflight-uncovered.txt"))
-        self.git(repo, "stash", "pop", "-q")
-
-        # The prescribed recovery (`--all`) must pass it.
-        self.clear_scratch()
-        r = self.bash("%s; git stash push --all -q -m strong; %s" % (capture, gate), repo)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.scratch_text("preflight-uncovered.txt"), "")
-
-    def test_b4_coverage_gate_fails_when_the_enumeration_was_skipped(self):
-        """Fires on absence: no at-risk file means `comm` errors, not that all is well."""
-        repo = self.make_fixture()
-        self.clear_scratch()
-        r = self.bash(
-            "git stash push --all -q -m x; "
-            "git stash show --include-untracked --name-only 'stash@{0}' | sort "
-            '> "$TMPDIR"/preflight-covered.txt; '
-            'comm -23 "$TMPDIR"/preflight-at-risk.txt "$TMPDIR"/preflight-covered.txt', repo)
-        self.assertNotEqual(r.returncode, 0,
-                            "skipping Phase 2 must fail the gate, not bypass it")
-        self.assertIn("No such file", r.stderr)
 
     def test_b5_prescribed_enumeration_lists_every_path_not_a_rollup(self):
         """50 untracked files under one directory. `clean -nd` says one line."""
@@ -516,16 +468,13 @@ class RedTeamRound1Test(SeedSkillFixture):
         rollup = self.git(repo, "clean", "-nd")
         self.assertEqual(len(rollup.strip().splitlines()), 1,
                          "this is the defect: a directory rollup")
-        self.assertIn("scaffold/", rollup)
 
-        enumerated = self.git(repo, "-c", "core.quotePath=false", "status",
-                              "--porcelain", "-uall", "--ignored")
-        paths = [ln[3:] for ln in enumerated.strip().splitlines()]
+        enumerated = self.sh(
+            "git status --porcelain -z -uall --ignored | tr '\\0' '\\n'", repo)
+        paths = [ln[3:] for ln in enumerated.stdout.strip().splitlines()]
         self.assertEqual(len(paths), 50, "the prescribed enumeration must list each file")
         self.assertIn("scaffold/f37.txt", paths)
 
-        # And the Phase 2 enumeration fence specifically must prescribe the form that
-        # enumerates. Asserting on the whole body would pass on any other mention.
         body = split_frontmatter(read_skill())[1]
         phase2 = re.search(r"^## Phase 2:.*?^## Phase 3:", body, re.S | re.M)
         self.assertIsNotNone(phase2, "SKILL.md must have a Phase 2 section")
@@ -533,10 +482,217 @@ class RedTeamRound1Test(SeedSkillFixture):
                         if "status --porcelain" in ln]
         self.assertTrue(status_lines, "Phase 2 must enumerate with git status")
         for ln in status_lines:
-            self.assertIn("-uall", ln,
-                          "Phase 2 status command %r rolls untracked dirs up to one "
-                          "line" % ln)
-            self.assertIn("--ignored", ln)
+            for flag in ("-uall", "--ignored", "-z"):
+                self.assertIn(flag, ln, "Phase 2 command %r lacks %s" % (ln, flag))
+
+
+class RedTeamRound2Test(SeedSkillFixture):
+    """One test per blocking finding from the second cold-agent review."""
+
+    def test_b1_staged_rename_with_an_edit_is_enumerated_and_covered(self):
+        """`RM` matches no hand-written list of dirty codes, so the old gate reported an
+        empty blast radius while two hours of work sat in the renamed file."""
+        repo = self.make_fixture("staged-rename")
+        work = (repo / "FINAL-REPORT.md").read_bytes()
+        self.assertIn(b"TWO HOURS OF WORK", work)
+
+        # The defect, reproduced: the retired code list matches nothing here.
+        codes = self.sh("git status --porcelain -uall --ignored "
+                        "| grep -E '^(\\?\\?|!!| M| D|MM|AM)' | cut -c4-", repo)
+        self.assertNotIn("FINAL-REPORT.md", codes.stdout,
+                         "this is the finding: the RM row contributes nothing to the "
+                         "retired at-risk list, so the file holding the work is invisible")
+        self.assertNotIn("README.md", codes.stdout)
+
+        # The prescribed enumeration must show it, unquoted and split across two lines.
+        enumerated = self.sh(
+            "git status --porcelain -z -uall --ignored | tr '\\0' '\\n'", repo)
+        self.assertIn("FINAL-REPORT.md", enumerated.stdout, "the new path must appear")
+        self.assertIn("README.md", enumerated.stdout, "the old path must appear too")
+        self.assertNotIn("->", enumerated.stdout, "-z must not emit the rename arrow")
+
+        # And the prescribed script must bring the work back.
+        r = self.run_prescribed(repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((repo / "FINAL-REPORT.md").is_file(),
+                        "the renamed file holding the work must survive")
+        self.assertEqual((repo / "FINAL-REPORT.md").read_bytes(), work)
+
+    def test_b1_residue_gate_catches_a_path_the_stash_did_not_take(self):
+        """Subtraction rather than a code list: whatever the stash missed is still on disk,
+        whether or not anyone anticipated its status code."""
+        repo = self.make_fixture()
+        # `-u` deliberately under-covers: the ignored file stays behind.
+        self.git(repo, "stash", "push", "--include-untracked", "-q", "-m", "weak")
+        residue = self.sh("git status --porcelain -uall --ignored", repo).stdout
+        self.assertIn(IGNORED_SECRET, residue, "the uncovered path must show as residue")
+        gate = self.sh('test -z "$(git status --porcelain -uall --ignored)"', repo)
+        self.assertNotEqual(gate.returncode, 0, "the residue gate must fail closed")
+        self.git(repo, "stash", "pop", "-q")
+
+        # The prescribed recovery leaves nothing behind, so the gate passes.
+        self.git(repo, "stash", "push", "--all", "-q", "-m", "strong")
+        gate = self.sh('test -z "$(git status --porcelain -uall --ignored)"', repo)
+        self.assertEqual(gate.returncode, 0,
+                         self.sh("git status --porcelain -uall --ignored", repo).stdout)
+
+    def test_b1_submodule_only_change_fails_the_gate_closed(self):
+        """`stash push --all` exits 0 creating no entry at all. The old ref comparison read
+        that as `MINE=no` and ran the destructive command with zero recovery."""
+        repo = self.make_fixture("submodule")
+        self.assertIn(" M sub", self.git(repo, "status", "--porcelain"))
+
+        before = self.sh("git rev-parse -q --verify refs/stash", repo).stdout.strip()
+        self.git(repo, "stash", "push", "--all", "-q", "-m", "probe")
+        after = self.sh("git rev-parse -q --verify refs/stash", repo).stdout.strip()
+        self.assertEqual(before, after, "no stash entry is created for a submodule change")
+
+        gate = self.sh('test -z "$(git status --porcelain -uall --ignored)"', repo)
+        self.assertNotEqual(gate.returncode, 0, "the residue gate must fail closed")
+
+        r = self.run_prescribed(repo)
+        self.assertNotEqual(r.returncode, 0, "the script must refuse to continue")
+        self.assertIn("not in the stash", r.stdout + r.stderr)
+
+    def test_b2_gate_cannot_be_passed_by_an_empty_redirect(self):
+        """The retired gate wrote its output through a redirect, so a failing `comm` still
+        created an empty file and `test ! -s` reported success."""
+        repo = self.make_fixture()
+        old_gate = ('comm -23 "$TMPDIR"/missing-at-risk.txt "$TMPDIR"/missing-covered.txt '
+                    '> "$TMPDIR"/uncovered.txt; test ! -s "$TMPDIR"/uncovered.txt')
+        r = self.bash(old_gate, repo)
+        self.assertEqual(r.returncode, 0,
+                         "this is the finding: the retired gate passes on missing input")
+
+        # The shipped gate takes no file input, so there is nothing to be missing.
+        body = split_frontmatter(read_skill())[1]
+        self.assertNotIn("comm -23", body, "the path-list gate must be gone")
+        self.assertNotIn("at-risk.txt", body)
+        self.assertIn('test -z "$(git status --porcelain -uall --ignored)"', body)
+
+    def test_b3_concurrent_stash_does_not_redirect_the_pop(self):
+        """Comparing the top of refs/stash proves the top changed, not that you made it."""
+        repo = self.make_fixture()
+        script = prescribed_script()
+        self.assertIn("git stash list --format=", script,
+                      "the script must resolve its own entry by message")
+        self.assertNotIn("BEFORE=", script, "the retired ref comparison must be gone")
+
+        # Our entry stays findable after another process pushes on top of it.
+        stamp = "preflight-unique-marker-12345"
+        self.git(repo, "stash", "push", "--all", "-q", "-m", stamp)
+        self.sh("echo stranger >> README.md && git stash push -q -m other-process", repo)
+        listing = self.git(repo, "stash", "list", "--format='%gd %gs'")
+        ours = [ln for ln in listing.splitlines() if stamp in ln]
+        self.assertEqual(len(ours), 1)
+        self.assertIn("stash@{1}", ours[0], "ours shifted, and is still identifiable")
+
+        self.git(repo, "stash", "pop", "--index", "stash@{1}")
+        self.assertTrue((repo / DOOMED).is_file(), "we popped our own entry")
+        self.assertIn("other-process", self.git(repo, "stash", "list"),
+                      "the other process's stash is untouched")
+
+    def test_b4_every_failure_after_the_stash_says_where_the_work_went(self):
+        """An emptied tree plus a raw `set -e` exit leaves the user with no idea their work
+        is recoverable. Two one-line triggers, both real."""
+        for mode, target, why in (("standard", "origin/does-not-exist", "unresolvable target"),
+                                  ("no-remote", "origin/main", "no remote at all")):
+            repo = self.make_fixture(mode if mode != "standard" else "standard")
+            r = self.run_prescribed(repo, target=target)
+            self.assertNotEqual(r.returncode, 0, why)
+            out = r.stdout + r.stderr
+            self.assertIn("ABORTED", out, why)
+            # Aborting before the stash keeps the tree intact, and says so.
+            self.assertIn("No preflight stash exists", out, why)
+            self.assertTrue((repo / DOOMED).is_file(),
+                            "the tree must be untouched when we abort this early: %s" % why)
+
+    def test_b4_branch_name_collision_no_longer_strands_the_tree(self):
+        """A pre-existing ref named `backup` made `backup/preflight-...` fail with
+        `cannot lock ref`, after the tree had already been emptied."""
+        repo = self.make_fixture("backup-branch-exists")
+        self.assertIn("backup", self.git(repo, "branch", "--list", "backup"))
+
+        r = self.run_prescribed(repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((repo / DOOMED).is_file())
+        self.assertNotIn("backup/", prescribed_script(),
+                         "a slashed backup name collides with a ref named `backup`")
+
+    def test_b5_script_refuses_to_run_mid_rebase(self):
+        """Stopped at a rebase `break` the index is clean, the stash succeeds, and
+        `reset --hard` completes at rc=0 with the rebase still in progress."""
+        repo = self.make_fixture("mid-rebase")
+        gitdir = self.git(repo, "rev-parse", "--git-dir").strip()
+        self.assertTrue((repo / gitdir / "rebase-merge").exists()
+                        or (repo / gitdir / "rebase-apply").exists(),
+                        "fixture must actually be mid-rebase")
+        before_head = self.head(repo)
+
+        r = self.run_prescribed(repo)
+        self.assertNotEqual(r.returncode, 0, "the script must refuse")
+        self.assertIn("operation is in progress", r.stdout + r.stderr)
+        self.assertEqual(self.head(repo), before_head)
+        self.assertTrue((repo / DOOMED).is_file())
+
+    def test_b6_sqlite_census_rejects_the_false_proofs(self):
+        """Errors go to stderr, so a naive count comparison compares two empty strings.
+
+        Both the census function and the guard lines are lifted out of the reference, so
+        deleting a guard from the artifact fails this test rather than passing on a copy
+        kept here.
+        """
+        ref = (SKILL_DIR / "references" / "sqlite-preflight.md").read_text(encoding="utf-8")
+        census = re.search(r"```bash\n(census\(\) \{.*?\n\})\n```", ref, re.S)
+        self.assertIsNotNone(census, "the reference must define the census function")
+        fn = census.group(1)
+
+        procedure = re.search(r"## The full procedure\n+```bash\n(.*?)```", ref, re.S)
+        self.assertIsNotNone(procedure, "the reference must carry the full procedure")
+        guards = [ln for ln in procedure.group(1).splitlines()
+                  if ln.startswith("test ") and ("$SRC" in ln or "$DST" in ln)]
+        self.assertEqual(len(guards), 3,
+                         "the procedure must guard on a non-empty source census, a "
+                         "non-empty restored census, and a match; found %r" % guards)
+        self.assertTrue(any('test -n "$SRC"' in g for g in guards),
+                        "no non-empty source-census guard in the reference")
+        self.assertTrue(any('test -n "$DST"' in g for g in guards),
+                        "no non-empty restored-census guard in the reference")
+        self.assertTrue(any('test "$SRC" = "$DST"' in g for g in guards),
+                        "no census-comparison guard in the reference")
+        self.assertIn("-bail", procedure.group(1))
+        self.assertIn("test ! -e", procedure.group(1),
+                      "the scratch database must be refused if it already exists")
+
+        work = self.root / "sqlite"
+        work.mkdir()
+        self.assertEqual(self.bash(
+            'sqlite3 app.db "create table users(a); insert into users values(1),(2);'
+            ' create table accounts(b); insert into accounts values(9);"', work).returncode, 0)
+
+        def check(setup):
+            script = "\n".join([
+                fn, setup,
+                'SRC=$(census app.db | sort); DST=$(census rc.db | sort)',
+                *guards,
+                "echo VERIFIED"])
+            return self.bash(script, work)
+
+        # A zero-byte dump: both censuses come back empty and would compare equal.
+        r = check('rm -f rc.db; : > d.sql; sqlite3 -bail rc.db < d.sql')
+        self.assertNotEqual(r.returncode, 0, "an empty census must not read as success")
+        self.assertNotIn("VERIFIED", r.stdout)
+
+        # A dump of one table while another table has no backup at all.
+        r = check('rm -f rc.db; sqlite3 app.db ".dump users" > d.sql; '
+                  'sqlite3 -bail rc.db < d.sql')
+        self.assertNotEqual(r.returncode, 0, "a partial backup must not read as success")
+        self.assertNotIn("VERIFIED", r.stdout)
+
+        # The real thing passes.
+        r = check('rm -f rc.db; sqlite3 app.db ".dump" > d.sql; sqlite3 -bail rc.db < d.sql')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("VERIFIED", r.stdout)
 
 
 class SkillCommandsExecuteTest(SeedSkillFixture):
@@ -570,7 +726,6 @@ class SkillCommandsExecuteTest(SeedSkillFixture):
             if tag != "safe-seq":
                 continue
             repo = self.make_fixture()
-            self.clear_scratch()
             r = self.bash("set -e\n" + "\n".join(claimed_exit(ln)[1] for ln in lines), repo)
             self.assertEqual(r.returncode, 0,
                              "safe-seq failed:\n%s" % (r.stdout + r.stderr))

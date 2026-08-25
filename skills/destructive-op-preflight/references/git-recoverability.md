@@ -95,20 +95,24 @@ Verified on the fixture in `tests/fixtures/destructive-op-preflight/`:
 |`git stash push --all`|yes|yes|yes|
 
 `--include-untracked` is the flag most people reach for, and it leaves `!!` files sitting
-on disk. A `git clean -fdx` after it still destroys `.env.local`. Use `--all` whenever the
-next command carries `-x`, and check coverage with a diff rather than by reading the flag:
+on disk. A `git clean -fdx` after it still destroys `.env.local`. Use `--all`, and prove
+coverage by measuring the residue rather than by diffing path lists:
 
 ```bash
-git -c core.quotePath=false status --porcelain -uall --ignored \
-  | grep -E '^(\?\?|!!| M| D|MM|AM)' | cut -c4- | sort > "${TMPDIR:-/tmp}"/preflight-at-risk.txt
-# ... take the stash ...
-git stash show --include-untracked --name-only 'stash@{0}' | sort > "${TMPDIR:-/tmp}"/preflight-covered.txt
-comm -23 "${TMPDIR:-/tmp}"/preflight-at-risk.txt "${TMPDIR:-/tmp}"/preflight-covered.txt   # must print nothing
+git stash push --all -m "preflight-$$"
+git status --porcelain -uall --ignored     # must print nothing at all
 ```
+
+Path-list comparison looks more precise and is strictly worse. `git status` quotes paths
+containing spaces and `git stash show --name-only` does not, so a legitimate path reads as
+uncovered; a rename arrives as `old -> new`, which is not a path; and any status code the
+list did not anticipate contributes nothing to either side, so the comparison passes while
+the data is unprotected. The residue check has none of those failure modes because git
+computes both halves.
 
 `--all` is expensive when an ignored `node_modules` or `.venv` is in the tree. Scope it
 with a pathspec (`git stash push --all -- src/ config/`) and record in the manifest which
-ignored paths you chose to leave uncovered.
+ignored paths you left uncovered.
 
 ## Not covered by any of this
 
