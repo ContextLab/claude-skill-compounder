@@ -246,7 +246,11 @@ PRUNE_EOF
     # Moved, not deleted. Nothing in this project is ever destructively removed;
     # delete the archive by hand once you are sure.
     echo "skillinsight: archived $moved week file(s) older than $cutoff"
-    [ "$moved" -gt 0 ] && echo "               -> $archive"
+    # `[ ... ] && echo` as the last command makes the whole subcommand exit 1 when
+    # nothing was archived, which reads as failure. Archiving nothing is a success.
+    if [ "$moved" -gt 0 ]; then
+      echo "               -> $archive"
+    fi
     ;;
 
   *) usage >&2; die "unknown command '$cmd'" ;;

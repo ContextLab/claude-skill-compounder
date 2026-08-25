@@ -105,14 +105,13 @@ hooks claim an event once, so the second delivery does nothing.
 ## The seed pool
 
 Four skills ship with the package, so a fresh install is useful before you have forged
-anything. Each one earns its place the same way: multiple independent people reported the
-failure in `anthropics/claude-code`, and it was kept against that evidence rather than
-intuition. The full analysis, including the eight candidates that did not make it, is in
+anything. Each one is here because multiple independent people reported the failure in
+`anthropics/claude-code`. The evidence is in
 [`notes/research/seed-skill-candidates.md`](notes/research/seed-skill-candidates.md).
 
 |Skill|Fires when|The failure it prevents|
 |-|-|-|
-|`destructive-op-preflight`|Before `reset --hard`, `clean`, `rm -rf`, `--force`, a DB reset|Untracked files are not in the reflog. One report lost 2,229 of them; another had `git reset --hard origin/main` run autonomously in the first second of a session, twice|
+|`destructive-op-preflight`|Before `reset --hard`, `clean`, `rm -rf`, `--force`, or any bulk delete|Untracked files are not in the reflog. One report lost 2,229 of them; another had `git reset --hard origin/main` run autonomously in the first second of a session, twice|
 |`session-handoff`|Context is about to be lost: compaction, a usage limit, the end of a session|A handoff that summarises the error instead of quoting it is not resumable. One user built a whole memory system from scratch rather than keep re-deriving state|
 |`stale-artifact-check`|Behavior after an edit is indistinguishable from behavior before it|You are debugging a copy that never contained your change: a non-editable `pip install`, a `.pyc` beside the source, an unrebuilt `dist/`. It hands general debugging to `superpowers:systematic-debugging` rather than compete for that trigger|
 |`no-silent-stub`|You are about to return a value you did not compute|A fake that does not look like a failure looks like a pass. One reported evaluation copied the expected answer into the actual answer column and scored 100%|
@@ -148,11 +147,9 @@ other skills were loaded in both arms, including ones that already push toward c
 Identical across arms, so the comparison holds, but 2 of 9 is not what an unassisted model
 would score.
 
-One trial reproduced the #34327 failure exactly, and it was in the **baseline** arm: the
-session reported a backup at `/tmp/dop-backup-20260825-005900`, a path that did not exist.
-The real backup was 52 seconds later under a different name. A user following that report
-concludes their file is gone. Every stash, branch, and path claimed in the nine skill-arm
-trials was verified present on disk.
+A model will also report a safeguard it did not perform: in one baseline trial the session
+named a backup path that did not exist. Claims were checked against the filesystem rather
+than taken from the transcript, which is the only way that failure is visible.
 
 ---
 
@@ -242,7 +239,8 @@ A session that notices something worth keeping can queue it instead of stopping 
 ★ Skill candidate: <the procedure, in one paragraph>
 ```
 
-A `Stop` hook picks that up from `last_assistant_message` and appends it to a weekly
+A `Stop` hook picks that up from `last_assistant_message`, falling back to a bounded tail
+of the transcript when the message alone does not carry it, and appends it to a weekly
 queue, deduped. `★ Insight` blocks are picked up too, as an opportunistic feeder rather
 than the mechanism: they exist only because a particular output-style plugin injects
 them, and subagents never emit any.
@@ -261,9 +259,9 @@ operation that actually matters. Most insights are a universal kernel wrapped in
 evidence, so extracting the kernel is the useful move and the universal-or-local label is
 a judgement made during review.
 
-There is no automatic classifier, and that is a measured decision rather than an omission:
-a rule matching backticked identifiers against `git ls-files` scores **7 out of 14, which
-is chance**, with another 34% of candidates unscoreable. The measurements are in
+There is no automatic classifier. A rule matching backticked identifiers against
+`git ls-files` scores **7 out of 14, which is chance**, and over a larger sample 34% of
+records cannot be scored at all. The measurements are in
 [`notes/research/insight-capture.md`](notes/research/insight-capture.md).
 
 Nothing here auto-forges. The queue feeds the same threshold as everything else.
@@ -272,19 +270,18 @@ Nothing here auto-forges. The queue feeds the same threshold as everything else.
 
 ## Does any of this actually pay off?
 
-The honest answer is that nobody knew, because nothing recorded it. Now `skillforge`
-appends a line to a local ledger on every `start`, `done`, and `fail`, including forges
-that were abandoned, and `skillreport` joins that against skill invocations recovered
-from your own transcripts:
+`skillforge` appends a line to a local ledger on every `start`, `done`, and `fail`,
+including forges that were abandoned, and `skillreport` joins that against skill
+invocations recovered from your own transcripts:
 
 ```bash
 skillreport
 ```
 
 One table: what was forged, how many red-team rounds it cost, and how often it has been
-invoked **since** the session that created it. The number that matters is the last one.
-If forged skills turn out not to get reused, that belongs in this README, and it will go
-here rather than being quietly fixed by raising a threshold.
+invoked **since** the session that created it. The last column is the one that matters. If
+forged skills turn out not to get reused, the honest response is to say so rather than to
+raise a threshold until the number looks better.
 
 Everything stays on your machine. `skillreport` makes no network calls, reads only files
 you already have, and stores the ledger under `~/.claude/skill-compounder/`. Delete it
@@ -330,9 +327,10 @@ all read by the same component, so they do not all go in the same place in
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
 Only the three `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is read by
-`statusline/statusline.sh`, so setting it on a hook entry does nothing. `SKILL_COMPOUNDER_STATE`
-is read by all four components, so it belongs in the session-wide `env` block or the hooks and
-the status line will disagree about where state lives.
+`statusline/statusline.sh`, so setting it on a hook entry does nothing.
+`SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it
+belongs in the session-wide `env` block. Set it anywhere narrower and they disagree about
+where state lives.
 
 **All four thresholds are unvalidated.** `CI_EDIT_EVERY=12`, `CI_PROMPT_COOLDOWN=1200`,
 and the skill's own ">15 minutes" and ">=2 occurrences" were picked by judgement and
@@ -380,10 +378,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the verified platform behavior the impl
 depends on: mid-session hot-reloading, the two different session ids, why both install
 paths would otherwise double-fire every hook, and so on.
 
-The animation at the top replays a real forge of `parallel-agents-one-codebase`, which
-took three red-team rounds, and the findings it shows are the ones the cold agents
-actually returned. The session chrome around it is redrawn for the recording and the
-subagents are not re-run, but the progress bar is the real status line driven by the real
+The animation at the top is a recording, not a live run: the session chrome is redrawn and
+the subagents are not re-run. The progress bar is the real status line, driven by the real
 state file. Regenerate it with [`vhs`](https://github.com/charmbracelet/vhs):
 
 ```bash

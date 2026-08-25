@@ -1,7 +1,7 @@
 # Design notes
 
 Platform behavior this implementation depends on, and why each piece is shaped the way it
-is. Everything below was verified by running it on **Claude Code 2.1.243, macOS 25.5.0,
+is. Everything below was verified by running it on **Claude Code 2.1.241, macOS 25.5.0,
 2026-08-24**. Re-verify before relying on any of it in a much later version.
 
 ---
@@ -178,11 +178,11 @@ cache misses on every render, re-running the user's base status line once a seco
 GNU first and validate that the result is numeric before trusting it.
 
 **`shutil.rmtree` in an installer is a data-loss bug waiting for a name collision.** The
-seed pool puts ten plausible names into `~/.claude/skills/`, one of which is
+seed pool puts several plausible names into `~/.claude/skills/`, one of which is
 `session-handoff`. Replacing whatever sits at the destination destroys a skill the user
 already had, and uninstall then removes the link as "ours" and leaves them with nothing.
-Install replaces only a symlink it can prove it created, and reports the collision
-otherwise. Uninstall has always followed that rule; install has to as well.
+Install and uninstall both replace or remove only a symlink they can prove they created,
+and report the collision otherwise.
 
 **`$?` after `if ! cmd` is the status of the negation.** It is always 0, so
 `if ! run_capped ...; then rc=$?` makes any diagnostic below it dead code. Capture the

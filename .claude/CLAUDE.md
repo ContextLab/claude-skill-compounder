@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code *configuration* package. It installs a skill, two hooks, a CLI, and a
-status-line wrapper into `~/.claude/`. There is no runtime service: the "program" is the
+A Claude Code *configuration* package. It installs six skills, three hook wirings, four
+CLIs, and a status-line wrapper into `~/.claude/`. There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
 `README.md` is the user-facing description. `docs/DESIGN.md` records the empirically
 verified platform behavior every design decision rests on. Read `docs/DESIGN.md` before
@@ -25,8 +25,10 @@ PYTHONPATH=$PWD python3 tests/test_installer.py InstallerTest.test_install_is_id
 is picked up with no registration. `PYTHONPATH` matters only for `test_installer.py` and
 `test_plugin.py` (the others shell out and need no import).
 
-Each file runs under a `perl alarm` wall-clock cap (`TEST_TIMEOUT`, default 300s), because
-a test that blocks on stdin has wedged this suite. A hook script reads its payload with
+Each file runs in its own process group under a wall-clock cap (`TEST_TIMEOUT`, default
+300s), enforced by an inline Python runner that kills the whole group on timeout. Killing
+only the direct child is not enough: a surviving grandchild holds the inherited stdout
+pipe, so `./run_tests.sh | tail` blocks for the full hang even after the runner exits. A hook script reads its payload with
 `payload="$(cat)"`, so **every** `subprocess` call against a hook must pass `input=` or
 `stdin=DEVNULL`, or it hangs forever.
 
@@ -60,9 +62,11 @@ values for the same session*. State written under one is invisible to the other,
 Hence `forge/current.json`, one forge at a time per machine. The reminder hook *does* key
 per session, which is correct: it both reads and writes the payload's `.session_id`.
 
-**Installation is marker-based and surgical.** `installer.py` identifies its own entries by
-substring (`HOOK_MARKER`, `STATUSLINE_MARKER`), so install is idempotent and uninstall
-removes only our entries. Other tools' hooks and an unrelated status line are left
+**Installation is marker-based and surgical.** `installer.py` identifies its own hook
+entries by marker substring (`HOOK_MARKER`, `INSIGHT_MARKER`), and its status line by an
+**exact** command match against `STATUSLINE_RECORD`, because a substring like
+`statusline.sh` also matches a user's own `~/bin/git-statusline.sh`. Install is idempotent
+and uninstall removes only our entries. Other tools' hooks and an unrelated status line are left
 untouched. `settings.json` is backed up before every write and written atomically; a
 malformed `settings.json` disables every setting in it. Malformed input raises rather than
 being silently discarded.
@@ -112,8 +116,8 @@ variables the scripts read for exactly that purpose (`SKILLFORGE_NOW`, `CI_NOW`,
 mock, add a pin like those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 
-**Shell portability traps that have already caused silent failures here** (details and
-reasoning in `docs/DESIGN.md`):
+**Shell portability traps that cause silent failures** (details and reasoning in
+`docs/DESIGN.md`):
 
 - Appending a multibyte glyph requires braces: `bar="${bar}▓"`, never `bar="$bar▓"`. Bash
   folds the UTF-8 bytes into the variable name.
@@ -140,7 +144,7 @@ Retiring a skill means `mv` to an archive with a `WHY-ARCHIVED.md`, never `rm -r
 from, `2026-08-25-roadmap-session.md` for current state, and `notes/research/` for the
 evidence behind issues #2-#6.
 
-The forging protocol has now been run end to end, on `parallel-agents-one-codebase`; the
+The forging protocol has been run end to end, on `parallel-agents-one-codebase`; the
 README animation replays that forge, including the findings its red-team rounds actually
 returned. The threshold constants (>15 min, >=2 occurrences, 12 edits, 20 min) are still
 first guesses, and nothing yet measures whether a forged skill ever gets used again. That
