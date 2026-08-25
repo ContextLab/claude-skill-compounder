@@ -1,6 +1,6 @@
 ---
 name: session-handoff
-description: "Use when context is about to be lost: the indicator is low, /compact or /clear is imminent, a usage-limit warning appeared, you or the user suggests restarting Claude, or a session ends with work unfinished. Writes a resumable handoff (verbatim git state, exact error text, dead ends, one resume command) to notes/<ISO-date>-<topic>.md. Do NOT use for a mid-session recap the user asked for, or to record a fact, decision, or wiki entry when no context-loss event is in play."
+description: "Use when context is about to be lost: the indicator is low, /compact or /clear is imminent, a usage-limit warning appeared, you or the user suggests restarting Claude, or a session ends with work unfinished. Writes a resumable handoff (verbatim git state, exact error text, dead ends, one resume command) to notes/<ISO-date>-<topic>.md. Do NOT use for a mid-session recap, for writing up finished work so others can read it, or to record a fact or decision when no context-loss event is in play."
 ---
 
 # Session handoff: write it before the context is gone
@@ -108,7 +108,7 @@ Fill every mandatory section. A section with nothing to report gets the literal 
 |Section|What goes in it, and the failure it prevents|
 |-|-|
 |`## Resume command`|Three lines: `cd` to the repo by **absolute, quoted** path, park whatever is in the tree with `git stash push` (findable afterwards in `git stash list`), then `git checkout -B` onto **the recorded sha**. Prevents an aborted checkout on a dirty tree, a surprise detached HEAD, and landing on a branch tip that has moved.|
-|`## State`|`branch:`, `commit:` with the full 40-character sha, pasted `git status --porcelain`, and the standing note that uncommitted work is not carried. Prevents reasoning against the wrong tree.|
+|`## State`|`branch:`, `commit:` with the full 40-character sha, pasted `git status --porcelain`, and `uncommitted work:` naming where the dirty tree went. Prevents reasoning against the wrong tree. The validator rejects `uncommitted work: none` when the tree is in fact dirty, because that is the one loss nothing else here can undo.|
 |`## Done and verified`|Each item with the command that proved it and the observed output. Prevents inherited false confidence.|
 |`## Done but NOT verified`|The honest list. Collapsing it upward is how a session inherits a claim as a fact.|
 |`## Broken`|Exact test name, pasted error output in a fence, and a `repro:` line that actually reproduces it. Prevents a rediscovery pass.|
@@ -135,7 +135,7 @@ git checkout -B resume/<topic> <full 40-char sha>
 
 branch: <branch name, or (detached), or none (not a git repository)>
 commit: <full 40-char sha, or none (no commits yet), or none (not a git repository)>
-uncommitted work: NOT carried by this handoff. Commit or stash it yourself; `## Next` says which.
+uncommitted work: <none, or where you put it: stashed as NAME, committed to wip/BRANCH, or left in the tree>
 
 ```
 $ git status --porcelain
@@ -219,6 +219,20 @@ Avoid `ls notes/*.md`: under zsh an unmatched glob is a shell error that a redir
 suppress. If the listing is empty there is no handoff, and you must not invent one from
 the git log. Otherwise read the newest before anything else, then run its
 `## Resume command`. Treat `## Done but NOT verified` as unverified, not as done.
+
+If `git checkout -B` fails with "already used by worktree", another checkout holds that
+branch: `git worktree list` finds it, and either work there or resume onto a different
+name (`git checkout -B resume/<topic>-2 <sha>`). It fails without moving HEAD, so nothing
+is lost.
+
+## Known limitations
+
+- **Uncommitted work is not carried.** Stated above, and the validator will not let you
+  claim otherwise, but no part of this skill moves that work for you.
+- **In a bare repository `mkdir -p notes` lands inside the git directory.** Bare repos
+  have no working tree; write the note in the checkout you were actually working in.
+- The validator checks structure and recorded state. It cannot check whether the prose is
+  true, and a `repro:` line that runs is not proof that it reproduces the failure.
 
 ## Why this exists
 

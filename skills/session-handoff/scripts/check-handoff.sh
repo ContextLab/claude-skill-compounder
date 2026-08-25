@@ -11,14 +11,20 @@
 # template, and the special ones are located by marker (state is whichever section holds a
 # "branch:" line, broken is whichever holds "repro:"), so a rename carries through.
 #
-# Parsing is fence-aware at every level, because this document's whole purpose is to hold
-# pasted output: a "## " line inside a code fence is content, not a heading. Backtick and
-# tilde fences both count, and fences nest by length, so a four-backtick block may contain
-# three-backtick blocks.
+# Parsing is fence-aware, because this document's whole purpose is to hold pasted output:
+# a "## " line inside a code fence is content, not a heading. Backtick and tilde fences
+# both count, up to three spaces of indent is CommonMark-legal, fences nest by length, and
+# CRLF input is normalised first.
+#
+# No `pipefail`, deliberately. Every boolean test below feeds grep from a here-string
+# rather than a pipe: `grep -q` exits on its first match, which SIGPIPEs the writer, and
+# under pipefail that 141 reads as "no match" on any section large enough to still be
+# buffering. That silently disables a rule on exactly the long pasted output this skill
+# demands, so the construct is avoided outright rather than sized around.
 #
 # What this does not check: whether the prose is true. It can prove the sha exists. It
 # cannot prove the dead ends are the real ones.
-set -uo pipefail
+set -u
 
 HANDOFF="${1:-}"
 SKILL_MD="${2:-$(cd "$(dirname "$0")/.." && pwd)/SKILL.md}"
@@ -31,15 +37,17 @@ if [ ! -f "$SKILL_MD" ]; then
   echo "cannot read SKILL.md at $SKILL_MD" >&2
   exit 2
 fi
-HANDOFF_DIR="$(cd "$(dirname "$HANDOFF")" && pwd)"
 
-# Shared fence tracker. Returns 1 for a fence delimiter, and keeps `fence` current. A
-# fence closes only on the same character, in a run at least as long as the opener.
+# Shared preamble: normalise CRLF for every rule, then track fences. A fence closes only
+# on the same character, in a run at least as long as the opener.
 FENCE_AWK='
-function fence_toggle(line,   n, ch) {
-  if (match(line, /^`+/) || match(line, /^~+/)) {
+{ sub(/\r$/, "") }
+function fence_toggle(line,   n, ch, s, k) {
+  s = line; k = 0
+  while (k < 3 && substr(s, 1, 1) == " ") { s = substr(s, 2); k++ }
+  if (match(s, /^`+/) || match(s, /^~+/)) {
     n = RLENGTH
-    ch = substr(line, 1, 1)
+    ch = substr(s, 1, 1)
     if (n < 3) return 0
     if (!fence) { fence = 1; flen = n; fch = ch; return 1 }
     if (ch == fch && n >= flen) { fence = 0; return 1 }
@@ -106,26 +114,29 @@ rc=0
 reject() { rc=1; echo "REJECT $1 $2"; }
 
 PRESENT="$(headings_of "$HANDOFF")"
-have() { printf '%s\n' "$PRESENT" | grep -Fxq "$1"; }
+have() { grep -Fxq "$1" <<< "$PRESENT"; }
 body_of() { section_of "$HANDOFF" "$1"; }
-has_content() { printf '%s\n' "$1" | grep -q '[^[:space:]]'; }
+has_content() { grep -q '[^[:space:]]' <<< "$1"; }
 
 prose_lines() {
-  printf '%s\n' "$1" | awk "$FENCE_AWK"'
+  awk "$FENCE_AWK"'
     { if (fence_toggle($0)) next
-      if (!fence && $0 ~ /[^[:space:]]/) print }'
+      if (!fence && $0 ~ /[^[:space:]]/) print }' <<< "$1"
 }
 
 fenced_lines() {
-  printf '%s\n' "$1" | awk "$FENCE_AWK"'
+  awk "$FENCE_AWK"'
     { if (fence_toggle($0)) next
-      if (fence && $0 ~ /[^[:space:]]/ && $0 !~ /^[[:space:]]*#/) print }'
+      if (fence && $0 ~ /[^[:space:]]/ && $0 !~ /^[[:space:]]*#/) print }' <<< "$1"
+}
+
+canonical() {
+  tr -d '[:space:]' <<< "$1" | tr 'A-Z' 'a-z' | sed 's/[.,;:!?]*$//'
 }
 
 canonical_prose() {
-  prose_lines "$1" \
-    | sed -e 's/^[[:space:]]*[-*][[:space:]]*//' -e 's/^[[:space:]]*[0-9][0-9]*\.[[:space:]]*//' \
-    | tr -d '[:space:]' | tr 'A-Z' 'a-z' | sed 's/[.,;:!?]*$//'
+  canonical "$(prose_lines "$1" \
+    | sed -e 's/^[[:space:]]*[-*][[:space:]]*//' -e 's/^[[:space:]]*[0-9][0-9]*\.[[:space:]]*//')"
 }
 
 NON_ANSWERS="tbd todo n/a na seeabove seebelow asabove asbefore sameasbefore unknown nothing ? - various misc pending"
@@ -161,24 +172,24 @@ done <<< "$PLACEHOLDERS"
 # A tool's own output may legitimately contain "(truncated)" or a path like etc.py, and
 # the skill forbids editing pasted output, so anything inside a fence is left alone.
 DOC_PROSE="$(awk "$FENCE_AWK"'{ if (fence_toggle($0)) next; if (!fence) print }' "$HANDOFF")"
-if printf '%s\n' "$DOC_PROSE" | grep -Eniq '\(truncated\)|\[truncated\]|\[snip\]|<snip>|snipped|elided|output omitted|rest omitted|full output above'; then
+if grep -Eniq '\(truncated\)|\[truncated\]|\[snip\]|<snip>|snipped|elided|output omitted|rest omitted|full output above' <<< "$DOC_PROSE"; then
   reject TRUNCATED_OUTPUT "an elision marker appears in the prose; paste the output in full instead"
 fi
-if printf '%s\n' "$DOC_PROSE" | grep -Eq '^[[:space:]]*(\.\.\.|…)[[:space:]]*$'; then
+if grep -Eq '^[[:space:]]*([-*]|[0-9]+\.)?[[:space:]]*(\.\.\.|…)[[:space:]]*$' <<< "$DOC_PROSE"; then
   reject TRUNCATED_OUTPUT "a bare ellipsis stands in for content; write it out"
 fi
 
 # --- resolve the working directory the resume command names ------------------------
-# Everything about the recorded commit is judged against this directory, so it is
-# resolved first. "unreachable" is a rejection, never a reason to skip a check.
-repo_kind="none"; repo_path=""; abs_path=""; resume_cmds=""
+# Everything about the recorded state is judged against this directory, so it is resolved
+# first. "unreachable" is a rejection, never a reason to skip a check.
+repo_kind="none"; repo_path=""; abs_path=""; resume_cmds=""; tree_state=""
 if have "$RESUME_SECTION"; then
   resume_cmds="$(fenced_lines "$(body_of "$RESUME_SECTION")")"
   if [ -z "$resume_cmds" ]; then
     reject NO_RESUME_COMMAND "$RESUME_SECTION needs a fenced command, not prose or a comment"
   else
-    repo_path="$(printf '%s\n' "$resume_cmds" \
-      | sed -n 's/^[[:space:]]*cd[[:space:]][[:space:]]*//p' | head -1 \
+    repo_path="$(sed -n 's/^[[:space:]]*cd[[:space:]][[:space:]]*//p' <<< "$resume_cmds" \
+      | head -1 \
       | sed -e 's/[[:space:]]*&&.*//' -e 's/[[:space:]]*;.*//' \
             -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//" -e 's/\\ / /g')"
     if [ -z "$repo_path" ]; then
@@ -186,7 +197,7 @@ if have "$RESUME_SECTION"; then
     else
       case "$repo_path" in
         /*)   abs_path="$repo_path" ;;
-        "~"*) abs_path="${HOME}${repo_path#\~}" ;;
+        "~"*) abs_path="${HOME:-}${repo_path#\~}" ;;
         *)    abs_path="" ;;
       esac
       if [ -z "$abs_path" ]; then
@@ -197,6 +208,7 @@ if have "$RESUME_SECTION"; then
         repo_kind="notrepo"
       elif git -C "$abs_path" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
         repo_kind="repo"
+        tree_state="$(git -C "$abs_path" status --porcelain 2>/dev/null)"
       else
         repo_kind="unborn"
       fi
@@ -209,8 +221,9 @@ fi
 # --- the recorded state must match what that directory actually is -----------------
 if have "$STATE_SECTION"; then
   state="$(body_of "$STATE_SECTION")"
-  branch="$(printf '%s\n' "$state" | sed -n 's/^branch:[[:space:]]*//p' | head -1)"
-  sha="$(printf '%s\n' "$state" | sed -n 's/^commit:[[:space:]]*//p' | head -1)"
+  branch="$(sed -n 's/^branch:[[:space:]]*//p' <<< "$state" | head -1)"
+  sha="$(sed -n 's/^commit:[[:space:]]*//p' <<< "$state" | head -1)"
+  unc="$(sed -n 's/^uncommitted work:[[:space:]]*//p' <<< "$state" | head -1)"
 
   if [ -z "$branch" ]; then
     reject NO_BRANCH "$STATE_SECTION needs a 'branch: <name>' line"
@@ -224,14 +237,14 @@ if have "$STATE_SECTION"; then
 
   if [ -z "$sha" ]; then
     reject NO_SHA "$STATE_SECTION needs a 'commit: <sha>' line"
-  elif printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$|^[0-9a-f]{64}$'; then
+  elif grep -Eq '^[0-9a-f]{40}$|^[0-9a-f]{64}$' <<< "$sha"; then
     case "$repo_kind" in
       repo)
         git -C "$abs_path" cat-file -e "${sha}^{commit}" 2>/dev/null \
           || reject UNKNOWN_COMMIT "$sha is not a commit in '$repo_path'"
-        printf '%s\n' "$resume_cmds" | grep -Fq "$sha" \
+        grep -Fq "$sha" <<< "$resume_cmds" \
           || reject RESUME_MISSING_SHA "the resume command must name $sha; a branch name moves"
-        printf '%s\n' "$resume_cmds" | grep -E 'git[[:space:]]+(checkout|switch|reset)' | grep -Fq "$sha" \
+        grep -E 'git[[:space:]]+(checkout|switch|reset)' <<< "$resume_cmds" | grep -Fq "$sha" \
           || reject RESUME_DOES_NOT_CHECKOUT "the resume command must git checkout or git switch to $sha, not merely mention it"
         ;;
       *)
@@ -247,6 +260,14 @@ if have "$STATE_SECTION"; then
   else
     reject NO_SHA "commit: '$sha' is not a full 40-char sha, 'none (not a git repository)', or 'none (no commits yet)'"
   fi
+
+  # The uncommitted work is the one thing this handoff cannot carry, so the disposition of
+  # it is the one thing that must not be left to the reader's eye.
+  if [ -z "$unc" ]; then
+    reject NO_UNCOMMITTED_LINE "$STATE_SECTION needs an 'uncommitted work:' line saying where it went (stashed, committed to a wip branch, or none)"
+  elif [ "$(canonical "$unc")" = "none" ] && [ -n "$tree_state" ]; then
+    reject UNCOMMITTED_CONTRADICTS_TREE "uncommitted work: says none, but '$repo_path' has a dirty tree right now; say where the work went"
+  fi
 else
   reject MISSING_SECTION "$STATE_SECTION"
 fi
@@ -257,7 +278,7 @@ if have "$BROKEN_SECTION"; then
   if [ "$(canonical_prose "$broken")" != "none" ]; then
     [ -n "$(fenced_lines "$broken")" ] \
       || reject SUMMARISED_ERROR "$BROKEN_SECTION needs the error output pasted in a fence"
-    repro="$(printf '%s\n' "$broken" | sed -n 's/^repro:[[:space:]]*//p' | head -1)"
+    repro="$(sed -n 's/^repro:[[:space:]]*//p' <<< "$broken" | head -1)"
     if [ -z "$repro" ]; then
       reject NO_REPRO "$BROKEN_SECTION needs a 'repro: <command>' line"
     else

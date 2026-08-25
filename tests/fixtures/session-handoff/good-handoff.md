@@ -12,8 +12,7 @@ git checkout -B resume/lease-expiry f882c1ac93d08b780caba472786173d2fdd45b78
 
 branch: fix/lease-expiry
 commit: f882c1ac93d08b780caba472786173d2fdd45b78
-uncommitted work: NOT carried by this handoff. The dirty `admission.py` was stashed as
-`wip-lease-renew`; see `## Next`.
+uncommitted work: left in the working tree at the path above; see ## Next step 1
 
 ```
 $ git status --porcelain
@@ -82,7 +81,8 @@ repro: python3 -m pytest tests/test_notes.py::test_handoff_has_state -q
 
 ## Next
 
-1. `git stash pop stash^{/wip-lease-renew}` to get the uncommitted `renew()` back.
+1. The tree still holds the uncommitted `renew()`, which no part of this handoff carries.
+   Commit it to `wip/lease-renew` or stash it before touching anything else.
 2. Inject a `Clock` into `Scheduler` so the boundary case is testable without sleeping.
 3. Write a test covering the `renew()` path at the boundary.
 

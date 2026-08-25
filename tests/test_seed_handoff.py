@@ -250,12 +250,17 @@ class TemplateContractTest(unittest.TestCase):
                          "a patch is atomic: one binary file or one conflicting hunk "
                          "restores nothing at all")
         self.assertNotIn(".patch", self.text)
-        state = sections_of(template_block(self.text))["## State"]
-        self.assertRegex(state, r"(?i)not carried",
-                         "the template must say plainly that uncommitted work is not carried")
         emergency = sections_of(self.text)["## If you have almost no context left, start here"]
         self.assertRegex(emergency, r"(?i)does not preserve uncommitted work",
                          "the reader who only reads the emergency section must be told too")
+        self.assertIn("## Known limitations", self.text,
+                      "what the skill cannot do belongs in the skill, not in a review thread")
+
+    def test_the_template_requires_a_disposition_for_uncommitted_work(self):
+        """Prose alone is what the emergency reader skips, so the field is mandatory."""
+        state = sections_of(template_block(self.text))["## State"]
+        self.assertRegex(state, r"(?m)^uncommitted work:",
+                         "the state section must carry an 'uncommitted work:' line")
 
     def test_the_skill_does_not_offer_a_partial_validation_mode(self):
         """A mode that validates the re-derivable half and blesses the absence of the rest
@@ -797,6 +802,99 @@ class HouseStyleTest(unittest.TestCase):
         for path in sorted(SKILL_DIR.rglob("*")) + sorted(FIXTURES.rglob("*")) + [Path(__file__)]:
             if path.is_file():
                 self.assertNotIn(em_dash, path.read_text(), f"em-dash in {path}")
+
+
+class SilentRuleSuppressionTest(TempRepoCase):
+    """Rules must not stop running just because the input got big or oddly shaped.
+
+    Both failures here read as a pass to anyone who is not comparing the reject list
+    against the document, which is the same class of defect twice over."""
+
+    def test_a_multi_megabyte_section_does_not_disable_the_rules_that_scan_it(self):
+        """`grep -q` exits on its first match, SIGPIPEing its writer. Under pipefail that
+        141 reads as "no match", so a long pasted section silently turns rules off. This
+        is exactly the input the skill demands: never abbreviate, paste it all."""
+        huge = "\n".join(
+            f"- a dead end that did not work, recorded at length [snip] number {i}"
+            for i in range(25000))
+        self.assertGreater(len(huge), 1_500_000, "the section must exceed the pipe buffer")
+        r = self.check(replace_section(self.good_doc(), "## Dead ends", huge))
+        self.assertNotIn("EMPTY_SECTION", r.stdout,
+                         f"a 1.5MB section was reported empty:\n{r.stdout}")
+        self.assertIn("TRUNCATED_OUTPUT", r.stdout,
+                      f"the elision rule stopped running on a large section:\n{r.stdout}")
+
+    def test_an_indented_fence_does_not_cascade_false_missing_sections(self):
+        """A CommonMark-legal fence indented under a bullet. When the opener is missed but
+        the closer is not, the rest of the file reads as fenced, and the reader cannot fix
+        it by following any of the messages they get."""
+        indented = ("- a second symptom, output indented under the bullet:\n\n"
+                    "  ```\n  E  IndexError: list index out of range\n```\n\n"
+                    "repro: python3 -m pytest -q")
+        doc = self.good_doc().replace("repro: python3 -m pytest tests/test_notes.py"
+                                      "::test_handoff_has_state -q", indented)
+        r = self.check(doc)
+        self.assertEqual(r.returncode, 0, f"an indented fence broke parsing:\n{r.stdout}")
+
+    def test_crlf_input_is_normalised_rather_than_reported_as_twelve_missing_sections(self):
+        doc = self.good_doc().replace("\n", "\r\n")
+        p = self.repo / "notes" / "crlf.md"
+        p.write_bytes(doc.encode())
+        r = run_validator(p, env=self.env)
+        self.assertEqual(r.returncode, 0, f"CRLF broke parsing:\n{r.stdout}")
+
+    def test_an_unset_HOME_still_produces_rejects_rather_than_an_abort(self):
+        doc = self.good_doc().replace(f"branch: {FIXTURE_BRANCH}", "branch: HEAD")
+        p = self.place(doc)
+        r = subprocess.run([str(VALIDATOR), str(p)], capture_output=True, text=True,
+                           env={"PATH": MINIMAL_PATH})
+        self.assertNotIn("unbound variable", r.stderr, r.stderr)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("BRANCH_IS_HEAD", r.stdout)
+
+
+class UncommittedDispositionTest(TempRepoCase):
+    """The one loss nothing here can undo is the one thing that must not be eyeballed."""
+
+    def test_the_line_is_required(self):
+        doc = re.sub(r"^uncommitted work:.*$\n", "", self.good_doc(), flags=re.MULTILINE)
+        r = self.check(doc)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("NO_UNCOMMITTED_LINE", r.stdout)
+
+    def test_claiming_none_while_the_tree_is_dirty_is_rejected(self):
+        self.assertTrue(self.git("status", "--porcelain"), "precondition: the tree is dirty")
+        doc = re.sub(r"^uncommitted work:.*$", "uncommitted work: none", self.good_doc(),
+                     flags=re.MULTILINE)
+        r = self.check(doc)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("UNCOMMITTED_CONTRADICTS_TREE", r.stdout)
+
+    def test_claiming_none_with_a_clean_tree_is_accepted(self):
+        clean = self.root / "clean"
+        (clean / "notes").mkdir(parents=True)
+        self.git("init", "-q", repo=clean)
+        self.git("symbolic-ref", "HEAD", "refs/heads/main", repo=clean)
+        (clean / "f").write_text("f")
+        (clean / ".gitignore").write_text("notes/\n")
+        self.git("add", "-A", repo=clean)
+        self.git("commit", "-q", "-m", "c", repo=clean)
+        sha = self.git("rev-parse", "HEAD", repo=clean)
+        self.assertEqual(self.git("status", "--porcelain", repo=clean), "",
+                         "precondition: the tree is clean")
+        doc = (self.good_doc().replace(str(self.repo), str(clean))
+               .replace(f"branch: {FIXTURE_BRANCH}", "branch: main")
+               .replace(FIXTURE_SHA, sha))
+        doc = re.sub(r"^uncommitted work:.*$", "uncommitted work: none", doc, flags=re.MULTILINE)
+        p = clean / "notes" / "h.md"
+        p.write_text(doc)
+        r = run_validator(p, env=self.env)
+        self.assertEqual(r.returncode, 0, f"a clean tree may say none:\n{r.stdout}")
+
+    def test_a_bare_ellipsis_as_a_list_item_does_not_escape_the_rule(self):
+        r = self.check(replace_section(self.good_doc(), "## Next", "1. keep going\n2. ..."))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("TRUNCATED_OUTPUT", r.stdout)
 
 
 if __name__ == "__main__":
