@@ -7,6 +7,7 @@ Python that runs, every scan is the real script in a subprocess, and every
 number reported below was measured in this process.
 """
 
+import json
 import re
 import shutil
 import subprocess
@@ -132,7 +133,13 @@ class SeedStubTest(unittest.TestCase):
         self.assertIn("name", keys)
         self.assertIn("description", keys)
         self.assertLessEqual(len(fm), 1024, f"frontmatter is {len(fm)} chars, cap is 1024")
-        desc = re.search(r"^description: (.*)$", fm, re.M).group(1)
+        raw = re.search(r"^description: (.*)$", fm, re.M).group(1)
+        # The value must be YAML-quoted: an unquoted `: ` inside it makes the whole
+        # frontmatter fail to parse and the skill load with no metadata at all. So
+        # measure the decoded string, not the quoted source line.
+        self.assertEqual(raw[:1], '"',
+                         "description must be double-quoted so a colon cannot break the parse")
+        desc = json.loads(raw)
         self.assertLessEqual(len(desc), 500, f"description is {len(desc)} chars, cap is 500")
         self.assertTrue(desc.startswith("Use when"),
                         "description must be a pure 'Use when...' trigger clause")
