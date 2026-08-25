@@ -22,6 +22,13 @@ Round 2:
   R2-B1  unchecked-hash and exact-mtime-restore bytecode serve old code invisibly
   R2-B2  a file canary with no truncate passes a re-prove that runs nothing
   R2-B3  a genuinely fresh flat layout must not be reported as stale
+Round 3:
+  R3-B1  `export CANARY=` does not survive a tool call, and an empty $CANARY grep
+         matches every file, so the token is inlined literally everywhere
+  R3-B2  a sourceless .pyc was reported CURRENT; one condition restores the verdict
+  R3-B3  a module-scope raise is hidden by -qq/--tb=no and by a swallowing except
+  R3-B4  tokens are stamped with a mint time, so an orphan is not mistaken for live
+  R3-B5  a canary FILE with no matching text was reported CLEAN
 
 Everything lives under a TemporaryDirectory with HOME pointed into it. Nothing is
 installed into the ambient interpreter. All path comparisons resolve symlinks first:
@@ -36,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -49,18 +57,30 @@ HOST_PYTHON_DIR = str(Path(sys.executable).parent)
 
 # The ```bash blocks of SKILL.md in document order, each keyed by a substring.
 BLOCK_KEYS = [
-    "od -An -N4",         # 0: generate a fresh canary token
+    "od -An -N4",         # 0: mint a time-stamped canary token
     "importlib.util",     # 1: which copy of the package loads
-    "CANARY:?",           # 2: remove your canary and only yours
+    "mine=CANARY",        # 2: sweep for your canary, and age everyone else's
 ]
+
+# The placeholder the document uses in every example. It is deliberately not of the
+# minted shape, so the Phase 4 sweep never mistakes this file or the SKILL for a live
+# canary. Tests substitute a real token for it.
+PLACEHOLDER = "CANARY-EPOCH-TOKEN"
+TOKEN_SHAPE = re.compile(r"^CANARY-[0-9]{10}-[0-9a-f]{8}$")
 
 # Commands the prose tells a session to run outside a fenced block. Each is executed
 # by a test below, so the skill cannot make a claim the suite has not checked.
 INLINE_COMMANDS = [
     'find . -name __pycache__ -type d -exec rm -rf {} +',
-    'grep -rl "$CANARY" dist/',
-    'rm -f "$CANARY"',
+    'grep -ral CANARY-EPOCH-TOKEN dist/',
+    'rm -f CANARY-EPOCH-TOKEN',
+    'test -e CANARY-EPOCH-TOKEN && echo OBSERVED || echo ABSENT',
 ]
+
+
+def mint(age_minutes=0):
+    """A token of the shape the skill mints, optionally back-dated."""
+    return "CANARY-%d-%s" % (int(time.time()) - age_minutes * 60, os.urandom(4).hex())
 
 
 def real(path):
@@ -142,21 +162,10 @@ class SkillDocumentTest(unittest.TestCase):
         self.assertTrue(self.description().startswith("Use when")
                         or self.description().startswith("Use before"))
 
-    def test_the_general_debugging_trigger_is_disclaimed_not_claimed(self):
-        """R2 overlap. `systematic-debugging` owns every symptom; this owns one question.
-
-        The three phrases below are that skill's verbatim trigger. They may appear here
-        only inside the negative clause, which is what stops a router matching both.
-        """
-        description = self.description()
-        cut = description.index("Do NOT use")
-        positive, negative = description[:cut], description[cut:]
-        self.assertIn("systematic-debugging", negative)
-        for phrase in ("a bug", "a test failure", "unexpected behavior"):
-            self.assertNotIn(phrase, positive,
-                             "%r in the positive clause re-creates the collision" % phrase)
-            self.assertIn(phrase, negative,
-                          "%r must be explicitly disclaimed, not merely omitted" % phrase)
+    # Round 3 deleted a test here that asserted the general-debugging phrases sat on
+    # the negative side of the description. It measured clause position, and a router
+    # matches on semantics, so it certified wording rather than behavior. The overlap
+    # with `superpowers:systematic-debugging` is real and is reported, not asserted away.
 
     def test_the_skill_does_not_contradict_its_own_trigger(self):
         """R2 found "I added a console.log and nothing prints" routed both ways."""
@@ -200,12 +209,47 @@ class SkillDocumentTest(unittest.TestCase):
         self.assertEqual(set(re.findall(r"CANARY-[0-9a-f]{4,}", self.text)), set())
         self.assertIn("od -An -N4", self.body)
 
+    def test_r3_b1_no_command_depends_on_shell_state_from_an_earlier_call(self):
+        """Separate tool calls do not share a shell, so `export CANARY=` is gone by the
+        next one and `grep "$CANARY"` then matches every file and reports a canary that
+        is not there. Every command must carry the token literally."""
+        for script in blocks() + INLINE_COMMANDS:
+            self.assertNotIn("$CANARY", script,
+                             "a token read from the environment is empty in the next "
+                             "tool call:\n%s" % script)
+            self.assertNotIn("export CANARY", script)
+        self.assertIn("separate tool calls do not share shell state", self.body,
+                      "the lesson has now cost this repo two red-team rounds; record it")
+
+    def test_r3_b1_the_document_only_ever_shows_a_non_minted_placeholder(self):
+        """A real token in the docs would be found by every sweep in every checkout."""
+        self.assertIn(PLACEHOLDER, self.body)
+        self.assertEqual(re.findall(r"CANARY-[0-9]{10}-[0-9a-f]{8}", self.text), [],
+                         "the SKILL must never contain a token of the minted shape")
+
     def test_only_python3_is_invoked_never_bare_python(self):
         """R2. Bare `python` is absent on Debian and stock macOS, and inside a venv it
         can resolve to a different interpreter than the one that was installed into."""
         for script in blocks():
             self.assertNotRegex(script, r"(?<![a-z0-9_.-])python(?![0-9])",
                                 "use python3 explicitly:\n%s" % script)
+
+    def test_r3_b3_the_file_form_is_the_default_and_the_raise_form_is_qualified(self):
+        """A module-scope raise is hidden by -qq, --tb=no, --no-summary, -rN and by any
+        swallowing except, so it cannot be the form a reader reaches for first."""
+        table = self.body.split("|Form|Hidden by|")[1].split("\n\n")[0]
+        rows = [r for r in table.splitlines() if r.startswith("|`")]
+        self.assertIn("open(", rows[0], "the file form must be listed first")
+        self.assertIn("Nothing", rows[0])
+        self.assertIn("raise", rows[1])
+        for flag in ("-qq", "--tb=no", "--no-summary", "-rN"):
+            self.assertIn(flag, rows[1], "%s hides the raise form and must be named" % flag)
+        self.assertIn("the default because", self.body)
+
+    def test_r3_b4_the_sweep_matches_only_the_minted_token_shape(self):
+        self.assertIn("CANARY-[0-9]{10}-[0-9a-f]{8}", block("mine=CANARY"))
+        self.assertIn("date +%s", block("od -An -N4"),
+                      "the token must carry its mint time")
 
     def test_undecidable_is_never_described_as_stale(self):
         """R2-B3. Prose may hedge; an exit code cannot, and the session acts on the code."""
@@ -219,11 +263,14 @@ class SkillDocumentTest(unittest.TestCase):
                 ("/private", "macOS temp paths are the false-stale case"),
                 ("sysconfig", "an in-repo .venv defeats a $PWD test"),
                 ("unchecked-hash", "bytecode that is never revalidated"),
+                ("A content check can", "R3, the narrowed bytecode claim"),
                 ("mtime and size were restored", "the other invisible bytecode case"),
                 ("git diff", "the diff-based cleanup gate must be warned against"),
                 ("pytest -q -s", "the capture measurement must be stated"),
-                ("delete it before every run", "R2-B2, the file canary needs truncating"),
-                ("Delete\nany canary file first", "R2-B2, the truncate must be a step"),
+                ("Clear\nthe previous run's evidence first", "R2-B2, the truncate step"),
+                ("--tb=no", "R3-B3, the flags that hide a raise canary"),
+                ("exit status actually flips", "R3-B3, the output-independent signal"),
+                ("sourceless `.pyc`", "R3-B2, the verdict that was missing"),
                 ("import** name", "PKG is the import name, not the distribution name")):
             self.assertIn(claim, self.body, "%s (%r missing)" % (why, claim))
 
@@ -253,26 +300,6 @@ class SkillDocumentTest(unittest.TestCase):
         for command in INLINE_COMMANDS:
             self.assertIn(command, self.text,
                           "the suite runs %r; keep the text and the test in step" % command)
-
-
-class CanaryTokenTest(unittest.TestCase):
-    """Block 0."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_generated_tokens_are_unique_and_prefixed(self):
-        seen = set()
-        for _ in range(5):
-            result = run(block("od -An -N4"), self.dir)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertRegex(result.stdout.strip(), r"^CANARY-[0-9a-f]{8}$")
-            seen.add(result.stdout.strip())
-        self.assertEqual(len(seen), 5, "tokens must not repeat: %r" % (seen,))
 
 
 class PythonProvenanceTest(unittest.TestCase):
@@ -391,6 +418,37 @@ class PythonProvenanceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("CURRENT", result.stdout)
 
+    def test_r3_b2_a_sourceless_pyc_is_stale_not_current(self):
+        """Round 2 cut a stray-.pyc detector to a prose line. Round 3 showed the cut
+        was the wrong half: with `mypkg/__init__.pyc` present and no `.py`, the runtime
+        serves the compiled copy and the check printed CURRENT, exit 0."""
+        project = Path(tempfile.mkdtemp(dir=str(self.root)))
+        pkg = project / "mypkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text('def f():\n    return "OLD"\n')
+        subprocess.run([str(self.python), "-m", "compileall", "-q", "mypkg"],
+                       cwd=str(project), check=True, capture_output=True)
+        tag = subprocess.run([str(self.python), "-c",
+                              "import sys; print('cpython-%d%d' % sys.version_info[:2])"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        shutil.copy(str(pkg / "__pycache__" / ("__init__.%s.pyc" % tag)),
+                    str(pkg / "__init__.pyc"))
+        (pkg / "__init__.py").unlink()
+        shutil.rmtree(str(pkg / "__pycache__"))
+        (pkg / "core.py").write_text('def f():\n    return "NEW"\n')
+
+        served = subprocess.run([str(self.python), "-c", "import mypkg; print(mypkg.f())"],
+                                cwd=str(project), capture_output=True, text=True,
+                                env={"PATH": BASE_PATH, "HOME": str(self.root)})
+        self.assertEqual(served.stdout.strip(), "OLD",
+                         "the sourceless .pyc really is what runs")
+
+        result = self.check(project, "mypkg/core.py")
+        self.assertEqual(result.returncode, 1,
+                         "a sourceless .pyc must never read as current:\n%s"
+                         % (result.stdout + result.stderr))
+        self.assertIn("sourceless", result.stdout)
+
     def test_namespace_package_is_undecidable_rather_than_a_crash(self):
         project = Path(tempfile.mkdtemp(dir=str(self.root)))
         (project / "mypkg").mkdir()
@@ -408,12 +466,23 @@ class PythonProvenanceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("not importable", result.stdout)
 
-    def test_paths_under_a_macos_temp_symlink_do_not_read_as_stale(self):
+    def test_a_path_reached_through_a_symlink_does_not_read_as_stale(self):
+        """macOS hands you a symlinked temp root for free (/var to /private/var); Linux
+        does not. The condition under test is "the path is reached through a symlink",
+        not "we are on a Mac", so build one when the platform has not supplied it.
+        Skipping on Linux would leave this uncovered on the runner CI actually uses."""
         project = self.project("src")
         self.install(project, editable=True)
+        if str(project) == real(project):
+            alias = self.root / ("alias-" + project.name)
+            alias.symlink_to(real(project))
+            project = alias
         self.assertNotEqual(str(project), real(project),
-                            "this assertion needs a symlinked temp root to mean anything")
-        self.assertEqual(self.check(project, "src/mypkg/core.py").returncode, 0)
+                            "the path under test must be reached through a symlink")
+        result = self.check(project, "src/mypkg/core.py")
+        self.assertEqual(result.returncode, 0,
+                         "an unresolved path comparison reports a false STALE here:\n%s"
+                         % (result.stdout + result.stderr))
 
     def test_canary_is_absent_on_the_stale_artifact_and_present_once_fixed(self):
         """The Iron Law, demonstrated rather than asserted."""
@@ -436,12 +505,12 @@ class PythonProvenanceTest(unittest.TestCase):
 
 
 class CanaryFormTest(unittest.TestCase):
-    """Phase 1 step 2 and step 3, measured against a real pytest."""
+    """Phase 1 steps 2 to 4, measured against a real pytest."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        self.token = "CANARY-%s" % os.urandom(4).hex()
+        self.token = mint()
         self.env = {"PATH": "%s:%s" % (HOST_PYTHON_DIR, BASE_PATH), "HOME": str(self.dir)}
 
     def tearDown(self):
@@ -453,62 +522,99 @@ class CanaryFormTest(unittest.TestCase):
         except ImportError:
             self.skipTest("pytest not importable by the host interpreter")
 
+    def inline(self, index):
+        return INLINE_COMMANDS[index].replace(PLACEHOLDER, self.token)
+
+    def run_pytest(self, *flags):
+        return subprocess.run([sys.executable, "-m", "pytest", *flags], cwd=str(self.dir),
+                              capture_output=True, text=True, env=self.env)
+
+    def test_minted_tokens_are_unique_stamped_and_of_the_swept_shape(self):
+        seen = set()
+        for _ in range(5):
+            result = run(block("od -An -N4"), self.dir)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            token = result.stdout.strip()
+            self.assertRegex(token, TOKEN_SHAPE)
+            minted = int(token.split("-")[1])
+            self.assertLess(abs(minted - int(time.time())), 120,
+                            "the stamp must be the real mint time or ageing is meaningless")
+            seen.add(token)
+        self.assertEqual(len(seen), 5, "tokens must not repeat: %r" % (seen,))
+
+    def test_r3_b1_an_unset_variable_would_have_matched_every_file(self):
+        """Why the token is inlined. This is the failure the skill now cannot make."""
+        (self.dir / "dist").mkdir()
+        (self.dir / "dist" / "bundle.js").write_text("totally unrelated build output\n")
+        empty = run('grep -ral "$CANARY" dist/', self.dir, env={"CANARY": ""})
+        self.assertEqual(empty.returncode, 0)
+        self.assertIn("bundle.js", empty.stdout,
+                      "an empty pattern matches anything, which reads as a canary found")
+        literal = run(self.inline(1), self.dir)
+        self.assertEqual(literal.returncode, 1,
+                         "the inlined literal cannot produce that false positive")
+
     def test_r1_b6_a_stderr_canary_is_lost_but_a_file_canary_is_not(self):
         self.pytest_available()
-        marker = self.dir / "canary.out"
+        marker = self.dir / self.token
         (self.dir / "test_thing.py").write_text(textwrap.dedent("""
-            import os, sys
+            import sys
             TOKEN = %r
             def helper():
                 sys.stderr.write(TOKEN + "\\n")
-                open(os.environ["CANARY_FILE"], "a").write(TOKEN + "\\n")
+                open(TOKEN, "a").write("x")
                 return 1
             def test_ok():
                 assert helper() == 1
         """) % self.token)
-        env = dict(self.env, CANARY_FILE=str(marker))
-        quiet = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(self.dir),
-                               capture_output=True, text=True, env=env)
+        quiet = self.run_pytest("-q")
         self.assertNotIn(self.token, quiet.stdout + quiet.stderr,
                          "a capturing runner swallows the stderr canary on a PASSING test")
-        self.assertIn(self.token, marker.read_text(),
-                      "the file canary survives capture, which is why it is ranked above")
+        self.assertTrue(marker.exists(), "the file canary survives capture")
         marker.unlink()
-        loud = subprocess.run([sys.executable, "-m", "pytest", "-q", "-s"], cwd=str(self.dir),
-                              capture_output=True, text=True, env=env)
+        loud = self.run_pytest("-q", "-s")
         self.assertIn(self.token, loud.stdout + loud.stderr)
 
-    def test_a_printed_canary_does_survive_a_failing_test(self):
-        """R2 non-blocking. The table must not say "No" flatly: this skill's own
-        scenario is often a failing test, and there the captured output IS shown."""
+    def test_r3_b3_a_raise_canary_is_hidden_by_flags_and_by_a_swallowing_except(self):
+        """The reason the file form is the default and the raise form carries caveats."""
         self.pytest_available()
+        (self.dir / "mod.py").write_text('raise RuntimeError(%r)\n' % self.token)
         (self.dir / "test_thing.py").write_text(textwrap.dedent("""
-            import sys
-            def test_fails():
-                sys.stderr.write(%r + "\\n")
-                assert False
-        """) % self.token)
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(self.dir),
-                                capture_output=True, text=True, env=self.env)
-        self.assertIn(self.token, result.stdout + result.stderr)
-        self.assertIn("Only sometimes", SKILL.read_text(),
-                      "the table must be qualified, not a flat No")
+            def test_ok():
+                try:
+                    import mod            # noqa: F401
+                except Exception:
+                    pass
+                assert 1 == 1
+        """))
+        swallowed = self.run_pytest("-q")
+        self.assertEqual(swallowed.returncode, 0)
+        self.assertNotIn(self.token, swallowed.stdout + swallowed.stderr,
+                         "an except clause hides the raise on a current artifact")
+
+        (self.dir / "test_thing.py").write_text("import mod\ndef test_ok():\n    assert 1\n")
+        hidden = self.run_pytest("-qq", "--tb=no", "-rN")
+        self.assertNotEqual(hidden.returncode, 0,
+                            "the exit status is the signal that survives every flag")
+        self.assertNotIn(self.token, hidden.stdout + hidden.stderr,
+                         "the token itself is hidden, so the text alone must not be trusted")
+
+        shown = self.run_pytest("-q")
+        self.assertIn(self.token, shown.stdout + shown.stderr,
+                      "without those flags the raise form does work")
 
     def test_r2_b2_a_file_canary_passes_a_re_prove_that_ran_nothing(self):
-        """R2-B2. Without a truncate step the previous run answers for this one."""
+        """Without the documented clear step the previous run answers for this one."""
         marker = self.dir / self.token
         marker.write_text("x")
-        nothing = run('python3 -c "pass"; test -e "$CANARY" && echo OBSERVED', self.dir,
-                      env={"CANARY": str(marker)},
-                      path_prefix=HOST_PYTHON_DIR)
-        self.assertIn("OBSERVED", nothing.stdout,
-                      "this is the defect: a run that executed nothing looks like a pass")
+        read = self.inline(3)
+        stale = run('python3 -c "pass"; %s' % read, self.dir, path_prefix=HOST_PYTHON_DIR)
+        self.assertIn("OBSERVED", stale.stdout,
+                      "the defect: a run that executed nothing looks like a pass")
 
-        cleared = run('%s; python3 -c "pass"; test -e "$CANARY" && echo OBSERVED || echo ABSENT'
-                      % INLINE_COMMANDS[2], self.dir, env={"CANARY": str(marker)},
+        cleared = run('%s; python3 -c "pass"; %s' % (self.inline(2), read), self.dir,
                       path_prefix=HOST_PYTHON_DIR)
-        self.assertIn("ABSENT", cleared.stdout,
-                      "the documented `rm -f` before each run is what closes it")
+        self.assertIn("ABSENT", cleared.stdout, "the documented rm -f closes it")
         self.assertFalse(marker.exists())
 
     def test_an_uncalled_canary_is_absent_from_a_current_artifact(self):
@@ -519,20 +625,18 @@ class CanaryFormTest(unittest.TestCase):
             def test_ok():
                 assert 1 == 1
         """) % self.token)
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=str(self.dir),
-                                capture_output=True, text=True, env=self.env)
+        result = self.run_pytest("-q")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn(self.token, result.stdout + result.stderr)
         self.assertIn("Absence proves nothing about a line that never runs", SKILL.read_text())
 
     def test_the_canary_grep_confirms_a_build_output(self):
         (self.dir / "dist").mkdir()
-        env = {"CANARY": self.token}
         (self.dir / "dist" / "index.js").write_text("// nothing\n")
-        self.assertEqual(run(INLINE_COMMANDS[1], self.dir, env=env).returncode, 1,
+        self.assertEqual(run(self.inline(1), self.dir).returncode, 1,
                          "no canary in the build output is a failure")
         (self.dir / "dist" / "index.js").write_text("// %s\n" % self.token)
-        found = run(INLINE_COMMANDS[1], self.dir, env=env)
+        found = run(self.inline(1), self.dir)
         self.assertEqual(found.returncode, 0, found.stdout + found.stderr)
         self.assertIn("dist/index.js", found.stdout)
 
@@ -645,12 +749,12 @@ class BytecodeRemedyTest(unittest.TestCase):
 
 
 class CanaryCleanupTest(unittest.TestCase):
-    """Block 2. R1-B5, plus the parallel-agent collision round 2 raised."""
+    """Block 2. R1-B5, plus the round-3 orphan, file, and false-positive findings."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        self.token = "CANARY-%s" % os.urandom(4).hex()
+        self.token = mint()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -660,27 +764,21 @@ class CanaryCleanupTest(unittest.TestCase):
                               cwd=str(self.dir), capture_output=True, text=True,
                               env={"PATH": BASE_PATH, "HOME": str(self.dir)})
 
-    def gate(self, token=None):
-        return run(block("CANARY:?"), self.dir, env={"CANARY": token or self.token})
+    def sweep(self, cwd=None):
+        return run(block("mine=CANARY").replace(PLACEHOLDER, self.token), cwd or self.dir)
 
     def diff_gate(self):
         """The obvious version, kept only to show that it passes when it should not."""
         return run('git diff | grep -c "%s"' % self.token, self.dir)
 
-    def test_an_unset_token_is_refused_rather_than_matching_everything(self):
-        (self.dir / "a.py").write_text("ok\n")
-        result = run(block("CANARY:?"), self.dir)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("set CANARY", result.stderr)
-
     def test_a_clean_tree_passes(self):
         (self.dir / "a.py").write_text("def f():\n    return 1\n")
-        result = self.gate()
+        result = self.sweep()
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("CLEAN", result.stdout)
 
     @unittest.skipUnless(shutil.which("git"), "git not on PATH")
-    def test_r1_b5_a_staged_canary_slips_past_git_diff_but_not_past_the_tree_grep(self):
+    def test_r1_b5_a_staged_canary_slips_past_git_diff_but_not_past_the_sweep(self):
         self.git("init", "-q", ".")
         (self.dir / "a.py").write_text("def f():\n    return 1\n")
         self.git("add", "-A")
@@ -690,7 +788,7 @@ class CanaryCleanupTest(unittest.TestCase):
 
         self.assertEqual(self.diff_gate().stdout.strip(), "0",
                          "the defect: git diff reports nothing once the file is staged")
-        result = self.gate()
+        result = self.sweep()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("a.py", result.stdout)
 
@@ -699,46 +797,72 @@ class CanaryCleanupTest(unittest.TestCase):
         self.git("init", "-q", ".")
         (self.dir / "new.py").write_text('raise RuntimeError("%s")\n' % self.token)
         self.assertEqual(self.diff_gate().stdout.strip(), "0")
-        self.assertEqual(self.gate().returncode, 1)
+        self.assertEqual(self.sweep().returncode, 1)
 
-    def test_r1_b5_the_gate_works_outside_a_repository(self):
+    def test_r1_b5_the_sweep_works_outside_a_repository(self):
         (self.dir / "b.py").write_text('raise RuntimeError("%s")\n' % self.token)
-        result = self.gate()
+        result = self.sweep()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("b.py", result.stdout)
 
+    def test_r3_b5_an_empty_canary_file_is_not_clean(self):
+        """The sweep was content-only, so a marker file with no matching text passed."""
+        marker = self.dir / self.token
+        marker.write_text("")
+        content = run('grep -ranF --exclude-dir=.git "%s" .' % self.token, self.dir)
+        self.assertEqual(content.returncode, 1,
+                         "there is no matching TEXT anywhere, which is the trap")
+        result = self.sweep()
+        self.assertEqual(result.returncode, 1,
+                         "the canary FILE is still on disk:\n%s" % result.stdout)
+        self.assertIn(self.token, result.stdout)
+
     def test_a_canary_inside_node_modules_is_not_excluded(self):
-        """R2. The old gate skipped node_modules, where workspace symlinks and copies of
-        dist live, so a canary that reached a built package went unreported."""
         (self.dir / "node_modules" / "pkg").mkdir(parents=True)
         (self.dir / "node_modules" / "pkg" / "index.js").write_text(
             'throw new Error("%s");\n' % self.token)
-        result = self.gate()
+        result = self.sweep()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("node_modules", result.stdout)
 
-    def test_another_sessions_canary_is_reported_but_not_ordered_removed(self):
-        """R2. In a shared checkout the prefix grep finds other agents' live canaries.
-        Ordering their removal deletes evidence out of someone else's running proof."""
-        other = "CANARY-0badc0de"
-        (self.dir / "theirs.py").write_text('raise RuntimeError("%s")\n' % other)
-        result = self.gate()
+    def test_r3_b4_a_dead_sessions_orphan_is_distinguishable_from_a_live_canary(self):
+        """Round 2 called every foreign token live and told the reader to leave it, so
+        nothing could ever be removed. The mint time in the token settles it."""
+        orphan, live = mint(age_minutes=180), mint(age_minutes=5)
+        (self.dir / "dead.py").write_text('x = "%s"\n' % orphan)
+        (self.dir / "alive.py").write_text('y = "%s"\n' % live)
+        result = self.sweep()
         self.assertEqual(result.returncode, 0,
-                         "someone else's canary must not block your own cleanup:\n%s"
-                         % result.stdout)
-        self.assertIn("ANOTHER SESSION", result.stdout)
-        self.assertIn("theirs.py", result.stdout)
-        self.assertIn("leave it alone", result.stdout)
-        self.assertTrue((self.dir / "theirs.py").exists())
+                         "another session's canary must not block your own cleanup")
+        lines = result.stdout.splitlines()
+        orphan_line = [l for l in lines if orphan in l][0]
+        live_line = [l for l in lines if live in l][0]
+        self.assertIn("ORPHAN", orphan_line)
+        self.assertIn("safe to remove", orphan_line)
+        self.assertIn("180m", orphan_line, "the age must be reported, not just the verdict")
+        self.assertIn("LIVE in another session", live_line)
+        self.assertIn("leave it alone", live_line)
+        self.assertTrue((self.dir / "alive.py").exists())
 
     def test_yours_and_theirs_are_reported_separately(self):
-        (self.dir / "theirs.py").write_text('raise RuntimeError("CANARY-0badc0de")\n')
+        theirs = mint(age_minutes=2)
+        (self.dir / "theirs.py").write_text('raise RuntimeError("%s")\n' % theirs)
         (self.dir / "mine.py").write_text('raise RuntimeError("%s")\n' % self.token)
-        result = self.gate()
+        result = self.sweep()
         self.assertEqual(result.returncode, 1)
         yours = result.stdout.split("YOUR CANARY")[1]
         self.assertIn("mine.py", yours)
         self.assertNotIn("theirs.py", yours, "do not order removal of a live foreign canary")
+
+    def test_r3_b4_the_sweep_is_silent_on_this_repository(self):
+        """The round-2 sweep produced 12 hits from SKILL.md and this test file. The
+        minted shape is what stops that, so it is checked against the real tree."""
+        result = self.sweep(cwd=REPO)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("ORPHAN", result.stdout,
+                         "documentation placeholders must never read as canaries")
+        self.assertNotIn("LIVE in another session", result.stdout)
+        self.assertIn("CLEAN", result.stdout)
 
 
 if __name__ == "__main__":
