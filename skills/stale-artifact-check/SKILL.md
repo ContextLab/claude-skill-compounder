@@ -1,6 +1,6 @@
 ---
 name: stale-artifact-check
-description: 'Use before treating any run as evidence about an edit you just made, and whenever a change appears to have had no effect at all. It answers one prior question, whether the artifact you just observed actually contains your edit, and it answers it by requiring an observed canary. Do NOT use it to work out what is wrong with the code, or to investigate a bug, a test failure, or unexpected behavior; that is systematic-debugging.'
+description: 'Use before treating any run as evidence about an edit you just made, and whenever a change appears to have had no effect at all. It answers one prior question, whether the artifact you just observed actually contains your edit, and it answers it by requiring an observed canary. Do NOT use it to work out why the code is wrong once you have confirmed you are running it; that is systematic-debugging.'
 ---
 
 # Stale artifact check
