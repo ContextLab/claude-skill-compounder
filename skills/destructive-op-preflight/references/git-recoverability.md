@@ -152,9 +152,15 @@ and read what moved before doing anything else (#70378).
 |`-n`|dry run, prints "Would remove ..." and changes nothing|
 |`-f`|actually remove (required unless `clean.requireForce=false`)|
 |`-d`|recurse into untracked directories, and remove the directories themselves|
+|`-ff`|also remove nested git repositories, which plain `-fd` refuses to touch|
 |`-x`|also remove ignored files (`.env.local`, `node_modules`, `.venv`)|
 |`-X`|remove *only* ignored files, keeping other untracked ones|
 |`-e <pat>`|add an exclusion on top of `.gitignore`|
 
 `git clean -nd` before `git clean -fd`, every time. The dry run costs nothing and its
 output is the manifest you were going to have to write anyway.
+
+Nested repositories are the exception worth knowing: `git clean -nd` says nothing about a
+`nested/` directory that contains its own `.git`, and `git clean -fd` leaves it alone. Only
+the doubled `-ff` removes it, and then the whole nested repository goes, history included.
+Verified: `clean -nd` printed nothing where `clean -ndff` printed `Would remove nested/`.

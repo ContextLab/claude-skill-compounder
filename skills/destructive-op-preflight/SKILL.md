@@ -30,19 +30,27 @@ here is what runs.
 ## Phase 1: locate, and refuse to start on unstable ground
 
 ```bash safe
-pwd -P && git rev-parse --show-toplevel && git rev-parse --is-bare-repository
+pwd -P
+git rev-parse --is-bare-repository
+git rev-parse --show-toplevel 2>/dev/null || echo 'NO WORK TREE: bare repo, or not a repo at all'
 git rev-parse --abbrev-ref HEAD
 git rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo 'NO UPSTREAM: every commit here is unpushed'
 ```
 
+Run these as separate commands, not chained with `&&`. In a bare repo
+`git rev-parse --show-toplevel` fatals with `this operation must be run in a work tree`, and
+a chain would stop there, before the line that tells you why.
+
 Compare `pwd -P`, not `pwd`. On macOS `/tmp` is a symlink to `/private/tmp`, so plain `pwd`
 and the toplevel disagree in a way that means nothing.
 
-Read `--is-bare-repository` **before** interpreting the branch. A bare repo has no working
-tree to enumerate, its destructive surface is refs rather than files, and it reports `HEAD`
-for the branch, which would otherwise look like a detached HEAD. In a non-bare repo, a
-literal `HEAD` from `--abbrev-ref HEAD` does mean detached, and that is the one place where
-the reflog is the only thing holding your commits: create a branch before anything else.
+Read `--is-bare-repository` **first**. A bare repo has no working tree to enumerate, its
+destructive surface is refs rather than files, and it reports `HEAD` for the branch, which
+would otherwise look like a detached HEAD. In a non-bare repo, a literal `HEAD` from
+`--abbrev-ref HEAD` does mean detached, and that is the one place where the reflog is the
+only thing holding your commits: create a branch before anything else. If `--show-toplevel`
+fatals in a *non*-bare directory, you are not in a repo, and the filesystem procedure under
+"Targets git does not cover" is the one that applies.
 
 Then refuse to proceed while git is mid-operation. This check is the script's, not git's:
 stopped at a `break` or `edit` during a rebase the index is clean, a stash succeeds, and
@@ -61,6 +69,7 @@ fails closed instead of vanishing:
 
 ```bash safe
 git status --porcelain -z -uall --ignored | tr '\0' '\n'
+git ls-files -v | grep -v '^H' || echo 'no index flags set'
 git log --oneline '@{u}'..HEAD 2>/dev/null || git log --oneline -20
 git stash list
 ```
@@ -75,6 +84,40 @@ separate lines rather than the unparseable `old -> new`.
 That last one matters more than it looks. A staged rename carrying an unstaged edit is code
 `RM`, and any hand-written list of "the dirty codes" misses it, along with `UU`, `AA`, ` T`,
 `MD` and `AD`. Two hours of work in a renamed file reads as an empty blast radius.
+
+`git ls-files -v` covers the blind spot that `status` cannot see at all. A file marked
+**assume-unchanged** is invisible to `status`, and a local edit to it is destroyed with no
+object anywhere and nothing in `fsck --lost-found`. Two measured facts make it worse than an
+ordinary unstaged edit.
+
+The invariant: it is **never captured by `git stash push --all`**, and never written as a
+git object at all (0 out of 34 runs, sequential and under load). Whatever else happens, no
+recovery you take contains it.
+
+The hazard: whether any given command clobbers the working copy is **unspecified**. Git
+trusts the cached stat data for these files and only sometimes re-reads them, so
+`stash push` and `reset --hard` destroyed the edit in every sequential run measured here and
+spared it in a few runs under concurrent load. Do not reason about which. Check **before**
+the stash, because that is the last moment the edit exists and it is not going into the
+recovery. Read the first column:
+
+|Flag|Meaning|Fatal?|
+|-|-|-|
+|`H`|normal|no, this is every ordinary file|
+|lowercase (`h`)|assume-unchanged|**yes**: invisible to status, never stashed, and clobbered unpredictably|
+|`S`|skip-worktree|no: verified to survive `reset --hard`, even across commits|
+
+Only the lowercase rows are a stop condition. Clear the bit with
+`git update-index --no-assume-unchanged <path>` and the file becomes ordinary, visible to
+`status`, and covered by the stash like anything else. `S` is not a stop condition: a
+skip-worktree edit was verified to survive `reset --hard`, even across commits, and a gate
+that fails on it is a gate people learn to route around.
+
+One enumeration caveat, stated because it is easy to assume otherwise: `-uall` expands
+untracked *directories*, but a nested git repository still prints as the single line
+`?? nested/`. That is not a hole in the gate, because `git stash push --all` reports
+`Ignoring path nested/` and leaves it in the residue, so the check fails closed. It is a
+hole in the manifest, so look at it by hand.
 
 For a filesystem target, count symlinks too. `find -type f` reports `1` for a tree whose
 only entry is a symlink to somebody else's data:
@@ -150,6 +193,7 @@ silently contributes nothing to compare. The residue check has none of those fai
 because git computes both sides:
 
 ```bash safe-seq
+test -z "$(git ls-files -v | grep '^[a-z]' || true)"
 git stash push --all -q -m "preflight-proof-$$"
 RESIDUE=$(git status --porcelain -uall --ignored)
 git stash pop --index -q
@@ -157,16 +201,23 @@ printf '%s\n' "$RESIDUE"
 test -z "$RESIDUE"
 ```
 
-Capture the residue and pop *before* asserting on it, so a failed check hands the tree back
-instead of leaving it stashed with no explanation. If the residue is empty, everything that
-was not clean is inside the stash. If anything remains, the stash does **not** cover it and
-the destructive command does not run.
+Two checks in order, and the order is the point. The index-flag test comes first because an
+assume-unchanged file is destroyed by the stash itself, so checking afterwards reports a
+clean residue over data that is already gone. The residue test comes second, and it captures
+and pops *before* asserting, so a failed check hands the tree back instead of leaving it
+stashed with no explanation. If the residue is empty, everything that was not clean is inside
+the stash. If anything remains, the stash does **not** cover it and the destructive command
+does not run.
 This is what catches the cases nobody enumerated: a submodule-only change, for instance,
 makes `stash push --all` exit 0 having created no entry at all, and the residue check fails
 closed on the ` M sub` line still sitting there.
 
-Empty directories are the one thing this cannot see, because git does not track them and
-`status` never reports them. If the target's structure matters, copy it aside.
+Two things this cannot see. Empty directories, because git does not track them and `status`
+never reports them: if the target's structure matters, copy it aside. And a submodule whose
+`.gitmodules` carries `submodule.<name>.ignore = dirty`, which hides its dirty state from
+`status` and so empties the residue. Check `git config -f .gitmodules --get-regexp ignore`
+when a submodule is in the blast radius. The risk is small (`clean -ffdx` was verified not
+to touch an initialized submodule) but the gate cannot see it for you.
 
 If you cannot construct a recovery, **stop and ask.** A one-line question costs a minute.
 The incident behind this skill cost 2,229 files.
@@ -190,7 +241,7 @@ went, or the user is left with an emptied tree and no idea it is recoverable.
 set -euo pipefail
 TARGET="${TARGET:?set TARGET to the commit you are resetting to}"
 STAMP="preflight-$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
-ours() { git stash list --format='%gd %gs' | grep -F "$STAMP" | head -1 | cut -d' ' -f1; }
+ours() { git stash list --format='%gd %gs' | grep -E "${STAMP}\$" | head -1 | cut -d' ' -f1; }
 trap 'rc=$?; [ "$rc" -eq 0 ] && exit 0
       echo "ABORTED rc=$rc: the destructive command did not complete." >&2
       w=$(ours || true); if [ -n "$w" ]; then
@@ -200,10 +251,13 @@ GITDIR=$(git rev-parse --git-dir)
 for f in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
   [ -e "$GITDIR/$f" ] && { echo "ABORTED: $f exists, an operation is in progress." >&2; exit 1; }
 done
+FLAGGED=$(git ls-files -v | grep '^[a-z]' || true)
+test -z "$FLAGGED" || { echo "ABORTED: assume-unchanged files are invisible to status and are overwritten by the stash itself:" >&2; printf '%s\n' "$FLAGGED" >&2; echo "Clear with: git update-index --no-assume-unchanged <path>" >&2; exit 1; }
 git rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null || { echo "ABORTED: '$TARGET' does not resolve." >&2; exit 1; }
 git stash push --all -m "$STAMP" || { echo "ABORTED: stash failed, no recovery exists." >&2; exit 1; }
 MINE=$(ours || true)
-test -z "$(git status --porcelain -uall --ignored)" || { echo "ABORTED: these paths are not in the stash:" >&2; git status --porcelain -uall --ignored >&2; exit 1; }
+RESIDUE=$(git status --porcelain -uall --ignored)
+test -z "$RESIDUE" || { echo "ABORTED: these are not in the stash:" >&2; printf '%s\n' "$RESIDUE" >&2; exit 1; }
 git branch "backup-$STAMP"
 git reset --hard "$TARGET"
 if [ -n "$MINE" ]; then git stash pop --index "$(ours || true)"; else echo "Nothing was stashed; nothing to restore."; fi
@@ -212,15 +266,23 @@ trap - EXIT
 
 Four details are load-bearing, each of them a bug found by review:
 
+- **Check the index flags before the stash, not after.** An assume-unchanged file is never
+  captured by `git stash push --all`, and whether the stash also clobbers it in place is
+  timing-dependent. Either way a gate placed after the stash reports an empty residue over
+  an edit the recovery never took. This is the one precondition where the recovery step is
+  the last moment the data still exists.
 - **Resolve `TARGET` before the stash.** With no remote, `git reset --hard origin/main`
   fatals; checking it first means the abort happens while the tree is still intact rather
   than after it has been emptied.
-- **Identify your stash by its unique message, never by position.** On a clean tree
-  `git stash push` prints `No local changes to save` and exits **0**, creating nothing.
+- **Identify your stash by its unique message, anchored, never by position.** On a clean
+  tree `git stash push` prints `No local changes to save` and exits **0**, creating nothing.
   Comparing the top of `refs/stash` before and after only proves the top changed: if
   another process stashes in between, that comparison says the entry is yours and you pop
   and delete somebody else's work. Matching `$STAMP` re-resolves correctly even when a
-  concurrent push shifts your entry from `stash@{0}` to `stash@{1}`.
+  concurrent push shifts your entry from `stash@{0}` to `stash@{1}`. The `\$` anchor is
+  load-bearing: an unanchored `grep -F` also matches a concurrent `${STAMP}-continued`, and
+  then the script pops and drops that stranger's entry, injects its content, and exits 0
+  with your own work still stashed.
 - **`backup-$STAMP`, not `backup/$STAMP`.** A pre-existing branch named `backup` makes the
   slashed form fail with `cannot lock ref`, and that failure lands after the tree is
   already stashed.
@@ -287,7 +349,7 @@ Each of these is a thought, not an observation. If you notice one, you are in Ph
 |"The stash succeeded"|Did you read its exit status, or only notice the next line ran? Mid-merge it exits 1 and stashes nothing; on a clean tree it exits 0 and stashes nothing. Measure the residue instead of trusting it.|
 |"The manifest was empty, so nothing is at risk"|An empty manifest more often means the enumeration missed a status code. A staged rename with an edit is `RM`, which every hand-written code list omits.|
 |"The user asked me to"|The user asked for an outcome. They did not ask to lose the file they never mentioned because it was never in a commit.|
-|"I generated these files, so they are disposable"|#23913: "The user said 'scaffolding' and the agent deleted everything matching the file extension." 2,229 untracked files.|
+|"I generated these files, so they are disposable"|#23913: the user said "scaffolding", and the agent deleted everything matching the file extension. 2,229 untracked files.|
 |"Untracked means unimportant"|Untracked means `.env.local`, the migration plan, the notes file. Untracked and ignored are the only categories with no recovery path at all.|
 |"It's under /tmp so nothing matters"|`/tmp` is where the copy you just took lives. It is also a symlink on macOS, so your path comparisons are comparing different strings.|
 |"I'm in a worktree, the main tree is safe"|Worktrees share one object store and one `refs/stash`. `gc --prune=now` and `reflog expire` reach every tree, and `stash pop` here pops a stash pushed there.|
@@ -315,12 +377,18 @@ skill cares about deeply. That is the point: the trigger is the irreversibility 
 outcome, not the vocabulary. A dry run prints and changes nothing. An interactive rebase of
 unpushed commits stays in the reflog.
 
+## Sources
+
+Every issue number cited above (#23913, #32938, #34327, #70378, #81508) is recorded with its
+URL and a verbatim quote in `notes/research/seed-skill-candidates.md` in this repository.
+Check the numbers there rather than treating them as folklore.
+
 ## Quick reference
 
 |Phase|Do|Done when|
 |-|-|-|
 |1 Locate|`pwd -P`, toplevel, bare check, `rev-parse --abbrev-ref HEAD`, in-progress check|Right repo, HEAD understood, no rebase or merge underway|
-|2 Enumerate|`status --porcelain -z -uall --ignored`, unpushed log, `find \( -type f -o -type l \)`|A manifest with one line per path, taken from what git printed|
+|2 Enumerate|`status --porcelain -z -uall --ignored`, `ls-files -v`, unpushed log, `find \( -type f -o -type l \)`|A manifest with one line per path, taken from what git printed|
 |3 Classify|The recoverability table and the five traps|Every path has a named recovery source or the word NOTHING|
-|4 Protect|`stash push --all`, `branch`, `cp -a`|`git status` after the stash printed nothing at all|
+|4 Protect|`ls-files -v` check first, then `stash push --all`, `branch`, `cp -a`|No lowercase index flags before stashing, and `git status` empty after|
 |5 Run|One guarded script: target resolved first, stash matched by message, `EXIT` trap|The abort path names where the work is, and re-enumeration matches|

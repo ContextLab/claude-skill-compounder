@@ -31,15 +31,32 @@ compares equal to another empty string and reads as success.
 ```bash
 census() {
   db="$1"
+  gen="${TMPDIR:-/tmp}/census-$$-$(basename "$db").sql"
   sqlite3 -bail -noheader "$db" \
-    "select 'select '''||name||':''||count(*) from '||quote(name)||';'
+    "select 'select ''' || name || ':'' || count(*) from ' || quote(name) || ';'
        from sqlite_master where type='table' and name not like 'sqlite_%';" \
-    > "$db.census.sql" || return 1
-  sqlite3 -bail -noheader "$db" < "$db.census.sql" || return 1
+    > "$gen" || return 1
+  sqlite3 -bail -noheader "$db" < "$gen" || { rm -f "$gen"; return 1; }
+  rm -f "$gen"
 }
 ```
 
 That prints one `table:rowcount` line per table. Verified against a two-table database.
+The generated SQL goes under `$TMPDIR` and is deleted, never written beside the database. A
+skill about not touching things should not drop scratch files into the directory holding
+production data.
+
+**What this proves, and what it does not.** It compares the set of table names and the row
+count in each. A dump with the same tables and the same cardinality but altered *content*
+passes. If content matters, compare a digest as well; SQLite has no built-in hash, so use
+the shell:
+
+```bash
+content_digest() { sqlite3 -bail "$1" ".dump" | grep -v '^--' | shasum -a 256 | cut -d' ' -f1; }
+```
+
+Comparing `content_digest` on the source and the restored copy catches everything the
+census cannot, at the cost of reading the whole database twice.
 
 ## The full procedure
 

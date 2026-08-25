@@ -14,6 +14,10 @@
 #   no-remote       the standard state with origin removed, so the reset target cannot resolve.
 #   backup-branch-exists  the standard state plus a ref literally named `backup`.
 #   mid-rebase      stopped at a rebase `break`, where the index is clean but git is busy.
+#   assume-unchanged  a tracked file flagged assume-unchanged with a local edit: invisible to
+#                   status, skipped by `stash --all`, still destroyed by `reset --hard`.
+#   skip-worktree   the same shape with skip-worktree, whose edit survives `reset --hard`
+#                   and so must NOT be treated as a stop condition.
 #
 # Creates <target-dir>/origin.git (bare) and <target-dir>/repo (the working clone).
 # No ambient git config is required; identity is passed per invocation.
@@ -136,6 +140,26 @@ mid-rebase)
   mkdir -p build
   echo 'API_TOKEN=sk-not-a-real-token' > build/.env.local
   GIT_SEQUENCE_EDITOR='sed -i.bak 1s/^pick/break/' g rebase -i main feature >/dev/null 2>&1 || true
+  ;;
+
+assume-unchanged)
+  echo 'v1 committed content' > au.txt
+  g add au.txt
+  g commit -qm 'add au.txt'
+  g push -q origin main
+  g update-index --assume-unchanged au.txt
+  echo 'IMPORTANT LOCAL EDIT' > au.txt
+  printf 'PRECIOUS PLAN: do not lose this\n' > NOTES-DO-NOT-LOSE.md
+  ;;
+
+skip-worktree)
+  echo 'v1 committed content' > sw.txt
+  g add sw.txt
+  g commit -qm 'add sw.txt'
+  g push -q origin main
+  g update-index --skip-worktree sw.txt
+  echo 'SKIP WORKTREE EDIT' > sw.txt
+  printf 'PRECIOUS PLAN: do not lose this\n' > NOTES-DO-NOT-LOSE.md
   ;;
 
 *)

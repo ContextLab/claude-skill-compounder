@@ -568,7 +568,8 @@ class RedTeamRound2Test(SeedSkillFixture):
         body = split_frontmatter(read_skill())[1]
         self.assertNotIn("comm -23", body, "the path-list gate must be gone")
         self.assertNotIn("at-risk.txt", body)
-        self.assertIn('test -z "$(git status --porcelain -uall --ignored)"', body)
+        self.assertIn("RESIDUE=$(git status --porcelain -uall --ignored)", body)
+        self.assertIn('test -z "$RESIDUE"', body)
 
     def test_b3_concurrent_stash_does_not_redirect_the_pop(self):
         """Comparing the top of refs/stash proves the top changed, not that you made it."""
@@ -693,6 +694,147 @@ class RedTeamRound2Test(SeedSkillFixture):
         r = check('rm -f rc.db; sqlite3 app.db ".dump" > d.sql; sqlite3 -bail rc.db < d.sql')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("VERIFIED", r.stdout)
+
+
+class RedTeamRound3Test(SeedSkillFixture):
+    """One test per blocking finding from the third cold-agent review."""
+
+    def test_b1_assume_unchanged_edit_is_destroyed_without_the_index_flag_check(self):
+        """The loss itself: invisible to status, skipped by `stash --all`, no object left."""
+        repo = self.make_fixture("assume-unchanged")
+        self.assertIn("IMPORTANT LOCAL EDIT", (repo / "au.txt").read_text())
+
+        # Invisible to every check the previous version made.
+        self.assertNotIn("au.txt", self.git(repo, "status", "--porcelain", "-uall",
+                                            "--ignored"))
+        # The recovery does not contain it. This is the deterministic half: whether the
+        # stash also overwrites the file in place is timing-dependent (git trusts the
+        # cached stat data), so the test asserts only what always holds.
+        self.git(repo, "stash", "push", "--all", "-q", "-m", "probe")
+        self.assertNotIn("au.txt",
+                         self.git(repo, "stash", "show", "--include-untracked",
+                                  "--name-only", "'stash@{0}'"),
+                         "the assume-unchanged path is not captured by the stash")
+
+        # A residue-only gate reports a perfectly clean tree over the gap.
+        self.assertEqual(
+            self.sh('test -z "$(git status --porcelain -uall --ignored)"', repo).returncode,
+            0, "this is the finding: the residue-only gate passes")
+
+        # Whether `reset --hard` then clobbers the working copy is itself unspecified:
+        # observed overwriting it in 34 of 34 sequential and CPU-loaded runs, and sparing
+        # it in a few runs during concurrent suite execution, which is a racy-index
+        # timing effect. The test asserts the invariant instead of the coin flip.
+        self.git(repo, "reset", "--hard", "HEAD")
+
+        # Nothing anywhere holds the edit.
+        self.assertFalse(self.sh("git fsck --lost-found --unreachable", repo).stdout.strip(),
+                         "no object survives, so the edit is unrecoverable")
+        self.assertFalse(any("IMPORTANT LOCAL EDIT" in self.sh("git cat-file -p %s" % sha,
+                                                               repo).stdout
+                             for sha in re.findall(
+                                 r"^(\w{40}) blob$",
+                                 self.sh("git cat-file --batch-all-objects "
+                                         "--batch-check='%(objectname) %(objecttype)'",
+                                         repo).stdout, re.M)),
+                         "the edit was never written as a git object")
+
+    def test_b1_index_flag_check_makes_the_gate_fail_closed(self):
+        """`git ls-files -v` is the half of the residue that `status` cannot see."""
+        repo = self.make_fixture("assume-unchanged")
+        flagged = self.sh("git ls-files -v | grep '^[a-z]'", repo)
+        self.assertEqual(flagged.returncode, 0)
+        self.assertIn("au.txt", flagged.stdout)
+
+        r = self.run_prescribed(repo)
+        self.assertNotEqual(r.returncode, 0, "the script must refuse to continue")
+        self.assertIn("assume-unchanged", r.stdout + r.stderr)
+        self.assertIn("au.txt", r.stdout + r.stderr, "it must name the invisible file")
+        self.assertIn("IMPORTANT LOCAL EDIT", (repo / "au.txt").read_text(),
+                      "the edit must still be on disk, so the abort has to land before "
+                      "the stash, which is itself what overwrites it")
+        self.assertEqual(self.git(repo, "stash", "list").strip(), "",
+                         "the script must not have stashed at all")
+
+        body = split_frontmatter(read_skill())[1]
+        self.assertIn("git ls-files -v", body, "Phase 2 must read the index flags")
+
+    def test_b1_phase4_proof_block_also_refuses_a_flagged_index(self):
+        """The Phase 4 block is a standalone procedure, so it needs the same precondition.
+        Run it against the flagged fixture rather than only reading it."""
+        blocks = [lines for tag, lines, _ in fences(read_skill()) if tag == "safe-seq"]
+        self.assertEqual(len(blocks), 1)
+        block = "set -e\n" + "\n".join(claimed_exit(ln)[1] for ln in blocks[0])
+
+        repo = self.make_fixture("assume-unchanged")
+        r = self.bash(block, repo)
+        self.assertNotEqual(r.returncode, 0,
+                            "the proof block must refuse a flagged index:\n%s"
+                            % (r.stdout + r.stderr))
+        self.assertIn("IMPORTANT LOCAL EDIT", (repo / "au.txt").read_text(),
+                      "and must refuse before the stash overwrites the edit")
+        self.assertEqual(self.git(repo, "stash", "list").strip(), "",
+                         "nothing should have been stashed")
+
+    def test_b1_skip_worktree_is_not_treated_as_a_stop_condition(self):
+        """Over-correcting on `S` would fail the gate on a flag whose edit survives, and a
+        gate that cries wolf is a gate people route around."""
+        repo = self.make_fixture("skip-worktree")
+        self.assertIn("S sw.txt", self.git(repo, "ls-files", "-v"))
+
+        # Verified premise: this edit really does survive a hard reset.
+        self.git(repo, "reset", "--hard", "HEAD")
+        self.assertIn("SKIP WORKTREE EDIT", (repo / "sw.txt").read_text())
+
+        r = self.run_prescribed(repo)
+        self.assertEqual(r.returncode, 0,
+                         "skip-worktree alone must not abort:\n%s" % (r.stdout + r.stderr))
+        self.assertIn("SKIP WORKTREE EDIT", (repo / "sw.txt").read_text())
+
+    def test_b2_ours_does_not_match_a_superstring_stash_message(self):
+        """Runs the artifact's own `ours()`. Unanchored, it selects a concurrent
+        `${STAMP}-continued`, pops it, drops it, and exits 0."""
+        repo = self.make_fixture()
+        script = prescribed_script()
+        ours_def = [ln for ln in script.splitlines() if ln.startswith("ours()")]
+        self.assertEqual(len(ours_def), 1, "the script must define ours() exactly once")
+
+        stamp = "preflight-20260825-010101-999-42"
+        self.git(repo, "stash", "push", "--all", "-q", "-m", stamp)
+        self.sh("echo stranger > s.txt && git add s.txt "
+                "&& git stash push --all -q -m '%s-continued'" % stamp, repo)
+        listing = self.git(repo, "stash", "list", "--format='%gd %gs'")
+        self.assertIn("%s-continued" % stamp, listing)
+
+        # The unanchored form is the defect, and it picks the stranger.
+        wrong = self.bash("STAMP=%s; git stash list --format='%%gd %%gs' "
+                          "| grep -F \"$STAMP\" | head -1 | cut -d' ' -f1" % stamp, repo)
+        self.assertEqual(wrong.stdout.strip(), "stash@{0}",
+                         "this is the finding: unanchored grep selects the stranger")
+
+        # The shipped definition must pick ours.
+        right = self.bash("STAMP=%s\n%s\nours" % (stamp, ours_def[0]), repo)
+        self.assertEqual(right.stdout.strip(), "stash@{1}",
+                         "the artifact's ours() must resolve to our own entry")
+        self.assertIn("grep -E", ours_def[0], "the match must be anchored")
+
+    def test_b2_prescribed_script_survives_a_superstring_neighbour(self):
+        """End to end: a stash whose message extends ours must be left untouched."""
+        repo = self.make_fixture()
+        # A pre-existing entry whose message is a superstring of any preflight stamp.
+        # Scope it to one path so the fixture's own dirty state is left intact.
+        self.sh("echo stranger > s.txt && git add s.txt && git stash push --all -q "
+                "-m 'preflight-continued-do-not-touch' -- s.txt", repo)
+        self.assertTrue((repo / DOOMED).is_file(), "fixture state must survive the setup")
+        before = self.git(repo, "stash", "list").strip()
+
+        r = self.run_prescribed(repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((repo / DOOMED).is_file(), "our own work must come back")
+        self.assertEqual(self.git(repo, "stash", "list").strip(), before,
+                         "the neighbour's stash must survive untouched")
+        self.assertFalse((repo / "s.txt").exists(),
+                         "the neighbour's content must not be injected into our tree")
 
 
 class SkillCommandsExecuteTest(SeedSkillFixture):
