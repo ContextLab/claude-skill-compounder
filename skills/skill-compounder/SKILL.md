@@ -56,7 +56,11 @@ Budget `<total-steps>` as `2 + 2 × (planned red-team rounds)`, so 8 for the usu
 cap. Call `skillforge step <n> "<what is happening right now>"` at **every** transition,
 and always close with `skillforge done "<outcome>"` or `skillforge fail "<why>"`. A forge
 left open strands a spinner in the user's status line; `skillforge clear` is the escape
-hatch.
+hatch, and it records the forge as abandoned rather than dropping it.
+
+Every start, done and fail appends to a local ledger, so an abandoned forge is as visible
+as a finished one. `skillreport` later joins that against your transcripts to answer the
+only question that matters about this protocol: did the skill ever get used again.
 
 **1. Builder agent.** Dispatch a subagent that invokes a skill-authoring skill
 (`skill-creator`, `writing-skills`, or equivalent) to write the SKILL.md. Give it the
@@ -108,6 +112,19 @@ future session. Escalate in order:
      recording the date, the case, and the concurring verdict. Never `rm -rf` a skill.
      Spurious deletions must be recoverable.
 
+## 3.5 Candidates you are not ready to forge yet
+
+Not every good idea clears the threshold in the moment it arrives. Rather than losing it
+or forging something premature, write the marker:
+
+```
+★ Skill candidate: <the procedure, and what made it costly, in one paragraph>
+```
+
+A `Stop` hook queues that, deduped, for one batched review a week (`skillinsight review`).
+The queue feeds this same threshold; it never bypasses it, and nothing in it is forged
+automatically.
+
 ## 4. Hot-reloading
 
 Skills are hot-reloaded. Writing `~/.claude/skills/<name>/SKILL.md` makes it available to
@@ -123,8 +140,10 @@ Skills are hot-reloaded. Writing `~/.claude/skills/<name>/SKILL.md` makes it ava
 
 ## Troubleshooting
 
-- `skillforge: command not found` → the CLI is at `~/.local/bin/skillforge`; ensure that
-  directory is on `PATH`, or call it by full path.
+- `skillforge: command not found` → the CLIs (`skillforge`, `skillreport`, `skillinsight`,
+  `skillcontrib`) install to `~/.local/bin/`; ensure that directory is on `PATH`, or call
+  them by full path. Loaded as a plugin instead, they are on the Bash tool's `PATH`
+  already.
 - Animation not visible → the status line only renders while a forge is active. Check
   `skillforge show`. If `settings.json` was just installed, the status line picks up
   changes without a restart, but `/hooks` forces a config reload.

@@ -302,9 +302,15 @@ Only the three `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is r
 is read by all four components, so it belongs in the session-wide `env` block or the hooks and
 the status line will disagree about where state lives.
 
-The defaults are first guesses; nobody measured them. If a reminder fires often enough
-that you learn to read past it, raise `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`, because by
-that point it has stopped doing anything for you and you will not notice that it has.
+**All four thresholds are unvalidated.** `CI_EDIT_EVERY=12`, `CI_PROMPT_COOLDOWN=1200`,
+and the skill's own ">15 minutes" and ">=2 occurrences" were picked by judgement and
+nothing has measured them since. `skillreport` is the instrument that would settle them,
+and it needs real usage across several repos over real time before any of these numbers
+should move. Until then, tuning them is guesswork with extra steps.
+
+The one adjustment worth making without data: if a reminder fires often enough that you
+learn to read past it, raise `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`. By that point it
+has stopped doing anything for you, and it will keep looking like it works.
 
 ---
 
