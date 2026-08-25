@@ -59,8 +59,8 @@ skillforge start <name> <total-steps> "<one-line summary>"
 ```
 
 Budget `<total-steps>` as `2 + 2 × (planned red-team rounds)`: one step to dispatch the
-builder, one for its draft, then a review step and a revision step per planned round. So 8
-for the usual 3-round cap. The count is a budget, not a prediction, and a forge that comes
+builder, one for its draft, then a review step and a revision step per planned round. So 12
+for the usual 5-round cap, or 22 if you have raised it to 10. The count is a budget, not a prediction, and a forge that comes
 back clean early simply stops short; `skillforge done` snaps the bar to full. Call `skillforge step <n> "<what is happening right now>"` at **every** transition,
 and always close with `skillforge done "<outcome>"` or `skillforge fail "<why>"`. A forge
 left open strands a spinner in the user's status line; `skillforge clear` is the escape
@@ -112,9 +112,24 @@ Required eval checklist:
 Spawn a **new** red-teamer each round; the whole test depends on the reader being
 genuinely cold. Repeat until the report comes back clean.
 
-**4. Cap at 3 rounds.** If it is not clean after 3, do not ship a half-working skill:
-either narrow its scope until it *is* clean, or abandon it (`skillforge fail`) and leave
-notes explaining what blocked it.
+**4. Cap at 5 rounds, or 10 for a skill that is complex or genuinely important.** Raise it
+deliberately and say why when you announce the forge, rather than discovering at round 6
+that you would like more. A safety-critical skill, one with a scanner or a validator, or
+one whose failure is silent all justify the higher cap.
+
+If it is not clean at the cap, do not ship a half-working skill: either narrow its scope
+until it *is* clean, or abandon it (`skillforge fail`) and leave notes explaining what
+blocked it.
+
+**Where 5 comes from.** The first cap was 3, and it was too tight. Across the eight forges
+this repository has run, **not one produced a clean report within three rounds**. Every one
+was narrowed at the cap or abandoned there, and several were still returning blocking
+findings on round 3 that a fourth round then fixed cleanly. A cap that nothing has ever met
+is not a cap, it is a guarantee that everything ships narrowed.
+
+Five is a better guess and still a guess. What would settle it is rounds-to-clean recorded
+per forge, which the ledger can carry; until that exists, treat this number the way the
+other thresholds in this package are treated, as unvalidated.
 
 ## 3. Fixing, documenting, or retiring a skill that did not work
 

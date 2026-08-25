@@ -182,7 +182,8 @@ skillforge start <name> <total-steps> "<one-line summary>"
   ├─ builder agent      → writes SKILL.md (given the transcript, including dead ends)
   ├─ red-team agent     → FRESH context, tries to execute it cold, reports failures
   ├─ loop               → findings back to the builder; a NEW red-teamer each round
-  └─ cap at 3 rounds    → narrow the scope until clean, or abandon it honestly
+  └─ cap at 5 rounds    → narrow the scope until clean, or abandon it honestly
+                          (10 for a complex or safety-critical skill)
   │
 skillforge done "<outcome>"
 ```
