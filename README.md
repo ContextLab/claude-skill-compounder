@@ -5,13 +5,13 @@
 ![A skill being forged: the builder/red-team loop, with live progress in the status line](docs/media/forge.gif)
 
 
-Every session, you and Claude solve some problem that took real effort to get right — a
-debugging sequence, a deploy-and-verify loop, a non-obvious API dance. Then the session
-ends and that knowledge evaporates. Next week a fresh session makes the same mistakes in
-the same order.
+Knowledge that costs a session real effort to acquire dies with that session. You and
+Claude work out a debugging sequence, a deploy-and-verify loop, or a non-obvious API
+dance; the context window closes; next week a fresh session makes the same mistakes in the
+same order.
 
 `claude-skill-compounder` closes that loop. It installs a skill, two hooks, and a live
-status-line animation that together implement one principle:
+status-line animation, all of which serve one principle:
 
 > **Compound improvement** — when a procedure is *costly to get right* and *likely to
 > recur*, stop re-deriving it and forge it into a reusable skill. Do it adversarially, so
@@ -21,16 +21,21 @@ status-line animation that together implement one principle:
 
 ## Why
 
-Skills are Claude Code's mechanism for durable capability. Two things stop them from
-compounding on their own:
+Skills are Claude Code's mechanism for durable capability, and two things stop them from
+compounding on their own.
 
-1. **Nothing notices the opportunity.** Recognizing "this is worth crystallizing" has to
-   happen *during* the work, not in a retrospective that never gets written.
-2. **A skill written by the session that just solved the problem is usually broken.** It
-   is written by an author who already knows the answer, so it quietly assumes context a
-   fresh session will not have. It looks fine, and then it fails six weeks later.
+The first is that nothing notices the opportunity. Recognizing that a procedure is worth
+crystallizing has to happen *during* the work, because the retrospective where it would
+otherwise happen is a document nobody writes.
 
-This project addresses (1) with hooks that keep asking the question, and (2) with an
+The second is that a skill written by the session that just solved the problem is usually
+broken. Its author already knows the answer, so it quietly assumes context a fresh session
+will not have. For example, it names a script without saying which directory to run it
+from, or it skips the environment variable that was already exported three hours ago, or
+it says "fix the error" about an error message it alone recognizes. In other words, it
+reads fine to the person who wrote it and fails six weeks later to everybody else.
+
+This project addresses the first with hooks that keep asking the question, and the second with an
 adversarial forging protocol: a **builder** agent writes the skill, and a **separate,
 cold** red-team agent tries to execute it with no context and reports where it breaks.
 They loop until the red-team report comes back clean.
@@ -46,9 +51,9 @@ They loop until the red-team report comes back clean.
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress|
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
 
-Nothing is destructive. Existing hooks from other tools are preserved, your current
-status line is preserved and restored on uninstall, and `settings.json` is backed up
-before every change.
+All of the changes are additive. Existing hooks from other tools are preserved, your
+current status line is preserved and restored on uninstall, and `settings.json` is backed
+up before every change.
 
 ---
 
@@ -78,20 +83,20 @@ config reload if you want to be certain.
 ### 1. Before implementing — reuse before you build
 
 At the start of a substantive turn, a `UserPromptSubmit` hook reminds the session to check
-whether a skill already covers the task, before writing a plan or any code. Throttled to
-one reminder per 20 minutes, and only for prompts of 60+ characters, so `yes` and
-`continue` never trigger it.
+whether a skill already covers the task, before writing a plan or any code. It is
+throttled to one reminder per 20 minutes and fires only for prompts of 60+ characters, so
+`yes` and `continue` never trigger it.
 
 ### 2. During work — notice what is worth keeping
 
-Every 12 file edits, a `PostToolUse` hook asks whether the current procedure clears the
-bar. **Both** conditions must hold:
+Every 12 file edits, a `PostToolUse` hook asks whether a given procedure clears the bar.
+**Both** conditions must hold:
 
 - **Costly** — >15 minutes of trial-and-error, a non-obvious ordering constraint, or an
   error a fresh session would predictably repeat, **and**
 - **Recurring** — it has already happened twice, or it is a standing part of the workflow.
 
-One without the other gets a note, not a skill. Forging is expensive; the bar is what
+One without the other gets a note, not a skill. Forging is expensive, and the bar is what
 keeps it worth paying for.
 
 When both hold, the session runs the **forging protocol**:
@@ -115,13 +120,15 @@ overlap with existing skills, and scope creep.
 
 ### 3. When a skill misfires — fix, document, or retire
 
-Never silently work around a bad skill; that pays the same cost in every future session.
-Escalate: fix the wording → fix the procedure and re-run the full red-team loop → retire.
+Never silently work around a bad skill, because the workaround costs the same time again
+in every future session. Escalate instead: fix the wording, then fix the procedure and
+re-run the full red-team loop, and retire it only when neither works.
 
-Retirement requires **independent concurrence**: a second fresh agent is asked the
-*neutral* question *"should this be kept, fixed, or retired?"* — never "confirm this
-deletion", which is a leading prompt any agent will rubber-stamp. Retiring moves the skill
-to `~/.claude/skills-archive/` with a `WHY-ARCHIVED.md`. Nothing is ever `rm -rf`'d.
+Retirement requires **independent concurrence**. A second fresh agent is asked the
+*neutral* question *"should this be kept, fixed, or retired?"*, and never "confirm this
+deletion", which is a leading prompt any agent will (obligingly) rubber-stamp. Retiring
+moves the skill to `~/.claude/skills-archive/` with a `WHY-ARCHIVED.md`. Nothing is ever
+`rm -rf`'d.
 
 ---
 
@@ -163,6 +170,10 @@ Noise is a tuning problem, not a reason to uninstall. Set these in the hook entr
 |`STATUSLINE_BASE_TTL`|`5`|Seconds your base status line is cached|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|Where runtime state lives|
 
+The defaults are first guesses rather than measured values. If a reminder fires often
+enough that you learn to read past it, raise `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`,
+because a reminder you have stopped reading has stopped working while still appearing to.
+
 ---
 
 ## Uninstall
@@ -186,10 +197,12 @@ and removes the symlinks. Runtime state is left intact; delete it with
 
 45 tests, no mocks: real temporary Claude directories, real `settings.json` files, real
 subprocess invocations of the shell scripts. See [docs/DESIGN.md](docs/DESIGN.md) for the
-verified platform behavior the implementation depends on.
+verified platform behavior the implementation depends on — mid-session hot-reloading, the
+two different session ids, and so on.
 
-The animation at the top is recorded from a fabricated forge — no real transcript, path,
-or skill name is ever captured. Regenerate it with [`vhs`](https://github.com/charmbracelet/vhs):
+The animation at the top is recorded from a fabricated forge (no real transcript, path, or
+skill name is ever captured). Regenerate it with
+[`vhs`](https://github.com/charmbracelet/vhs):
 
 ```bash
 brew install vhs
