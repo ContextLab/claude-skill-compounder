@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# skillinsight: the batched weekly review over the captured skill-candidate queue.
+#
+#   skillinsight list   [--week <ISO-week>]
+#   skillinsight review [--week <ISO-week>]
+#   skillinsight stats
+#   skillinsight prune  --older-than <weeks>
+#   skillinsight --help
+#
+# The queue is written by hooks/insight-capture.sh on Stop, one JSONL file per ISO
+# week under ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/insights/.
+#
+# WHY THIS IS BATCHED AND WEEKLY, NOT PER TURN. The queue fills at roughly 30 unique
+# candidates per week (busiest measured 7-day window: 115), and only 4.8% of turns
+# produce one at all. A per-turn model call to triage them would be about 100 calls a
+# day, 95% of which would look at nothing. One pass over a week's queue costs one call.
+# Numbers: notes/research/insight-capture.md sections 4 and 7.
+#
+# WHY THERE IS NO AUTOMATIC UNIVERSAL/LOCAL CLASSIFIER HERE. One was built and
+# measured. The rule (does the candidate name identifiers that exist in the current
+# repo's `git ls-files`?) scored 7/14 against hand-read labels, which is chance on a
+# binary label, and a further 34% of records could not be scored at all because the
+# recorded cwd was a worktree or a scratchpad. Its errors ran LOCAL -> UNIVERSAL,
+# the direction that pollutes the global skill set. It was dropped for that reason.
+# What replaces it is kernel extraction, performed by the reviewing session during
+# `review`: rewrite the lesson with repo-specific names stripped, and see what is
+# left. Evidence: notes/research/insight-capture.md section 6.
+set -uo pipefail
+
+DIR="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/insights"
+
+command -v jq >/dev/null 2>&1 || { echo "skillinsight: jq is required" >&2; exit 1; }
+
+die() { echo "skillinsight: $*" >&2; exit 2; }
+
+now="${INSIGHT_NOW:-${CI_NOW:-$(date -u +%s 2>/dev/null)}}"
+case "$now" in ''|*[!0-9]*) die "clock is unreadable" ;; esac
+
+# BSD date wants -r <seconds>, GNU date wants -d @<seconds>. Try both, in that order.
+week_of() { date -u -r "$1" +%G-W%V 2>/dev/null || date -u -d "@$1" +%G-W%V 2>/dev/null; }
+
+usage() {
+  cat <<'USAGE'
+skillinsight: review the captured skill-candidate queue.
+
+  skillinsight list   [--week <ISO-week>]   one line per candidate (default: this week)
+  skillinsight review [--week <ISO-week>]   the full reviewable batch, with instructions
+  skillinsight stats                        queue size, weeks covered, duplicates skipped
+  skillinsight prune  --older-than <weeks>  archive week files older than the cutoff
+  skillinsight --help
+
+The queue is appended by the Stop hook (hooks/insight-capture.sh) from two signals:
+
+  1. An explicit marker the session writes when it means it, which is the primary
+     signal because it survives any output style:
+         ★ Skill candidate: <the lesson>
+         SKILL-CANDIDATE: <the lesson>
+     The marker plus the rest of its paragraph is captured.
+
+  2. `★ Insight` blocks, an opportunistic feeder. These come from the
+     learning-output-style plugin, so their absence is normal.
+
+Nothing in the queue is ever forged automatically. `review` produces a batch for a
+session to judge; survivors go through the existing skill-compounder threshold and
+its builder/red-team loop.
+
+Environment:
+  SKILL_COMPOUNDER_STATE   queue root (default ~/.claude/skill-compounder)
+  INSIGHT_NOW / CI_NOW     pin the clock, so the current ISO week is deterministic
+USAGE
+}
+
+files_for_week() { # $1 = ISO week
+  [ -f "$DIR/$1.jsonl" ] && printf '%s\n' "$DIR/$1.jsonl"
+}
+
+all_files() {
+  [ -d "$DIR" ] || return 0
+  ls -1 "$DIR"/*.jsonl 2>/dev/null | sort
+}
+
+# Echoes the ISO week named by --week, or the current one. Runs in a command
+# substitution, so it must never print anything else: --help is handled by the
+# caller before this is reached.
+parse_week_flag() {
+  w=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --week) shift; w="${1:-}"; [ -z "$w" ] && die "--week needs an ISO week, e.g. 2026-W34" ;;
+      --week=*) w="${1#--week=}" ;;
+      *) die "unexpected argument '$1'" ;;
+    esac
+    shift
+  done
+  [ -z "$w" ] && w="$(week_of "$now")"
+  printf '%s' "$w"
+}
+
+wants_help() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in -h|--help) return 0 ;; esac
+    shift
+  done
+  return 1
+}
+
+cmd="${1:-}"; shift 2>/dev/null || true
+
+case "$cmd" in
+  ""|-h|--help|help) usage; exit 0 ;;
+
+  list)
+    wants_help "$@" && { usage; exit 0; }
+    week="$(parse_week_flag "$@")" || exit $?
+    f="$(files_for_week "$week")"
+    if [ -z "$f" ]; then
+      echo "skillinsight: nothing queued for $week"
+      exit 0
+    fi
+    echo "queue for $week ($(wc -l < "$f" | tr -d ' ') candidates)"
+    jq -r '(.source) + "  " + (.ts) + "  " + (.project) + "\n    " + ((.text | gsub("\\s+"; " "))[0:110])' "$f" \
+      | awk '/^[a-z]/ {n++; printf "%3d  %s\n", n, $0; next} {print}'
+    ;;
+
+  review)
+    wants_help "$@" && { usage; exit 0; }
+    week="$(parse_week_flag "$@")" || exit $?
+    f="$(files_for_week "$week")"
+    if [ -z "$f" ]; then
+      echo "skillinsight: nothing queued for $week"
+      exit 0
+    fi
+    n="$(wc -l < "$f" | tr -d ' ')"
+    cat <<INSTRUCTIONS
+==============================================================================
+SKILL CANDIDATE REVIEW  |  $week  |  $n candidates
+==============================================================================
+
+Instructions for the reviewing session. Do all of this yourself, in this turn.
+
+1. KERNEL EXTRACTION, first, for every candidate. Rewrite the lesson with every
+   repo-specific name replaced by the role it plays. A path becomes "a second
+   validator module". A function name becomes "the retry wrapper". A ticket number
+   goes away. Write the rewrite out. It is the rewrite, not the original text, that
+   becomes a skill candidate.
+
+2. THEN LABEL each candidate, using the rewrite as the evidence:
+     UNIVERSAL  the rewrite still states something actionable to someone who has
+                never seen this repo.
+     LOCAL      the rewrite collapses into a fact about one codebase. File it in
+                that repo's CLAUDE.md or notes. Say which repo.
+     DISCARD    the rewrite collapses to a tautology, to restated documentation,
+                or to nothing.
+   Do not label before rewriting. The label is a judgement about the rewrite. An
+   automatic classifier for this was built and measured at chance (7/14), so there
+   is no shortcut here: notes/research/insight-capture.md section 6.
+
+3. THEN APPLY THE EXISTING THRESHOLD to the UNIVERSAL survivors only. A candidate
+   earns a skill only if it is BOTH costly to have gotten right (more than 15
+   minutes of trial and error, a non-obvious ordering constraint, or an error a
+   fresh session would predictably repeat) AND likely to recur (it has already
+   happened twice, or it is a standing part of the workflow). Both, or it gets a
+   note instead of a skill.
+
+4. NEVER AUTO-FORGE. Not from this batch, not from any part of it. Present the
+   survivors and what you propose to do with each, and stop. Forging happens only
+   when a human says so, through the skill-compounder skill and its builder and
+   red-team loop. A queue that forges itself produces skills faster than anyone can
+   red-team them, which is the failure this whole design exists to avoid.
+
+------------------------------------------------------------------------------
+INSTRUCTIONS
+    jq -r '
+      "\n[" + (.source) + "]  " + (.project) + "  " + (.ts) + "  " + (.hash[0:8]) + "\n" +
+      (.text) + "\n" +
+      "------------------------------------------------------------------------------"
+      ' "$f"
+    ;;
+
+  stats)
+    [ "$#" -gt 0 ] && { case "$1" in -h|--help) usage; exit 0 ;; *) die "stats takes no arguments" ;; esac; }
+    fs="$(all_files)"
+    if [ -z "$fs" ]; then
+      echo "skillinsight: the queue is empty ($DIR)"
+      exit 0
+    fi
+    total=0; weeks=0; first=""; last=""
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      c="$(wc -l < "$f" | tr -d ' ')"
+      total=$(( total + c ))
+      weeks=$(( weeks + 1 ))
+      w="$(basename "$f" .jsonl)"
+      [ -z "$first" ] && first="$w"
+      last="$w"
+    done <<STATS_EOF
+$fs
+STATS_EOF
+    dupes=0
+    [ -f "$DIR/.dedup-count" ] && dupes="$(cat "$DIR/.dedup-count" 2>/dev/null || echo 0)"
+    case "$dupes" in ''|*[!0-9]*) dupes=0 ;; esac
+    echo "candidates:      $total"
+    echo "weeks covered:   $weeks  ($first .. $last)"
+    echo "duplicates skipped: $dupes"
+    echo "by source:"
+    while IFS= read -r f; do
+      [ -n "$f" ] && jq -r '.source' "$f" 2>/dev/null
+    done <<SOURCES_EOF | sort | uniq -c | sed 's/^/  /'
+$fs
+SOURCES_EOF
+    echo "current week:    $(week_of "$now")"
+    echo "queue directory: $DIR"
+    ;;
+
+  prune)
+    weeks=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --older-than) shift; weeks="${1:-}" ;;
+        --older-than=*) weeks="${1#--older-than=}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unexpected argument '$1'" ;;
+      esac
+      shift
+    done
+    [ -z "$weeks" ] && die "usage: skillinsight prune --older-than <weeks>"
+    case "$weeks" in ''|*[!0-9]*) die "--older-than takes a whole number of weeks" ;; esac
+    cutoff="$(week_of "$(( now - weeks * 604800 ))")"
+    [ -z "$cutoff" ] && die "could not compute the cutoff week"
+    # Week names are %G-W%V and zero padded, so a string comparison is a date
+    # comparison, across year boundaries included.
+    archive="$DIR/archive"
+    moved=0
+    fs="$(all_files)"
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      w="$(basename "$f" .jsonl)"
+      if [ "$w" \< "$cutoff" ]; then
+        mkdir -p "$archive" 2>/dev/null || die "cannot create $archive"
+        mv "$f" "$archive/" || die "cannot archive $f"
+        moved=$(( moved + 1 ))
+      fi
+    done <<PRUNE_EOF
+$fs
+PRUNE_EOF
+    # Moved, not deleted. Nothing in this project is ever destructively removed;
+    # delete the archive by hand once you are sure.
+    echo "skillinsight: archived $moved week file(s) older than $cutoff"
+    [ "$moved" -gt 0 ] && echo "               -> $archive"
+    ;;
+
+  *) usage >&2; die "unknown command '$cmd'" ;;
+esac

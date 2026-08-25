@@ -15,14 +15,20 @@ look arbitrary. They are not.
 ## Commands
 
 ```bash
-./run_tests.sh                                  # full suite (45 tests, stdlib unittest)
+./run_tests.sh                                  # full suite (stdlib unittest)
+TEST_TIMEOUT=60 ./run_tests.sh                  # tighter per-file cap while iterating
 PYTHONPATH=$PWD python3 tests/test_hook.py -v   # one file
 PYTHONPATH=$PWD python3 tests/test_installer.py InstallerTest.test_install_is_idempotent
 ```
 
 `run_tests.sh` loops over `tests/test_*.py` and runs each as a script, so a new test file
-is picked up with no registration. `PYTHONPATH` matters only for `test_installer.py`
-(the others shell out and need no import).
+is picked up with no registration. `PYTHONPATH` matters only for `test_installer.py` and
+`test_plugin.py` (the others shell out and need no import).
+
+Each file runs under a `perl alarm` wall-clock cap (`TEST_TIMEOUT`, default 300s), because
+a test that blocks on stdin has wedged this suite. A hook script reads its payload with
+`payload="$(cat)"`, so **every** `subprocess` call against a hook must pass `input=` or
+`stdin=DEVNULL`, or it hangs forever.
 
 Exercising the installer by hand (**never** against your own config):
 
@@ -34,7 +40,12 @@ python3 scripts/setup.py --uninstall --claude-dir /tmp/fake-claude --bin-dir /tm
 `install.sh` / `uninstall.sh` are thin shells that locate the app home and `exec` into
 `scripts/setup.py`; the real logic is `skill_compounder/installer.py`.
 
-Requires `jq` (hooks, CLI, status line) and `python3` (installer only).
+Requires `jq` (hooks, CLIs, status line) and `python3` (installer only). The `gh` tests in
+`test_contribute.py` skip cleanly without `gh` or without auth; nothing else skips.
+
+Four CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state and the ledger),
+`skillreport` (ledger joined against transcript invocations), `skillinsight` (the candidate
+queue), `skillcontrib` (read-only contribution reconnaissance).
 
 ## Architecture
 
@@ -67,6 +78,25 @@ path, emits `{suppressOutput:true, hookSpecificOutput:{...additionalContext}}` w
 fires, and emits nothing at all when throttled. Tuning defaults (`CI_EDIT_EVERY=12`,
 `CI_PROMPT_COOLDOWN=1200`, `CI_PROMPT_MIN_CHARS=60`) live in the script and are echoed in
 the README tuning table. Change both.
+
+**The repo is two install paths at once, and they must not drift.** `install.sh` writes
+entries into the user's `settings.json`; `hooks/hooks.json` plus `.claude-plugin/plugin.json`
+make the same repo loadable as a plugin. `tests/test_plugin.py` asserts the two wire the same
+scripts to the same events with the same matchers, so adding a hook to one and forgetting the
+other fails a test. A plugin cannot carry `statusLine`, which is why the installer stays
+primary; see `docs/DESIGN.md`.
+
+**With both wirings active every hook fires twice.** Measured, not theorised. `claim_once()`
+in `hooks/compound-improvement.sh` claims each event by `.prompt_id` / `.tool_use_id` using
+`mkdir`, which is atomic. Any new hook that counts or throttles needs the same guard.
+
+**`CLAUDE.md` lives at `.claude/CLAUDE.md`, not the repo root.** A root `CLAUDE.md` makes
+`claude plugin validate --strict` fail, and that is what marketplace review runs. The
+`.claude/` path still loads as project context (verified with a token round-trip).
+
+**The installer discovers what to link.** `_skill_dirs()` and `_cli_files()` walk `skills/`
+and `bin/`, so adding a seed skill or a CLI needs no installer change, and
+`test_installer.py` asserts every shipped one is actually linked.
 
 **`skills/skill-compounder/SKILL.md` is prose, but it is the primary deliverable**: it
 carries the builder/red-team forging protocol and the retirement protocol.
