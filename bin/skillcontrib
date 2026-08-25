@@ -3,7 +3,7 @@
 #
 #   skillcontrib dedup <skill-name> [--description <text>] [--repo <r>] [--override-rejected]
 #   skillcontrib whoami [--repo <r>]
-#   skillcontrib preflight <skill-dir>
+#   skillcontrib preflight <skill-dir> [--strict]
 #   skillcontrib --help
 #
 # This script performs NO network writes. It only reads: no forking, no branch
@@ -14,29 +14,56 @@
 # Exit codes
 #   0   clean / success
 #   2   usage error
-#   3   dedup: fuzzy matches present. The caller MUST ask the user.
-#   4   dedup: exact match on an OPEN or MERGED pull request.
-#   5   dedup: match on a CLOSED-unmerged pull request. Blocks resubmission unless
-#       --override-rejected is passed. A declined proposal is a signal, not noise.
-#   6   gh is not installed
+#   3   possible duplicates present. The caller MUST ask the user.
+#   4   a pull request that PROPOSED this skill is OPEN or MERGED.
+#   5   a pull request that PROPOSED this skill was CLOSED without merging. Blocks
+#       resubmission unless --override-rejected is passed. A declined proposal is a
+#       signal, not noise.
+#   6   gh or jq is not installed
 #   7   gh is not authenticated
 #   8   a read-only lookup failed (network, rate limit, unknown repo)
+#   9   the skill already exists in the upstream tree at skills/<name>/
+#   18  the upstream repo is archived and rejects writes
 #   10  preflight: skill directory not found
 #   11  preflight: SKILL.md not found
 #   12  preflight: frontmatter missing or unterminated
 #   13  preflight: non-portable frontmatter key
-#   14  preflight: description longer than 500 characters
-#   15  preflight: frontmatter longer than 1024 characters
-#   16  preflight: body longer than 500 lines
+#   14  preflight: description over the hard limit
+#   15  preflight: frontmatter over the hard limit
+#   16  preflight: body over the advisory limit, under --strict
 #   17  preflight: required frontmatter field missing
 set -uo pipefail
 
 DEFAULT_REPO="ContextLab/claude-skill-compounder"
 PORTABLE_KEYS="name description license compatibility metadata allowed-tools"
-MAX_DESCRIPTION=500
-MAX_FRONTMATTER=1024
-MAX_BODY_LINES=500
-FUZZY_THRESHOLD=25   # percent token overlap at or above which a hit is "above threshold"
+
+# Limits, and where each number comes from. These were re-derived after a first pass
+# rejected skills that actually ship.
+#   DESC_HARD 1024:  the cap the upstream skills repo validates against
+#                    (anthropics/skills PR #1635). 29 of 156 installed skills exceed
+#                    500 characters, so 500 cannot be a hard failure.
+#   DESC_SOFT 500:   the best-practice margin. Advisory only.
+#   FM_HARD 1536:    the measured external truncation point for description plus
+#                    when_to_use combined. Past this the metadata is cut off.
+#   FM_SOFT 1024:    house guidance.
+#   BODY_SOFT 500:   the documented ceiling. 86% of 105 surveyed skills comply and the
+#                    median is 200, but real skills exceed it (superpowers:writing-skills
+#                    is 679 lines), so it is advisory unless --strict.
+DESC_HARD=1024
+DESC_SOFT=500
+FM_HARD=1536
+FM_SOFT=1024
+BODY_SOFT=500
+
+# A pull request PROPOSED a skill when it adds skills/<name>/SKILL.md outright: no
+# deletions on that path, and at least PROPOSAL_MIN_ADDED added lines. The floor is the
+# smallest shipping SKILL.md in the survey (36 lines). Without this evidence a one-line
+# typo fix inside an existing skill reads as a rejected proposal, which trains reflexive
+# use of --override-rejected and destroys the value of the block.
+PROPOSAL_MIN_ADDED=30
+
+FUZZY_THRESHOLD=25   # percent token overlap at or above which a fuzzy row is counted
+FUZZY_TERMS=2        # how many description tokens get their own search query
 STOPWORDS='["when","this","that","with","from","into","your","must","should","would",
             "user","users","skill","skills","claude","code","uses","using","used",
             "want","wants","need","needs","only","also","have","been","them","then",
@@ -52,21 +79,25 @@ skillcontrib: read-only reconnaissance before proposing a skill upstream.
 
   skillcontrib dedup <skill-name> [--description <text>] [--repo OWNER/REPO]
                                   [--override-rejected]
-        Two-layer duplicate check against every pull request in any state.
-        Layer 1 (exact): skill directory name and `name:` frontmatter.
-        Layer 2 (fuzzy): `description:` tokens against pull request titles.
-        Prints every match, including sub-threshold fuzzy ones. It never decides
-        for you: exit 3 means "ask the user", exit 4 and 5 mean "stop".
+        Duplicate check in three probes, cheapest first:
+          tree     does skills/<name>/ already exist upstream (and what name does its
+                   frontmatter declare)
+          files    does any pull request, in any state, ADD skills/<name>/SKILL.md
+          fuzzy    do the description tokens overlap pull request titles
+        Prints every hit, including sub-threshold fuzzy ones, and never decides for
+        you: exit 3 means "ask the user", 4, 5 and 9 mean "stop".
 
   skillcontrib whoami [--repo OWNER/REPO]
-        Print the acting identity and whether it has push access to the repo.
-        `maintainer` means branch directly on upstream. `contributor` means the
-        fork path. Also reports whether the upstream repo is archived.
+        Print the acting identity and its permission level on the repo. `maintainer`
+        means branch directly on upstream. `contributor` means the fork path. Read-only
+        and triage collaborators are contributors, not maintainers.
 
-  skillcontrib preflight <skill-dir>
-        Validate a skill before proposing it: SKILL.md present, frontmatter parses,
-        only the six portable frontmatter keys, description <= 500 characters,
-        frontmatter <= 1024 characters, body <= 500 lines.
+  skillcontrib preflight <skill-dir> [--strict]
+        Validate a skill before proposing it. Hard failures are the things that break
+        loading: unparseable frontmatter, a missing name or description, a non-portable
+        key, or a description past the upstream validator's cap. House guidance
+        (description over 500 chars, body over 500 lines) prints as a warning, and
+        --strict turns those warnings into failures.
 
 Repo defaults to ContextLab/claude-skill-compounder.
 Exit codes are documented at the top of this script.
@@ -75,8 +106,25 @@ USAGE
 
 require_gh() {
   command -v gh >/dev/null 2>&1 || fail 6 "gh is not installed. Install it from https://cli.github.com and retry."
-  gh auth status >/dev/null 2>&1 || fail 7 "gh is not authenticated. Run 'gh auth login' yourself, then retry."
   command -v jq >/dev/null 2>&1 || fail 6 "jq is required."
+  gh auth status >/dev/null 2>&1 || fail 7 "gh is not authenticated. Run 'gh auth login' yourself, then retry."
+}
+
+# Resolve the repo and refuse an archived one. A search against a repo that does not
+# exist answers an empty list with a zero exit status, indistinguishable from "no
+# duplicate found", so this call (which 404s properly) has to run first.
+resolve_repo() {
+  archived=$(gh repo view "$repo" --json isArchived --jq .isArchived 2>/dev/null)
+  [ -n "$archived" ] || fail 8 "could not resolve $repo. Check the name, your network, and 'gh api rate_limit'."
+  [ "$archived" = "true" ] && fail 18 "$repo is archived. It rejects forks, pushes, and pull requests. Find the successor repo."
+  return 0
+}
+
+token_warning() {
+  if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+    echo "WARNING: GH_TOKEN or GITHUB_TOKEN is set. gh acts as that token's account, which"
+    echo "         may differ from the account git uses when it uploads a branch. Confirm both first."
+  fi
 }
 
 # ------------------------------------------------------------------ whoami
@@ -96,29 +144,34 @@ cmd_whoami() {
   user=$(gh api user --jq .login 2>/dev/null)
   [ -n "$user" ] || fail 8 "could not read the authenticated identity from gh api user."
 
-  archived=$(gh repo view "$repo" --json isArchived --jq .isArchived 2>/dev/null)
-  [ -n "$archived" ] || fail 8 "could not read $repo. Check the name and your network."
-
-  # A collaborator check answers 204 No Content for someone with push access and 404
-  # for everyone else, so success or failure of the call IS the answer.
-  if gh api "repos/$repo/collaborators/$user" --silent >/dev/null 2>&1; then
-    role="maintainer"; path="branch directly on upstream; do not fork"
-  else
-    role="contributor"; path="fork the repo, branch on the fork"
-  fi
+  # The bare collaborators/<user> endpoint answers 204 for ANY collaborator, including
+  # read-only and triage ones, who cannot push. The permission endpoint distinguishes
+  # them. It answers 403 to a caller without push access, which is itself the answer.
+  # gh prints the API error body on stdout when the call fails, so the exit status,
+  # not the captured text, decides whether this is a real permission value.
+  if perm=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>/dev/null); then :; else perm=""; fi
+  case "$perm" in
+    admin|write|maintain) role="maintainer"; path="branch directly on upstream; do not fork" ;;
+    "") perm="none (or not visible to this account)"; role="contributor"; path="fork the repo, branch on the fork" ;;
+    *) role="contributor"; path="fork the repo, branch on the fork" ;;
+  esac
 
   echo "acting as: $user"
   echo "repo:      $repo"
+  echo "permission: $perm"
   echo "role:      $role"
   echo "path:      $path"
-  echo "archived:  $archived"
-  [ "$archived" = "true" ] && echo "WARNING:   upstream is archived and rejects writes."
+  token_warning
+  arch=$(gh repo view "$repo" --json isArchived --jq .isArchived 2>/dev/null)
+  [ -n "$arch" ] || fail 8 "could not resolve $repo. Check the name and your network."
+  echo "archived:  $arch"
+  [ "$arch" = "true" ] && fail 18 "$repo is archived. It rejects forks, pushes, and pull requests."
   return 0
 }
 
 # ------------------------------------------------------------------ dedup
 
-# The authoritative duplicate lookup. Three details are load-bearing:
+# The authoritative pull request lookup. Three details are load-bearing:
 #   1. --limit 100. The default page size is 30, so a sweep without it silently
 #      misses older pull requests and concludes "no duplicate".
 #   2. --state all really does return OPEN, CLOSED, and MERGED together. GitHub
@@ -127,14 +180,13 @@ cmd_whoami() {
 #   3. Never reach for `gh api search/issues -f q=...`. Passing -f flips gh to POST,
 #      and POST /search/issues does not exist, so it answers 404. If the search API
 #      is needed for a qualifier gh pr list does not expose, it must be -X GET.
-# One more caveat the caller has to live with: this is the search index, and the
-# index lags pull request creation by seconds to minutes. A duplicate opened moments
-# ago can be invisible here. Absence of evidence is not evidence of absence.
-# gh's stderr is deliberately not swallowed here. A failed lookup must be visible and
-# must not be mistaken for a clean result; callers check the exit status.
+# Two caveats the caller has to live with. This reads the search index, and the index
+# lags pull request creation by seconds to minutes, so a duplicate opened moments ago
+# can be invisible. And these queries drain the graphql budget, not the search one:
+# `.resources.graphql.remaining` was observed dropping while `.resources.search`
+# stayed put. gh's stderr is not swallowed; callers check the exit status.
 pr_search() {
-  gh pr list --repo "$repo" --state all --search "$1" \
-     --json number,title,state,url,headRefName --limit 100
+  gh pr list --repo "$repo" --state all --search "$1" --json "$2" --limit 100
 }
 
 cmd_dedup() {
@@ -152,100 +204,129 @@ cmd_dedup() {
   done
   [ -n "$name" ] || fail 2 "usage: skillcontrib dedup <skill-name> [--description <text>]"
   require_gh
+  resolve_repo
 
-  # Resolve the repo first. A search against a repo that does not exist answers an empty
-  # list with a zero exit status, which is indistinguishable from "no duplicate found".
-  # This call 404s properly, so a typo in the repo name cannot read as a clean result.
-  archived=$(gh repo view "$repo" --json isArchived --jq .isArchived 2>/dev/null)
-  [ -n "$archived" ] || fail 8 "could not resolve $repo. Check the name, your network, and 'gh api rate_limit'."
-  [ "$archived" = "true" ] && echo "WARNING: $repo is archived and rejects writes." >&2
+  echo "repo:        $repo"
+  echo "skill name:  $name"
+  if [ -n "$desc" ]; then echo "description: $desc"; else echo "description: (none given; the fuzzy probe did not run)"; fi
+  echo
 
-  results=$(pr_search "$name") || fail 8 "pull request lookup failed for $repo. A failed lookup is not a clean one."
+  # Probe 1: the tree. One call, and it is the case people actually hit: a skill that
+  # already ships upstream produces no pull request hit at all, because the pull
+  # request that added it may predate the search window or never mention the name in
+  # its title.
+  if gh api "repos/$repo/contents/skills/$name" >/dev/null 2>&1; then
+    echo "ALREADY UPSTREAM: skills/$name/ exists in $repo."
+    upstream_name=$(gh api "repos/$repo/contents/skills/$name/SKILL.md" \
+      -H "Accept: application/vnd.github.raw" 2>/dev/null | awk '
+        NR == 1 && !/^---[[:space:]]*$/ {exit}
+        /^name:/ {sub(/^name:[[:space:]]*/, ""); print; exit}
+        NR > 1 && /^---[[:space:]]*$/ {exit}')
+    if [ -n "$upstream_name" ]; then
+      echo "Its frontmatter declares name: $upstream_name"
+    else
+      echo "(no SKILL.md frontmatter name could be read from that directory)"
+    fi
+    echo "Improve the existing skill instead of proposing a second copy."
+    exit 9
+  fi
+
+  results=$(pr_search "$name" "number,title,state,url,headRefName,files") \
+    || fail 8 "pull request lookup failed for $repo. A failed lookup is not a clean one."
   [ -n "$results" ] || fail 8 "empty response from the pull request lookup for $repo."
 
-  # Fuzzy terms: the longest few description tokens, searched one at a time. GitHub
-  # ANDs the terms in a single query, which would be far too narrow, and the search
-  # index allows only 30 requests per minute, so three extra queries is the budget.
+  # Probes 2 and 3 share one candidate pool. The fuzzy queries omit `files`, which is
+  # the expensive field, because only the exact probe needs it.
   dtoks="[]"
   if [ -n "$desc" ]; then
     dtoks=$(printf '%s' "$desc" | jq -R -s --argjson stop "$STOPWORDS" '
       ascii_downcase | [splits("[^a-z0-9]+")]
       | map(select(length >= 4)) | map(select(. as $t | $stop | index($t) | not)) | unique')
-    for term in $(printf '%s' "$dtoks" | jq -r 'sort_by(-length, .)[:3][]'); do
-      more=$(pr_search "$term") || fail 8 "fuzzy lookup failed for term '$term'. A failed lookup is not a clean one."
+    for term in $(printf '%s' "$dtoks" | jq -r --argjson n "$FUZZY_TERMS" 'sort_by(-length, .)[:$n][]'); do
+      more=$(pr_search "$term" "number,title,state,url,headRefName") \
+        || fail 8 "fuzzy lookup failed for term '$term'. A failed lookup is not a clean one."
       [ -n "$more" ] && results=$(printf '%s\n%s' "$results" "$more" | jq -s 'add')
     done
   fi
 
   rows=$(printf '%s' "$results" | jq -r --arg name "$name" --argjson dtoks "$dtoks" \
-    --argjson stop "$STOPWORDS" --argjson thr "$FUZZY_THRESHOLD" '
+    --argjson stop "$STOPWORDS" --argjson thr "$FUZZY_THRESHOLD" --argjson minadd "$PROPOSAL_MIN_ADDED" '
     def toks: ascii_downcase | [splits("[^a-z0-9]+")]
       | map(select(length >= 4)) | map(select(. as $t | $stop | index($t) | not)) | unique;
     def overlap($t): if ($dtoks | length) == 0 then 0
       else (([$dtoks[] | select(. as $x | $t | index($x))] | length) * 100 / ($dtoks | length) | floor) end;
-    unique_by(.number) | sort_by(-.number)
-    | map(. + {exact: ((.title | ascii_downcase | contains($name | ascii_downcase))
-                       or (.headRefName | ascii_downcase | contains($name | ascii_downcase)))})
-    | map(. + {score: overlap(.title | toks)})
-    | map(select(.exact or .score > 0))
-    | .[] | [ (if .exact then "exact" else "fuzzy" end), .state, (.score | tostring),
+    ($name | ascii_downcase) as $n
+    | ("skills/" + $n + "/skill.md") as $target
+    | (unique_by(.number) | sort_by(-.number))
+    | map((.files // []) as $f
+          | . + {
+      proposes: ([$f[] | select((.path | ascii_downcase) == $target)
+                        | select(.deletions == 0 and .additions >= $minadd)] | length > 0),
+      touches:  ([$f[] | select(.path | ascii_downcase | startswith("skills/" + $n + "/"))] | length > 0),
+      mentions: ((.title | ascii_downcase | contains($n)) or (.headRefName | ascii_downcase | contains($n))),
+      score: overlap(.title | toks)})
+    | map(. + {kind: (if .proposes then "proposal"
+                      elif .touches then "touch"
+                      elif .mentions then "mention"
+                      else "fuzzy" end)})
+    | map(select(.proposes or .touches or .mentions or .score > 0))
+    | .[] | [ .kind, .state, (.score | tostring),
               (if .score >= $thr then "above" else "below" end),
               (.number | tostring), .url, .title ] | join("\t")')
 
-  exact_live=0; rejected=0; fuzzy=0
-  echo "repo:        $repo"
-  echo "skill name:  $name"
-  if [ -n "$desc" ]; then echo "description: $desc"; else echo "description: (none given; the fuzzy layer did not run)"; fi
-  echo
+  prop_closed=0; prop_live=0; counted=0; shown_only=0
   if [ -z "$rows" ]; then
     echo "No matching pull request in any state."
   else
-    printf '%-6s %-7s %-6s %-6s %-7s %s\n' KIND STATE SCORE BAND NUMBER TITLE
+    printf '%-9s %-7s %-6s %-6s %-7s %s\n' KIND STATE SCORE BAND NUMBER TITLE
     printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r kind state score band number url title; do
-      printf '%-6s %-7s %-6s %-6s %-7s %s\n' "$kind" "$state" "$score%" "$band" "#$number" "$title"
-      printf '       %s\n' "$url"
+      printf '%-9s %-7s %-6s %-6s %-7s %s\n' "$kind" "$state" "$score%" "$band" "#$number" "$title"
+      printf '          %s\n' "$url"
     done
   fi
 
-  # Tally in this shell. A `while read` in a pipeline runs in a subshell under bash,
-  # so the counters above would be lost; the loop below reads from a here-string.
+  # Tally in this shell. A `while read` in a pipeline runs in a subshell under bash, so
+  # counters set there would be lost; this loop reads from a here-document instead.
   while IFS="$(printf '\t')" read -r kind state score band number url title; do
     [ -n "${kind:-}" ] || continue
-    if [ "$kind" = "exact" ] && [ "$state" = "CLOSED" ]; then
-      rejected=$((rejected + 1))
-    elif [ "$kind" = "exact" ]; then
-      exact_live=$((exact_live + 1))
-    else
-      fuzzy=$((fuzzy + 1))
-    fi
+    case "$kind" in
+      proposal) if [ "$state" = "CLOSED" ]; then prop_closed=$((prop_closed + 1))
+                else prop_live=$((prop_live + 1)); fi ;;
+      touch|mention) counted=$((counted + 1)) ;;
+      fuzzy) if [ "$band" = "above" ]; then counted=$((counted + 1)); else shown_only=$((shown_only + 1)); fi ;;
+    esac
   done <<EOF
 $rows
 EOF
 
   echo
-  echo "exact on OPEN or MERGED: $exact_live"
-  echo "exact on CLOSED and unmerged: $rejected"
-  echo "fuzzy candidates: $fuzzy"
+  echo "proposals CLOSED without merging: $prop_closed"
+  echo "proposals OPEN or MERGED:         $prop_live"
+  echo "other possible duplicates:        $counted"
+  echo "shown but not counted (below the $FUZZY_THRESHOLD% fuzzy threshold): $shown_only"
   echo "note: the search index lags pull request creation, so a duplicate opened in the last few minutes may not appear above."
+  token_warning
 
-  if [ "$rejected" -gt 0 ] && [ "$override" -eq 0 ]; then
+  if [ "$prop_closed" -gt 0 ] && [ "$override" -eq 0 ]; then
     echo
-    echo "BLOCKED: a maintainer already declined this contribution. Read that pull request."
-    echo "Pass --override-rejected only after the user has read it and said to proceed anyway."
+    echo "BLOCKED: a pull request that added skills/$name/SKILL.md was closed without merging."
+    echo "Read that pull request before anything else. Pass --override-rejected only after"
+    echo "the user has read it and said to proceed anyway."
+    [ "$prop_live" -gt 0 ] && echo "ALSO: $prop_live open or merged proposal(s) above. Both apply."
     exit 5
   fi
-  if [ "$rejected" -gt 0 ]; then
+  if [ "$prop_closed" -gt 0 ]; then
     echo
-    echo "OVERRIDE: a declined pull request was found and overridden by explicit request."
+    echo "OVERRIDE: a declined proposal was found and overridden by explicit request."
   fi
-  if [ "$exact_live" -gt 0 ]; then
+  if [ "$prop_live" -gt 0 ]; then
     echo
     echo "STOP: an equivalent contribution is already open or already merged."
     exit 4
   fi
-  if [ "$fuzzy" -gt 0 ] || [ "$rejected" -gt 0 ]; then
+  if [ "$counted" -gt 0 ] || [ "$prop_closed" -gt 0 ]; then
     echo
-    echo "ASK THE USER: possible duplicates above, including sub-threshold ones. Decide together."
+    echo "ASK THE USER: possible duplicates above. Sub-threshold rows are printed too. Decide together."
     exit 3
   fi
   echo
@@ -256,19 +337,22 @@ EOF
 # ---------------------------------------------------------------- preflight
 
 cmd_preflight() {
-  dir=""
+  dir=""; strict=0; warnings=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --strict) strict=1 ;;
       -h|--help) usage; exit 0 ;;
       -*) fail 2 "unknown flag: $1" ;;
       *) [ -z "$dir" ] || fail 2 "preflight takes one directory"; dir="$1" ;;
     esac
     shift
   done
-  [ -n "$dir" ] || fail 2 "usage: skillcontrib preflight <skill-dir>"
+  [ -n "$dir" ] || fail 2 "usage: skillcontrib preflight <skill-dir> [--strict]"
   [ -d "$dir" ] || fail 10 "skill directory not found: $dir"
   md="$dir/SKILL.md"
   [ -f "$md" ] || fail 11 "SKILL.md not found in $dir"
+
+  warn() { echo "WARNING: $*" >&2; warnings=$((warnings + 1)); }
 
   head -n 1 "$md" | grep -q '^---[[:space:]]*$' || fail 12 "frontmatter missing: $md must start with a --- line"
   close=$(awk 'NR>1 && /^---[[:space:]]*$/ {print NR; exit}' "$md")
@@ -289,24 +373,58 @@ cmd_preflight() {
   case "$keys" in *description*) ;; *) fail 17 "required frontmatter field missing: description" ;; esac
 
   # A description can be folded across indented continuation lines, so gather them.
-  desc=$(printf '%s\n' "$fm" | awk '
+  # Surrounding quotes are stripped before measuring: they are YAML syntax, not content.
+  desc_raw=$(printf '%s\n' "$fm" | awk '
     /^description:/ {grab = 1; sub(/^description:[[:space:]]*/, ""); printf "%s", $0; next}
     grab && /^[A-Za-z][A-Za-z0-9_-]*:/ {grab = 0}
     grab {sub(/^[[:space:]]+/, " "); printf "%s", $0}
     END {print ""}')
+  # The quote check runs on the raw value. Stripping first would hide the quotes that
+  # make a colon legal. Length is measured after stripping: quotes are YAML, not content.
+  desc=$(printf '%s' "$desc_raw" | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
   desc_chars=$(printf '%s' "$desc" | wc -c | tr -d ' ')
+
+  # An unquoted ": " inside a description makes the whole frontmatter fail to parse as
+  # YAML. The skill then loads with empty metadata and silently never triggers, which
+  # is worse than a loud error, so it is a hard failure here.
+  case "$desc_raw" in
+    \"*\"|\'*\') ;;
+    *": "*) fail 12 "description contains an unquoted ': ' and will not parse as YAML. Wrap the value in quotes." ;;
+  esac
 
   body_lines=$(sed -n "$((close + 1)),\$p" "$md" | wc -l | tr -d ' ')
 
-  [ "$desc_chars" -le "$MAX_DESCRIPTION" ] || fail 14 "description is $desc_chars characters; the limit is $MAX_DESCRIPTION"
-  [ "$fm_chars" -le "$MAX_FRONTMATTER" ] || fail 15 "frontmatter is $fm_chars characters; the limit is $MAX_FRONTMATTER"
-  [ "$body_lines" -le "$MAX_BODY_LINES" ] || fail 16 "body is $body_lines lines; the limit is $MAX_BODY_LINES"
+  [ "$desc_chars" -le "$DESC_HARD" ] || fail 14 "description is $desc_chars characters; the hard limit is $DESC_HARD"
+  [ "$fm_chars" -le "$FM_HARD" ] || fail 15 "frontmatter is $fm_chars characters; the hard limit is $FM_HARD"
+
+  if [ "$desc_chars" -gt "$DESC_SOFT" ]; then
+    [ "$strict" -eq 1 ] && fail 14 "description is $desc_chars characters; --strict enforces $DESC_SOFT"
+    warn "description is $desc_chars characters. $DESC_SOFT is the recommended margin, $DESC_HARD the hard cap."
+  fi
+  if [ "$fm_chars" -gt "$FM_SOFT" ]; then
+    [ "$strict" -eq 1 ] && fail 15 "frontmatter is $fm_chars characters; --strict enforces $FM_SOFT"
+    warn "frontmatter is $fm_chars characters. $FM_SOFT is the recommended margin, $FM_HARD the hard cap."
+  fi
+  if [ "$body_lines" -gt "$BODY_SOFT" ]; then
+    [ "$strict" -eq 1 ] && fail 16 "body is $body_lines lines; --strict enforces $BODY_SOFT"
+    warn "body is $body_lines lines. $BODY_SOFT is the documented ceiling and 200 the median; consider a references/ file."
+  fi
+
+  # Everything else in the directory travels with the skill. A procedure that copies
+  # only SKILL.md silently drops scripts/, examples/, references/, and LICENSE.
+  extra=$(find "$dir" -type f ! -name SKILL.md | sed "s|^$dir/||" | sort | tr '\n' ' ')
 
   echo "OK: $md"
   echo "  frontmatter keys: $(printf '%s' "$keys" | tr '\n' ' ')"
-  echo "  description: $desc_chars chars (limit $MAX_DESCRIPTION)"
-  echo "  frontmatter: $fm_chars chars (limit $MAX_FRONTMATTER)"
-  echo "  body: $body_lines lines (limit $MAX_BODY_LINES)"
+  echo "  description: $desc_chars chars (advisory $DESC_SOFT, hard $DESC_HARD)"
+  echo "  frontmatter: $fm_chars chars (advisory $FM_SOFT, hard $FM_HARD)"
+  echo "  body: $body_lines lines (advisory $BODY_SOFT)"
+  if [ -n "$extra" ]; then
+    echo "  other files that must travel with it: $extra"
+  else
+    echo "  other files that must travel with it: (none)"
+  fi
+  [ "$warnings" -gt 0 ] && echo "  warnings: $warnings (advisory only; rerun with --strict to enforce)"
   return 0
 }
 
@@ -315,6 +433,7 @@ case "$cmd" in
   dedup) cmd_dedup "$@" ;;
   whoami) cmd_whoami "$@" ;;
   preflight) cmd_preflight "$@" ;;
-  -h|--help|help|"") usage; [ -n "$cmd" ] && exit 0; exit 2 ;;
+  -h|--help|help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
   *) echo "skillcontrib: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;
 esac

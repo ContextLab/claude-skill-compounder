@@ -41,19 +41,21 @@ work, with a sentence on what it did.
 
 ## Duplicate check
 
-Output of `skillcontrib dedup <skill-name> --description "<description>"`:
+Output of `skillcontrib dedup <skill-name> --description "<description>"`. It probes the
+upstream tree, then every pull request in any state, then description overlap:
 
 ```
 paste the output, including sub-threshold fuzzy rows
 ```
 
-Exit code: <!-- 0, or 3/4/5 with an explanation of why this is not a duplicate -->
+Exit code: <!-- 0, or 3/4/5/9 with an explanation of why this is not a duplicate -->
 
 ## Checklist
 
-- [ ] `skillcontrib preflight <skill-dir>` passes
-- [ ] Only the six portable frontmatter keys
+- [ ] `skillcontrib preflight <skill-dir>` passes, warnings included or explained
+- [ ] Only the six portable frontmatter keys, and the description is quoted
+- [ ] Every file in the skill directory is included, not only `SKILL.md`
 - [ ] `description` is a "Use when …" clause with the negative scope, at most 500 chars
-- [ ] Body at most 500 lines
+- [ ] Body at most 500 lines, or a reason it needs more
 - [ ] `./run_tests.sh` passes in full
 - [ ] No mocks, no em-dashes

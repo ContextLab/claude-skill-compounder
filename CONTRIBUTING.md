@@ -46,13 +46,31 @@ Only the six portable frontmatter keys: `name`, `description`, `license`,
 `compatibility`, `metadata`, `allowed-tools`. Custom keys do not survive outside Claude
 Code, and a seed skill should.
 
-- `description` is a trigger clause, at most 500 characters. Write it as "Use when …",
-  and put the negative scope in the same sentence ("Do NOT use for …"). It is not a
-  summary of the skill; it is the sentence that decides whether the skill fires.
-- Frontmatter total at most 1024 characters.
-- Body at most 500 lines. The median skill in the surveyed ecosystem is 200. Anything
-  longer than that usually wants a bundled reference file instead.
-- One skill does one thing. If the red-teamer says it is doing two, split it.
+**Quote the description.** An unquoted `: ` inside it makes the whole frontmatter fail to
+parse as YAML, after which the skill loads with empty metadata and silently never fires.
+CI runs `claude plugin validate --strict`, which catches it, and so does
+`skillcontrib preflight`.
+
+The limits, and where each number comes from. Two are hard, because past them the skill
+does not load correctly. The rest are guidance, measured against what actually ships, and
+`skillcontrib preflight --strict` enforces them when you want that.
+
+|Limit|Value|Basis|
+|-|-|-|
+|`description`, hard|1024 chars|The cap the upstream skills repo validates against (anthropics/skills #1635)|
+|`description`, advisory|500 chars|Best-practice margin. 29 of 156 installed skills exceed it, so it cannot be a hard failure|
+|Frontmatter total, hard|1536 chars|Measured external truncation point for `description` plus `when_to_use`|
+|Frontmatter total, advisory|1024 chars|House guidance|
+|Body, advisory|500 lines|The documented ceiling. 86% of 105 surveyed skills comply and the median is 200, but real ones exceed it|
+
+`description` is a trigger clause, not a summary: write it as "Use when …" and put the
+negative scope in the same sentence ("Do NOT use for …"). It is the sentence that decides
+whether the skill fires. One skill does one thing; if the red-teamer says it is doing two,
+split it.
+
+Everything else in the skill directory travels with it. `scripts/`, `references/`,
+`examples/`, and `LICENSE.txt` are part of the contribution, so copy the directory, not
+just the `SKILL.md`.
 
 ## Prose style
 
