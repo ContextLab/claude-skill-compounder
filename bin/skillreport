@@ -28,6 +28,11 @@ LEDGER="$STATE_ROOT/ledger.jsonl"
 REMINDERS="$STATE_ROOT/reminders"
 TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
 EDIT_EVERY="${CI_EDIT_EVERY:-12}"
+# It reaches integer arithmetic twice. Unguarded, `CI_EDIT_EVERY=abc` aborted the whole
+# script mid-report under `set -u` ("abc: unbound variable") and `=0` divided by zero;
+# either way the reminder section reported the wrong reason or never printed at all.
+case "$EDIT_EVERY" in ''|*[!0-9]*|???????*) EDIT_EVERY=12 ;; esac
+[ "$EDIT_EVERY" -lt 1 ] && EDIT_EVERY=12
 
 case "${1:-}" in
   -h|--help|help)
@@ -57,23 +62,54 @@ fi
 # The start timestamp must never stand in for a finish: doing that lets an invocation
 # made *during* an unfinished forge be counted as reuse, which turns the one number
 # this report exists to produce into a flattering lie.
+#
+# AN OUTCOME WITH NO START IS ALSO A ROW. Walking start records only meant an outcome
+# that nothing joined to was discarded in silence -- and the reason a `done` has no
+# `start` is that the process was killed between claiming its slot and appending its
+# start row, so silent discarding removed exactly the forges most worth counting. This
+# script exists to say whether forged skills get reused; under-reporting the crashed
+# ones is the failure mode it can least afford. Such a row is marked, and its forge
+# window is reconstructed from the recorded duration, which is real data and not a
+# guess: 'since' is still the recorded finish, so nothing during the window counts.
+#
+# ONE OUTCOME PER START, for the same reason. Matching by name alone let one `done` be
+# consumed by two starts of the same name, so an abandoned forge was counted as
+# finished and the denominator of the reuse fraction grew by one.
 jq -s -R -r '
   def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
-  [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $r
-  | [ range(0; ($r | length)) | . as $i | select($r[$i].event == "start") | $i ]
-  | map(. as $i | $r[$i] as $st
-      | ($r[($i + 1):]
-         | map(select(.name == $st.name and (.event == "done" or .event == "fail")))
-         | .[0]) as $en
-      | [ $st.name,
-          ($st.ts // 0),
-          (if $en == null then ($st.ts // 0) else ($en.ts // $st.ts // 0) end),
-          (if $en == null then "no outcome" else $en.event end),
-          (if $en == null then rounds_of($st.steps)
-           else ($en.rounds // rounds_of($st.steps)) end),
-          (if $en == null then "no" else "yes" end) ]
-      | @tsv)
-  | .[]
+  [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $rec
+  | [ range(0; ($rec | length)) | select($rec[.].event == "start") ] as $starts
+  | [ range(0; ($rec | length))
+      | select($rec[.].event == "done" or $rec[.].event == "fail") ] as $ends
+  | (reduce $starts[] as $i ({used: [], pairs: []};
+       . as $acc
+       | ([ $ends[] | select(. > $i and $rec[.].name == $rec[$i].name) ]
+          - $acc.used | .[0]) as $e
+       | { used:  (if $e == null then $acc.used else ($acc.used + [$e]) end),
+           pairs: ($acc.pairs + [[$i, $e]]) })) as $join
+  | ($ends - $join.used) as $orphans
+  | ( ($join.pairs | map(.[0] as $i | .[1] as $ei | $rec[$i] as $st
+        | (if $ei == null then null else $rec[$ei] end) as $en
+        | [ $st.name,
+            ($st.ts // 0),
+            (if $en == null then ($st.ts // 0) else ($en.ts // $st.ts // 0) end),
+            (if $en == null then "no outcome" else $en.event end),
+            (if $en == null then rounds_of($st.steps)
+             else ($en.rounds // rounds_of($st.steps)) end),
+            (if $en == null then "no" else "yes" end),
+            (if $en == null then "" else ($en.rounds_planned // "" | tostring) end),
+            "no" ]))
+      + ($orphans | map(. as $j | $rec[$j] as $en
+        | [ (if ($en.name // "") == "" then "(unnamed)" else $en.name end),
+            (($en.ts // 0) - ($en.duration // 0)),
+            ($en.ts // 0),
+            $en.event,
+            ($en.rounds // 0),
+            "yes",
+            ($en.rounds_planned // "" | tostring),
+            "yes" ])) )
+  | sort_by(.[1])
+  | .[] | @tsv
 ' "$LEDGER" > "$TMP/forges.tsv" 2>/dev/null
 
 if [ ! -s "$TMP/forges.tsv" ]; then
@@ -126,9 +162,34 @@ reused=0
 unclosed=0
 during_total=0
 unparsed_total=0
+orphans=0
+overruns=0
 
-while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed; do
+# ROUNDS is printed as "completed/planned" when a forge ran past its budget. The budget
+# has been in the ledger since the overrun was made representable and nothing printed
+# it, so six rounds against a three-round budget read as a plain "6" -- identical to a
+# forge that spent exactly what it planned.
+# Deliberately does not touch a counter: it is called in a command substitution, which
+# is a subshell, so an increment here would be discarded. The caller counts.
+rounds_col() { # <completed> <planned>
+  case "${2:-}" in ''|*[!0-9]*) printf '%s' "$1"; return ;; esac
+  if [ "$1" -gt "$2" ]; then printf '%s/%s' "$1" "$2"
+  else printf '%s' "$1"; fi
+}
+is_over() { # <completed> <planned>
+  case "${2:-}" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -gt "$2" ]
+}
+
+while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed planned orphan; do
   [ -n "${name:-}" ] || continue
+  is_over "$rounds" "${planned:-}" && overruns=$(( overruns + 1 ))
+  rounds="$(rounds_col "$rounds" "${planned:-}")"
+  # An outcome with no start is shown from the outcome alone, and says so.
+  if [ "${orphan:-no}" = "yes" ]; then
+    orphans=$(( orphans + 1 ))
+    outcome="$outcome*"
+  fi
 
   # No finish time means no window to measure against. Print the row so the forge is
   # visible, but show a dash rather than a count, and keep it out of both halves of
@@ -183,6 +244,16 @@ done < "$TMP/forges.tsv"
 # --------------------------------------------------------------- the headline
 
 echo
+if [ "$orphans" -gt 0 ]; then
+  echo "* $orphans outcome record(s) have no matching start record. Only the outcome"
+  echo "  survives, so the FORGED date is reconstructed from the recorded duration. A"
+  echo "  start row is missing when \`start\` was killed between claiming its slot and"
+  echo "  appending its row, or when the ledger was truncated after a forge had begun."
+fi
+if [ "$overruns" -gt 0 ]; then
+  echo "ROUNDS reads completed/planned for the $overruns forge(s) that ran past their budget."
+fi
+if [ "$orphans" -gt 0 ] || [ "$overruns" -gt 0 ]; then echo; fi
 if [ "$total" -eq 0 ]; then
   echo "REUSE: not measurable. No forge in the ledger has a recorded finish, so there is"
   echo "       no window to count invocations against."

@@ -123,6 +123,11 @@ def make_venv(path):
     return python
 
 
+def strip_routing_pin(text):
+    """Drop the `<!-- routing-pin ... -->` block. It is provenance metadata, not prose."""
+    return re.sub(r"\n*<!-- routing-pin\b.*?-->\n*", "\n\n", text, count=1, flags=re.S)
+
+
 class SkillDocumentTest(unittest.TestCase):
     """Frontmatter, size, structure, and the claims the prose makes."""
 
@@ -179,9 +184,13 @@ class SkillDocumentTest(unittest.TestCase):
         read in full as house exemplars, against a documented hard ceiling of 500. The
         fenced blocks are executable and every one is run by this suite, so they are
         measured apart from the prose a reader has to absorb."""
-        lines = len(self.body.strip().splitlines())
+        # The `<!-- routing-pin` block is machine-readable provenance for the routing
+        # claims below it (tests/test_routing_claims.py), not prose. It is excluded for
+        # the same reason the fenced blocks are: nobody reads it to learn the skill.
+        prose = strip_routing_pin(self.body)
+        lines = len(prose.strip().splitlines())
         fenced = sum(len(m.splitlines())
-                     for m in re.findall(r"^```(?:bash)?\n(.*?)^```", self.body, re.S | re.M))
+                     for m in re.findall(r"^```(?:bash)?\n(.*?)^```", prose, re.S | re.M))
         self.assertLessEqual(lines, 283)
         self.assertLessEqual(lines - fenced, 200, "prose at or under the measured median")
 

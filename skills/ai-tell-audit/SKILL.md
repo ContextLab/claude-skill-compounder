@@ -522,6 +522,15 @@ number and make the claim without it.
 
 ## Trigger precision
 
+<!-- routing-pin
+description-sha256: ac9911bf107c5432ceaead0c1439d96d6566dc84c85b7e089f9f538c64fc96f4
+prompts-sha256: 43b70b6d0ce526554ec7c74afe628f206ef750f96d2a22b6b8a477cd19fec69a
+measured: never
+cli: n/a
+model: n/a
+result: unmeasured
+-->
+
 Must fire:
 
 1. "Write the release notes for v2.1 and I'll ship them today."

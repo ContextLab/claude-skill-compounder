@@ -20,6 +20,7 @@ export PYTHONDONTWRITEBYTECODE=1
 TEST_TIMEOUT="${TEST_TIMEOUT:-300}"
 
 fail=0
+failed=
 for t in tests/test_*.py; do
   echo "=== $t ==="
   start=$(date +%s)
@@ -60,11 +61,17 @@ RUNNER
     if [ "$rc" -eq 142 ]; then
       echo "!!! $t was killed after ${elapsed}s (cap ${TEST_TIMEOUT}s). A hang is a failure."
     fi
+    # Name the file here, on every non-zero status. Reporting only the timeout case left
+    # an ordinary failure identified nowhere but in unittest's own output, so a run whose
+    # tail was captured or scrolled printed SOME TESTS FAILED with nothing saying which
+    # file failed. Two separate sessions hit that and could not reproduce it afterwards.
+    echo "!!! $t FAILED (exit $rc)"
+    failed="$failed $t"
     fail=1
   fi
 done
 if [ "$fail" -ne 0 ]; then
-  echo "SOME TESTS FAILED"
+  echo "SOME TESTS FAILED:$failed"
   exit 1
 fi
 echo "ALL TESTS PASSED"

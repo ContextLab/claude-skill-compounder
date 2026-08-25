@@ -11,8 +11,8 @@ dance; the context window closes; next week a fresh session makes the same mista
 same order.
 
 `claude-skill-compounder` closes that loop. It installs the forging protocol as a skill,
-five seed skills that are useful on day one, hooks that keep asking the question, and a
-live status-line animation. All of it serves one principle:
+a pool of seed skills that are useful on day one, hooks that keep asking the question, and
+a live status-line animation. All of it serves one principle:
 
 > **Compound improvement.** When a procedure is *costly to get right* and *likely to
 > recur*, stop re-deriving it and forge it into a reusable skill. Do it adversarially, so
@@ -39,7 +39,8 @@ to the person who wrote it and fails six weeks later for everybody else.
 This project addresses the first with hooks that keep asking the question, and the second with an
 adversarial forging protocol: a **builder** agent writes the skill, and a **separate,
 cold** red-team agent tries to execute it with no context and reports where it breaks.
-They loop until the red-team report comes back clean.
+They loop until the red-team report comes back clean, driven by an **orchestrator** agent
+so the loop does not run in the thread you are talking to.
 
 ---
 
@@ -48,7 +49,8 @@ They loop until the red-team report comes back clean.
 |Piece|What it does|
 |-|-|
 |`skills/skill-compounder/`|The doctrine: when to forge, how to forge, how to fix or retire a bad skill|
-|`skills/` (five more)|The seed pool, below. Useful before you have forged anything|
+|`skills/skill-authoring/`|How to write the SKILL.md itself: the description that decides when it fires, and the gates that prove it parses|
+|`skills/<the rest>/`|The seed pool, below. Useful before you have forged anything|
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
@@ -58,9 +60,17 @@ They loop until the red-team report comes back clean.
 |`bin/skillcontrib`|The read-only reconnaissance behind `contribute-skill`: duplicate check, push-access check, preflight|
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
 
-All of the changes are additive, so hooks installed by other tools are left alone. Your
-current status line is preserved and restored on uninstall, and `settings.json` is backed
-up before every change.
+The hook changes are additive: hooks installed by other tools are left alone, and
+uninstall removes only ours. `statusLine` is the one entry that cannot be additive,
+because it holds a single command — ours replaces it and calls your previous one first.
+The original is saved and restored on uninstall, and sibling keys you set on it, such as
+`padding`, are carried across unchanged.
+
+`settings.json` is backed up before every change. If yours is a symlink into a dotfiles
+repo, it is written *through* rather than replaced, so the link survives. Symlinks in
+`~/.claude/skills` and in the CLI directory are only ever replaced or removed when this
+package can prove it created them; anything else of yours at one of those names is
+reported and left alone.
 
 ---
 
@@ -94,8 +104,9 @@ claude --plugin-dir /path/to/claude-skill-compounder
 That gets you the skills (namespaced `skill-compounder:<name>`, so they cannot collide
 with skills you already have), the hooks, and `bin/` on the Bash tool's `PATH`. It does
 **not** get you the forge animation: a plugin's `settings.json` accepts only `agent` and
-`subagentStatusLine`, and `statusLine` is not among them. That is why the installer is
-the primary path.
+`subagentStatusLine`, and `statusLine` is not among them
+([docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md)). That is why the installer
+is the primary path.
 
 Running both at once is safe: each event carries a `prompt_id` or `tool_use_id`, and the
 hooks claim an event once, so the second delivery does nothing.
@@ -104,8 +115,12 @@ hooks claim an event once, so the second delivery does nothing.
 
 ## The seed pool
 
-Five skills ship with the package, so a fresh install is useful before you have forged
-anything. Each one is here on evidence that the failure is common, not on a hunch. For the
+Everything under `skills/` installs into `~/.claude/skills/`, and not all of it is seed
+pool. `skill-compounder`, `skill-authoring` and `contribute-skill` are the machinery, and
+each has its own row in the table above. The rest is the pool: **six seed skills ship in
+it**, so a fresh install is useful before you have forged anything.
+
+Each one is here on evidence that the failure is common, not on a hunch. For the
 first four that evidence is multiple independent reports in `anthropics/claude-code`, laid
 out in [`notes/research/seed-skill-candidates.md`](notes/research/seed-skill-candidates.md).
 `ai-tell-audit` came from a different place: a published catalogue of Claude-specific
@@ -121,6 +136,17 @@ built from. It edited none of the eight human ones. Four machine-drafted documen
 came through unedited, which is the error it makes: prose generated as reference material
 carries few of these patterns, and the skill states that limit.
 
+`claim-provenance` came from this repository's own defects rather than from the issue
+corpus: a test that pinned the literal string `"103 skills"`, and so enforced a claim's
+presence instead of its truth; a document claiming eight forges against a ledger holding
+three; a ledger field documented as a budget it had stopped being; and a lesson about YAML
+frontmatter taught wrongly in four files for months. Every one of them passed a green
+suite. It also ships on a different footing from the rest of the pool: it was narrowed
+over ten rounds and was **not clean at the end**, with the round-10 fixes verified by
+running them but not cold-reviewed. Two independent reviewers were asked whether it should
+exist at all and both said keep. It is the one skill here whose final round no fresh agent
+signed off.
+
 |Skill|Fires when|The failure it prevents|
 |-|-|-|
 |`destructive-op-preflight`|Before `reset --hard`, `clean`, `rm -rf`, `--force`, or any bulk delete|Untracked files are not in the reflog. One report lost 2,229 of them; another had `git reset --hard origin/main` run autonomously in the first second of a session, twice|
@@ -128,6 +154,7 @@ carries few of these patterns, and the skill states that limit.
 |`stale-artifact-check`|Behavior after an edit is indistinguishable from behavior before it|You are debugging a copy that never contained your change: a non-editable `pip install`, a `.pyc` beside the source, an unrebuilt `dist/`. It hands general debugging to `superpowers:systematic-debugging` rather than compete for that trigger|
 |`no-silent-stub`|You are about to return a value you did not compute|A fake that does not look like a failure looks like a pass. One reported evaluation copied the expected answer into the actual answer column and scored 100%|
 |`ai-tell-audit`|You are about to publish a README, an issue, a PR description or docs|Prose a model drafted carries recognisable tells. The skill knows them and says, per pattern, whether to rewrite it, delete it, or keep it. It never judges who wrote anything, because automated detection scores human writing as machine-written often enough to be unusable|
+|`claim-provenance`|A claim that is already written down is checked or carried forward: a count restated from another document, a documented behaviour nobody measured, a test asserting what a document says rather than whether it is true|A green suite proves the sentence is present, not that it is true. It defers to `ai-tell-audit` for how prose reads, and its description says so, so the two do not race for one trigger|
 
 The loudest complaint in the corpus is deliberately **not** here:
 `superpowers:verification-before-completion` already owns that trigger, and two skills
@@ -182,7 +209,9 @@ It counts `Bash` alongside `Write` and `Edit`, because a session told to edit wi
 heredocs and inline interpreters produces almost no `Write` calls, and the checkpoint then
 goes quiet in the long autonomous sessions it exists for. Read-only commands are filtered
 out by inspecting the command string, so `ls` never counts toward a checkpoint.
-**Both** conditions must hold:
+
+<!-- doctrine: both-conditions -->
+**Both must hold, or it gets a note rather than a skill.**
 
 - **Costly**: name the specific dead end in one sentence, and what a fresh session would
   have done instead. If you cannot name it, it was not costly, it was just work. **And**
@@ -191,28 +220,52 @@ out by inspecting the command string, so `ls` never counts toward a checkpoint.
 
 Both want a **concrete referent** rather than a judgement, because both are otherwise
 loose enough to say yes to nearly any non-trivial work, and a threshold that always
-resolves to yes is worse than none. One without the other gets a note, not a skill.
+resolves to yes is worse than none.
 
 When both hold, the session runs the **forging protocol**:
 
 ```
 skillforge start <name> <total-steps> "<one-line summary>"
   │
-  ├─ builder agent      → writes SKILL.md (given the transcript, including dead ends)
-  ├─ red-team agent     → FRESH context, tries to execute it cold, reports failures
-  ├─ loop               → findings back to the builder; a NEW red-teamer each round
-  └─ cap at 5 rounds    → narrow the scope until clean, or abandon it honestly
-                          (10 for a complex or safety-critical skill)
+  └─ orchestrator agent  → runs the loop; the main thread goes back to work
+       ├─ builder agent   → writes SKILL.md (given the transcript, including dead ends)
+       ├─ red-team agent  → FRESH context, tries to execute it cold, reports failures
+       ├─ loop            → findings to the builder; a NEW red-teamer each round
+       └─ cap at 5 rounds → narrow the scope until clean, or abandon it honestly
+                            (10 for a complex or safety-critical skill)
   │
 skillforge done "<outcome>"
 ```
 
-The red-teamer must never be a fork of the orchestrating session. A forked reviewer
-already knows what the skill was *meant* to say, so it cannot detect the ambiguity that
-will bite a cold session six weeks later. Its checklist: cold-start executability, trigger
-precision (3 prompts that should fire, 3 that should not), every asserted command actually
-run, unhappy paths, overlap with existing skills, and scope creep.
+<!-- doctrine: orchestrator-runs-the-rounds -->
+**The session that starts a forge does not run it.** One orchestrator subagent runs the
+rounds and reports back when the loop closes. Blocking was never the problem — the
+agents already ran in the background. The problem was that every review report landed in
+the thread the user is talking to, and every revision brief was written out of it. A
+subagent dispatched from a main session can itself dispatch subagents, and `skillforge`
+is on its `PATH`, so the animation keeps moving while the main thread does something
+else. That is the only level of nesting the protocol relies on, and it is the only one
+it should use: a level further down, probes found `Agent` present for one agent and
+absent for another, with no rule predicting which
+([docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md)). So the builder and
+red-teamers dispatch nobody, and orchestrators are never nested.
 
+<!-- doctrine: close-ownership -->
+**You own `start`, `done` and `fail`; the orchestrator owns everything between.** It
+reports its outcome rather than closing the record itself, so a forge whose orchestrator
+dies is still one someone can close — and a second close is not a correction, it is
+discarded silently at exit 0.
+
+<!-- doctrine: no-forked-reviewer -->
+**The red-teamer must never be a fork of either layer** — not of the orchestrator that
+dispatches it, and not of the session that dispatched the orchestrator. A forked
+reviewer already knows what the skill was *meant* to say, so it cannot detect the
+ambiguity that will bite a cold session six weeks later. Its checklist: cold-start
+executability, trigger precision (3 prompts that should fire, 3 that should not), every
+asserted command actually run, unhappy paths, overlap with existing skills, and scope
+creep.
+
+<!-- doctrine: no-leading-prompt -->
 **Never hand a reviewer a list of what not to flag.** Scoping a brief that way reads as
 instruction about what the answer should be, and the review narrows to match. Measured on
 this repo's own documentation: the same file, reviewed by one agent given a "do not flag
@@ -221,19 +274,29 @@ unprimed reviewer defended two passages the primed brief would have condemned.
 
 ### 3. When a skill misfires: fix, document, or retire
 
-Never silently work around a bad skill, because the workaround costs the same time again
-in every future session. Escalate instead: fix the wording, and if the procedure itself is
+<!-- doctrine: no-silent-workaround -->
+**Never silently work around a skill that misfired.** The workaround costs the same
+time again in every future session. Escalate instead: fix the wording, and if the procedure itself is
 wrong, fix that and then re-run the full red-team loop. Retire it only when neither works.
 
-Retirement requires **independent concurrence**. Ask a second fresh agent the *neutral*
-question, *"should this be kept, fixed, or retired?"* Never "confirm this deletion", which
-is a leading prompt any agent will (obligingly) rubber-stamp.
+Retirement requires **independent concurrence**.
 
-Retiring archives the skill with a `WHY-ARCHIVED.md`, and it archives the **source, not
-the link**: most skills here are symlinks into a checkout, so moving
+<!-- doctrine: neutral-retirement-question -->
+**Ask a second fresh agent the neutral question, *"should this be kept, fixed, or
+retired?"*, never "confirm this deletion".** The second form is a leading prompt, and any
+agent will (obligingly) rubber-stamp it.
+
+Retiring archives the skill with a `WHY-ARCHIVED.md`.
+
+<!-- doctrine: archive-the-source -->
+**Archive the source, not the link.** Most skills here are symlinks into a checkout, so
+moving
 `~/.claude/skills/<name>` moves the link, leaves the real directory where the next install
 resurrects it, and writes the tombstone into live source. Resolve with `realpath` first,
-move the resolved directory, then drop the dangling link. Nothing is ever `rm -rf`'d.
+move the resolved directory, then drop the dangling link.
+
+<!-- doctrine: never-rm-rf -->
+**Never `rm -rf` a skill.**
 
 ---
 
@@ -345,7 +408,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 
 ## Tuning
 
-Noisy reminders are a tuning problem. All seven are environment variables, but they are not
+Noisy reminders are a tuning problem. All ten are environment variables, but they are not
 all read by the same component, so they do not all go in the same place in
 `~/.claude/settings.json`:
 
@@ -356,10 +419,13 @@ all read by the same component, so they do not all go in the same place in
 |`CI_PROMPT_MIN_CHARS`|`60`|the hook entries|Shorter prompts never trigger a reminder|
 |`CI_CLAIM_TTL_MIN`|`60`|the hook entries|Minutes before a stale double-fire claim is pruned|
 |`CI_PRUNE_EVERY`|`25`|the hook entries|Hook invocations between sweeps of expired claims|
+|`CI_QUEUE_NUDGE`|`1`|the hook entries|Set to `0` to stop announcing the pending skill-candidate queue|
+|`CI_QUEUE_NUDGE_MIN`|`259200`|the hook entries|Seconds that must pass before the queue may be announced again|
+|`CI_QUEUE_NUDGE_MAX`|`1209600`|the hook entries|Seconds after which an unchanged queue is announced anyway|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
-Only the five `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is read by
+Only the eight `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is read by
 `statusline/statusline.sh`, so setting it on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it
 belongs in the session-wide `env` block. Set it anywhere narrower and they disagree about
@@ -390,6 +456,12 @@ Removes our hooks, leaving other tools' hooks alone, then restores your original
 line and removes the symlinks. Runtime state is left intact; delete it with
 `rm -rf ~/.claude/skill-compounder`.
 
+The `curl` form works whichever way you installed: with no checkout beside it, the script
+reads `~/.claude/skill-compounder/install-manifest.json` to find the one you used. If that
+checkout has been deleted, clone the repo and run `./uninstall.sh` from the clone — the
+manifest still identifies the links the old checkout made, so they are removed rather than
+disowned.
+
 ---
 
 ## Development
@@ -409,9 +481,13 @@ CI runs the suite on both ubuntu and macos, because macOS ships bash 3.2 and tha
 where this repo's shell portability traps actually bite. It also runs
 `claude plugin validate --strict`, which is what marketplace review runs.
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the verified platform behavior the implementation
-depends on: mid-session hot-reloading, the two different session ids, why both install
-paths would otherwise double-fire every hook, and so on.
+[docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md) records the verified Claude
+Code behavior the implementation depends on, each entry established by running it: skills
+hot-reloading mid-session, how far subagent dispatch nests, what a plugin cannot carry,
+what the skill loader does with broken frontmatter, and why both install paths would
+otherwise double-fire every hook. It is written for anyone building on Claude Code, not
+only for this package. [docs/DESIGN.md](docs/DESIGN.md) is the local rationale: why the
+forge keys on a name, why the status line rotates, and the shell traps that bite on macOS.
 
 The animation at the top is a recording, not a live run: the session chrome is redrawn and
 the subagents are not re-run. The progress bar is the real status line, driven by the real

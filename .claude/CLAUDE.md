@@ -4,13 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code *configuration* package. It installs seven skills, three hook wirings, four
-CLIs, and a status-line wrapper into `~/.claude/`. There is no runtime service: the "program" is the
+A Claude Code *configuration* package. It installs every skill under `skills/`, three hook
+wirings, four CLIs, and a status-line wrapper into `~/.claude/`. There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
-`README.md` is the user-facing description. `docs/DESIGN.md` records the empirically
-verified platform behavior every design decision rests on. Read `docs/DESIGN.md` before
-changing anything in `bin/`, `statusline/`, or `hooks/`. Several of the constraints there
-look arbitrary. They are not.
+`README.md` is the user-facing description. The two documents under `docs/` are split by
+audience, and the split is load-bearing:
+
+- `docs/CLAUDE-CODE-BEHAVIOR.md` is verified behavior of **Claude Code itself**, useful to
+  a project that shares no code with this one. Every entry names the finding, how it was
+  established by running something, and the CLI version where it was recorded. Add a
+  platform finding there, not to `DESIGN.md`, and carry its measured limits with it.
+- `docs/DESIGN.md` is the **local rationale**: why each piece of this package is shaped the
+  way it is. It links to the platform file rather than restating a finding.
+
+Read both before changing anything in `bin/`, `statusline/`, or `hooks/`. Several of the
+constraints there look arbitrary. They are not. Nothing may live in both files: a moved
+claim that reappears in `DESIGN.md` fails `tests/test_docs_split.py`.
 
 ## Commands
 
@@ -60,13 +69,17 @@ make it session-keyed without reading `docs/DESIGN.md` first. The reminder hook 
 per session, which is correct: it both reads and writes the payload's `.session_id`.
 
 **Installation is marker-based and surgical.** `installer.py` identifies its own hook
-entries by marker substring (`HOOK_MARKER`, `INSIGHT_MARKER`), and its status line by an
-**exact** command match against `STATUSLINE_RECORD`, because a substring like
-`statusline.sh` also matches a user's own `~/bin/git-statusline.sh`. Install is idempotent
-and uninstall removes only our entries. Other tools' hooks and an unrelated status line are left
-untouched. `settings.json` is backed up before every write and written atomically; a
-malformed `settings.json` disables every setting in it. Malformed input raises rather than
-being silently discarded.
+entries by marker substring (`HOOK_MARKER`, `INSIGHT_MARKER`), and its status line by
+`STATUSLINE_MARKER` -- a trailing `# claude-skill-compounder` shell comment it writes into
+the command itself. Never a substring like `statusline.sh`, which also matches a user's own
+`~/bin/git-statusline.sh`, and never the bare path, which stops matching the moment the
+checkout moves; the three location-bound recognitions are kept only as fallbacks for
+entries written before the marker. Install is idempotent and uninstall removes only our
+entries. Other tools' hooks and an unrelated status line are left untouched. `settings.json`
+is backed up before every write and written atomically, and *through* a symlink rather than
+over it, so a dotfiles source is not orphaned; a malformed `settings.json` disables every
+setting in it. Malformed shapes split by direction: install refuses and names the offending
+key, uninstall never refuses. Read `docs/DESIGN.md` before changing either side of that.
 
 **The status line wraps whatever is already there.** Any pre-existing `statusLine` command
 is saved to `<state>/statusline-base.sh` (plus `original-statusline.json` for restoration)
@@ -85,7 +98,8 @@ entries into the user's `settings.json`; `hooks/hooks.json` plus `.claude-plugin
 make the same repo loadable as a plugin. `tests/test_plugin.py` asserts the two wire the same
 scripts to the same events with the same matchers, so adding a hook to one and forgetting the
 other fails a test. A plugin cannot carry `statusLine`, which is why the installer stays
-primary; see `docs/DESIGN.md`.
+primary; see `docs/CLAUDE-CODE-BEHAVIOR.md` for what the plugin path does and does not
+carry, and `docs/DESIGN.md` for the decision.
 
 **The edit checkpoint counts `Bash`, not just `Write|Edit`.** `mutates_file()` in
 `hooks/compound-improvement.sh` inspects `tool_input.command` and counts only commands
@@ -96,16 +110,21 @@ delays a checkpoint; counting `ls` teaches the user to ignore it. A second branc
 names a README but nothing otherwise connects editing one to invoking it.
 
 **With both wirings active every hook fires twice**, so any new hook that counts or
-throttles needs the `claim_once()` guard in `hooks/compound-improvement.sh`. Reasoning in
-`docs/DESIGN.md`.
+throttles needs the `claim_once()` guard in `hooks/compound-improvement.sh`. The measured
+double delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a
+rule is in `docs/DESIGN.md`.
 
 **`CLAUDE.md` lives at `.claude/CLAUDE.md`, not the repo root.** A root `CLAUDE.md` fails
 `claude plugin validate --strict`, which is what marketplace review runs. The `.claude/`
-path loads as project context the same way.
+path loads as project context the same way; both were measured, in
+`docs/CLAUDE-CODE-BEHAVIOR.md`.
 
 **The installer discovers what to link.** `_skill_dirs()` and `_cli_files()` walk `skills/`
 and `bin/`, so adding a seed skill or a CLI needs no installer change, and
-`test_installer.py` asserts every shipped one is actually linked.
+`test_installer.py` asserts every shipped one is actually linked. Removal cannot enumerate
+from the checkout alone: a skill or CLI *renamed* upstream is invisible to both walks, so
+install and uninstall also read the names the manifest recorded for those directories, and
+install prunes such a link only once it is dead.
 
 **`skills/skill-compounder/SKILL.md` is prose, but it is the primary deliverable**: it
 carries the builder/red-team forging protocol and the retirement protocol.
@@ -132,7 +151,8 @@ temp dir, so scripts must not depend on the ambient environment.
 - A literal `%` inside an *argument* to `printf '%s'` needs no escaping. Doubling it prints
   a visible `%%`.
 
-**The red-teamer must never be a fork of the orchestrating session.** This applies to the
+**The red-teamer must never be a fork of either layer** — not of the orchestrator that
+dispatches it, and not of the session that dispatched the orchestrator. This applies to the
 protocol in `SKILL.md` and to any work in this repo that follows it. A forked reviewer
 inherits the author's blindness and reports that the skill looks fine. Each loop round
 spawns a *new* cold agent, because after round one the previous one is no longer cold. The
@@ -140,7 +160,12 @@ retirement check has the same shape: ask the neutral *"keep, fix, or retire?"*, 
 "confirm this deletion".
 
 **Nothing is ever destructively removed.** Uninstall only unlinks symlinks it can prove it
-created (`_unlink_if_ours` compares `realpath`), and it leaves runtime state intact.
+created, and it leaves runtime state intact. `_link_is_ours` wants one of four independent
+proofs of authorship, backed by `<state>/install-manifest.json`; `realpath` inside the
+current checkout is only one of them, and on its own it wedged install *and* uninstall the
+moment the checkout moved. Widening the rule to a path shape is the obvious repair and the
+wrong one -- it adopts a user's own link. A link that proves nothing is reported, not
+removed.
 Retiring a skill means `mv` to an archive with a `WHY-ARCHIVED.md`, never `rm -rf`.
 
 ## Notes and open threads

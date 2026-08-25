@@ -362,6 +362,15 @@ Each of these is a thought, not an observation. If you notice one, you are in Ph
 
 ## Trigger precision
 
+<!-- routing-pin
+description-sha256: 5ed8cdc4d1fc8c6608ac4072db2e8bcbdf25bfe929910fe4af1921bff54df49d
+prompts-sha256: 5a42fa5841d8fc005fd7c133ff9c09cd1e120367bd928b6f5e83d9b5c7347d83
+measured: never
+cli: n/a
+model: n/a
+result: unmeasured
+-->
+
 MUST fire:
 1. "start fresh, blow away everything not checked in"
 2. "clear the local commits on this branch and sync to origin/main"

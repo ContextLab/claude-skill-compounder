@@ -2,7 +2,12 @@
 """Install/uninstall driver. Called by install.sh / uninstall.sh (or directly).
 
 Wires up the hooks, status line, skill, and CLI. All the logic lives in
-skill_compounder.installer, which is what the test suite exercises."""
+skill_compounder.installer, which is what the test suite exercises.
+
+Every failure the installer can reach is reported as a sentence naming the file,
+key or directory at fault. A traceback tells the user nothing they can act on, and
+the two cases that produced one -- a read-only bin directory and a settings.json we
+cannot parse -- are exactly the cases where they most need to know what happened."""
 
 import argparse
 import os
@@ -16,6 +21,12 @@ if APP_HOME not in sys.path:
 from skill_compounder import installer  # noqa: E402
 
 
+def _print_report(title, rep):
+    print(title)
+    for k, v in rep.items():
+        print("  %-10s %s" % (k, v))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="claude-skill-compounder setup")
     ap.add_argument("--uninstall", action="store_true")
@@ -25,18 +36,33 @@ def main():
     args = ap.parse_args()
 
     if args.uninstall:
-        rep = installer.uninstall(APP_HOME, args.claude_dir, args.bin_dir, args.state_dir)
-        print("Uninstalled claude-skill-compounder:")
-        for k, v in rep.items():
-            print("  %-10s %s" % (k, v))
+        try:
+            rep = installer.uninstall(APP_HOME, args.claude_dir, args.bin_dir,
+                                      args.state_dir)
+        except (installer.InstallError, ValueError, OSError) as exc:
+            print("error: %s" % exc, file=sys.stderr)
+            return 1
+        _print_report("Uninstalled claude-skill-compounder:", rep)
         print("\nYour forge/reminder state is left intact. To delete it:")
         print("  rm -rf ~/.claude/skill-compounder")
+        if rep.get("errors"):
+            print("\nerror: %s" % rep["errors"], file=sys.stderr)
+            print("Everything listed above as removed really is removed; fix the problem "
+                  "and run this again to finish.", file=sys.stderr)
+            return 1
         return 0
 
-    rep = installer.install(APP_HOME, args.claude_dir, args.bin_dir, args.state_dir)
-    print("Installed claude-skill-compounder:")
-    for k, v in rep.items():
-        print("  %-10s %s" % (k, v))
+    try:
+        rep = installer.install(APP_HOME, args.claude_dir, args.bin_dir, args.state_dir)
+    except (installer.InstallError, ValueError, OSError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+    _print_report("Installed claude-skill-compounder:", rep)
+    if rep.get("errors"):
+        print("\nerror: %s" % rep["errors"], file=sys.stderr)
+        print("Everything listed above as linked really is installed; fix the problem "
+              "and run this again to finish.", file=sys.stderr)
+        return 1
     print("\nNext steps:")
     print("  1. Ensure %s is on your PATH (for skillforge, skillreport,\n"
           "     skillinsight, and skillcontrib)." % args.bin_dir)

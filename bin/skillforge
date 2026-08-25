@@ -5,26 +5,40 @@
 # line renders the animation from the state it writes (see statusline/).
 #
 #   skillforge start <name> <total-steps> <one-line summary...>
-#   skillforge step  <step-number> <what is happening now...>
-#   skillforge done  [message...]
-#   skillforge fail  <reason...>
-#   skillforge clear
-#   skillforge show
+#   skillforge step  [--name <forge>] <step-number> <what is happening now...>
+#   skillforge done  [--name <forge>] [message...]
+#   skillforge fail  [--name <forge>] <reason...>
+#   skillforge clear [--name <forge> | --all]
+#   skillforge show  [--name <forge> | --all]
+#   skillforge list
 #   skillforge ledger [--json]
 #
-# State lives in ONE file, not a session-keyed one. This is deliberate: the id in
-# $CLAUDE_CODE_SESSION_ID and the .session_id delivered to hooks and the status line
-# are different values for the same session, so a session-keyed file written here
-# would never be found by the renderer. One forge at a time per machine.
+# SEVERAL FORGES CAN RUN AT ONCE. Each one gets its own file under forge/, named after
+# the forge, so `start` never destroys another forge's record. Which forge a command
+# acts on is resolved in this order:
 #
-# PRIVACY. Two files are written, both under
+#   1. --name <forge> (or -n), or the $SKILLFORGE_NAME environment variable.
+#   2. The single live forge, when exactly one is active. This is the common case and
+#      needs no argument at all.
+#   3. Otherwise the command REFUSES and lists the live names. It does not guess: a
+#      guess means `done` closing the wrong record and the status line naming the wrong
+#      job, which is the whole reason forges are tracked separately.
+#
+# State is NOT keyed on a session id. The id in $CLAUDE_CODE_SESSION_ID and the
+# .session_id delivered to hooks and the status line are different values for the same
+# session, so a session-keyed file written here would never be found by the renderer.
+# A forge name is visible to both sides, which is why it is the key.
+#
+# PRIVACY. Two kinds of file are written, both under
 # ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}, both local, both plain text:
-#   forge/current.json  the in-progress forge (name, summary, step, phase, timestamps).
+#   forge/<name>.forge.json  one in-progress forge (name, summary, step, phase, times).
 #   ledger.jsonl        one JSON line per start/done/fail, appended forever. Each line
 #                       holds the skill name, the one-line summary you passed to
 #                       'start', the originating repository path, epoch timestamps,
 #                       step counts, outcome and reason. No file contents, no
 #                       transcripts, no credentials.
+# Any other *.json left in forge/ by an older version is read as a forge too, so an
+# upgrade neither loses it nor deletes it behind your back.
 # Nothing is transmitted. This script makes no network calls. Delete ledger.jsonl at
 # any time; skillforge recreates it on the next forge.
 set -uo pipefail
@@ -32,46 +46,228 @@ set -uo pipefail
 STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$STATE_ROOT/forge"
 mkdir -p "$DIR" 2>/dev/null || { echo "skillforge: cannot create $DIR" >&2; exit 1; }
-FILE="$DIR/current.json"
 LEDGER="$STATE_ROOT/ledger.jsonl"
+# Fields in the slot index below are separated by US (0x1f), not by a tab. Two reasons,
+# and both are load-bearing: a skill name is allowed to contain a tab (skillreport has a
+# regression test for exactly that), and tab is IFS whitespace, so `read` would collapse
+# a run of them and shift every later field by one.
+SEP="$(printf '\037')"
 
 command -v jq >/dev/null 2>&1 || { echo "skillforge: jq is required" >&2; exit 1; }
 
 # SKILLFORGE_NOW pins the clock so tests can assert on durations and dates.
 now() { if [ -n "${SKILLFORGE_NOW:-}" ]; then printf '%s' "$SKILLFORGE_NOW"; else date +%s; fi; }
 die() { echo "skillforge: $*" >&2; exit 2; }
-field() { jq -r --arg k "$1" '.[$k] // empty' "$FILE" 2>/dev/null; }
-update() { # jq expression applied to the state file
-  local tmp="$FILE.tmp.$$"
-  jq "$@" "$FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not update $FILE"; }
+
+# The renderer guards this knob and the CLI did not, so `SKILLFORGE_NOW=abc` reached
+# `--argjson now abc`, jq failed, and the one thing `start` could report was its own
+# fallback message -- "could not write to .../forge (is it writable?)" against a
+# perfectly writable directory. Checked once, here, where the message can name the
+# actual cause. Ten digits is every epoch second until the year 2286.
+case "${SKILLFORGE_NOW:-}" in
+  '') : ;;
+  *[!0-9]*|???????????*)
+    die "SKILLFORGE_NOW must be epoch seconds (digits only, at most 10); got '$SKILLFORGE_NOW'" ;;
+esac
+
+field() { jq -r --arg k "$2" '.[$k] // empty' "$1" 2>/dev/null; }   # <file> <key>
+
+# ONE LINE, ALWAYS, WHATEVER IS IN THE FILE. `field` with -r pretty-prints a container,
+# so a foreign record holding `"step": {"a":1}` put raw newlines through `list`'s
+# fixed-width printf and split one forge across three rows. `tojson` is compact by
+# construction and the gsub catches the rest.
+sfield() { # <file> <key>
+  jq -r --arg k "$2" '(.[$k] // "") | (if type == "string" then . else tojson end)
+                      | gsub("[[:cntrl:]]"; " ")' "$1" 2>/dev/null
 }
 
+# A blank or all-whitespace name cannot be typed after --name and cannot be told apart
+# from its neighbours on screen, so wherever a name is DISPLAYED it is replaced by the
+# one handle that does identify it: its file. Counting such a record while refusing to
+# name it made `step` say "b, c, d are all live" with four records blocking it.
+label_of() { # <name> <path>
+  case "$(printf '%s' "${1:-}" | tr -d '[:space:]')" in
+    '') printf '(unnamed: %s)' "$(basename "$2")" ;;
+    *)  printf '%s' "$1" ;;
+  esac
+}
+
+# Truncate and pad to a number of TERMINAL COLUMNS. `printf '%.28s'` and `%-28s` are
+# BYTE-based: a CJK forge name was cut mid-character, so a stray \347 reached the
+# terminal, and it was padded to 28 bytes rather than 28 columns, so every later column
+# of the table shifted. This is the same problem the renderer solves in fit(), at table
+# scale, with the wide/fullwidth blocks that a skill name can plausibly contain.
+cell() { # <string> <columns>
+  jq -rn --arg s "$1" --argjson w "$2" '
+    def cw: if (. >= 4352   and . <= 4447)   or (. >= 8986   and . <= 8987)
+              or (. >= 9193   and . <= 9196)   or (. >= 11904  and . <= 42191)
+              or (. >= 44032  and . <= 55203)  or (. >= 63744  and . <= 64255)
+              or (. >= 65040  and . <= 65049)  or (. >= 65072  and . <= 65135)
+              or (. >= 65280  and . <= 65376)  or (. >= 65504  and . <= 65510)
+              or (. >= 127744 and . <= 130041) or (. >= 131072 and . <= 262141)
+            then 2
+            elif (. >= 768   and . <= 879)   or (. >= 8203  and . <= 8207)
+              or (. >= 8288  and . <= 8303)  or (. >= 65024 and . <= 65039)
+            then 0 else 1 end;
+    ($s | gsub("[[:cntrl:]]"; " ")) as $t
+    | ($t | explode) as $c
+    | ([foreach $c[] as $x (0; . + ($x | cw))]) as $cum
+    | ($cum | last // 0) as $tot
+    | if $tot <= $w then $t + ((" " * ($w - $tot)) // "")
+      else ([ range(0; ($c | length)) | select($cum[.] <= ($w - 1)) ] | length) as $k
+        | (($c[0:$k] | implode) + "…")
+          + ((" " * ($w - 1 - (if $k == 0 then 0 else $cum[$k - 1] end))) // "")
+      end' 2>/dev/null || printf '%s' "$1"
+}
+
+update() { # <file> <jq args...>
+  u_file="$1"; shift
+  u_tmp="$u_file.tmp.$$"
+  # The whole group is wrapped, not just jq. A redirect that cannot open its target is
+  # reported by the SHELL, not by jq, so the unwrapped form printed bash's own
+  # "Permission denied" above the tidy message below it. `start` already does this.
+  { jq "$@" "$u_file" > "$u_tmp"; } 2>/dev/null && mv "$u_tmp" "$u_file" \
+    || { rm -f "$u_tmp" 2>/dev/null; die "could not update $u_file"; }
+}
+
+# Orphan temp files. `start` writes its record to ".start.<pid>.<ts>.tmp" before it
+# claims a slot and `update` writes "<slot>.tmp.<pid>"; a process killed between the
+# write and the rename leaves one behind, and nothing reaped them -- 29 survived 60
+# SIGKILLs during `start`, and the directory grows without bound. Neither name ends in
+# .json, so they are invisible to slots() and to the renderer, and reaping them must
+# not change that.
+#
+# AGE, NOT EXISTENCE, IS THE TEST. A temp file younger than an hour may belong to a
+# writer that is still running, and deleting it would corrupt a concurrent start. No
+# write survives sixty minutes.
+reap_temps() {
+  find "$DIR" -maxdepth 1 -type f \( -name '.start.*.tmp' -o -name '*.tmp.*' \) \
+       -mmin +60 -exec rm -f {} + 2>/dev/null || true
+}
 
 # The originating repository, best effort. Outside a checkout (or with no git at all)
 # the working directory is the honest answer.
-project_root() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD"; }
+# Cached, and `start` warms it BEFORE it claims a slot. The value cannot change inside
+# one invocation, and the `git rev-parse` behind it is the slowest thing in
+# `ledger_append` -- which is what runs immediately after the slot claim. A process
+# killed in that window leaves a live forge with no `start` row (4 of 60 SIGKILL
+# trials). Warming the cache first takes the fork-and-exec out of the window entirely.
+# It does not close the window; `ledger` and `skillreport` now SHOW an outcome that has
+# no start rather than dropping it, which is the half that matters.
+PROJECT_ROOT_CACHE=""
+project_root() {
+  [ -n "$PROJECT_ROOT_CACHE" ] || \
+    PROJECT_ROOT_CACHE="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
+  printf '%s' "$PROJECT_ROOT_CACHE"
+}
 
 int_or_zero() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
 
-# Red-team rounds are not stored during a forge, only the step budget and the step
-# reached. SKILL.md budgets steps as 2 + 2*rounds: one step to dispatch the builder, one
-# for its draft, then a review step and a revision step per round.
+# ------------------------------------------------------------------ slot discovery
+
+# Every *.json directly under forge/ that parses and carries a name and a status is a
+# forge slot. `find` rather than a glob: zsh makes an unmatched glob a fatal error, and
+# this file has to keep working if it is ever sourced or run under something other than
+# bash. A file that does not parse is SKIPPED, never deleted -- a half-written temp file
+# from a concurrent writer must not take a forge down with it, and neither must a state
+# file from a future version this build does not understand.
 #
-# So the budget implies the PLANNED rounds, and the step reached implies the COMPLETED
-# ones. Reporting the planned count on an outcome record is a lie the ledger tells about
-# itself: a forge abandoned at step 3 of 8 recorded three rounds when it had finished
-# none. A start record carries the plan; a done or fail record carries what happened.
-rounds_planned() {
-  r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
-  [ "$r" -lt 0 ] && r=0
-  printf '%s' "$r"
+# The temp files written by update()/start are named "<file>.tmp.<pid>", which does not
+# end in .json, so a render can never catch one mid-write.
+# A record whose name holds a newline, a carriage return or a US cannot be represented
+# in a one-line index, so it is SKIPPED -- never deleted, and never allowed to produce a
+# phantom half-row that a later --name lookup could match. `start` refuses those three
+# characters, so only a hand-written or foreign state file can be in that shape.
+slot_meta() { # <file> -> "started<US>name<US>status" or nothing
+  jq -r 'select((has("name")) and (has("status")) and ((.name|type) == "string")
+                and (((.name | contains("\n")) or (.name | contains("\r"))
+                      or (.name | contains("\u001f"))) | not))
+         | "\(.started // 0)\u001f\(.name)\u001f\(.status)"' "$1" 2>/dev/null
 }
 
-rounds_completed() { # <step reached>
-  r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
-  [ "$r" -lt 0 ] && r=0
-  printf '%s' "$r"
+slots() { # -> "started<US>name<US>status<US>path" per slot, oldest start first
+  find "$DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | while IFS= read -r s_f; do
+    s_meta="$(slot_meta "$s_f")"
+    [ -n "$s_meta" ] || continue
+    printf '%s%s%s\n' "$s_meta" "$SEP" "$s_f"
+  done | sort -t"$SEP" -k1,1n -k4,4
 }
+
+# Resolve which slot a command acts on. Sets RESOLVED (a path) or AMBIG (a name list).
+# Returns 0 resolved, 1 nothing to act on, 3 ambiguous.
+#
+# Ambiguity is measured over ACTIVE forges only. A finished forge lingers on disk for
+# its status-line clear-out window, and letting that corpse make every no-argument
+# command ambiguous for the next 30 seconds would be a worse bug than the one this
+# replaces.
+resolve_slot() { # <wanted name, or empty>
+  RESOLVED=""; AMBIG=""; RESOLVED_STATE=""; RESOLVED_NAME=""
+  r_want="$1"; r_all=0; r_act=0; r_allp=""; r_actp=""; r_alln=""; r_actn=""
+  r_alls=""; r_allnm=""; r_actnm=""
+  while IFS="$SEP" read -r r_st r_nm r_stt r_pth; do
+    [ -n "${r_pth:-}" ] || continue
+    [ -n "$r_want" ] && [ "$r_nm" != "$r_want" ] && continue
+    r_lbl="$(label_of "$r_nm" "$r_pth")"
+    r_all=$(( r_all + 1 )); r_allp="$r_pth"; r_alls="$r_stt"; r_allnm="$r_nm"
+    # `${r_alln:+, }` is what dropped a blank name silently: appending "" leaves the
+    # accumulator empty, so the NEXT name became the first one and the count and the
+    # list disagreed. label_of makes every entry non-empty, so it cannot recur.
+    r_alln="$r_alln${r_alln:+, }$r_lbl"
+    if [ "$r_stt" = "active" ]; then
+      r_act=$(( r_act + 1 )); r_actp="$r_pth"; r_actnm="$r_nm"
+      r_actn="$r_actn${r_actn:+, }$r_lbl"
+    fi
+  done <<SLOTS
+$(slots)
+SLOTS
+  if [ "$r_act" -eq 1 ]; then
+    RESOLVED="$r_actp"; RESOLVED_STATE="active"; RESOLVED_NAME="$r_actnm"; return 0
+  fi
+  if [ "$r_act" -gt 1 ]; then AMBIG="$r_actn"; return 3; fi
+  if [ "$r_all" -eq 1 ]; then
+    RESOLVED="$r_allp"; RESOLVED_STATE="$r_alls"; RESOLVED_NAME="$r_allnm"; return 0
+  fi
+  if [ "$r_all" -gt 1 ]; then AMBIG="$r_alln"; return 3; fi
+  return 1
+}
+
+# `step`, `done` and `fail` must act on a LIVE forge and nothing else. Falling back to
+# the one remaining record when none is active let a bare `step` rewind the bar under a
+# green ✓, and let a second `done` append a second outcome record for one start -- the
+# ledger then counts a forge twice and its own start-to-outcome join hides it.
+# Returns 0 with RESOLVED set, or exits.  <command> <no-active-is-fatal?>
+require_active() { # <command> <fatal|quiet>
+  resolve_slot "$NAME_OPT"; rq=$?
+  [ "$rq" -eq 3 ] && ambiguous "$1"
+  if [ "$rq" -eq 1 ]; then
+    # Named a forge that does not exist at all: always an error, even for the commands
+    # whose empty case is a silent no-op. A typo in --name would otherwise close
+    # nothing, say nothing, and exit 0.
+    [ -n "$NAME_OPT" ] && die "no forge named '$NAME_OPT' (try: skillforge list)"
+    [ "$2" = "fatal" ] && die "no active forge; run 'skillforge start' first"
+    exit 0
+  fi
+  if [ "$RESOLVED_STATE" != "active" ]; then
+    [ "$2" = "fatal" ] && die "forge '$RESOLVED_NAME' is not running (status: $RESOLVED_STATE); it has already been closed out"
+    echo "skillforge: '$RESOLVED_NAME' was already closed out (status: $RESOLVED_STATE); nothing to do"
+    exit 0
+  fi
+  return 0
+}
+
+ambiguous() { # <command> -- never guesses; says exactly what to type instead
+  die "$AMBIG are all live. Say which one: skillforge $1 --name <forge> ... ('skillforge list' shows them; a forge whose session died is cleared with 'skillforge clear --name <forge>')"
+}
+
+# forge/<slug>.forge.json. The slug is only a filename; the name inside the file is
+# what every lookup uses, so a mangled or truncated slug can never mislabel a forge.
+slug_of() {
+  s="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._-' '-' | cut -c1-60)"
+  s="$(printf '%s' "$s" | sed 's/^-*//; s/-*$//')"
+  [ -n "$s" ] && printf '%s' "$s" || printf 'forge'
+}
+
+# ------------------------------------------------------------------------- ledger
 
 # One JSON object, one line, one append. jq builds the whole line before the redirect
 # runs, so a single short write reaches the file and concurrent forges cannot interleave
@@ -96,75 +292,304 @@ ledger_append() { # <event> <name> <steps> <summary> [step] [phase] [duration] [
   return 0
 }
 
-# Close out whatever is in $FILE as an outcome record. Used by done, fail, and by
-# clear when it would otherwise drop an active forge on the floor without a trace.
-ledger_close() { # <event> <phase>
-  l_name="$(field name)"; l_steps="$(int_or_zero "$(field steps)")"
-  l_summary="$(field summary)"; l_step="$(int_or_zero "$(field step)")"
-  l_started="$(int_or_zero "$(field started)")"
-  l_dur=$(( $(now) - l_started ))
-  [ "$l_dur" -lt 0 ] && l_dur=0
-  ledger_append "$1" "$l_name" "$l_steps" "$l_summary" \
-    "$l_step" "$2" "$l_dur" "$(rounds_completed "$l_step")" "$(rounds_planned "$l_steps")"
+# Red-team rounds are not stored during a forge, only the step budget and the step
+# reached. SKILL.md budgets steps as 2 + 2*rounds: one step to dispatch the builder, one
+# for its draft, then a review step and a revision step per round.
+#
+# So the budget implies the PLANNED rounds, and the step reached implies the COMPLETED
+# ones. Reporting the planned count on an outcome record is a lie the ledger tells about
+# itself: a forge abandoned at step 3 of 8 recorded three rounds when it had finished
+# none. A start record carries the plan; a done or fail record carries what happened.
+rounds_planned() {
+  r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
+  [ "$r" -lt 0 ] && r=0
+  printf '%s' "$r"
 }
 
+rounds_completed() { # <step reached>
+  r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
+  [ "$r" -lt 0 ] && r=0
+  printf '%s' "$r"
+}
+
+# Close out one slot as an outcome record. Used by done, fail, and by clear when it
+# would otherwise drop an active forge on the floor without a trace.
+ledger_close() { # <file> <event> <phase>
+  l_f="$1"
+  l_name="$(field "$l_f" name)"; l_steps="$(int_or_zero "$(field "$l_f" steps)")"
+  l_summary="$(field "$l_f" summary)"; l_step="$(int_or_zero "$(field "$l_f" step)")"
+  l_started="$(int_or_zero "$(field "$l_f" started)")"
+  l_dur=$(( $(now) - l_started ))
+  [ "$l_dur" -lt 0 ] && l_dur=0
+  ledger_append "$2" "$l_name" "$l_steps" "$l_summary" \
+    "$l_step" "$3" "$l_dur" "$(rounds_completed "$l_step")" "$(rounds_planned "$l_steps")"
+}
+
+# --------------------------------------------------------------------- option parse
+
 cmd="${1:-}"; shift 2>/dev/null || true
+
+# --name is accepted anywhere in the argument list; --all only where it means something,
+# so that a `fail` reason or a `step` phase containing the word is left alone.
+NAME_OPT="${SKILLFORGE_NAME:-}"
+ALL_OPT=0
+case "$cmd" in clear|show|list) ALLOW_ALL=1 ;; *) ALLOW_ALL=0 ;; esac
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name|-n) [ $# -ge 2 ] || die "--name requires a forge name"
+               NAME_OPT="$2"; shift 2 ;;
+    --name=*)  NAME_OPT="${1#--name=}"; shift ;;
+    --all)     if [ "$ALLOW_ALL" -eq 1 ]; then ALL_OPT=1; shift
+               else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --)        shift; while [ $# -gt 0 ]; do ARGS[${#ARGS[@]}]="$1"; shift; done ;;
+    *)         ARGS[${#ARGS[@]}]="$1"; shift ;;
+  esac
+done
+# bash 3.2 under `set -u` treats an empty array expansion as unbound, so every use of
+# ARGS has to carry the +alternate guard.
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "$cmd" in
   start)
     name="${1:-}"; steps="${2:-}"; shift 2 2>/dev/null || true
     summary="$*"
+    [ -n "$NAME_OPT" ] && [ -z "$name" ] && { name="$NAME_OPT"; }
     [ -z "$name" ] && die "usage: skillforge start <name> <total-steps> <summary...>"
+    # The name is the key for every lookup and it is written into a one-line index, so
+    # a newline inside it would split one forge into two phantom rows and make every
+    # later --name miss. A tab is fine: the index is US-separated precisely so that a
+    # skill name holding one still round-trips.
+    case "$name" in
+      *'
+'*|*"$(printf '\r')"*|*"$SEP"*)
+        die "a forge name cannot contain a newline, a carriage return or a US (0x1f)" ;;
+    esac
+    # Digits only AND a bounded magnitude. `--argjson t 99999999999999999999` is
+    # accepted by jq as the FLOAT 1e+20, which then fails every later integer test:
+    # bash prints "[: integer expected" on stderr, the renderer's numeric guard folds
+    # 1e+20 back to 1, and a forge at step 5 renders as a full bar at 100%.
     case "$steps" in ''|*[!0-9]*) die "total-steps must be a positive integer" ;; esac
+    case "$steps" in ?????*) die "total-steps must be between 1 and 9999" ;; esac
     [ "$steps" -lt 1 ] && die "total-steps must be >= 1"
     [ -z "$summary" ] && die "a one-line summary is required — it is what the user sees"
-    # Written via a temp file and mv, like update() does. A plain redirect
-    # truncates $FILE first, and the status line renders once a second: a render
-    # landing inside that window reads a partial file, its jq fails, and the whole
-    # forge segment vanishes for a frame. That is the progress bar "blinking".
-    tmp="$FILE.tmp.$$"
-    jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
+
+    # Does a forge by this name already exist? An ACTIVE one is refused: overwriting it
+    # is exactly the defect this multi-slot scheme exists to remove, and silently
+    # forging two things under one name would make both the animation and the ledger
+    # join meaningless. A FINISHED one is reused in place -- it has already been closed
+    # out to the ledger and the status line was about to reap it anyway.
+    existing=""; existing_state=""
+    while IFS="$SEP" read -r e_st e_nm e_stt e_pth; do
+      [ -n "${e_pth:-}" ] || continue
+      [ "$e_nm" = "$name" ] || continue
+      existing="$e_pth"; existing_state="$e_stt"
+      [ "$e_stt" = "active" ] && break
+    done <<SLOTS
+$(slots)
+SLOTS
+    if [ -n "$existing" ] && [ "$existing_state" = "active" ]; then
+      die "a forge named '$name' is already live (step $(sfield "$existing" step)/$(sfield "$existing" steps)). Close it with 'skillforge done --name $name', or forge under a different name."
+    fi
+
+    # The record is written COMPLETE, to a temp file, before any slot is claimed.
+    # That ordering is the whole trick below: the file that appears at a slot path is
+    # never a placeholder, so a concurrent starter can always tell an occupied slot
+    # from a free one. A plain redirect onto the slot would truncate it first, and the
+    # status line renders once a second: a render landing inside that window reads a
+    # partial file, its jq fails, and the whole forge segment vanishes for a frame.
+    # That is the progress bar "blinking".
+    #
+    # The temp name does not end in .json, so it is invisible to slots() and to the
+    # renderer while it is being written.
+    # Warmed here, outside the slot-claim window below: see project_root().
+    project_root >/dev/null 2>&1
+    tmp="$DIR/.start.$$.$(now).tmp"
+    # The whole group is wrapped, not just jq: a redirect that cannot open its target
+    # is reported by the SHELL, so `jq ... > "$tmp" 2>/dev/null` still prints bash's own
+    # "Permission denied" above the tidy message below it.
+    { jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
       '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
-        status:"active", started:$now, updated:$now}' > "$tmp" \
-      && mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not write $FILE"; }
+        status:"active", started:$now, updated:$now}' > "$tmp"; } 2>/dev/null \
+      || { rm -f "$tmp" 2>/dev/null; die "could not write to $DIR (is it writable?)"; }
+
+    if [ -n "$existing" ]; then
+      # A finished record for the same name, replaced in place: one slot per name, so
+      # the ledger's start-to-outcome join stays unambiguous.
+      FILE="$existing"
+      mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not write $FILE"; }
+    else
+      FILE="$DIR/$(slug_of "$name").forge.json"
+      # Claiming a slot is `ln`, not a redirect: a hard link either appears atomically
+      # or fails because the name is taken, and it publishes the finished record in the
+      # same instant. `set -o noclobber; : > "$FILE"` was tried first and is WRONG here
+      # -- it claims with a 0-byte file, so a racing starter looking at that slot sees
+      # an empty file, reads it as an abandoned claim, and takes the slot too. Three
+      # simultaneous starts with names that share a slug then collapsed into one, and
+      # two of them were lost with no error and exit status 0.
+      n=1
+      while :; do
+        if ln "$tmp" "$FILE" 2>/dev/null; then rm -f "$tmp"; break; fi
+        if [ ! -e "$FILE" ]; then
+          rm -f "$tmp"; die "could not create $FILE (is $DIR writable?)"
+        fi
+        if [ "$(field "$FILE" name)" = "$name" ]; then
+          # Lost a same-name race, or a finished record appeared since the scan above.
+          if [ "$(field "$FILE" status)" = "active" ]; then
+            rm -f "$tmp"
+            die "a forge named '$name' is already live. Close it with 'skillforge done --name $name', or forge under a different name."
+          fi
+          mv "$tmp" "$FILE"; break
+        fi
+        # Zero bytes is not a slot: slots() skips it, so it cannot be a live forge, and
+        # taking it back stops one failed write from poisoning that slug forever.
+        if [ ! -s "$FILE" ]; then mv "$tmp" "$FILE"; break; fi
+        n=$(( n + 1 ))
+        [ "$n" -gt 64 ] && { rm -f "$tmp"; die "cannot find a free slot file in $DIR"; }
+        FILE="$DIR/$(slug_of "$name")-$n.forge.json"
+      done
+    fi
     ledger_append start "$name" "$steps" "$summary"
+    reap_temps
     echo "skillforge: forging '$name' ($steps steps) — animation live in the status line"
+    # Count the OTHER live forges and say so. A session that starts a second forge
+    # without noticing is the situation where a bare `skillforge step` stops being
+    # unambiguous, so it has to be told at the moment it becomes true.
+    others="$(slots | awk -F"$SEP" -v me="$name" '$3 == "active" && $2 != me { printf "%s%s", (n++ ? ", " : ""), $2 }')"
+    # `if`, not `&&`: a trailing `&&` whose test is false makes the whole script exit
+    # non-zero, and a caller that checks the exit status of `start` would read a forge
+    # that started perfectly well as a failure.
+    if [ -n "$others" ]; then
+      echo "skillforge: also live: $others — target this one with 'skillforge step --name $name ...'"
+    fi
     ;;
+
   step)
-    [ -f "$FILE" ] || die "no active forge; run 'skillforge start' first"
+    require_active step fatal
+    FILE="$RESOLVED"
     n="${1:-}"; shift 2>/dev/null || true
     phase="$*"
-    case "$n" in ''|*[!0-9]*) die "usage: skillforge step <step-number> <phase...>" ;; esac
+    case "$n" in ''|*[!0-9]*) die "usage: skillforge step [--name <forge>] <step-number> <phase...>" ;; esac
+    # Bounded for the same reason `start` bounds the budget: `--argjson n 1e20` is a
+    # float that fails every later integer test, and an unbounded step is now WRITTEN
+    # rather than clamped, so it also sets the width of a status-line field.
+    case "$n" in ?????*) die "step-number must be between 0 and 9999" ;; esac
     [ -z "$phase" ] && die "a phase description is required"
-    update --argjson n "$n" --arg p "$phase" --argjson now "$(now)" \
-      '.step = (if $n > .steps then .steps else $n end) | .phase = $p | .updated = $now'
-    echo "skillforge: [$n/$(field steps)] $phase"
+    # THE STEP IS RECORDED AS GIVEN, NOT CLAMPED TO THE BUDGET. Clamping made an
+    # overrun unrepresentable: 14 of 12 was stored as 12, so the status line could not
+    # show it, `rounds_completed` under-counted it, and `skillreport` -- which reads
+    # nothing but the ledger -- could never report that a forge went long. A budget is
+    # a plan; the step reached is an observation, and the observation is what is kept.
+    update "$FILE" --argjson n "$n" --arg p "$phase" --argjson now "$(now)" \
+      '.step = $n | .phase = $p | .updated = $now'
+    s_total="$(sfield "$FILE" steps)"
+    s_over=""
+    [ "$n" -gt "$(int_or_zero "$s_total")" ] && s_over=" (past the $s_total-step budget)"
+    echo "skillforge: [$n/$s_total] $(sfield "$FILE" name): $phase$s_over"
     ;;
+
   done)
-    [ -f "$FILE" ] || exit 0
+    require_active done quiet
+    FILE="$RESOLVED"
     msg="${*:-clean red-team pass}"
-    update --arg p "$msg" --argjson now "$(now)" \
-      '.status="done" | .step=.steps | .phase=$p | .updated=$now | .finished=$now'
-    ledger_close done "$msg"
-    echo "skillforge: '$(field name)' complete — $msg"
+    # `done` fills the bar, but it must not REWIND a forge that ran past its budget:
+    # the ledger's rounds-completed count is derived from the step reached.
+    update "$FILE" --arg p "$msg" --argjson now "$(now)" \
+      '.status="done" | .step=(if .step > .steps then .step else .steps end)
+       | .phase=$p | .updated=$now | .finished=$now'
+    ledger_close "$FILE" done "$msg"
+    echo "skillforge: '$(sfield "$FILE" name)' complete — $msg"
     ;;
+
   fail)
-    [ -f "$FILE" ] || exit 0
+    require_active fail quiet
+    FILE="$RESOLVED"
     reason="${*:-abandoned}"
-    update --arg p "$reason" --argjson now "$(now)" \
+    update "$FILE" --arg p "$reason" --argjson now "$(now)" \
       '.status="failed" | .phase=$p | .updated=$now | .finished=$now'
-    ledger_close fail "$reason"
-    echo "skillforge: '$(field name)' abandoned — $reason"
+    ledger_close "$FILE" fail "$reason"
+    echo "skillforge: '$(sfield "$FILE" name)' abandoned — $reason"
     ;;
+
   clear)
     # An active forge thrown away is still a forge that happened. Record it, so the
     # ledger cannot quietly overstate the completion rate.
-    if [ -f "$FILE" ] && [ "$(field status)" = "active" ]; then
-      ledger_close fail "cleared before completing"
+    if [ "$ALL_OPT" -eq 1 ]; then
+      cleared=0
+      while IFS="$SEP" read -r c_st c_nm c_stt c_pth; do
+        [ -n "${c_pth:-}" ] || continue
+        [ "$c_stt" = "active" ] && ledger_close "$c_pth" fail "cleared before completing"
+        rm -f "$c_pth"; cleared=$(( cleared + 1 ))
+      done <<SLOTS
+$(slots)
+SLOTS
+      reap_temps
+      echo "skillforge: cleared $cleared forge(s)"
+      exit 0
     fi
-    rm -f "$FILE"; echo "skillforge: cleared"
+    resolve_slot "$NAME_OPT"; rc=$?
+    [ "$rc" -eq 3 ] && die "$AMBIG are all live. Say which one: skillforge clear --name <forge>, or clear every one with skillforge clear --all"
+    [ "$rc" -eq 1 ] && [ -n "$NAME_OPT" ] && die "no forge named '$NAME_OPT' (try: skillforge list)"
+    if [ "$rc" -eq 0 ]; then
+      [ "$(field "$RESOLVED" status)" = "active" ] && ledger_close "$RESOLVED" fail "cleared before completing"
+      rm -f "$RESOLVED"
+      echo "skillforge: cleared"
+      exit 0
+    fi
+    echo "skillforge: nothing to clear"
     ;;
-  show)  [ -f "$FILE" ] && cat "$FILE" || echo "no active forge" ;;
+
+  show)
+    if [ "$ALL_OPT" -eq 1 ]; then
+      shown=0
+      while IFS="$SEP" read -r s_st s_nm s_stt s_pth; do
+        [ -n "${s_pth:-}" ] || continue
+        jq -c . "$s_pth" 2>/dev/null && shown=$(( shown + 1 ))
+      done <<SLOTS
+$(slots)
+SLOTS
+      [ "$shown" -eq 0 ] && echo "no active forge"
+      exit 0
+    fi
+    resolve_slot "$NAME_OPT"; rc=$?
+    # A --name that matches nothing is a typo, and answering it with the same
+    # "no active forge" a quiet system prints -- at exit 0 -- tells the caller their
+    # forge finished when in fact it was never found. `step` and `clear` both die here.
+    [ "$rc" -eq 1 ] && [ -n "$NAME_OPT" ] && die "no forge named '$NAME_OPT' (try: skillforge list)"
+    if [ "$rc" -eq 0 ]; then
+      cat "$RESOLVED"
+    elif [ "$rc" -eq 3 ]; then
+      # Several are live and no name was given. Print them ALL rather than picking one:
+      # `show` is what a caller uses to ask "what is going on", and answering with one
+      # of several is the misreport this whole scheme exists to stop. One compact object
+      # per line, so a downstream `jq -re '.status'` still reads every one of them.
+      while IFS="$SEP" read -r s_st s_nm s_stt s_pth; do
+        [ -n "${s_pth:-}" ] || continue
+        jq -c . "$s_pth" 2>/dev/null
+      done <<SLOTS
+$(slots)
+SLOTS
+    else
+      echo "no active forge"
+    fi
+    ;;
+
+  list)
+    listed=0
+    while IFS="$SEP" read -r l_st l_nm l_stt l_pth; do
+      [ -n "${l_pth:-}" ] || continue
+      [ "$listed" -eq 0 ] && printf '%-28s %-8s %8s  %s\n' "FORGE" "STATE" "STEP" "PHASE"
+      listed=$(( listed + 1 ))
+      printf '%s %-8s %8s  %s\n' \
+        "$(cell "$(label_of "$l_nm" "$l_pth")" 28)" "$l_stt" \
+        "$(sfield "$l_pth" step)/$(sfield "$l_pth" steps)" "$(sfield "$l_pth" phase)"
+    done <<SLOTS
+$(slots)
+SLOTS
+    [ "$listed" -eq 0 ] && echo "no active forge"
+    exit 0
+    ;;
+
   ledger)
     if [ "${1:-}" = "--json" ]; then
       [ -s "$LEDGER" ] && cat "$LEDGER"
@@ -177,32 +602,85 @@ case "$cmd" in
     # Each start is joined to the first done/fail for the same name that follows it.
     # A start with nothing after it is an abandoned forge: the session ended, crashed,
     # or moved on without closing out. It is reported, not dropped.
+    #
+    # AND SO IS THE MIRROR IMAGE. An outcome that no start joins to used to be dropped
+    # in silence, because the join walked start records only: a planted `done` for
+    # `ghost-one` produced output that read "6 forge(s)" and never mentioned it. That is
+    # not a hypothetical shape. `start` claims its slot with `ln` and appends its ledger
+    # row immediately afterwards; a process killed between the two leaves a live forge
+    # with no start row (4 of 60 SIGKILL trials), and its eventual `done` is then an
+    # orphan. Those are precisely the forges worth seeing -- the ones that crashed -- so
+    # an unmatched outcome is now a row, marked, rather than a silence.
     jq -s -R -r '
       def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
-      [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $r
-      | [ range(0; ($r | length)) | . as $i | select($r[$i].event == "start") | $i ]
-      | map(. as $i | $r[$i] as $st
-          | ($r[($i + 1):]
-             | map(select(.name == $st.name and (.event == "done" or .event == "fail")))
-             | .[0]) as $en
-          | { name:     $st.name,
-              ts:       ($st.ts // 0),
-              project:  ($st.project // ""),
-              outcome:  (if $en == null then "no outcome" else $en.event end),
-              rounds:   (if $en == null then rounds_of($st.steps)
-                         else ($en.rounds // rounds_of($st.steps)) end),
-              duration: (if $en == null then null else ($en.duration // null) end),
-              phase:    (if $en == null then "never closed out" else ($en.phase // "") end) }
-          # jq 1.6 returns [] for ("" | split("/")), so .[-1] on an absent or empty
-          # project yields null, which then interpolates as the literal string "null".
-          | .where = ([ (.project | split("/"))[] | select(length > 0) ] | last // "-"))
-      | (.[] | "\(.ts | gmtime | strftime("%Y-%m-%d"))  \(.name)  [\(.outcome)]  \(.rounds) round(s)  \(if .duration == null then "-" else "\(.duration)s" end)  \(.where)  \(.phase)"),
+      # jq 1.6 returns [] for ("" | split("/")), so .[-1] on an absent or empty
+      # project yields null, which then interpolates as the literal string "null".
+      def wherefrom: ([ ((. // "") | split("/"))[] | select(length > 0) ] | last // "-");
+      # `rounds_planned` has been in the JSONL since the overrun was made representable
+      # and nothing ever printed it, so a forge that ran six rounds against a three-round
+      # budget read as a plain "6 round(s)" -- indistinguishable from one that spent
+      # exactly its budget. The budget is only worth showing when it was not met.
+      def roundtxt($r; $p):
+        if $p == null or $p == $r then "\($r) round(s)"
+        elif $r > $p             then "\($r) of \($p) round(s) (over)"
+        else                          "\($r) of \($p) round(s)" end;
+      [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $rec
+      | [ range(0; ($rec | length)) | select($rec[.].event == "start") ] as $starts
+      | [ range(0; ($rec | length))
+          | select($rec[.].event == "done" or $rec[.].event == "fail") ] as $ends
+      # ONE OUTCOME PER START. Matching by name alone let a single `done` be consumed by
+      # two starts of the same name -- a forge that was abandoned when its slot file
+      # went missing was then reported as finished, wearing the date, duration and
+      # phase belonging to the OTHER one, and the finished count came out one too
+      # high. NOTE: no apostrophes in here. This whole program sits inside a
+      # single-quoted shell string, so one closes it and the file stops parsing. Each
+      # is claimed by the earliest start that can take it and by nothing else, so an
+      # unclaimed start reads "no outcome" and an unclaimed outcome becomes an orphan
+      # row below. Array subtraction keeps the order of the left operand.
+      | (reduce $starts[] as $i ({used: [], pairs: []};
+           . as $acc
+           | ([ $ends[] | select(. > $i and $rec[.].name == $rec[$i].name) ]
+              - $acc.used | .[0]) as $e
+           | { used:  (if $e == null then $acc.used else ($acc.used + [$e]) end),
+               pairs: ($acc.pairs + [[$i, $e]]) })) as $join
+      | ($ends - $join.used) as $orphans
+      | ( ($join.pairs | map(.[0] as $i | .[1] as $ei | $rec[$i] as $st
+            | (if $ei == null then null else $rec[$ei] end) as $en
+            | { name:     $st.name,
+                ts:       ($st.ts // 0),
+                where:    (($st.project // "") | wherefrom),
+                outcome:  (if $en == null then "no outcome" else $en.event end),
+                rounds:   (if $en == null then rounds_of($st.steps)
+                           else ($en.rounds // rounds_of($st.steps)) end),
+                planned:  (if $en == null then null else ($en.rounds_planned // null) end),
+                duration: (if $en == null then null else ($en.duration // null) end),
+                phase:    (if $en == null then "never closed out" else ($en.phase // "") end),
+                orphan:   false }))
+          # An orphan is dated by when the forge STARTED, reconstructed from the
+          # recorded duration, so it sorts into the table where its start would have
+          # been rather than at its finish.
+          + ($orphans | map(. as $j | $rec[$j] as $en
+            | { name:     ($en.name // ""),
+                ts:       (($en.ts // 0) - ($en.duration // 0)),
+                where:    (($en.project // "") | wherefrom),
+                outcome:  $en.event,
+                rounds:   ($en.rounds // 0),
+                planned:  ($en.rounds_planned // null),
+                duration: ($en.duration // null),
+                phase:    ($en.phase // ""),
+                orphan:   true })) )
+      | sort_by(.ts)
+      | (.[] | "\(.ts | gmtime | strftime("%Y-%m-%d"))  \(.name)  [\(.outcome)]\(if .orphan then "*" else "" end)  \(roundtxt(.rounds; .planned))  \(if .duration == null then "-" else "\(.duration)s" end)  \(.where)  \(.phase)"),
         "",
-        "\(length) forge(s): \(map(select(.outcome == "done")) | length) done, \(map(select(.outcome == "fail")) | length) abandoned, \(map(select(.outcome == "no outcome")) | length) never closed out"
+        "\(length) forge(s): \(map(select(.outcome == "done")) | length) done, \(map(select(.outcome == "fail")) | length) abandoned, \(map(select(.outcome == "no outcome")) | length) never closed out",
+        (([ .[] | select(.orphan) ] | length) as $o
+         | if $o == 0 then empty
+           else "* \($o) outcome record(s) have no matching start record, so only the outcome survives and its date is reconstructed from the recorded duration. A start row is missing when `start` was killed between claiming its slot and appending its row, or when the ledger was truncated after a forge had begun."
+           end)
     ' "$LEDGER"
     ;;
   ""|-h|--help|help)
-    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac

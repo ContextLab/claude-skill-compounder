@@ -341,6 +341,15 @@ Each of these thoughts means stop and return to phase 2:
 
 ## Trigger precision
 
+<!-- routing-pin
+description-sha256: 9b66f6c5bd2ddc0b6366bacab8cb4629cc4363bdd08d42c853ea16b7071a2d48
+prompts-sha256: 3481a41b8b015b69a99f8d99ca42118f2a8f3da63e3001ff912b57a6d273cb67
+measured: never
+cli: n/a
+model: n/a
+result: unmeasured
+-->
+
 The must-not prompts are deliberately adversarial rather than restatements of the
 description's carve-outs: two of them describe a fallback, which is the word the trigger
 keys on, and are still correct engineering.

@@ -63,9 +63,16 @@ Anthropic, while an independent parse finds 0 of 156 unparseable. None of them i
 contribution is gated on. Please do not add them to the gate.
 
 **Quote the description** when it contains a colon followed by a space, or use a YAML block
-scalar. An unquoted `: ` inside a plain scalar makes the frontmatter fail to parse, after
-which the skill loads with empty metadata and silently never fires. CI runs
-`claude plugin validate --strict`, which catches it.
+scalar. An unquoted `: ` inside a plain scalar makes the frontmatter fail to parse under
+strict YAML. Claude Code's own loader is lenient about it -- measured on CLI 2.1.245, such
+a skill loads with its description intact and triggers normally -- but the upstream skills
+repo's validator and this repo's own `yaml.safe_load` step are not lenient, and a
+frontmatter break that *does* cost the parser the `description` key (a tab-indented line,
+say) leaves the skill loaded and named but with its trigger clause replaced by a fallback,
+so it silently never fires. `claude plugin validate --strict` catches none of this:
+locally (2.1.245) it passes a plugin whose skill frontmatter raises `ScannerError`. Both
+measurements, and the scope they cover, are recorded in
+[docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md).
 
 Review guidance, with where each number comes from:
 

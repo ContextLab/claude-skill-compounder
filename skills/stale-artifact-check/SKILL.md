@@ -1,6 +1,6 @@
 ---
 name: stale-artifact-check
-description: 'Use before treating any run as evidence about an edit you just made, and whenever a change appears to have had no effect at all. It answers one prior question, whether the artifact you just observed actually contains your edit, and it answers it by requiring an observed canary. Do NOT use it to work out why the code is wrong once you have confirmed you are running it; that is systematic-debugging.'
+description: 'Use before any other debugging step, whenever an edit you made appears to have had no observable effect: output identical after a rewrite, a page or asset that renders the same after a rebuild or reload, a print or console.log that never appears, the same failure after a fix. Also before trusting a run as evidence about an edit. It answers whether the artifact you ran contains your edit, by requiring an observed canary. Do NOT use once it is confirmed; that is systematic-debugging.'
 ---
 
 # Stale artifact check
@@ -20,8 +20,7 @@ A RUN THAT HAS NOT PROVEN IT CONTAINS YOUR EDIT IS NOT EVIDENCE OF ANYTHING
 
 This is not a debugging procedure and it does not compete with one. It establishes a single
 fact before debugging starts: is the code you observed yours? Once the answer is yes, this
-skill is finished and `systematic-debugging` owns everything after it. Investigating a
-failure, reading a stack trace, forming a hypothesis about a defect: none of that is here.
+skill is finished and `systematic-debugging` owns everything after it.
 
 ## Phase 1: Plant a canary
 
@@ -37,9 +36,8 @@ printf 'CANARY-%s-%s\n' "$(date +%s)" "$(od -An -N4 -tx1 /dev/urandom | tr -d ' 
 **Paste the literal token into every command that follows.** Do not put it in a shell
 variable and reuse it later: separate tool calls do not share shell state, so an `export` in
 one call is gone by the next, and a `grep` for an empty variable matches every file and
-reports a canary that is not there. That failure is silent and it reports success, which is
-why it is worth the repetition. The examples below all show `CANARY-EPOCH-TOKEN`, which is a
-placeholder; substitute your real token everywhere it appears.
+reports a canary that is not there. The examples below all show `CANARY-EPOCH-TOKEN`, which
+is a placeholder; substitute your real token everywhere it appears.
 
 **2. Insert it on a line the run must execute.** The file form is the default because
 nothing in the toolchain can hide it.
@@ -139,9 +137,7 @@ Exit `0` is current, `1` is stale, `2` is undecidable and never means either.
 
 - **STALE.** Either `site-packages` is being loaded, or a sourceless `.pyc` is. Reinstall as
   `pip install -e .` into the interpreter that will run the code, which is not always the
-  one on `PATH`. The site-packages verdict comes from asking `sysconfig` where this
-  interpreter puts packages, not from testing whether the path sits under the repo: an
-  in-repo `.venv` is the common case, and a `$PWD` test calls it current.
+  one on `PATH`.
 - **UNDECIDABLE, two copies.** A directory in the tree shadows an installed package, so this
   directory and every other directory load different files. Neither is wrong yet. Decide
   which invocation your result came from and reproduce that one exactly.
@@ -155,8 +151,7 @@ an unresolved comparison declares every temp directory stale.
 ## Phase 3: Force a clean pipeline, then re-prove
 
 Nothing below is a diagnosis. Each removes a whole class of stale copy at once, and the
-canary is what tells you whether it worked. That is deliberate: a remedy you verify beats a
-detector you trust.
+canary is what tells you whether it worked.
 
 - **Installed package**: reinstall editable, into the interpreter that runs the code.
 - **Python bytecode**: `find . -name __pycache__ -type d -exec rm -rf {} +` and delete any
@@ -207,13 +202,11 @@ fi
 echo "CLEAN: your canary is gone"
 ```
 
-Four things this gets right that the obvious version does not. It searches the working tree
-rather than `git diff`, which reports nothing for a staged file, nothing for an untracked
-file, and nothing at all outside a repository. It looks for the canary **file** as well as
-the text, so an empty marker file cannot pass as clean. It reads `-a`, because a token
-compiled into a binary is invisible to `grep` on macOS otherwise. And it matches only the
-minted token shape, so the placeholders in this document are never mistaken for live
-canaries.
+Three things this gets right that the obvious version does not. It looks for the canary
+**file** as well as the text, so an empty marker file cannot pass as clean. It reads `-a`,
+because a token compiled into a binary is invisible to `grep` on macOS otherwise. And it
+matches only the minted token shape, so the placeholders in this document are never mistaken
+for live canaries.
 
 ## Red flags
 
@@ -221,7 +214,6 @@ Each of these means stop and go to Phase 1:
 
 - "The fix must not have worked, let me try a different approach."
 - "That is strange, it should have changed."
-- "Let me add some logging to see what is happening." (You will not see the logging either.)
 - "I added a print and nothing printed."
 - "The test still fails, so my change was wrong."
 - "The test passes now, so my change worked."
@@ -243,6 +235,16 @@ Each of these means stop and go to Phase 1:
 
 ## Trigger precision
 
+<!-- routing-pin
+description-sha256: 38995fb5736a6bcbafca8e98fed808ff2ee12cc405ac1de5334ae5cdaaedffaf
+prompts-sha256: 00cf5239ded765faff0dcf7f92e743a85d890cfc8dcf9fb1a3d12e975d71d48b
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: verified 3/3 must-fire, 3/3 must-not-fire
+note: cli version recorded from the CLI installed on the measurement date, not captured by the run
+-->
+
 Prompts that MUST fire this skill:
 
 - "I rewrote that function and reran the suite, and the output is character for character what it was before."
@@ -254,6 +256,13 @@ Prompts that must NOT fire this skill:
 - "The totals are off by one somewhere. Track it down." (A defect hunt, which is `systematic-debugging`.)
 - "This test fails with `KeyError` on line 42. Fix it." (A failure to diagnose, with no edit of yours in question.)
 - "Add retry-with-backoff to the HTTP client." (No run, and no claim about one.)
+
+All six were measured on 2026-08-25 by running real `claude -p --model sonnet` sessions in
+an empty directory and checking for an actual `Skill` tool call: the three above fire this
+skill, the three here route elsewhere (two to `systematic-debugging`, one to
+`brainstorming`). The opening clause is load-bearing, not decoration. A draft reading "Use
+before debugging logic" lost must-fire 1 to `systematic-debugging`; "before any other
+debugging step" wins it. Re-measure all six after any edit to the description.
 
 ## Quick reference
 

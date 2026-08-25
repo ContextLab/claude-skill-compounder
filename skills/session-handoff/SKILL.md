@@ -272,11 +272,30 @@ Each of these is the same thought, and each precedes an unusable handoff:
 
 ## Trigger precision
 
+<!-- routing-pin
+description-sha256: f947506756013672c9e335f9f788a657899bad9ec6fb3e8f56433fbb3f950e68
+prompts-sha256: de09a9bf1705ada1ed41359171480a179ee23b29daecab78882153d33d9d4e85
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: partial: the six claims here are unverified
+note: only the rejected fragment quoted in the prose below was run
+cli-note: taken from the installed CLI on that date, not from the run itself
+-->
+
 ### Must fire (3)
 
 - "we're almost out of context, let's wrap up"
 - "I'm going to run /compact now"
-- "you've hit your usage limit, we'll pick this up tomorrow"
+- "We're halfway through the migration refactor and three tests are still red. You've hit your usage limit, we'll pick this up tomorrow."
+
+Every one of these carries unfinished work, and the third one says so out loud because
+it has to. Measured on 2026-08-25 by running real `claude -p --model sonnet` sessions and
+checking for an actual `Skill` tool call: the bare fragment *"you've hit your usage limit,
+we'll pick this up tomorrow"*, with no work in view, fires nothing at all, and that is
+correct rather than a defect. A handoff for zero work is a file with nothing in it. The
+context-loss event is only half the trigger; the other half is something worth resuming,
+so a trigger prompt written without one is testing the wrong thing.
 
 ### Must NOT fire (3)
 

@@ -119,15 +119,29 @@ class ManifestTest(unittest.TestCase):
 
 
 class SkillFrontmatterTest(unittest.TestCase):
-    """Every shipped SKILL.md must have frontmatter that parses as YAML.
+    """Every shipped SKILL.md must have frontmatter that parses as strict YAML.
 
-    This is not pedantry. An unquoted `: ` inside a description terminates the scalar
-    and the rest is read as a mapping, so the whole document fails and Claude Code
-    loads the skill with **empty metadata**: no name, no description, no trigger. The
-    skill is installed, visible on disk, and inert. Three of the four seed skills
-    shipped that way until CI caught it, and the locally installed
-    `claude plugin validate` (2.1.241) did not: it passed all three. The validator CI
-    installs does check, which is why this test exists rather than relying on the CLI.
+    Not because Claude Code's loader needs it to. Measured on CLI 2.1.245, that loader
+    is lenient: a SKILL.md whose frontmatter `yaml.safe_load` rejects with
+    `ScannerError` (an unquoted `: ` inside the description) still loads with its name
+    and its **full description intact**, and still triggers normally. Verified by
+    building the broken skill twice, once as a project skill under `.claude/skills/`
+    and once inside a `--plugin-dir` plugin, and typing its trigger word: both fired
+    and returned their sentinel token.
+
+    What the leniency does not survive is a break that costs the parser the
+    `description` key itself -- a tab-indented `description:` line, for instance. Then
+    the skill still loads and still has a name, but the description is replaced by a
+    fallback taken from the body, the trigger clause is gone, and the skill never
+    fires. Verified the same way: that skill's trigger word produced nothing. So the
+    real failure is a lost trigger, not empty metadata, and it is silent -- no error is
+    printed anywhere.
+
+    The reason to require strict YAML anyway is everything downstream that is not
+    Claude Code's loader: the forging protocol's own `yaml.safe_load` step, and the
+    upstream skills repo's validator. `claude plugin validate --strict` is not that
+    check -- locally (2.1.245) it passes a plugin whose skill frontmatter raises
+    `ScannerError`, because it reads the plugin manifest and nothing below it.
     """
 
     def skills(self):
@@ -152,7 +166,7 @@ class SkillFrontmatterTest(unittest.TestCase):
                 self.assertNotIn(
                     ": ", value,
                     "%s: `%s` contains an unquoted colon-space, which makes the whole "
-                    "frontmatter fail to parse and the skill load with no metadata"
+                    "frontmatter fail to parse under strict YAML"
                     % (d.name, key))
                 self.assertNotIn(
                     value[:1], "[{*&!|>%@`#",

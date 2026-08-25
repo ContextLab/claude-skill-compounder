@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # skillinsight: the batched weekly review over the captured skill-candidate queue.
 #
-#   skillinsight list   [--week <ISO-week>]
-#   skillinsight review [--week <ISO-week>]
+#   skillinsight list    [--week <ISO-week>] [--source <source>]
+#   skillinsight review  [--week <ISO-week>]
+#   skillinsight decline <hash> [--why <reason>]
+#   skillinsight pending [--project <dir>] [--format tsv|text]
+#   skillinsight snooze  [<days>] | --clear
 #   skillinsight stats
-#   skillinsight prune  --older-than <weeks>
+#   skillinsight prune   --older-than <weeks>
 #   skillinsight --help
 #
 # The queue is written by hooks/insight-capture.sh on Stop, one JSONL file per ISO
@@ -25,6 +28,16 @@
 # What replaces it is kernel extraction, performed by the reviewing session during
 # `review`: rewrite the lesson with repo-specific names stripped, and see what is
 # left. Evidence: notes/research/insight-capture.md section 6.
+#
+# WHY `decline` EXISTS AND WHY IT NEVER DELETES. A `session-audit` record is written
+# by the hook without asking anyone, so most of them will be judged not worth a skill.
+# Judging one has to be recordable, or the queue re-presents the same record every
+# week and the reviewer learns to skim past the whole source. But a reviewer who can
+# make a record disappear can also make an inconvenient one disappear, and the
+# disappearance would leave nothing behind. So a decline is an APPEND to
+# declined.jsonl carrying the reason: `review` stops presenting the record, `list`
+# still shows it marked, `stats` counts it, and the original line is never touched.
+# Declining is visible; disregarding is what leaves the record standing.
 set -uo pipefail
 
 DIR="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/insights"
@@ -43,10 +56,18 @@ usage() {
   cat <<'USAGE'
 skillinsight: review the captured skill-candidate queue.
 
-  skillinsight list   [--week <ISO-week>]   one line per candidate (default: this week)
-  skillinsight review [--week <ISO-week>]   the full reviewable batch, with instructions
+  skillinsight list    [--week <ISO-week>] [--source <src>]
+                                            one line per candidate (default: this week)
+  skillinsight review  [--week <ISO-week>]   the full reviewable batch, with instructions
+  skillinsight decline <hash> [--why <why>]  record that a candidate was judged and
+                                             declined; the record is kept, not deleted
+  skillinsight pending [--project <dir>] [--format tsv|text]
+                                            what is queued and undeclined right now,
+                                            and the one record most worth reading first
+  skillinsight snooze  [<days>] | --clear   stop announcing the queue for a while
+                                            without judging anything in it
   skillinsight stats                        queue size, weeks covered, duplicates skipped
-  skillinsight prune  --older-than <weeks>  archive week files older than the cutoff
+  skillinsight prune   --older-than <weeks>  archive week files older than the cutoff
   skillinsight --help
 
 The queue is appended by the Stop hook (hooks/insight-capture.sh) from two signals:
@@ -60,23 +81,210 @@ The queue is appended by the Stop hook (hooks/insight-capture.sh) from two signa
   2. `★ Insight` blocks, an opportunistic feeder. These come from the
      learning-output-style plugin, so their absence is normal.
 
+  3. `session-audit` records, written by the hook itself once a session crosses a
+     mechanical edit threshold. Nothing is asked of the session and nothing is
+     classified: the record states edits counted, files touched, checkpoints fired
+     and forges started, and leaves the "were these the same kind of fix?" question
+     to this review, which is the only place it can be answered from outside the
+     session. A session that disregards every reminder still leaves one of these.
+
 Nothing in the queue is ever forged automatically. `review` produces a batch for a
 session to judge; survivors go through the existing skill-compounder threshold and
 its builder/red-team loop.
 
+HOW THE QUEUE GETS READ. A queue nobody opens is the same as no queue. The reminder
+hook (hooks/compound-improvement.sh, UserPromptSubmit) asks `pending --format tsv` on
+the FIRST prompt of a session -- the moment a person is present and has not yet
+committed to a task -- and surfaces one line if, and only if, there is something
+undeclined AND either the queue has grown or it has been a fortnight since it was last
+mentioned. Two ways to make it stop, and both are honest about what they mean:
+
+  decline <hash>   this record was judged and is not worth a skill. Permanent, kept,
+                   and visible in `list`. Decline them all and the count reaches zero
+                   and the nudge stops by itself.
+  snooze <days>    nothing was judged; do not raise it for a while. Expires on its own.
+
+Set CI_QUEUE_NUDGE=0 to switch the announcement off entirely.
+
 Environment:
   SKILL_COMPOUNDER_STATE   queue root (default ~/.claude/skill-compounder)
   INSIGHT_NOW / CI_NOW     pin the clock, so the current ISO week is deterministic
+  INSIGHT_PENDING_WINDOW   week files `pending` reads, newest first (default 8)
 USAGE
 }
+
+# A DOTFILE, deliberately. `all_files()`, `prune` and the capture hook's dedup grep all
+# glob "$DIR"/*.jsonl, which does not match a leading dot. Named without one, this file
+# would be counted as a week of candidates by `stats`, archived by `prune`, and -- worst
+# -- matched by the hook's `grep -F "\"hash\":\"$h\""`, since a decline record carries
+# exactly that string. Declining a candidate would then silently blocklist its hash.
+DECLINED="$DIR/.declined.jsonl"
+# Where hooks/compound-improvement.sh keeps a session's live file list. A session-audit
+# record snapshots that list at the moment the threshold was crossed, and the session
+# usually keeps editing afterwards, so `review` re-reads it when it is still there.
+REMINDERS="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders"
 
 files_for_week() { # $1 = ISO week
   [ -f "$DIR/$1.jsonl" ] && printf '%s\n' "$DIR/$1.jsonl"
 }
 
+# Every declined hash, as a JSON array, for jq to test membership against. Read once
+# per command rather than grepped per record. A malformed line is skipped, not fatal:
+# a corrupt decline log must not make the queue unreadable.
+declined_json() {
+  if [ ! -f "$DECLINED" ]; then printf '[]'; return 0; fi
+  jq -R -r '(fromjson? // empty) | .hash // empty' "$DECLINED" 2>/dev/null \
+    | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || printf '[]'
+}
+
 all_files() {
   [ -d "$DIR" ] || return 0
   ls -1 "$DIR"/*.jsonl 2>/dev/null | sort
+}
+
+# ------------------------------------------------------------ surfacing the queue
+#
+# WHY THIS EXISTS AT ALL. Everything above this line writes a queue. Nothing above
+# this line makes anyone read it. `review` is a command a human has to remember to
+# type, and the whole point of the capture arm is that remembering is exactly what
+# fails -- a session that disregarded three checkpoints in a row is not going to
+# remember a fourth thing. So the queue has to announce itself.
+#
+# It announces itself through the reminder hook, which asks this CLI (never the
+# other way round) for one line of TSV:
+#
+#   <undeclined-count> TAB <age-in-days-of-the-oldest> TAB <week-of-the-pick>
+#     TAB <first-8-of-the-pick's-hash> TAB <epoch-of-the-NEWEST-undeclined-record>
+#     TAB <one-line-headline-for-the-pick>
+#
+# Six fields, one line, headline last so `cut -f6-` cannot be broken by a headline
+# that contains anything. No trailing prose, so a shell can `cut -f` it.
+#
+# THE FIFTH FIELD IS THE WATERMARK, AND IT IS A TIMESTAMP RATHER THAN A COUNT ON
+# PURPOSE. The caller has to answer "has anything arrived that I have not mentioned?",
+# and a count cannot answer it, because `decline` makes the count go DOWN. Measured:
+# announce a queue of 10, review it, decline 9, then let 8 genuinely new records
+# arrive -- the count is 9, which is less than the 10 last announced, so a count
+# comparison reads eight new candidates as "no growth" and stays silent for eleven
+# days. Doing the right thing muted the mechanism. The newest record's timestamp only
+# ever moves forward, so it cannot be defeated that way. The count and
+# the age are the "should I care" signal -- two fresh records and thirty going back a
+# month are not the same queue, and a bare count cannot tell them apart. The pick is
+# the "care about what" signal: a count alone tells nobody anything, so one concrete
+# record is named. The pick is the OLDEST undeclined record, preferring one from the
+# directory the caller names, because a record about the repo you are standing in is
+# actionable now and one about a repo you last touched in June is not.
+#
+# Declined records are excluded here, which is what makes `decline` the off switch:
+# judge every record and the count reaches zero and the nudge goes silent on its own.
+# `snooze` is the other off switch, for "not now" rather than "not this".
+NUDGE_STAMP="$DIR/.nudge"
+SNOOZE="$DIR/.nudge-snooze"
+# Bounded on purpose. This runs inside a hook with a 10-second budget, once per
+# session, and an unpruned queue directory grows without limit. Eight weeks is longer
+# than the review cadence by a wide margin and keeps the read to a few hundred lines.
+PENDING_WINDOW="${INSIGHT_PENDING_WINDOW:-8}"
+case "$PENDING_WINDOW" in ''|*[!0-9]*) PENDING_WINDOW=8 ;; esac
+[ "$PENDING_WINDOW" -lt 1 ] && PENDING_WINDOW=1
+# Bounding the FILE COUNT is not bounding the READ. A week file has no size limit --
+# a session-audit record carries a file list, and `insight-capture.sh` caps no
+# record's text -- so eight files can still be hundreds of megabytes. Measured: eight
+# 55 MB week files took 8.63 s against a hook's 10-second budget, and one of them cost
+# jq 397 MB resident. Week files are append-only, so the tail is the newest records;
+# `fromjson?` below drops the part-line the cut leaves at the front.
+PENDING_BYTES="${INSIGHT_PENDING_BYTES:-262144}"
+case "$PENDING_BYTES" in ''|*[!0-9]*) PENDING_BYTES=262144 ;; esac
+[ "$PENDING_BYTES" -lt 4096 ] && PENDING_BYTES=4096
+
+# $1 = a directory whose records to prefer, or "" for no preference.
+# Always prints exactly one line, including on every failure path: a caller in a hook
+# must be able to parse the answer without also having to handle silence.
+pending_tsv() {
+  if [ ! -d "$DIR" ]; then printf '0\t0\t\t\t0\t\n'; return 0; fi
+  pt_proj=""
+  if [ -n "${1:-}" ]; then
+    # Records store the git toplevel when there is one (see the capture hook), so the
+    # caller's cwd has to be resolved the same way or a session started in a
+    # subdirectory never matches its own project.
+    pt_proj="$(cd "$1" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"
+    [ -z "$pt_proj" ] && pt_proj="$1"
+  fi
+  # `cat` in a read loop rather than `jq f1 f2 ...`: a state directory containing a
+  # space word-splits the second form, and the failure is silent.
+  pt_out="$(all_files | tail -n "$PENDING_WINDOW" | while IFS= read -r qf; do
+      [ -n "$qf" ] && tail -c "$PENDING_BYTES" "$qf" 2>/dev/null
+    done | jq -R -r -s --argjson dec "$(declined_json)" --arg proj "$pt_proj" \
+                       --argjson now "$now" '
+    def clean: gsub("[\t\n\r]"; " ") | gsub("  +"; " ");
+    # capture() raises on no match; `?` turns that into no output, and `// null` turns
+    # no output into one null. A record whose wording changed then renders "?" for that
+    # number instead of making the whole line unbuildable.
+    def num($re): ((((.text // "") | capture($re)?) // null)
+                   | if . == null then "?" else .n end);
+    def headline:
+      (((.project // "") | split("/") | map(select(length > 0)) | last) // "?") as $p
+      | if (.source // "") == "session-audit" then
+          $p + " - " + num("file edits counted[ ]+(?<n>[0-9]+)") + " edits across "
+             + num("distinct files touched[ ]+(?<n>[0-9]+)") + " files, "
+             + num("checkpoints fired[ ]+(?<n>[0-9]+)") + " checkpoints fired"
+        else
+          $p + " - " + ((.text // "") | clean | .[0:120])
+        end;
+    # `index(.hash)` would evaluate `.hash` against $dec, the ARRAY -- jq applies a
+    # function argument to the input of the function it was passed to, so that form
+    # raises "cannot index array with string" and, behind the 2>/dev/null this runs
+    # under, silently reports an empty queue. Bind the hash first.
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+      | select(type == "object")
+      | select((.hash // "") as $h | ($dec | index($h)) | not) ]
+    | sort_by(.ts // "")
+    | if length == 0 then "0\t0\t\t\t0\t"
+      else . as $all
+        | (($all | map(select((.project // "") == $proj)) | first) // ($all | first)) as $pick
+        | (($all | first | .ts // "") | (fromdateiso8601? // $now)) as $t0
+        | (($all | last  | .ts // "") | (fromdateiso8601? // $now)) as $t1
+        | [ ($all | length | tostring),
+            (((($now - $t0) / 86400) | floor | if . < 0 then 0 else . end) | tostring),
+            ($pick.week // ""),
+            (($pick.hash // "")[0:8]),
+            ($t1 | floor | tostring),
+            ($pick | headline | clean) ] | join("\t")
+      end' 2>/dev/null)"
+  # One line, always. jq is constrained to a single line above, but a caller doing
+  # `cut -f1` on an unexpected second line would read a count that is not a number,
+  # so the guarantee is enforced here rather than assumed.
+  pt_out="$(printf '%s' "$pt_out" | head -n 1)"
+  [ -z "$pt_out" ] && pt_out="$(printf '0\t0\t\t\t0\t')"
+  printf '%s\n' "$pt_out"
+  return 0
+}
+
+# The nudge stamp: "<epoch-last-announced> <watermark-epoch>", one line, where the
+# watermark is the timestamp of the newest record the user has been told about.
+# The reminder hook writes both fields; `review` writes only the first, and that
+# asymmetry is the fix for a measured misfire.
+#
+# `review` has to touch the stamp at all, because a queue that was just read should not
+# be announced again an hour later. But it must NOT claim the watermark. Measured:
+# `skillinsight review --week 2025-W30` over a week holding one declined record printed
+# "0 candidates" and, when it also advanced the watermark, silenced twenty-five live
+# candidates in another week for a fortnight. Reviewing nothing must not count as
+# reading everything. So review resets the floor and leaves the watermark alone: three
+# days of quiet, and then whatever is still undeclined is raised again.
+record_nudge() {
+  mkdir -p "$DIR" 2>/dev/null || return 0
+  rn_mark="${1:-}"
+  if [ -z "$rn_mark" ]; then
+    rn_mark=0
+    if [ -f "$NUDGE_STAMP" ]; then
+      rn_mark="$(awk '{print $2; exit}' "$NUDGE_STAMP" 2>/dev/null)"
+      case "$rn_mark" in ''|*[!0-9]*) rn_mark=0 ;; esac
+    fi
+  fi
+  # Subshell, so a failed redirect cannot reach the terminal: the shell reports it
+  # before applying the 2>/dev/null on the same command.
+  ( printf '%s %s\n' "$now" "$rn_mark" > "$NUDGE_STAMP" ) 2>/dev/null || true
+  return 0
 }
 
 # Echoes the ISO week named by --week, or the current one. Runs in a command
@@ -111,15 +319,88 @@ case "$cmd" in
 
   list)
     wants_help "$@" && { usage; exit 0; }
-    week="$(parse_week_flag "$@")" || exit $?
+    # --source is stripped before the week parser sees it: that parser rejects anything
+    # it does not know, which is the behaviour that keeps a typo from being ignored.
+    src=""
+    wk=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --source) shift; src="${1:-}"; [ -z "$src" ] && die "--source needs a source name" ;;
+        --source=*) src="${1#--source=}" ;;
+        *) wk="$wk $1" ;;
+      esac
+      shift
+    done
+    # shellcheck disable=SC2086
+    week="$(parse_week_flag $wk)" || exit $?
     f="$(files_for_week "$week")"
     if [ -z "$f" ]; then
       echo "skillinsight: nothing queued for $week"
       exit 0
     fi
-    echo "queue for $week ($(wc -l < "$f" | tr -d ' ') candidates)"
-    jq -r '(.source) + "  " + (.ts) + "  " + (.project) + "\n    " + ((.text | gsub("\\s+"; " "))[0:110])' "$f" \
-      | awk '/^[a-z]/ {n++; printf "%3d  %s\n", n, $0; next} {print}'
+    shown="$(jq -r --argjson dec "$(declined_json)" --arg src "$src" '
+      select($src == "" or .source == $src)
+      | (.hash) as $h
+      | (if ($dec | index($h)) then "  [declined]" else "" end) as $d
+      | (.source) + "  " + (.ts) + "  " + (.project) + $d
+        + "\n    " + ((.text | gsub("\\s+"; " "))[0:110])' "$f" 2>/dev/null \
+      | awk '/^[a-z]/ {n++; printf "%3d  %s\n", n, $0; next} {print}')"
+    # Counted from the records, never from the rendered text. Counting rendered lines
+    # with `grep -c '^ *[0-9]'` also counts a wrapped candidate that happens to begin
+    # with a digit ("12 factor config..."), so the header claimed three candidates
+    # above a list of two.
+    count="$(jq -r --arg src "$src" 'select($src == "" or .source == $src) | .hash' "$f" 2>/dev/null \
+      | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    if [ -n "$src" ]; then
+      echo "queue for $week (source=$src: $count of $(wc -l < "$f" | tr -d ' ') candidates)"
+    else
+      echo "queue for $week ($count candidates)"
+    fi
+    [ "$count" -gt 0 ] && printf '%s\n' "$shown"
+    ;;
+
+  decline)
+    wants_help "$@" && { usage; exit 0; }
+    h="${1:-}"; [ -z "$h" ] && die "usage: skillinsight decline <hash> [--why <reason>]"
+    case "$h" in -*) die "usage: skillinsight decline <hash> [--why <reason>]" ;; esac
+    shift
+    why=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --why) shift; why="${1:-}" ;;
+        --why=*) why="${1#--why=}" ;;
+        *) die "unexpected argument '$1'" ;;
+      esac
+      shift
+    done
+    # The hash has to name a real record, or a typo silently declines nothing and the
+    # reviewer believes the queue is handled. Prefix matching is allowed because
+    # `review` prints only the first eight characters.
+    # One jq per file, driven by a read loop. `jq ... $(all_files)` word-splits, so a
+    # state directory containing a space made every decline fail -- and fail as "no
+    # queued candidate has a hash starting ...", which reads as a mistyped hash rather
+    # than as a broken command.
+    full="$(all_files | while IFS= read -r qf; do
+        [ -n "$qf" ] || continue
+        jq -r --arg h "$h" 'select((.hash // "") | startswith($h)) | .hash' "$qf" 2>/dev/null
+      done | sort -u)"
+    n="$(printf '%s' "$full" | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" -eq 0 ] && die "no queued candidate has a hash starting '$h'"
+    [ "$n" -gt 1 ] && die "'$h' matches $n candidates; use more of the hash"
+    ts="$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    rec="$(jq -c -n --arg hash "$full" --arg ts "$ts" --arg why "$why" \
+      '{hash:$hash, ts:$ts, why:$why}' 2>/dev/null)"
+    [ -z "$rec" ] && die "could not build the decline record"
+    mkdir -p "$DIR" 2>/dev/null || die "cannot write to $DIR"
+    printf '%s\n' "$rec" >> "$DECLINED" || die "cannot append to $DECLINED"
+    # Appended, never deleted. The queued line stays exactly where it was; `list` still
+    # shows it, marked, so a decline is inspectable rather than a disappearance.
+    echo "skillinsight: declined ${full}"
+    if [ -n "$why" ]; then
+      echo "               why: $why"
+    fi
     ;;
 
   review)
@@ -130,7 +411,11 @@ case "$cmd" in
       echo "skillinsight: nothing queued for $week"
       exit 0
     fi
-    n="$(wc -l < "$f" | tr -d ' ')"
+    dec="$(declined_json)"
+    n="$(jq -r --argjson dec "$dec" '. as $r | select(($dec | index($r.hash)) | not) | .hash' "$f" 2>/dev/null \
+      | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    skipped="$(( $(wc -l < "$f" | tr -d ' ') - n ))"
     cat <<INSTRUCTIONS
 ==============================================================================
 SKILL CANDIDATE REVIEW  |  $week  |  $n candidates
@@ -162,7 +447,19 @@ Instructions for the reviewing session. Do all of this yourself, in this turn.
    happened twice, or it is a standing part of the workflow). Both, or it gets a
    note instead of a skill.
 
-4. NEVER AUTO-FORGE. Not from this batch, not from any part of it. Present the
+4. SESSION-AUDIT CANDIDATES ARE DIFFERENT, and step 1 does not apply to them.
+   They carry no lesson to extract a kernel from. They carry a list of what one
+   session actually edited, written by the hook without asking the session anything,
+   because a session asked mid-fix whether its work is recurring reliably answers no.
+   For each one, read the file list as a SET and answer the question the session could
+   not: were two or more of those edits fixes of the same kind? If yes, name the kind
+   -- that, not any single fix, is the candidate, and it goes to step 3. If no, or if
+   the record is not worth carrying forward, run
+       skillinsight decline <hash> --why "<one line>"
+   Declining keeps the record and marks it; only a decline stops it being presented
+   again next week.
+
+5. NEVER AUTO-FORGE. Not from this batch, not from any part of it. Present the
    survivors and what you propose to do with each, and stop. Forging happens only
    when a human says so, through the skill-compounder skill and its builder and
    red-team loop. A queue that forges itself produces skills faster than anyone can
@@ -170,11 +467,129 @@ Instructions for the reviewing session. Do all of this yourself, in this turn.
 
 ------------------------------------------------------------------------------
 INSTRUCTIONS
-    jq -r '
-      "\n[" + (.source) + "]  " + (.project) + "  " + (.ts) + "  " + (.hash[0:8]) + "\n" +
+    if [ "$skipped" -gt 0 ]; then
+      echo "($skipped already declined and not shown; \`skillinsight list\` still shows them)"
+      echo "------------------------------------------------------------------------------"
+    fi
+    jq -r --argjson dec "$dec" '
+      . as $r
+      | select(($dec | index($r.hash)) | not)
+      | "\n[" + (.source) + "]  " + (.project) + "  " + (.ts) + "  " + (.hash[0:8]) + "\n" +
       (.text) + "\n" +
       "------------------------------------------------------------------------------"
       ' "$f"
+    # A session-audit record snapshots the file list at the moment the threshold was
+    # crossed; the session almost always kept editing afterwards. The live list is on
+    # disk until the reminder state ages out, so show it when it has grown. Not folded
+    # into the record itself: the queue is append-only by design, and a record that
+    # rewrote itself would stop being an account of what was true when it was written.
+    jq -r --argjson dec "$dec" \
+      '. as $r | select(.source == "session-audit") | select(($dec | index($r.hash)) | not)
+       | (.hash[0:8]) + "\t" + (.session // "")' "$f" 2>/dev/null \
+    | while IFS="$(printf '\t')" read -r rhash rsid; do
+        [ -z "$rsid" ] && continue
+        # Must sanitise exactly as hooks/compound-improvement.sh does, or this looks
+        # for a filename that never existed and silently shows nothing.
+        safe="$(printf '%s' "$rsid" | tr -c 'A-Za-z0-9._-' '_')"
+        live="$REMINDERS/$safe.paths"
+        [ -f "$live" ] || continue
+        total="$(sort -u "$live" 2>/dev/null | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+        case "$total" in ''|*[!0-9]*) continue ;; esac
+        echo ""
+        echo "LIVE FILE LIST for session-audit $rhash ($total distinct files, current):"
+        sort -u "$live" 2>/dev/null | grep '[^[:space:]]' | sed 's/^/  /'
+        echo "------------------------------------------------------------------------------"
+      done
+    # The queue has now been read, so record that. Without this, running `review` and
+    # deciding that nothing in it is worth a skill leaves the surfacing state untouched
+    # and the next session announces the same queue again -- which teaches the reader
+    # that reviewing changes nothing, and that is how a reminder gets muted. Declining
+    # is still what removes a record; this only stops it being ANNOUNCED again
+    # immediately.
+    record_nudge
+    ;;
+
+  pending)
+    wants_help "$@" && { usage; exit 0; }
+    fmt="text"; proj=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --format) shift; fmt="${1:-}" ;;
+        --format=*) fmt="${1#--format=}" ;;
+        --project) shift; proj="${1:-}" ;;
+        --project=*) proj="${1#--project=}" ;;
+        *) die "unexpected argument '$1'" ;;
+      esac
+      shift
+    done
+    case "$fmt" in tsv|text) ;; *) die "--format takes 'tsv' or 'text'" ;; esac
+    line="$(pending_tsv "$proj")"
+    if [ "$fmt" = "tsv" ]; then
+      printf '%s\n' "$line"
+      exit 0
+    fi
+    count="$(printf '%s' "$line" | cut -f1)"
+    days="$(printf '%s' "$line" | cut -f2)"
+    pweek="$(printf '%s' "$line" | cut -f3)"
+    phash="$(printf '%s' "$line" | cut -f4)"
+    hline="$(printf '%s' "$line" | cut -f6-)"
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    if [ "$count" -eq 0 ]; then
+      echo "skillinsight: nothing pending (declined records are not counted)"
+    else
+      echo "$count pending candidate(s); the oldest is $days day(s) old."
+      echo "top: $hline"
+      echo "     [$phash]  in $pweek"
+      echo ""
+      echo "  skillinsight review --week $pweek"
+      echo "  skillinsight decline $phash --why \"<one line>\"   # not this one, ever"
+      echo "  skillinsight snooze 14                            # not now"
+    fi
+    if [ -f "$NUDGE_STAMP" ]; then
+      echo "last surfaced: $(cat "$NUDGE_STAMP" 2>/dev/null) (epoch, watermark)"
+    else
+      echo "last surfaced: never"
+    fi
+    if [ -f "$SNOOZE" ]; then
+      su="$(cat "$SNOOZE" 2>/dev/null || echo 0)"
+      case "$su" in ''|*[!0-9]*) su=0 ;; esac
+      if [ "$su" -gt "$now" ]; then
+        echo "snoozed:       for another $(( (su - now) / 86400 )) day(s)"
+      fi
+    fi
+    ;;
+
+  snooze)
+    wants_help "$@" && { usage; exit 0; }
+    # "Not now" is a different answer from "not this", and the mechanism has to accept
+    # both or it becomes something people mute at the source. `decline` records a
+    # judgement about one record and is permanent; this records no judgement at all,
+    # expires by itself, and never touches the queue.
+    days=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --clear)
+          rm -f "$SNOOZE" 2>/dev/null
+          echo "skillinsight: snooze cleared"
+          exit 0 ;;
+        *) [ -n "$days" ] && die "usage: skillinsight snooze [<days>] | --clear"
+           days="$1" ;;
+      esac
+      shift
+    done
+    [ -z "$days" ] && days=7
+    case "$days" in ''|*[!0-9]*) die "snooze takes a whole number of days, or --clear" ;; esac
+    [ "$days" -eq 0 ] && die "snooze 0 does nothing; use 'skillinsight snooze --clear'"
+    # Bounded, because the arithmetic below is not. `snooze 200000000000000` silently
+    # overflowed to a NEGATIVE epoch, printed a cheerful confirmation, and left the
+    # reminder firing -- a mute that reports success and does nothing is worse than a
+    # refusal. Ten years is longer than any honest "not now".
+    [ "${#days}" -gt 6 ] || [ "$days" -gt 3650 ] && \
+      die "snooze takes at most 3650 days; use CI_QUEUE_NUDGE=0 to switch it off for good"
+    mkdir -p "$DIR" 2>/dev/null || die "cannot write to $DIR"
+    printf '%s\n' "$(( now + days * 86400 ))" > "$SNOOZE" || die "cannot write $SNOOZE"
+    echo "skillinsight: queue reminders snoozed for $days day(s)"
+    echo "               nothing was judged and nothing was removed; the queue is unchanged"
     ;;
 
   stats)
@@ -199,9 +614,16 @@ STATS_EOF
     dupes=0
     [ -f "$DIR/.dedup-count" ] && dupes="$(cat "$DIR/.dedup-count" 2>/dev/null || echo 0)"
     case "$dupes" in ''|*[!0-9]*) dupes=0 ;; esac
+    declined=0
+    if [ -f "$DECLINED" ]; then
+      declined="$(jq -R -r '(fromjson? // empty) | .hash // empty' "$DECLINED" 2>/dev/null \
+        | sort -u | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+    fi
+    case "$declined" in ''|*[!0-9]*) declined=0 ;; esac
     echo "candidates:      $total"
     echo "weeks covered:   $weeks  ($first .. $last)"
     echo "duplicates skipped: $dupes"
+    echo "declined:        $declined"
     echo "by source:"
     while IFS= read -r f; do
       [ -n "$f" ] && jq -r '.source' "$f" 2>/dev/null

@@ -1,26 +1,26 @@
 # Design notes
 
-Platform behavior this implementation depends on, and why each piece is shaped the way it
-is. Everything below was verified by running it on **Claude Code 2.1.241, macOS 25.5.0,
-2026-08-24**. Re-verify before relying on any of it in a much later version.
+Why each piece of this package is shaped the way it is. The platform behavior these
+decisions rest on is recorded separately, in
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md): that file holds the findings about
+Claude Code itself, which are useful to a project that shares no code with this one. This
+file holds the local reasoning, and links there rather than restating a finding.
+
+Everything below was verified by running it, on **macOS 25.5.0** and in CI on ubuntu.
+Where a section rests on the platform, that part was run against **Claude Code 2.1.241**
+on **2026-08-24**, except where the section names another version. Re-verify before
+trusting any of it in a much later version.
 
 ---
 
-## Skills hot-reload mid-session
+## Forging pays off in the session that does it
 
-Writing `~/.claude/skills/<name>/SKILL.md` makes the skill available to the
-**already-running** session, and to other live sessions, with no restart.
+Skills hot-reload mid-session, roughly one tool round-trip after the file is written
+([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#skills-hot-reload-mid-session)).
 
-There is a lag of roughly one tool round-trip. The observed sequence:
-
-1. Write the SKILL.md.
-2. `Skill(hotreload-probe)` → `Unknown skill: hotreload-probe`.
-3. Make any other tool call. A system reminder announces the new skill.
-4. `Skill(hotreload-probe)` → succeeds.
-
-**Consequence for the design:** a skill forged mid-session pays off *in that session*.
-That is why the compounding loop is worth running immediately instead of deferring to a
-follow-up session. It is also why the SKILL.md tells sessions not to treat the first
+**Consequence for the design:** the compounding loop is worth running immediately instead
+of deferring to a follow-up session, because the skill it forges is available to the
+session that forged it. It is also why the SKILL.md tells sessions not to read the first
 `Unknown skill` as a failure.
 
 ---
@@ -31,36 +31,190 @@ follow-up session. It is also why the SKILL.md tells sessions not to treat the f
 hook / status-line stdin JSON are **different identifiers for the same session**. Observed
 in one session: `32c3cd9e-…` in the environment variable, `f2d5c428-…` in the hook payload.
 
-**Consequence for the design:** `skillforge` writes to a single `forge/current.json`
-rather than a session-keyed file. Keying it on the environment variable makes the status
-line look for a filename that never exists, so it renders nothing, silently, with no error
-anywhere.
+**Consequence for the design:** `skillforge` keys its state on the **forge name**, never on a
+session id. Keying it on the environment variable makes the status line look for a filename
+that never exists, so it renders nothing, silently, with no error anywhere. A forge name is
+the one identifier both sides can see: the writer is handed it on the command line, and the
+reader finds it inside the file it is already reading.
 
 The reminder hook *does* key its counters per session, and that is correct: it both writes
 and reads using the payload's `.session_id`, so the two sides agree.
 
-The tradeoff is that only one forge runs at a time per machine. Forging is rare and
-deliberate, so this is acceptable; if it ever needs to change, the fix is for the status
-line to key on something both sides can see.
+### One file per forge
+
+Several forges run at once. The loop runs in a background orchestrator, so a main thread
+that is not tied up for the length of a forge starts a second one cheaply, and does.
+
+`skillforge` writes `forge/<slug>.forge.json`, one file per forge, and reads every `*.json`
+in that directory as a slot. `start` never touches another forge's record. The slug is only
+a filename: every lookup reads the `name` field *inside* the file, so a sanitized or
+truncated slug cannot mislabel anything, and two names that sanitize to the same slug number
+off (`my-skill-2.forge.json`).
+
+A slot is claimed with `ln` of the fully-written record, not with a redirect. The file that
+appears at a slot path is therefore never a placeholder, which is what lets a concurrent
+starter tell an occupied slot from a free one. Claiming with an empty file instead —
+`set -o noclobber; : > "$FILE"` — is wrong here, and wrong silently: a racing starter reads
+the 0-byte file as an abandoned claim and takes the slot as well, so simultaneous starts
+collapse into one and the losers vanish with exit status 0.
+
+**Which forge a command acts on** is resolved in three steps: an explicit `--name`/`-n` (or
+`$SKILLFORGE_NAME`); otherwise the single active forge, when exactly one is active;
+otherwise the command **refuses** and lists the live names. It never guesses, because the
+failure this replaces was software confidently naming the wrong job. The no-argument case is
+untouched in the ordinary situation of one forge. Ambiguity is measured over *active* forges
+only: a finished record lingers on disk for the status line's clear-out window, and letting
+it make every bare command ambiguous for thirty seconds is worse than the problem it would
+solve.
+
+`start` refuses a second forge under a name that is already active and exits 2. A finished
+record of the same name is replaced in place, so there is exactly one slot per name and the
+ledger's start-to-outcome join stays unambiguous. `step`, `done` and `fail` act only on an
+active forge: a bare `step` against a closed record rewinds the bar under a green ✓, and a
+second `done` appends a second outcome row for one start, which makes the ledger count one
+forge twice while its own join hides the duplicate.
+
+### The status line rotates
+
+A status line is one line wide and a forge segment is about seventy columns, so two do not
+fit side by side. `statusline/skillforge-status.sh` shows one forge at a time, switching
+every `SKILLFORGE_ROTATE_SECS` seconds (6 by default), and stamps every frame `[k/N]`. Both
+halves carry weight: showing only the most recently updated forge hides the others, which is
+the defect itself, and a counter without rotation says "there are two" while never saying
+what the other one is. With one forge the counter is omitted and the segment renders exactly
+as it does with no rotation at all.
+
+Display width is constant *within* a rotation window, because the tail is padded to a fixed
+column count; it changes *at* a boundary, since the name on screen is a different length.
+That is one redraw every six seconds, coinciding with a real change of content, rather than
+the once-a-second blink the fixed width exists to prevent. The rotation period is
+deliberately not the tail-alternation period (6s against 5s): equal periods lock each forge
+to one tail forever, so with three live forges the third would show its summary and never
+its phase.
+
+Reaping is per slot, on each slot's own clock, so one forge finishing never clears another
+and a lingering ✓ never holds up the forge beside it. `SKILLFORGE_DONE_TTL` is 30s and
+`SKILLFORGE_FAIL_TTL` is 60s. The expiry decision is made by the same `jq` call that reads
+the file, so the `rm` follows that file's own read immediately. Deciding for all N files and
+deleting afterwards is a real bug and not a theoretical one: `skillforge start`, replacing a
+finished slot in place, lands inside that window and the reaper deletes the brand-new active
+forge — 40 of 40 trials with a dozen expired slots present, and the status line renders once
+a second, so "narrow" is no defence. A record with no `finished` falls back to `updated`,
+then `started`; with none of the three it is never reaped, because `now - 0` is past every
+TTL and would delete a foreign record on sight.
+
+### Reading a directory of slots
+
+Any `*.json` directly under `forge/` that parses and carries `name` and `status` is a forge,
+which is how a state file written by an earlier single-file scheme keeps working: it is an
+ordinary slot, driven in place, rendered, and reaped on the usual TTL. A file that does not
+parse is skipped and left alone — it may be half-written, or from a newer version — and is
+never counted, so garbage on disk cannot make every command ambiguous. Temp files are named
+`<file>.tmp.<pid>` or `.start.<pid>.<ts>.tmp` and do not end in `.json`, so a render cannot
+catch a write in progress.
+
+An `active` forge whose session died has no TTL and keeps every no-argument command ambiguous
+until it is cleared. That is deliberate — a real forge can legitimately run for hours — and
+the refusal names `skillforge list` and `skillforge clear --name <forge>` for it.
+
+### Idleness is a signal, not a reaper
+
+An `active` forge has no TTL, so a session that stops calling `skillforge step` leaves a
+confident, precise, entirely stale phase on screen. Reported after 3h07m at step 11 of 12,
+with nothing to distinguish it from a forge stepped a minute earlier.
+
+Past `SKILLFORGE_IDLE_SECS` (2700s) the tail is prefixed with the age of the phase and
+turns yellow, the spinner freezes on `⣿` and dims, and the bar stops pulsing. Nothing is
+deleted or closed: the no-TTL rule above is unchanged.
+
+The threshold is measured. 33 intervals between consecutive `skillforge` calls, recovered
+from Claude Code transcripts across four forges of this repo: median 460s, p90 1211s,
+longest working gap 1240s. The next two observations in the sample are 4561s and 11216s,
+and 11216s is the reported defect. Any threshold in that empty 21-to-76-minute band
+separates the sample identically; 2700s is 2.2× the longest working gap. n=33, one user,
+one repository — a defensible floor, not a law, hence the variable.
+
+The marker goes *inside* the padded tail, so crossing the threshold changes no width and
+costs the host no redraw.
+
+### A full bar means finished, and only that
+
+`12/12 100%` under a spinner was shown for a forge still running; only the glyph separated
+it from a ✓. And `step 14` of a 12-step budget was clamped to 12, so an overrun was
+invisible and unrecordable.
+
+While a forge is running the bar stops one cell short and the percentage stops at 99. The
+reserved cell names its own reason: `·` still budgeted, `▒` every step spent but not
+closed out, `»` past the budget. Over budget the count keeps rising (`14/12`) and the
+percentage reads `over`, which is exactly as wide as ` 99%`. Integer division makes
+`step * WIDTH / steps` reach WIDTH only at `step >= steps`, so nothing mid-budget moves.
+
+`skillforge step` now stores what it is given. Clamping made an overrun unrepresentable
+downstream: `rounds_completed` under-counted it and `skillreport`, which reads only the
+ledger, could never report it. `done` raises the step to the budget but never lowers it.
+
+Any status that is not `done` or `failed` is treated as running. Testing `= "active"` let
+`status: "paused"` fall through every safeguard at once.
+
+### Width is measured in terminal columns
+
+`jq`'s `length` counts codepoints. A CJK or emoji-presentation codepoint occupies two
+cells and a combining mark none, so a Japanese phase padded to 38 codepoints drew 47
+columns while the ASCII summary beside it drew 38 — the segment blinked every five seconds
+inside one rotation window. `fit()` carries the wide/fullwidth blocks, the emoji that
+render double-width from the narrow Miscellaneous Symbols ranges (`✅ ⭐ ⌚`), and the
+zero-width marks. The name and terminal-state messages are capped too: unbounded, a
+200-character name drew 275 columns and wrapped the line.
+
+### Every tunable is guarded for shape *and* magnitude
+
+`SKILLFORGE_DONE_TTL` and `FAIL_TTL` reach `jq --argjson`: set to a non-number they killed
+jq on every slot and blanked the whole segment, exit 0, nothing on stderr. A digits-only
+guard is not enough either — `SKILLFORGE_BAR_WIDTH=999999999999999999999999` is all digits
+and put `[: integer expected` on stderr four times a second in bash and once in zsh, with
+the two shells drawing different things. Six digits is the *shape* guard, and shape is not
+the whole problem.
+
+`SKILLFORGE_BAR_WIDTH=999999` is six digits, passes it, and then runs a million
+`bar="${bar}·"` appends — still going after twenty seconds, restarted once a second, so
+stuck renderers accumulate without bound; `=9999` finishes in about two seconds and emits
+a 10,070-column line, and `SKILLFORGE_TAIL_WIDTH=999999` emits a 1,000,044-column one.
+So each width knob is additionally bounded by what a terminal can display rather than by
+what a number can be: the bar caps at 200 columns and the name and tail at 400, and an
+out-of-range value returns to its default rather than clamping to the ceiling, because a
+value that far out is a mistake and the default is the only width known to render.
+
+The bound that finally matters is the SEGMENT, not the knob. Each width is legal on its
+own and they still sum past the line — `SKILLFORGE_TAIL_WIDTH=400` alone renders 445
+columns and 200/400/400 renders 629 — so the three are checked together against one
+terminal line (400 columns) plus 23 columns of measured fixed furniture and a margin for
+the `[k/N]` counter and a four-digit step field. If they do not fit, all three return to
+their defaults; shrinking one to make room would render a geometry nobody asked for and
+give no clue why.
+
+`SKILLFORGE_ROTATE_SECS` has its own ceiling, and it bounds how long a forge may be off
+screen rather than how large the number may be: too long a period pins
+`idx = (now / ROTATE) % n` for that whole period and hides every forge but the current
+one, silently, while the `[k/N]` stamp truthfully says there are three. An hour was
+neither a small enough bound nor an exclusive one — the guard was `-gt 3600`, so the
+documented ceiling value itself passed and hid two of three forges for a full hour. The
+ceiling is 60 seconds: a forge is off screen for at most `(n-1) * ROTATE`, so even three
+live forges each reappear inside two minutes.
 
 ---
 
-## The status line is the only animatable surface
+## Why the animation is a file and not a process
 
-Claude Code re-renders the status line on an interval (`refreshInterval`, minimum 1s).
-Nothing else in the terminal UI updates continuously:
+The status line is the only surface in the terminal UI that updates continuously
+([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#the-status-line-is-the-only-surface-that-animates)).
 
-- `Bash` tool output is not reliably shown to the user.
-- Writing to `/dev/tty` fights the TUI for the screen and risks corrupting it.
-- Hook `systemMessage` output is discrete, arriving one message at a time.
+**Consequence for the design:** `skillforge` writes a small JSON file and the status line
+paints whatever it finds each second. That decoupling is what lets one animation survive
+across subagent dispatches: the builder and each red-teamer are separate processes, and
+they all update one file.
 
-**Consequence for the design:** the animation is **state-driven, not process-driven**.
-`skillforge` writes a small JSON file; the status line paints whatever it finds each
-second. That decoupling is what lets the animation survive across subagent dispatches.
-The builder and each red-teamer are separate processes, but they all update one file.
-
-A 1-second refresh would otherwise re-run the user's base status line (typically `git`
-calls) every second, so base output is cached for `STATUSLINE_BASE_TTL` seconds.
+The refresh would otherwise re-run the user's base status line, typically `git` calls,
+once a second, so base output is cached for `STATUSLINE_BASE_TTL` seconds.
 
 ---
 
@@ -80,6 +234,20 @@ statement, which is correct under all of them.
 
 **`printf '%s' "…%…"` does not need `%%`.** A literal percent inside an *argument* to
 `%s` is not a format string, so escaping it produces a visible `%%`.
+
+**`path` is zsh's array view of `$PATH`.** Same family as `status`, and worth stating
+separately because the symptom is not an empty segment but a subtly wrong one. Reading a slot
+filename into a variable called `path` replaces the command search path with that one
+directory, so every later `jq` in the script is "command not found". The bar still draws — it
+needs no `jq` — but the tail loses its padding and the width wobbles once a second, for zsh
+users only, with nothing on stderr. `fpath`, `cdpath`, `manpath` and `module_path` are tied
+to their scalar twins the same way. The renderer uses `slotfile` and `fstate` for exactly
+this reason.
+
+**Tab is IFS whitespace, so `read` collapses runs of it.** An index of tab-separated fields
+silently shifts every field after an empty one, and a skill name may contain a tab
+(`tests/test_ledger.py` pins this). Both the CLI's slot index and the renderer's field parse
+use US (`0x1f`), which is not IFS whitespace and which `start` refuses inside a name.
 
 ---
 
@@ -104,26 +272,52 @@ be kept, fixed, or retired?" is a question the agent can actually answer against
 
 ---
 
-## Two install paths, and what each one cannot do
+## A test cannot read prose for meaning, so `test_doctrine_sync.py` stopped trying
 
-The repo is both a `curl | bash` install and a Claude Code plugin. Verified on
-**Claude Code 2.1.241, macOS 25.5.0, 2026-08-25** by loading it with
-`claude --plugin-dir` and reading what the hooks actually received.
+The rule above is mirrored into `README.md` and `.claude/CLAUDE.md`, and it has been
+silently deleted from a mirror before, so `tests/test_doctrine_sync.py` guards it. Three
+versions of that guard tried to enforce it by scanning the prose for the rule, and each was
+defeated on first contact by a fresh reviewer — not by a bug in a pattern, by a rewording:
 
-What the plugin path gives you for free:
+- `not .{0,20}a fork` certified **"does not have to be a fork"**. The permission passed the
+  scan for the prohibition, in all three files at once.
+- A rewrite that split prose into clauses and required the negation to govern the verb was
+  beaten by "There is **no fork** restriction", by the inflections `forked` and `forks`, by
+  pronoun subjects walking through the clause splitter, by an exemption clause phrased in
+  the exemption's own words, and by "drive the whole thing itself" where the scan looked
+  for the verb `runs`.
 
-- `hooks/hooks.json` fires. `UserPromptSubmit`, `PostToolUse` with the
-  `Write|Edit|Bash` matcher, and `Stop` all reached the scripts. Validation passing is not
-  the same as a hook running, so this was checked by dumping the payloads.
-- `bin/` lands on the Bash tool's `PATH`. A probe binary that existed only inside the
-  plugin resolved from there, which is the test that actually proves it (a name the
-  user has already installed proves nothing).
-- Skills are namespaced `skill-compounder:<name>`, so the seed pool cannot collide
-  with a skill the user already has.
+Each round ended with the author reporting that every counterexample now failed, which was
+true only of the counterexamples tried so far. The set of paraphrases of an English
+sentence is not finite, so that loop has no terminating round, and a green suite told three
+sessions running that the fork rule was protected when it was not. Reporting safety you do
+not provide is worse than reporting none.
 
-What it cannot do: a plugin's `settings.json` supports only `agent` and
-`subagentStatusLine`. **`statusLine` is not among them**, so the forge animation
-cannot ship as a plugin at all.
+What replaced it: each doctrine rule is pinned in `DOCTRINE` as one exact sentence, and
+every mirror must contain that sentence verbatim (whitespace collapsed, `*` emphasis
+stripped, nothing else). `<!-- doctrine: <id> -->` anchors mark the pinned sentences in
+`SKILL.md` and `README.md`; they render as nothing and warn the next editor that the
+sentence is pinned. Presence of a known string is decidable; "does this paragraph mean the
+rule" is not.
+
+The trade is deliberate and is written into the test's own docstring, and it was measured
+rather than assumed: a cold reviewer handed only the documents and the test reversed every
+rule pinned at the time -- eight of them -- in a single pass, by keeping each sentence
+verbatim and repudiating it in the following clause, with the suite at exit 0. A document can carry its pinned sentence
+and contradict it in the next paragraph, and nothing catches that. What
+is caught is the drift that has actually happened here: a rule reworded, softened, or
+deleted in one document while the others still teach it. Changing a rule now means editing
+the pinned sentence in a commit a reviewer can see, which is the point — visible, not
+impossible.
+
+---
+
+## Two install paths, and why the installer stays primary
+
+The repo is both a `curl | bash` install and a Claude Code plugin. What the plugin path
+carries and what it cannot carry is recorded in
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#what-the-plugin-path-can-and-cannot-carry).
+The line that decides this package: a plugin cannot install a `statusLine`.
 
 **The decision: the installer stays the primary path.** A one-line install is a
 requirement, and the animation is the most visible thing the package does; losing it
@@ -131,44 +325,219 @@ to gain a version pin is a bad trade. The plugin manifest ships alongside so the
 can be loaded with `--plugin-dir`, submitted to a marketplace, and validated in CI.
 The README says plainly that the plugin path has no status line.
 
-### Running both wirings at once double-fires every hook
+### Idempotence rather than a rule about running one wiring
 
-With the installer's `settings.json` entries and the plugin both active, one `Write`
-delivers `PostToolUse` to the hook **twice**. Nothing errors. Left alone, `CI_EDIT_EVERY=12`
-silently becomes 6 and every insight is queued twice.
+With both wirings active every hook event is delivered twice
+([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#both-wirings-at-once-deliver-every-hook-event-twice)).
+Left alone, `CI_EDIT_EVERY=12` silently becomes 6 and every insight is queued twice.
 
-The answer is idempotence rather than a rule telling people not to do it. `UserPromptSubmit`
-carries `.prompt_id` and `PostToolUse` carries `.tool_use_id`, both confirmed present in
-real payloads. `claim_once()` claims an event by creating a directory named for that id:
-`mkdir` either succeeds or fails, atomically, so of two racing hook processes exactly one
-proceeds. An event with no usable id is always claimed, because losing reminders is worse
-than an occasional duplicate.
+The answer is idempotence rather than a rule telling people not to do it. `claim_once()`
+claims an event by creating a directory named for the payload's `.prompt_id` or
+`.tool_use_id`. An event with no usable id is always claimed, because losing reminders is
+worse than an occasional duplicate. Any new hook in this repo that counts or throttles
+needs that guard.
 
-### `CLAUDE.md` cannot sit at the plugin root
+### `CLAUDE.md` lives at `.claude/CLAUDE.md`
 
-`claude plugin validate .` passes with a warning that a root `CLAUDE.md` is not loaded as
-plugin context, and `--strict` turns that warning into a failure. Since `--strict` is what
-the marketplace review pipeline runs, the file lives at `.claude/CLAUDE.md`. That path
-loads as project context exactly the same way: verified by putting a token in it, asking a
-headless session for the token, and getting it back.
+A root `CLAUDE.md` fails `claude plugin validate --strict`, and `.claude/CLAUDE.md` loads
+as project context the same way
+([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#claudemd-at-a-plugin-root-fails---strict)).
+Since `--strict` is what the marketplace review pipeline runs, the file lives there.
 
 ---
 
-## Four failures that produce no error
+## Proving we made a link, when the checkout has moved
 
+`curl | bash` clones to `~/.claude/skill-compounder-app`; the README also documents
+installing from your own clone. Doing one and then the other, or simply `mv`-ing the
+checkout, used to wedge the package in both directions. Ownership of a link was decided by
+`realpath(link)` falling inside the *current* `app_home`, so after the move all thirteen
+links failed the test at once: install reported "NOT LINKED, you already have something by
+that name" for every one of them and uninstall reported "left in place (not ours)",
+leaving nine dangling skill links and four dangling CLI links forever, with the message
+blaming the user for them.
+
+Widening the test is the obvious repair and the wrong one. A rule that matches
+`<anything>/skills/<name>` adopts the link of someone whose own `no-silent-stub` lives in
+their dotfiles, which is the exact failure the narrow rule was written to stop.
+
+Identity is therefore established by **proof of authorship**, and there are four
+independent proofs. Any one of them is enough; none of them is a guess about a path shape:
+
+1. `<state>/install-manifest.json`, written at install time, names this destination with
+   this target. This is the same move as `installed-statusline.json`, extended from one
+   entry to all of them: what we wrote, recorded where a later run can read it.
+2. The manifest names this target under some other destination — the config directory
+   moved.
+3. The target resolves inside the checkout running right now (the original rule, kept).
+4. The target's directory contains `skill_compounder/installer.py` **and**
+   `skills/skill-compounder/SKILL.md`, and the link sits at the relative path we would
+   have linked it from. The file it points at is one of ours by construction, so adopting
+   it takes nothing from the user. This is what covers a second clone with no manifest.
+
+A dangling link with no manifest entry satisfies none of the four. It is left exactly
+where it is and reported under `attention:`, naming the link and its dead target — ours to
+report, not ours to delete.
+
+The manifest also carries `app_home`, which is what lets
+`curl … uninstall.sh | bash` find an install made from somebody's own clone instead of
+failing with `can't open file …/skill-compounder-app/scripts/setup.py`.
+
+---
+
+## The status line carries a marker, like the hooks do
+
+Recognising our `statusLine` by exact string match against `"<app_home>/statusline/statusline.sh"`
+has the same fragility as the link rule: move the checkout, delete the state directory, and
+uninstall can no longer prove the entry is ours. It then leaves `statusLine` pointing at a
+script that does not exist and exits 0 reporting success, with no way back.
+
+The entry now carries a marker we author ourselves — a trailing `# claude-skill-compounder`
+shell comment — which is what the two hooks have always done. It is location-independent,
+so the checkout can move; and it cannot collide with a user's path the way the substring
+`statusline.sh` collided with their `~/bin/git-statusline.sh` and the directory-qualified
+form collided with `$HOME/dotfiles/statusline/statusline.sh`. A status-line command is run
+through a shell, so the comment costs nothing
+([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#a-statusline-command-is-run-through-a-shell)).
+The three older recognitions are kept as fallbacks so an entry written before the marker is
+still removable.
+
+---
+
+## Check first, or say exactly what landed
+
+A read-only `~/.local/bin` used to raise `PermissionError` *after* the hooks, the status
+line and all nine skills were live. The user read a traceback and "it failed" while
+actually holding most of an install with `skillforge` missing from PATH.
+
+Everything install needs is now proven writable before anything is applied, by creating and
+deleting a real temp file in each destination rather than by reading mode bits, which lie
+on NFS, under ACLs and on read-only mounts. All the problems are reported at once. An
+`OSError` that still happens mid-loop is attributed to the name it happened to and surfaced
+as `errors:` with a non-zero exit, because half an install plus a traceback tells the user
+nothing about which half.
+
+---
+
+## Removability outranks strictness
+
+Malformed shapes are split by direction. **Install** refuses and names the offending key
+(`hooks.PostToolUse[0].hooks`), because merging into something we cannot read means
+guessing at settings that are not ours. **Uninstall** never refuses: a shape we cannot read
+holds no entry of ours anyway, and a `statusLine` that is a plain string — which used to
+raise `AttributeError` in both directions — must not be the reason a user is stuck with the
+package installed. `hooks: null` is read as "no hooks" rather than as an error.
+
+---
+
+## Two writes that are not what they look like
+
+`os.replace` onto a symlinked `settings.json` deletes the link and leaves a regular file,
+silently orphaning a stow / chezmoi dotfiles source with exit 0. Every write resolves the
+link first and writes *through* it, with the temp file created beside the resolved target so
+the rename stays on one filesystem.
+
+The temp file also gets a unique name per writer: a fixed `settings.json.tmp` lets two
+concurrent runs interleave their bytes into one file and then rename the result into place.
+And because the backup stamp has second resolution, a second run within the same second
+used to overwrite the pre-install backup — the one copy worth keeping. Backups now dedupe
+on content, cap at `MAX_BACKUPS`, and suffix rather than clobber.
+
+---
+
+## Uninstall may never refuse
+
+A cold review found that a `settings.json` which does not parse stopped uninstall dead:
+exit 1, and all thirteen links still in place. `remove_hooks` had already been written to
+tolerate a shape it cannot read, for exactly this reason, but `read_settings` raised a
+layer above it. The rule is now uniform and it is worth stating as a rule: **install may
+refuse, uninstall never does.** A user whose config was corrupted by anything at all is
+precisely the user who most needs to be able to take this package off. Uninstall removes
+the links and the state, leaves the file untouched, says which entries are still in it and
+why, and exits non-zero so the incompleteness is not mistaken for success.
+
+The same review found five more failures of the same family — a report that did not match
+what happened:
+
+- **Enumeration came only from the current checkout.** A skill or CLI renamed upstream was
+  invisible to `_skill_dirs` / `_cli_files`, so `git pull` + reinstall + uninstall left a
+  dangling `skillreport` on `PATH` while the report said "removed" and exited 0. Both
+  commands now also enumerate the names the manifest records for those directories.
+  Install removes such a link only once it is dead, so a name still served by another
+  checkout is never pulled out from under it.
+- **Stale status-line state resurrected a deleted status line.** With no `statusLine` in
+  settings there is nothing to restore, so `original-statusline.json` and
+  `statusline-base.sh` are deleted at install rather than kept.
+- **`_probe_writable` walked up past a dangling symlink**, because `exists()` is false for
+  one. A dangling `~/.claude/skills` therefore passed preflight and the install failed
+  nine times over, after the hooks and status line were live, with "File exists" as the
+  only explanation. The walk now uses `lexists` and names the dead link.
+- **"left in place (not ours)" was printed for links that are ours** when the directory was
+  read-only at uninstall. A failure to remove is now its own category, `OURS BUT NOT
+  REMOVED`, and it sets a non-zero exit.
+- **A checkout with no executable bits installed silently.** `cli (none found)`, a
+  `statusLine` pointing at a file the shell will not run, exit 0, and next-steps telling
+  the user to run `skillforge`. Preflight now refuses, listing the files and the `chmod +x`
+  that fixes them.
+
+And two smaller ones: `write_manifest` had the fixed-temp-name race `write_settings` had
+just been fixed for, and an empty hook list of the user's (`"PostToolUse": []`) was deleted
+by uninstall, so install records which event keys already existed and uninstall puts back
+exactly what it found.
+
+---
+
+## Two figures that are records, not measurements
+
+Findings about Claude Code itself have their own file,
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md). What follows is local: two facts about
+this repo's own ledger, and two numbers from this repo's history that are quoted in the
+skill and are not evidence about anything else.
+
+**The ledger's `rounds` means different things on `fail` and on `done`.** Established by
+running `start <name> 12` -> `step 8` -> `fail`, which records `rounds: 3` alongside
+`rounds_planned: 5`: the completed count derived from the step reached, and the budget.
+On `done` the arm RAISES the step to the budget but never lowers it —
+`.step = (if .step > .steps then .step else .steps end)` — so the two agree only when the
+forge finished at or under its budget, which is the ordinary case and the reason a
+completed forge that stayed on plan cannot tell you how many rounds it actually ran. An
+OVERRUN survives that arm and is recorded: `start over-one 8` -> `step 14` -> `done` writes
+`rounds: 6, rounds_planned: 3`. `bin/skillforge`'s own comment states the intent, "a start
+record carries the plan; a done or fail record carries what happened", and it is accurate
+for `fail` and for an overrunning `done`; for a `done` at or under budget, `rounds` is the
+plan restated. Reading a `done` record's `rounds` as a measurement is the mistake to
+avoid; `ai-tell-audit` records 5 against a five-round budget and ran seven.
+`skillforge ledger` and `skillreport` now
+print the budget beside the completed count whenever the two differ
+(`6 of 3 round(s) (over)`, and `6/3` in the ROUNDS column), so an overrun is visible
+rather than merely representable.
+
+**The ledger's start-to-outcome join claims each outcome once and reports what it cannot
+match.** Walking start records only discarded a `done` whose `start` was lost — the state a
+SIGKILL between the `ln` slot claim and `ledger_append` produces, 4 of 60 trials — so
+exactly the forges that crashed went unreported. Matching by name alone also let one
+`done` be consumed by two starts of the same name, reporting an abandoned forge as
+finished with the other one's date, duration and phase.
+
+**From this repository's history, not the platform.** Two figures quoted in
+`skills/skill-compounder/SKILL.md` are single observations from forging in this repo, and
+are not reproducible platform behaviour: the reviewer-bias A/B, where one file reviewed
+against a "do not flag these" brief and against a neutral one produced 1 finding and 4;
+and the `ai-tell-audit` round citations used to justify the round cap. Both are honest
+records of what happened once. Neither is evidence about how any other repository, or any
+other model version, will behave.
+
+---
+
+## Six failures that produce no error
 Each of these looks like it works. None of them is caught by anything except running the
 code somewhere else, or at a scale nobody has tried, which is what the ubuntu-plus-macos
-matrix and the cold red-team agents are for.
-
-**An unquoted colon empties a skill.** `description: Use when X: do Y` is not valid YAML.
-The scalar ends at the first `: `, the remainder parses as a mapping, the document fails,
-and Claude Code loads the skill with **no metadata at all**: no name, no description, no
-trigger. The skill is installed, listed on disk, and inert. Quote every frontmatter value
-that could contain a colon.
-
-Do not rely on the CLI to catch it. `claude plugin validate --strict` at 2.1.241 accepts a
-broken description that the version CI installs from npm rejects, so the check belongs in
-the test suite, where it does not depend on which CLI happens to be present.
+matrix and the cold red-team agents are for. A seventh failure of the same kind belongs to
+the platform rather than to this repo: a frontmatter break can leave a skill loaded, named
+and triggerless, which is recorded in
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#the-skill-loader-tolerates-an-unquoted-colon-and-silently-drops-a-lost-description)
+and is why `SkillFrontmatterTest` in `tests/test_plugin.py` parses the frontmatter itself
+rather than shelling out to the CLI.
 
 **`stat -f` means different things on the two platforms.** On BSD it selects a format; on
 GNU coreutils it means "report on the filesystem", so `stat -f %m "$cache"` exits 0 on
@@ -187,3 +556,23 @@ and report the collision otherwise.
 **`$?` after `if ! cmd` is the status of the negation.** It is always 0, so
 `if ! run_capped ...; then rc=$?` makes any diagnostic below it dead code. Capture the
 status directly.
+
+**A trailing `&&` is the script's exit status.** `[ -n "$x" ] && echo …` as the last command
+of a case arm makes the whole script exit 1 whenever `$x` is empty. `skillforge start`
+printed its forge, wrote its state, appended its ledger row and then exited non-zero purely
+because it had nothing extra to say. Nothing errored; a caller checking the status simply
+read a healthy forge as a failure. Use `if`/`fi` for a conditional final statement.
+
+**`jq --argjson` turns a huge integer into a float.** `--argjson t 99999999999999999999`
+stores `1e+20`, which then fails every integer test downstream: bash prints
+`[: integer expected` on stderr and a numeric guard folds it back to 1, so a forge at step 5
+renders as a full bar at 100%. Bound the magnitude at input, and clamp rather than fold when
+reading a value you did not write.
+
+**A mutation that fails to apply looks exactly like a test that caught nothing.** Mutation
+testing is only evidence if the mutation landed. An anchor string that spans a line break
+in the file makes the replace a silent no-op, the suite stays green, and the honest reading
+of a green suite is "my guard has a hole" — so a working guard gets reported as broken and
+then widened for no reason. This has now happened twice in this repository, both times on
+text wrapped at the column limit, which is most prose here. Assert that the mutated file
+differs from the original before you run anything against it.
