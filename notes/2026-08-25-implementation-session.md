@@ -58,6 +58,47 @@ while testing `skillreport` under both shells.
   a fallback with no syntactic tell, pinned by a test rather than deleted from the fixture.
 - `skillreport` recovered 127 real skill invocations from this machine's transcripts.
 
+## What the red-team loop actually cost, and caught
+
+Every artifact went to cold agents, never forks. Each round spawned a **new** one, because
+after round one the previous reviewer is no longer cold. Verdicts:
+
+|Artifact|R1|R2|R3|
+|-|-|-|-|
+|`session-handoff`|FIX|FIX|DO-NOT-SHIP, narrowed|
+|`stale-artifact-check`|DO-NOT-SHIP|FIX|DO-NOT-SHIP, narrowed|
+|`contribute-skill`|DO-NOT-SHIP|DO-NOT-SHIP, narrowed|-|
+|`destructive-op-preflight`|DO-NOT-SHIP|DO-NOT-SHIP, narrowed|-|
+|`no-silent-stub`|FIX|DO-NOT-SHIP (scanner), narrowed|-|
+|infrastructure|FIX|DO-NOT-SHIP|-|
+|`skill-compounder` doctrine|FIX|-|-|
+
+**Not one artifact passed its first cold read.** Every builder reported its work as done and
+tested, and every one of them was wrong in a way only execution found. That is the argument
+for the protocol, made against the protocol's own output.
+
+The cap earned its place too. Four of the five skills hit round 3 and were **narrowed rather
+than patched**, and in each case the thing cut was the part that had failed twice:
+
+- `no-silent-stub`: the scanner. Its author measured precision 1.00 on their own fixture; a
+  cold agent measured about 4% on real libraries, and a second, after the rules were cut,
+  measured 8% on a different corpus with 0 of 5 recall on the commonest shape. The prose
+  doctrine ships; the linter does not.
+- `stale-artifact-check`: the whole stack-specific cookbook and an unverifiable reference file.
+- `destructive-op-preflight`: the datastore section, six of whose eight engines were
+  self-declared unverified.
+- `session-handoff`: the patch round-trip, whose failure mode was restoring nothing and
+  hiding the user's work in an unannounced stash.
+- `contribute-skill`: the general skill linter, which rejected 46 of 156 real installed
+  skills including four of Anthropic's own.
+
+**A lesson this repo had already forged, rediscovered.** Round 3 on `stale-artifact-check`
+found `export CANARY=...` not surviving between Bash calls, so every later `$CANARY` was
+empty and a `grep -rl "$CANARY"` matched everything. The `parallel-agents-one-codebase` forge
+had found exactly this in *its* round 3: "`$RUN=$(mktemp -d)` cannot survive, Bash calls do
+not share shell state." Same repo, same trap, four months apart. It is now written into the
+skill rather than into a notes file nobody rereads.
+
 ## Still open
 
 - ~~**The `destructive-op-preflight` ship gate.**~~ **Measured.** 18 real headless trials,
