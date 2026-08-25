@@ -1,6 +1,6 @@
 ---
 name: skill-compounder
-description: Use when deciding whether a repeatable procedure should become a reusable skill, when starting a major implementation (to check an existing skill first), or when a skill you invoked did not work well (to fix, document, or retire it). Runs a builder + red-team subagent loop, with a live progress animation via `skillforge`. Do NOT use for authoring a one-off script or for ordinary refactoring.
+description: "Use when deciding whether a repeatable procedure has earned becoming a skill, when starting a major implementation (to check for an existing skill first), or when a skill you invoked misfired and needs fixing, documenting, or retiring. Runs a builder plus cold red-team subagent loop to a clean report. Do NOT use to author a skill you have already decided on (that is writing-skills), for a one-off script, or for ordinary refactoring."
 ---
 
 # Compounding: turn hard-won procedures into permanent capability
@@ -30,14 +30,20 @@ dance, a project-specific build+test+screenshot loop.
 **Threshold (BOTH must hold).** Forging a skill costs several subagent rounds, so be
 selective:
 
-- **Costly.** It took real effort to get right: roughly >15 minutes of trial-and-error, a
-  non-obvious ordering constraint, or an error a fresh session would predictably repeat; AND
-- **Recurring.** There is concrete reason to believe it recurs: it has already happened
-  at least twice, or it is a standing part of this project's or this user's workflow.
+- **Costly.** Name the specific dead end, in one sentence, and say what a fresh session
+  would have done instead. If you cannot name it, it was not costly; it was just work.
+- **Recurring.** Point at the second occurrence. A prior session, an earlier point in this
+  one, or an open issue. "It seems like the sort of thing that recurs" is not a second
+  occurrence.
 
-If only one holds, write a note or update the project's `CLAUDE.md` instead. Do **not**
-forge a skill for one-off work, for something a single sentence of documentation covers,
-or for anything an existing skill already handles.
+Both need a **concrete referent**, not a judgement, because both conditions are otherwise
+loose enough to say yes to nearly any non-trivial work, and a threshold that always
+resolves to yes is worse than none. Write the two sentences down before deciding; if
+either one is hard to write, that is the answer.
+
+These three override a yes, in order: an existing skill already handles it (section 1); a
+single sentence of documentation covers it; the procedure is specific to work that is
+finishing now. In any of those cases write a note or update the project's `CLAUDE.md`.
 
 **Where it lives:** generalizes across projects → `~/.claude/skills/<name>/SKILL.md`.
 Specific to one repo → `<repo>/.claude/skills/<name>/SKILL.md`, committed.
@@ -52,8 +58,10 @@ live status-line animation:
 skillforge start <name> <total-steps> "<one-line summary>"
 ```
 
-Budget `<total-steps>` as `2 + 2 × (planned red-team rounds)`, so 8 for the usual 3-round
-cap. Call `skillforge step <n> "<what is happening right now>"` at **every** transition,
+Budget `<total-steps>` as `2 + 2 × (planned red-team rounds)`: one step to dispatch the
+builder, one for its draft, then a review step and a revision step per planned round. So 8
+for the usual 3-round cap. The count is a budget, not a prediction, and a forge that comes
+back clean early simply stops short; `skillforge done` snaps the bar to full. Call `skillforge step <n> "<what is happening right now>"` at **every** transition,
 and always close with `skillforge done "<outcome>"` or `skillforge fail "<why>"`. A forge
 left open strands a spinner in the user's status line; `skillforge clear` is the escape
 hatch, and it records the forge as abandoned rather than dropping it.
@@ -108,9 +116,23 @@ future session. Escalate in order:
      be kept, fixed, or retired? Justify."* Never ask it to "confirm the deletion". A
      leading prompt defeats the check.
    - Retire only if it independently reaches "retire." If it says keep or fix, do that.
-   - Retiring means `mv` to `~/.claude/skills-archive/<name>/` plus a `WHY-ARCHIVED.md`
-     recording the date, the case, and the concurring verdict. Never `rm -rf` a skill.
-     Spurious deletions must be recoverable.
+   - **Archive the source, not the link.** Most skills here are symlinks into a checkout,
+     so `mv ~/.claude/skills/<name> ...` moves the link and leaves the real directory in
+     place, where the next install resurrects it. Worse, writing `WHY-ARCHIVED.md` into
+     the moved directory writes into the live source. Resolve first:
+
+     ```bash
+     src="$(realpath ~/.claude/skills/<name>)"          # follow the link
+     mkdir -p ~/.claude/skills-archive
+     mv "$src" ~/.claude/skills-archive/<name>          # move the real directory
+     rm -f ~/.claude/skills/<name>                      # then drop the dangling link
+     ```
+     Write `WHY-ARCHIVED.md` inside the archived copy afterwards, recording the date, the
+     case, and the concurring verdict. If the source lives in a git repo, remove it there
+     too, or the next `git pull` brings it back.
+   - A skill inside a plugin cache cannot be archived this way at all. Disable the plugin,
+     or narrow the skill's `description` so it stops firing, and record why.
+   - Never `rm -rf` a skill. Spurious deletions must be recoverable.
 
 ## 3.5 Candidates you are not ready to forge yet
 
@@ -137,6 +159,26 @@ Skills are hot-reloaded. Writing `~/.claude/skills/<name>/SKILL.md` makes it ava
 - Consequence: finish and red-team a skill **during** the session that discovered the need
   for it. The benefit propagates immediately, and deferring to "next session" throws that
   benefit away.
+
+## Trigger precision
+
+Should fire:
+
+- "That took four attempts to get the ordering right, and we hit it last week too."
+- "Before I write this deploy script, is there already something for it?"
+- "The skill I just used told me to run it from the wrong directory."
+
+Should NOT fire:
+
+- "Write a skill that does X." That is `superpowers:writing-skills`, which owns authoring.
+  This skill decides *whether* to author, and runs the adversarial loop around it.
+- "Refactor this module." Ordinary work, no repeatable procedure in view.
+- "Write a one-off script to rename these files."
+
+Habit 1 (check before implementing) has no reliable lexical hook: "let's build the
+ingestion pipeline" contains nothing a `description` can match. That habit is carried by
+the `UserPromptSubmit` reminder hook and the `CLAUDE.md` stanza, not by this trigger. If
+those are not installed, habit 1 will not fire on its own.
 
 ## Troubleshooting
 
