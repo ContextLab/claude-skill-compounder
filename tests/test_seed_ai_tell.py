@@ -828,7 +828,7 @@ class StructuralFamilyTest(unittest.TestCase):
         for name, block in self.families().items():
             pair = block[block.find("**Before.**"):]
             bare = prose_only(pair)
-            self.assertEqual(bare.strip().replace("*", "").replace(".", ""),
+            self.assertEqual(" ".join(bare.replace("*", "").replace(".", "").split()),
                              "Before After",
                              "family %r has worked-example text outside backticks, "
                              "so it reads as the file's own voice" % name)
@@ -870,8 +870,8 @@ class StructuralDensityTest(unittest.TestCase):
     def test_the_measured_human_baseline_sits_under_the_threshold(self):
         """The number is only defensible if the human corpus clears it."""
         _, rate = self.numbers()
-        measured = float(re.search(r"([\d.]+) per thousand", flowed(self.section))
-                         .group(1))
+        measured = float(re.search(r"surviving instance: ([\d.]+) per thousand",
+                                   flowed(self.section)).group(1))
         self.assertLess(measured, rate,
                         "the threshold %d is at or under the measured human rate "
                         "%.2f, so human prose would fire" % (rate, measured))
@@ -961,6 +961,23 @@ class CatalogueCurrencyTest(unittest.TestCase):
         self.assertRegex(section(self.body, CURRENCY),
                          r"(?s)Fading, not deleted.*%s" % self.ISO,
                          "a demoted pattern carries no date")
+
+    def test_the_recorded_id_list_exists_and_matches_the_recorded_count(self):
+        """The diff step is only runnable if the previous pull is on disk. A
+        procedure that says `diff against the last pull` with no last pull is the
+        same wish this section replaced."""
+        m = re.search(r"`(sources/claudisms-ids-\d{4}-\d{2}-\d{2}\.txt)`", self.section)
+        self.assertIsNotNone(m, "the diff step names no stored id list")
+        snapshot = SKILL_DIR / m.group(1)
+        self.assertTrue(snapshot.exists(), "%s is named but absent" % m.group(1))
+        ids = [l for l in snapshot.read_text().splitlines() if l.strip()]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate ids in the snapshot")
+        stamp = int(re.search(r"`count` (\d+)", self.section).group(1))
+        self.assertEqual(len(ids), stamp,
+                         "the snapshot holds %d ids but the recorded stamp says %d"
+                         % (len(ids), stamp))
+        self.assertEqual(sorted(ids), ids, "the snapshot is not sorted, so a diff "
+                                           "against a sorted pull is all noise")
 
     def test_the_source_that_was_already_here_is_still_credited(self):
         self.assertIn("https://claudisms.ai", self.section)

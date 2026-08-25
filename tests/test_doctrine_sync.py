@@ -140,5 +140,48 @@ class RedTeamDoctrineTest(unittest.TestCase):
                       "the naive move that leaves the real directory in place")
 
 
+
+class SeedPoolTest(unittest.TestCase):
+    """Adding a skill to skills/ without adding its README row is the same drift.
+
+    It happened: `ai-tell-audit` shipped, and the README kept describing four seed skills
+    and a pool that did not contain it.
+    """
+
+    def shipped(self):
+        return sorted(d.name for d in (ROOT / "skills").iterdir()
+                      if (d / "SKILL.md").is_file())
+
+    def table_rows(self):
+        m = re.search(r"\|Skill\|Fires when\|The failure it prevents\|\n\|-\|-\|-\|\n((?:\|.*\n)+)",
+                      README)
+        self.assertIsNotNone(m, "README seed-pool table is missing or reshaped")
+        return re.findall(r"^\|`([^`]+)`\|", m.group(1), re.M)
+
+    def test_every_shipped_skill_is_documented(self):
+        """Not necessarily in the pool table: `skill-compounder` and `contribute-skill`
+        have their own sections. But a skill nobody mentions is a skill nobody finds."""
+        for name in self.shipped():
+            # assertIn would print the whole README on failure. A 20 KB dump for a
+            # one-word finding is output nobody reads.
+            self.assertTrue(name in README,
+                            "skills/%s ships but the README never names it" % name)
+
+    def test_no_row_describes_a_skill_that_does_not_ship(self):
+        shipped = set(self.shipped())
+        for name in self.table_rows():
+            self.assertIn(name, shipped,
+                          "README documents a seed skill `%s` that does not ship" % name)
+
+    def test_the_stated_pool_size_matches(self):
+        m = re.search(r"(\w+) skills ship with the package", README)
+        self.assertIsNotNone(m, "README no longer states the seed-pool size")
+        words = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                 "nine": 9, "ten": 10}
+        self.assertEqual(words.get(m.group(1).lower()), len(self.table_rows()),
+                         "README says %s skills ship; the table lists %d"
+                         % (m.group(1), len(self.table_rows())))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
