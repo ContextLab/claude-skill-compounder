@@ -367,8 +367,24 @@ class CaptureTest(InsightsTestBase):
         not the shell's inability to start."""
         if shutil.which("jq", path=PATH) is None:
             self.skipTest("jq is not installed, so its absence proves nothing here")
-        keep = [d for d in PATH.split(":") if not os.path.exists(os.path.join(d, "jq"))]
-        no_jq = ":".join(keep)
+        # Dropping every directory that contains jq also drops /usr/bin on Linux, which
+        # takes bash with it and measures the wrong thing. Build a shadow bin instead:
+        # symlink every executable on PATH into one directory, minus jq.
+        shadow = self.root / "nojq-bin"
+        shadow.mkdir(exist_ok=True)
+        for d in PATH.split(":"):
+            if not os.path.isdir(d):
+                continue
+            for name in os.listdir(d):
+                if name == "jq":
+                    continue
+                link = shadow / name
+                if not link.exists() and not link.is_symlink():
+                    try:
+                        link.symlink_to(os.path.join(d, name))
+                    except OSError:
+                        pass
+        no_jq = str(shadow)
         self.assertIsNone(shutil.which("jq", path=no_jq))
         self.assertIsNotNone(shutil.which("bash", path=no_jq),
                              "the shell itself must still be reachable")

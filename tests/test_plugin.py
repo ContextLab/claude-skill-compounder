@@ -12,6 +12,7 @@ validation test shells out to the real `claude` CLI when it is available.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,6 +102,77 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0,
                          "plugin validate --strict failed:\n%s\n%s"
                          % (proc.stdout, proc.stderr))
+
+
+class SkillFrontmatterTest(unittest.TestCase):
+    """Every shipped SKILL.md must have frontmatter that parses as YAML.
+
+    This is not pedantry. An unquoted `: ` inside a description terminates the scalar
+    and the rest is read as a mapping, so the whole document fails and Claude Code
+    loads the skill with **empty metadata**: no name, no description, no trigger. The
+    skill is installed, visible on disk, and inert. Three of the four seed skills
+    shipped that way until CI caught it, and the locally installed
+    `claude plugin validate` (2.1.241) did not: it passed all three. The validator CI
+    installs does check, which is why this test exists rather than relying on the CLI.
+    """
+
+    def skills(self):
+        return sorted(d for d in (APP / "skills").iterdir() if (d / "SKILL.md").is_file())
+
+    def frontmatter(self, skill_dir):
+        text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"), "%s has no frontmatter" % skill_dir.name)
+        end = text.index("\n---\n", 3)
+        return text[4:end + 1]
+
+    def test_no_unquoted_value_can_break_the_parse(self):
+        """Runs everywhere, with no parser dependency."""
+        for d in self.skills():
+            for line in self.frontmatter(d).split("\n"):
+                m = re.match(r"^([A-Za-z0-9_-]+):\s(.*)$", line)
+                if not m:
+                    continue
+                key, value = m.group(1), m.group(2)
+                if value[:1] in ('"', "'"):
+                    continue
+                self.assertNotIn(
+                    ": ", value,
+                    "%s: `%s` contains an unquoted colon-space, which makes the whole "
+                    "frontmatter fail to parse and the skill load with no metadata"
+                    % (d.name, key))
+                self.assertNotIn(
+                    value[:1], "[{*&!|>%@`#",
+                    "%s: `%s` starts with a YAML indicator and must be quoted"
+                    % (d.name, key))
+
+    def test_frontmatter_really_parses(self):
+        """The same thing again with a real parser, so the check above cannot drift
+        out of agreement with actual YAML."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("pyyaml not installed (CI installs it, so this always runs there)")
+        for d in self.skills():
+            try:
+                spec = yaml.safe_load(self.frontmatter(d))
+            except yaml.YAMLError as exc:
+                self.fail("%s frontmatter does not parse: %s" % (d.name, exc))
+            self.assertIsInstance(spec, dict, "%s frontmatter is not a mapping" % d.name)
+            self.assertEqual(spec.get("name"), d.name,
+                             "%s: the `name` field must match the directory" % d.name)
+            self.assertTrue(spec.get("description"), "%s has no description" % d.name)
+
+    def test_only_portable_frontmatter_keys(self):
+        """A key Claude Code does not know is a hard error outside Claude Code."""
+        portable = {"name", "description", "license", "allowed-tools",
+                    "metadata", "version"}
+        for d in self.skills():
+            for line in self.frontmatter(d).split("\n"):
+                m = re.match(r"^([A-Za-z0-9_-]+):", line)
+                if m:
+                    self.assertIn(m.group(1), portable,
+                                  "%s uses non-portable frontmatter key `%s`"
+                                  % (d.name, m.group(1)))
 
 
 class HookIdempotenceTest(unittest.TestCase):

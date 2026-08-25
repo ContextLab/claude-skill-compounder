@@ -31,6 +31,12 @@ jobs:
           fi
           jq --version
 
+      - name: Install pyyaml
+        # Only so the frontmatter test parses with a real YAML parser instead of
+        # skipping. An unquoted colon in a description silently empties a skill's
+        # metadata, and that must never reach main again.
+        run: python3 -m pip install --quiet pyyaml
+
       - name: Record the shells under test
         run: |
           bash --version | head -1

@@ -1,6 +1,6 @@
 ---
 name: no-silent-stub
-description: Use when about to hand back a value you did not actually compute: a hardcoded result, an empty collection standing in for logic, an `except: pass`, a mock on a live path, a TODO that returns, a test scored against its own input, or a fallback a caller cannot tell apart from a real answer, usually because a key, dependency, or service is out of reach. Do NOT use for documented default parameters, typed-optional returns the caller must check, or test doubles a project has deliberately chosen.
+description: "Use when about to hand back a value you did not actually compute: a hardcoded result, an empty collection standing in for logic, an `except: pass`, a mock on a live path, a TODO that returns, a test scored against its own input, or a fallback a caller cannot tell apart from a real answer, usually because a key, dependency, or service is out of reach. Do NOT use for documented default parameters, typed-optional returns the caller must check, or test doubles a project has deliberately chosen."
 ---
 
 # Fail loudly, never plausibly

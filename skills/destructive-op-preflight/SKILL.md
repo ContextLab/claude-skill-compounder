@@ -1,6 +1,6 @@
 ---
 name: destructive-op-preflight
-description: Use when about to run a command that can destroy work no commit or backup can bring back: git reset --hard, git checkout -- , git restore --worktree, git clean, git stash drop, push --force or --force-with-lease, rm -rf, a bulk delete or overwrite loop, or a database reset, drop, truncate, or migration rollback. Use when a safety flag has just refused an operation. Do NOT use for ordinary edits, commits, non-force pushes, branch creation, or reversible refactors.
+description: "Use when about to run a command that can destroy work no commit or backup can bring back: git reset --hard, git checkout -- , git restore --worktree, git clean, git stash drop, push --force or --force-with-lease, rm -rf, a bulk delete or overwrite loop, or a database reset, drop, truncate, or migration rollback. Use when a safety flag has just refused an operation. Do NOT use for ordinary edits, commits, non-force pushes, branch creation, or reversible refactors."
 ---
 
 # Destructive-op preflight
