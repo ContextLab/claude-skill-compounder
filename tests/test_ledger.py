@@ -118,8 +118,10 @@ class LedgerWriteTest(LedgerTestBase):
         self.assertEqual(rec["duration"], 600)
         self.assertEqual(rec["step"], 8)
         self.assertEqual(rec["phase"], "clean red-team pass")
-        # 8 steps budgeted as 2 + 2*rounds means 3 red-team rounds.
-        self.assertEqual(rec["rounds"], 3)
+        # `done` snaps the step to the budget, so a completed forge reports the full
+        # three rounds and the plan agrees with what happened.
+        self.assertEqual(rec["rounds"], 3, "completed rounds, derived from the step reached")
+        self.assertEqual(rec["rounds_planned"], 3, "8 steps budgeted as 2 + 2*rounds")
 
     def test_fail_is_recorded_so_abandoned_forges_are_not_lost(self):
         self.forge("start", "s", "6", "summary", now=T0)
@@ -130,7 +132,23 @@ class LedgerWriteTest(LedgerTestBase):
         self.assertEqual(rec["phase"], "3 rounds, still ambiguous")
         self.assertEqual(rec["step"], 3, "a failed forge keeps the step it reached")
         self.assertEqual(rec["duration"], 400)
-        self.assertEqual(rec["rounds"], 2)
+        # An outcome record reports rounds COMPLETED, not rounds budgeted. Reporting the
+        # plan here was a lie the ledger told about itself: a forge abandoned in the first
+        # review had finished no rounds at all, and the whole point of this file is to
+        # measure what actually happened.
+        self.assertEqual(rec["rounds"], 0,
+                         "abandoned during round 1, so no round completed")
+        self.assertEqual(rec["rounds_planned"], 2, "6 steps budgeted as 2 + 2*rounds")
+
+    def test_an_outcome_never_reports_more_rounds_than_happened(self):
+        """The specific case a cold review caught: abandoned at step 3 of 8, recorded 3."""
+        self.forge("start", "s", "8", "summary", now=T0)
+        self.forge("step", "3", "red-team round 1", now=T0 + 50)
+        self.forge("fail", "gave up in round 1", now=T0 + 60)
+        rec = self.records()[-1]
+        self.assertEqual(rec["rounds"], 0)
+        self.assertEqual(rec["rounds_planned"], 3)
+        self.assertLessEqual(rec["rounds"], rec["rounds_planned"])
 
     def test_clear_of_an_active_forge_is_recorded_as_abandonment(self):
         self.forge("start", "s", "4", "summary", now=T0)
