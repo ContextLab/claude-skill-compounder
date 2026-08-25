@@ -2,6 +2,9 @@
 
 **Make Claude Code get permanently better at the things you do repeatedly.**
 
+![A skill being forged: the builder/red-team loop, with live progress in the status line](docs/media/forge.gif)
+
+
 Every session, you and Claude solve some problem that took real effort to get right — a
 debugging sequence, a deploy-and-verify loop, a non-obvious API dance. Then the session
 ends and that knowledge evaporates. Next week a fresh session makes the same mistakes in
@@ -184,6 +187,14 @@ and removes the symlinks. Runtime state is left intact; delete it with
 45 tests, no mocks: real temporary Claude directories, real `settings.json` files, real
 subprocess invocations of the shell scripts. See [docs/DESIGN.md](docs/DESIGN.md) for the
 verified platform behavior the implementation depends on.
+
+The animation at the top is recorded from a fabricated forge — no real transcript, path,
+or skill name is ever captured. Regenerate it with [`vhs`](https://github.com/charmbracelet/vhs):
+
+```bash
+brew install vhs
+./dev/generate_media.sh      # runs dev/forge_demo.sh under dev/forge.tape
+```
 
 ---
 
