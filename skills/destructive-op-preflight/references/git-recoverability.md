@@ -82,7 +82,43 @@ git cat-file -p '<sha>^3^{tree}'
   removes `build/` itself, not merely the build products in it. Verified.
 
 For each of these, the only defense is upstream of the command:
-`git stash push --include-untracked` before it runs.
+`git stash push --all` before it runs.
+
+## Which stash flag covers what
+
+Verified on the fixture in `tests/fixtures/destructive-op-preflight/`:
+
+|Flag|Tracked changes|Untracked (`??`)|Ignored (`!!`)|
+|-|-|-|-|
+|`git stash push`|yes|no|no|
+|`git stash push --include-untracked`|yes|yes|**no**|
+|`git stash push --all`|yes|yes|yes|
+
+`--include-untracked` is the flag most people reach for, and it leaves `!!` files sitting
+on disk. A `git clean -fdx` after it still destroys `.env.local`. Use `--all` whenever the
+next command carries `-x`, and check coverage with a diff rather than by reading the flag:
+
+```bash
+git -c core.quotePath=false status --porcelain -uall --ignored \
+  | grep -E '^(\?\?|!!| M| D|MM|AM)' | cut -c4- | sort > "${TMPDIR:-/tmp}"/preflight-at-risk.txt
+# ... take the stash ...
+git stash show --include-untracked --name-only 'stash@{0}' | sort > "${TMPDIR:-/tmp}"/preflight-covered.txt
+comm -23 "${TMPDIR:-/tmp}"/preflight-at-risk.txt "${TMPDIR:-/tmp}"/preflight-covered.txt   # must print nothing
+```
+
+`--all` is expensive when an ignored `node_modules` or `.venv` is in the tree. Scope it
+with a pathspec (`git stash push --all -- src/ config/`) and record in the manifest which
+ignored paths you chose to leave uncovered.
+
+## Not covered by any of this
+
+- **Submodules.** UNTESTED here. A `git clean -fdx` in a superproject can remove an
+  uninitialized submodule directory, and a submodule's own untracked files are invisible
+  to the superproject's `status` unless you pass `--recurse-submodules`. Enumerate inside
+  each submodule separately before trusting a superproject manifest.
+- **Files held open by another process.** `git stash push` fails on an unreadable path
+  with `Cannot save the untracked files`, exit 1, having stashed nothing. That is why the
+  Phase 5 script checks the exit status instead of chaining blindly.
 
 ## Force-push recovery
 
