@@ -403,11 +403,22 @@ class PythonProvenanceTest(unittest.TestCase):
         self.assertIn("not importable", result.stdout)
 
     def test_paths_under_a_macos_temp_symlink_do_not_read_as_stale(self):
-        """CI-1. /var is a symlink to /private/var; an unresolved compare fails everywhere."""
+        """CI-1. /var is a symlink to /private/var; an unresolved compare fails everywhere.
+
+        macOS supplies the symlinked temp root for free and Linux does not, so rather than
+        skip on Linux (which would leave the regression uncovered on the platform CI runs
+        most) the test builds the symlink itself when the environment has not already
+        provided one. The condition under test is "reached through a symlink", not
+        "running on a Mac".
+        """
         project = self.project("src")
         self.install(project, editable=True)
+        if str(project) == real(project):
+            alias = self.root / ("alias-" + project.name)
+            alias.symlink_to(real(project))
+            project = alias
         self.assertNotEqual(str(project), real(project),
-                            "this assertion needs a symlinked temp root to mean anything")
+                            "the path under test must be reached through a symlink")
         result = self.check(project, "src/mypkg/core.py")
         self.assertEqual(result.returncode, 0,
                          "an unresolved path comparison reports a false STALE here:\n%s"
