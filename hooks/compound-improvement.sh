@@ -95,8 +95,16 @@ case "$MODE" in
   *) exit 0 ;;
 esac
 
-# Opportunistic pruning of stale per-session state. Claim markers are directories,
-# so they need their own sweep; -depth makes find empty them before removing them.
+# Opportunistic pruning of stale per-session state.
+#
+# Claim markers are directories, and they nest: <sid>.seen/<mode>-<id>/. Matching only
+# '*.seen*' left the inner markers in place, so the parent was never empty, rmdir always
+# failed, and the markers accumulated for the life of the machine. -depth visits children
+# before parents, so one pass empties the markers and then removes the .seen directory
+# that held them. -mindepth 1 keeps $STATE_DIR itself out of it.
+#
+# A directory's mtime moves whenever its contents change, so an active session's .seen
+# stays fresh and only genuinely idle state ages out.
 find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
-find "$STATE_DIR" -depth -type d -mtime +7 -name '*.seen*' -exec rmdir {} + 2>/dev/null
+find "$STATE_DIR" -mindepth 1 -depth -type d -mtime +7 -exec rmdir {} + 2>/dev/null
 exit 0

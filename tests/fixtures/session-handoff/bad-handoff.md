@@ -6,7 +6,7 @@ Just pick up where we left off in the admission repo. Everything is on the featu
 
 ## State
 
-branch: fix/lease-expiry
+branch: HEAD
 
 Working tree has a few uncommitted changes.
 
@@ -16,7 +16,7 @@ Working tree has a few uncommitted changes.
 
 ## Done but NOT verified
 
-- Some cleanup in the renew path.
+- TBD
 
 ## Broken
 
@@ -25,7 +25,7 @@ Working tree has a few uncommitted changes.
 
 ## Dead ends
 
-- Tried a few things with the clock that did not pan out.
+- see above
 
 ## Corrections to earlier notes
 
