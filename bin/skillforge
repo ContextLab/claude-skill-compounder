@@ -10,25 +10,87 @@
 #   skillforge fail  <reason...>
 #   skillforge clear
 #   skillforge show
+#   skillforge ledger [--json]
 #
 # State lives in ONE file, not a session-keyed one. This is deliberate: the id in
 # $CLAUDE_CODE_SESSION_ID and the .session_id delivered to hooks and the status line
 # are different values for the same session, so a session-keyed file written here
 # would never be found by the renderer. One forge at a time per machine.
+#
+# PRIVACY. Two files are written, both under
+# ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}, both local, both plain text:
+#   forge/current.json  the in-progress forge (name, summary, step, phase, timestamps).
+#   ledger.jsonl        one JSON line per start/done/fail, appended forever. Each line
+#                       holds the skill name, the one-line summary you passed to
+#                       'start', the originating repository path, epoch timestamps,
+#                       step counts, outcome and reason. No file contents, no
+#                       transcripts, no credentials.
+# Nothing is transmitted. This script makes no network calls. Delete ledger.jsonl at
+# any time; skillforge recreates it on the next forge.
 set -uo pipefail
 
-DIR="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/forge"
+STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+DIR="$STATE_ROOT/forge"
 mkdir -p "$DIR" 2>/dev/null || { echo "skillforge: cannot create $DIR" >&2; exit 1; }
 FILE="$DIR/current.json"
+LEDGER="$STATE_ROOT/ledger.jsonl"
 
 command -v jq >/dev/null 2>&1 || { echo "skillforge: jq is required" >&2; exit 1; }
 
-now() { date +%s; }
+# SKILLFORGE_NOW pins the clock so tests can assert on durations and dates.
+now() { if [ -n "${SKILLFORGE_NOW:-}" ]; then printf '%s' "$SKILLFORGE_NOW"; else date +%s; fi; }
 die() { echo "skillforge: $*" >&2; exit 2; }
 field() { jq -r --arg k "$1" '.[$k] // empty' "$FILE" 2>/dev/null; }
 update() { # jq expression applied to the state file
   local tmp="$FILE.tmp.$$"
   jq "$@" "$FILE" > "$tmp" 2>/dev/null && mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not update $FILE"; }
+}
+
+
+# The originating repository, best effort. Outside a checkout (or with no git at all)
+# the working directory is the honest answer.
+project_root() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD"; }
+
+int_or_zero() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
+
+# Red-team rounds are not stored during a forge, only the step budget is. SKILL.md
+# budgets steps as 2 + 2*rounds (one build step, one write step, then a review and a
+# revision step per round), so rounds = max(0, (steps - 2) / 2).
+rounds_from_steps() {
+  r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
+  [ "$r" -lt 0 ] && r=0
+  printf '%s' "$r"
+}
+
+# One JSON object, one line, one append. jq builds the whole line before the redirect
+# runs, so a single short write reaches the file and concurrent forges cannot interleave
+# half a record. A ledger failure must never break a forge, hence the bare returns.
+ledger_append() { # <event> <name> <steps> <summary> [step] [phase] [duration] [rounds]
+  line="$(jq -n -c \
+    --arg event "$1" --arg name "$2" --arg summary "${4:-}" \
+    --arg project "$(project_root)" \
+    --argjson ts "$(now)" --argjson steps "$(int_or_zero "${3:-0}")" \
+    --arg step "${5:-}" --arg phase "${6:-}" --arg duration "${7:-}" --arg rounds "${8:-}" \
+    '{event:$event, name:$name, ts:$ts, steps:$steps, summary:$summary, project:$project}
+     + (if $step     == "" then {} else {step:     ($step|tonumber)}     end)
+     + (if $phase    == "" then {} else {phase:     $phase}              end)
+     + (if $duration == "" then {} else {duration: ($duration|tonumber)} end)
+     + (if $rounds   == "" then {} else {rounds:   ($rounds|tonumber)}   end)' 2>/dev/null)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "$line" >> "$LEDGER" 2>/dev/null || return 0
+  return 0
+}
+
+# Close out whatever is in $FILE as an outcome record. Used by done, fail, and by
+# clear when it would otherwise drop an active forge on the floor without a trace.
+ledger_close() { # <event> <phase>
+  l_name="$(field name)"; l_steps="$(int_or_zero "$(field steps)")"
+  l_summary="$(field summary)"; l_step="$(int_or_zero "$(field step)")"
+  l_started="$(int_or_zero "$(field started)")"
+  l_dur=$(( $(now) - l_started ))
+  [ "$l_dur" -lt 0 ] && l_dur=0
+  ledger_append "$1" "$l_name" "$l_steps" "$l_summary" \
+    "$l_step" "$2" "$l_dur" "$(rounds_from_steps "$l_steps")"
 }
 
 cmd="${1:-}"; shift 2>/dev/null || true
@@ -50,6 +112,7 @@ case "$cmd" in
       '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
         status:"active", started:$now, updated:$now}' > "$tmp" \
       && mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not write $FILE"; }
+    ledger_append start "$name" "$steps" "$summary"
     echo "skillforge: forging '$name' ($steps steps) — animation live in the status line"
     ;;
   step)
@@ -67,6 +130,7 @@ case "$cmd" in
     msg="${*:-clean red-team pass}"
     update --arg p "$msg" --argjson now "$(now)" \
       '.status="done" | .step=.steps | .phase=$p | .updated=$now | .finished=$now'
+    ledger_close done "$msg"
     echo "skillforge: '$(field name)' complete — $msg"
     ;;
   fail)
@@ -74,12 +138,53 @@ case "$cmd" in
     reason="${*:-abandoned}"
     update --arg p "$reason" --argjson now "$(now)" \
       '.status="failed" | .phase=$p | .updated=$now | .finished=$now'
+    ledger_close fail "$reason"
     echo "skillforge: '$(field name)' abandoned — $reason"
     ;;
-  clear) rm -f "$FILE"; echo "skillforge: cleared" ;;
+  clear)
+    # An active forge thrown away is still a forge that happened. Record it, so the
+    # ledger cannot quietly overstate the completion rate.
+    if [ -f "$FILE" ] && [ "$(field status)" = "active" ]; then
+      ledger_close fail "cleared before completing"
+    fi
+    rm -f "$FILE"; echo "skillforge: cleared"
+    ;;
   show)  [ -f "$FILE" ] && cat "$FILE" || echo "no active forge" ;;
+  ledger)
+    if [ "${1:-}" = "--json" ]; then
+      [ -s "$LEDGER" ] && cat "$LEDGER"
+      exit 0
+    fi
+    if [ ! -s "$LEDGER" ]; then
+      echo "no forges recorded yet ($LEDGER)"
+      exit 0
+    fi
+    # Each start is joined to the first done/fail for the same name that follows it.
+    # A start with nothing after it is an abandoned forge: the session ended, crashed,
+    # or moved on without closing out. It is reported, not dropped.
+    jq -s -R -r '
+      def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
+      [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $r
+      | [ range(0; ($r | length)) | . as $i | select($r[$i].event == "start") | $i ]
+      | map(. as $i | $r[$i] as $st
+          | ($r[($i + 1):]
+             | map(select(.name == $st.name and (.event == "done" or .event == "fail")))
+             | .[0]) as $en
+          | { name:     $st.name,
+              ts:       ($st.ts // 0),
+              project:  ($st.project // ""),
+              outcome:  (if $en == null then "no outcome" else $en.event end),
+              rounds:   (if $en == null then rounds_of($st.steps)
+                         else ($en.rounds // rounds_of($st.steps)) end),
+              duration: (if $en == null then null else ($en.duration // null) end),
+              phase:    (if $en == null then "never closed out" else ($en.phase // "") end) })
+      | (.[] | "\(.ts | gmtime | strftime("%Y-%m-%d"))  \(.name)  [\(.outcome)]  \(.rounds) round(s)  \(if .duration == null then "-" else "\(.duration)s" end)  \(.project | split("/") | .[-1])  \(.phase)"),
+        "",
+        "\(length) forge(s): \(map(select(.outcome == "done")) | length) done, \(map(select(.outcome == "fail")) | length) abandoned, \(map(select(.outcome == "no outcome")) | length) never closed out"
+    ' "$LEDGER"
+    ;;
   ""|-h|--help|help)
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac

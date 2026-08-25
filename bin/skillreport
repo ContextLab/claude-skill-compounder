@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# skillreport: did any of this actually pay off?
+#
+#   skillreport [--help]
+#
+# Joins the forge ledger written by 'skillforge' against skill invocations recovered
+# from Claude Code transcripts, and prints one table plus the number that matters: the
+# fraction of forged skills that were invoked at least once AFTER the session that
+# forged them. Reuse before or during the forge is not reuse.
+#
+# PRIVACY. This script reads three files, all already on your disk, and writes nothing
+# except its own output to the terminal:
+#   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/ledger.jsonl
+#       one JSON line per forge: skill name, your one-line summary, the originating
+#       repository path, epoch timestamps, step counts, outcome and reason.
+#   ${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}/*/*.jsonl
+#       your Claude Code transcripts. Only three fields are read out of them: the
+#       invoked skill name, the record timestamp, and the working directory. Prompts,
+#       responses, file contents and tool output are never parsed or printed.
+#   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/*.edits
+#       per-session edit counters written by the reminder hook (an integer each).
+# There are no network calls anywhere in this script. Nothing leaves the machine.
+# Nothing is uploaded, and no summary is sent anywhere.
+set -uo pipefail
+
+STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+LEDGER="$STATE_ROOT/ledger.jsonl"
+REMINDERS="$STATE_ROOT/reminders"
+TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
+EDIT_EVERY="${CI_EDIT_EVERY:-12}"
+
+case "${1:-}" in
+  -h|--help|help)
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  "") : ;;
+  *) echo "skillreport: unknown option '$1' (try: skillreport --help)" >&2; exit 2 ;;
+esac
+
+command -v jq >/dev/null 2>&1 || { echo "skillreport: jq is required" >&2; exit 1; }
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/skillreport.XXXXXX")" || { echo "skillreport: cannot create a temp dir" >&2; exit 1; }
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# --------------------------------------------------------------------- the ledger
+
+if [ ! -s "$LEDGER" ]; then
+  echo "no forges recorded yet ($LEDGER)"
+  echo "Nothing to measure. Run a forge with the skill-compounder skill first."
+  exit 0
+fi
+
+# One row per start, joined to the first done/fail for the same name that follows it.
+# 'since' is the moment the forge ended, or its start if it never closed out: only
+# invocations strictly after that count as reuse.
+jq -s -R -r '
+  def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
+  [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $r
+  | [ range(0; ($r | length)) | . as $i | select($r[$i].event == "start") | $i ]
+  | map(. as $i | $r[$i] as $st
+      | ($r[($i + 1):]
+         | map(select(.name == $st.name and (.event == "done" or .event == "fail")))
+         | .[0]) as $en
+      | [ $st.name,
+          ($st.ts // 0),
+          (if $en == null then ($st.ts // 0) else ($en.ts // $st.ts // 0) end),
+          (if $en == null then "no outcome" else $en.event end),
+          (if $en == null then rounds_of($st.steps)
+           else ($en.rounds // rounds_of($st.steps)) end) ]
+      | @tsv)
+  | .[]
+' "$LEDGER" > "$TMP/forges.tsv" 2>/dev/null
+
+if [ ! -s "$TMP/forges.tsv" ]; then
+  echo "no forges recorded yet ($LEDGER has no 'start' records)"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- the transcripts
+
+# Skill invocations are recorded as assistant tool_use blocks. The grep prefilter is
+# the verified recipe from issue #6: transcripts are written as compact JSON, so the
+# key order '"name":"Skill","input":{"skill":' is stable. jq then re-checks the shape,
+# so a line that matches the substring for some other reason is discarded.
+#
+# Per-invocation timestamps are real, not inferred: every transcript record carries an
+# ISO-8601 '.timestamp'. Fractional seconds are trimmed because jq's fromdateiso8601
+# does not accept them. A record whose timestamp cannot be parsed emits -1 and is
+# counted separately rather than being folded into either bucket. File mtime is never
+# substituted for a record timestamp.
+: > "$TMP/inv.tsv"
+# The file list is built first rather than iterated inside a pipeline: bash runs every
+# stage of a pipeline in a subshell, so a counter incremented in the loop would be lost.
+# find rather than a glob, because zsh treats a glob that matches nothing as a fatal
+# error and this script has to survive being run under either shell.
+find "$TRANSCRIPTS" -maxdepth 2 -type f -name '*.jsonl' 2>/dev/null > "$TMP/files"
+found_any=0
+[ -s "$TMP/files" ] && found_any=1
+while IFS= read -r f; do
+  grep -h '"name":"Skill"' "$f" 2>/dev/null
+done < "$TMP/files" | jq -R -r '
+  (fromjson? // empty) as $rec
+  | ($rec.timestamp // "") as $iso
+  | (($iso | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) // -1) as $ts
+  | ($rec.cwd // "unknown") as $cwd
+  | ($rec.message.content // [])
+  | (if type == "array" then .[] else empty end)
+  | select((.type? == "tool_use") and (.name? == "Skill"))
+  | [ (.input.skill // "unknown"), $ts, $cwd ] | @tsv
+' >> "$TMP/inv.tsv" 2>/dev/null
+
+# --------------------------------------------------------------------- the table
+
+printf '%-30s %-12s %7s %-12s %12s %9s\n' \
+  "SKILL" "FORGED" "ROUNDS" "OUTCOME" "USES SINCE" "PROJECTS"
+printf '%-30s %-12s %7s %-12s %12s %9s\n' \
+  "------------------------------" "------------" "-------" "------------" "------------" "---------"
+
+total=0
+reused=0
+during_total=0
+unparsed_total=0
+
+while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds; do
+  [ -n "${name:-}" ] || continue
+  total=$(( total + 1 ))
+  counts="$(awk -F'\t' -v n="$name" -v since="$since_ts" -v start="$start_ts" '
+    {
+      bare = $1
+      sub(/^[^:]*:/, "", bare)          # accept both "name" and "plugin:name"
+      if ($1 != n && bare != n) next
+      if ($2 + 0 < 0) { unparsed++; next }
+      if ($2 + 0 > since + 0) {
+        after++
+        if (!seen[$3]++) projects++
+      } else if ($2 + 0 >= start + 0) {
+        during++
+      }
+    }
+    END { printf "%d %d %d %d", after + 0, projects + 0, during + 0, unparsed + 0 }
+  ' "$TMP/inv.tsv")"
+  # Read the four numbers back with a heredoc rather than 'set -- $counts': zsh does
+  # not word-split an unquoted expansion, so the positional-parameter trick silently
+  # yields one field there and four under bash.
+  after=0; projects=0; during=0; unparsed=0
+  IFS=' ' read -r after projects during unparsed <<COUNTS
+$counts
+COUNTS
+  during_total=$(( during_total + during ))
+  unparsed_total=$(( unparsed_total + unparsed ))
+  [ "$after" -gt 0 ] && reused=$(( reused + 1 ))
+  printf '%-30s %-12s %7s %-12s %12s %9s\n' \
+    "$(printf '%.30s' "$name")" \
+    "$(jq -n -r --argjson t "$since_ts" '$t | gmtime | strftime("%Y-%m-%d")' 2>/dev/null || echo "?")" \
+    "$rounds" "$outcome" "$after" "$projects"
+done < "$TMP/forges.tsv"
+
+# --------------------------------------------------------------- the headline
+
+echo
+if [ "$total" -eq 0 ]; then
+  echo "no forges recorded yet"
+else
+  pct=$(( reused * 100 / total ))
+  echo "REUSE: $reused of $total forged skills ($pct%) were invoked at least once after"
+  echo "       the forge that created them finished."
+fi
+
+echo
+echo "$during_total invocation(s) fell inside a forge window and were not counted as reuse."
+if [ "$unparsed_total" -gt 0 ]; then
+  echo "$unparsed_total invocation(s) had no parseable timestamp and were not counted at all."
+fi
+if [ "$found_any" -eq 0 ]; then
+  echo "WARNING: no transcripts found under $TRANSCRIPTS, so every count above is zero"
+  echo "         for want of data, not for want of reuse."
+fi
+
+# ---------------------------------------------- reminder-to-forge conversion
+
+# The reminder hook does not log when it fires, only the running edit count per
+# session. Checkpoints are therefore reconstructed: a session with N edits must have
+# hit floor(N / CI_EDIT_EVERY) checkpoints. This is an estimate, and it is a loose one:
+# the hook prunes counters older than 7 days, so the denominator is a rolling window
+# while the ledger numerator is the whole history.
+checkpoints=0
+sessions=0
+if [ -d "$REMINDERS" ]; then
+  find "$REMINDERS" -maxdepth 1 -type f -name '*.edits' 2>/dev/null > "$TMP/counters"
+  while IFS= read -r c; do
+    [ -f "$c" ] || continue
+    n="$(cat "$c" 2>/dev/null)"
+    case "${n:-}" in ''|*[!0-9]*) continue ;; esac
+    sessions=$(( sessions + 1 ))
+    checkpoints=$(( checkpoints + n / EDIT_EVERY ))
+  done < "$TMP/counters"
+fi
+starts="$(grep -c '"event":"start"' "$LEDGER" 2>/dev/null || echo 0)"
+case "${starts:-}" in ''|*[!0-9]*) starts=0 ;; esac
+
+echo
+echo "REMINDER CONVERSION (estimate, see the comment in this script)"
+echo "  edit counters on disk:      $sessions session(s)"
+echo "  checkpoints they imply:     $checkpoints (assuming CI_EDIT_EVERY=$EDIT_EVERY)"
+echo "  forges started, all time:   $starts"
+if [ "$checkpoints" -gt 0 ]; then
+  echo "  rough conversion:           $(( starts * 100 / checkpoints ))%"
+else
+  echo "  rough conversion:           not computable, no checkpoints implied yet"
+fi
+echo "  The numerator covers all time and the denominator only the last 7 days, so read"
+echo "  the conversion as a loose upper bound rather than a rate."
