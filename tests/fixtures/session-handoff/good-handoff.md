@@ -3,17 +3,22 @@
 ## Resume command
 
 ```bash
-cd ./scratch-repo && git checkout f882c1ac93d08b780caba472786173d2fdd45b78 && git status --short
+cd /srv/checkouts/admission
+git stash push --message "before resuming 2026-08-25" || true
+git checkout -B resume/lease-expiry f882c1ac93d08b780caba472786173d2fdd45b78
+git apply notes/2026-08-25-lease-expiry.patch
 ```
 
 ## State
 
 branch: fix/lease-expiry
 commit: f882c1ac93d08b780caba472786173d2fdd45b78
+uncommitted: notes/2026-08-25-lease-expiry.patch
 
 ```
 $ git status --porcelain
  M admission.py
+?? notes/
 ```
 
 ```
@@ -24,30 +29,33 @@ f882c1a Widen the lease window to a half-open interval
 ## Done and verified
 
 - `is_expired` now treats the lease window as half-open. Proved by
-  `git show --stat HEAD`, which printed `admission.py | 2 +-`.
-- The committed form uses `>` rather than `>=`. Proved by
   `git show HEAD:admission.py`, which printed `    return now > lease_end`.
+- The change is committed, not just in the tree. Proved by `git show --stat HEAD`, which
+  printed `admission.py | 2 +-`.
 
 ## Done but NOT verified
 
-- The uncommitted edit in the working tree adds a `renew()` path that reuses the same
-  comparison. Nothing covers it, and no test file exists yet in this repository.
+- The uncommitted `renew()` in the patch reuses the same comparison. Nothing covers it,
+  and this repository has no test file yet.
 
 ## Broken
 
-- test_admission_rejects_expired_lease
+- test_handoff_has_state, in the notes linter
 
 ```
-$ python3 -m pytest tests/test_scheduler.py::test_admission_rejects_expired_lease -q
-FAILED tests/test_scheduler.py::test_admission_rejects_expired_lease
-E       AssertionError: assert 'admitted' == 'rejected'
-E         - rejected
-E         + admitted
-tests/test_scheduler.py:212: AssertionError
-1 failed in 0.52s
+$ python3 -m pytest tests/test_notes.py -q
+FAILED tests/test_notes.py::test_handoff_has_state
+E       AssertionError: the rendered note is missing its State heading
+E       rendered note was:
+## Tree
+## Resume command
+E       and the linter expected:
+## State
+tests/test_notes.py:88: AssertionError
+1 failed in 0.30s
 ```
 
-repro: python3 -m pytest tests/test_scheduler.py::test_admission_rejects_expired_lease -q
+repro: python3 -m pytest tests/test_notes.py::test_handoff_has_state -q
 
 ## Dead ends
 

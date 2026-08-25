@@ -1,6 +1,6 @@
 ---
 name: session-handoff
-description: "Use when context is about to be lost: the indicator is low, /compact or /clear is imminent, a usage-limit warning appeared, you or the user suggests restarting Claude, or a session ends with work unfinished. Writes a resumable handoff (verbatim git state, exact error text, dead ends, one resume command) to notes/<ISO-date>-<topic>.md. Do NOT use for a mid-session recap the user asked for, or to record a fact, decision, or wiki entry when no context-loss event is in play."
+description: "Use when context is about to be lost: the indicator is low, /compact or /clear is imminent, a usage-limit warning appeared, you or the user suggests restarting Claude, or a session ends with work unfinished. Writes a resumable handoff (verbatim git state, uncommitted work as a patch, exact error text, one resume command) to notes/<ISO-date>-<topic>.md. Do NOT use for a mid-session recap the user asked for, or to record a fact, decision, or wiki entry when no context-loss event is in play."
 ---
 
 # Session handoff: write it before the context is gone
@@ -16,17 +16,26 @@ A SUMMARY IS NOT A HANDOFF. PASTE THE EXACT OUTPUT, OR WRITE NOTHING.
 
 ```bash
 mkdir -p notes
-git symbolic-ref --quiet --short HEAD || echo "(detached)"   # branch, or (detached)
-git rev-parse HEAD                                            # full sha
-git status --porcelain
+D=$(date +%F); T=<topic>                       # T is a short slug, e.g. lease-expiry
+git diff HEAD > "notes/$D-$T.patch"            # uncommitted work; nothing else holds it
+git rev-parse --git-dir >/dev/null 2>&1 \
+  && { git symbolic-ref --quiet --short HEAD || echo "(detached)"
+       git rev-parse --verify --quiet HEAD || echo "none (no commits yet)"
+       git status --porcelain; } \
+  || echo "none (not a git repository)"
 ```
 
-Write `notes/<ISO-date>-<topic>.md` with two sections: `## State`, holding a `branch:`
-line, a `commit:` line, and the pasted porcelain output; and `## Resume command`, holding
-one fenced line `cd <abs path> && git checkout <that sha> && git status --short`.
+Write `notes/$D-$T.md` with two sections only: `## State`, holding `branch:`, `commit:`
+and `uncommitted:` lines plus the pasted porcelain output; and `## Resume command`,
+holding the fenced block from the template below. Then:
 
-Fill in the rest if there is room. Phase 4's validator lists what is still missing, and
-that list is your to-do order for whatever budget remains. Two sections beat none.
+```bash
+scripts/check-handoff.sh --minimal notes/$D-$T.md
+```
+
+`--minimal` judges those two sections and lists the rest on stderr as remaining work
+rather than rejecting them. Fill in whatever that list allows. Two sound sections beat ten
+guessed ones.
 
 ## When NOT to use
 
@@ -39,8 +48,10 @@ that list is your to-do order for whatever budget remains. Two sections beat non
 
 **Composition with `/soft-compact`.** A "take notes then compact" command
 (`~/.claude/commands/soft-compact.md`) does not reference this skill and will not load it.
-When one runs, invoke this skill yourself to produce its note: same folder, same naming,
-one file.
+When one runs, invoke this skill yourself to produce its note. One caution: that command
+commits and pushes *after* the note, which invalidates the sha and porcelain output you
+just recorded. Either write the handoff after the commit, or re-run phase 2 and update
+`## State` once the commit exists.
 
 ## Phase 1: Recognize the trigger
 
@@ -56,30 +67,36 @@ Five triggers, all of them yours to notice rather than the user's:
 
 ## Phase 2: Collect verbatim state
 
-Run these and keep the raw bytes. Do not read them and paraphrase.
+Run the block from the fallback above and keep the raw bytes. Do not paraphrase. Three
+things it gets right that the obvious commands get wrong:
 
-```bash
-git symbolic-ref --quiet --short HEAD || echo "(detached)"
-git rev-parse HEAD
-git status --porcelain
-git log --oneline -5
-```
-
+- **Guard on `rev-parse --git-dir` first.** In a directory that is not a repository,
+  `git symbolic-ref ... || echo "(detached)"` prints `(detached)`, because every git
+  command there exits 128. A non-repository then gets recorded as a detached checkout.
 - **Detached HEAD:** `git rev-parse --abbrev-ref HEAD` returns the literal `HEAD`, and a
   resume command built from that reads `git checkout HEAD`, which goes nowhere. Use
-  `symbolic-ref` as above and record `branch: (detached)`.
-- **Not a git repository:** all four commands exit 128. Record `none (not a git
-  repository)` for both `branch:` and `commit:`, and make the resume command `cd <abs
-  path>` plus whatever re-enters the work (the dev server, the failing script).
+  `symbolic-ref` and record `branch: (detached)`.
+- **A repository with no commits:** `git rev-parse HEAD` prints the literal string `HEAD`
+  on **stdout** while exiting 128, so `2>/dev/null || echo ...` records both `HEAD` and the
+  fallback. `--verify --quiet` is what actually stays silent. Record
+  `commit: none (no commits yet)`.
+
+**`git status --porcelain` records filenames, not content.** The uncommitted work is the
+one thing no clone, log, or diff of the repository can give the next session back, so save
+it: `git diff HEAD > notes/<ISO-date>-<topic>.patch`, and name that file on the
+`uncommitted:` line. Untracked files are not in that patch; they appear as `??` in the
+porcelain output, and any that matter should be committed or copied before the session
+ends. If there is nothing uncommitted, write `uncommitted: none` and drop the `git apply`
+line from the resume command.
 
 For anything broken, capture the **exact test name**, its **exact output**, and the
 **exact command that reproduces it**. Re-run the command now and paste what it prints.
-Never abbreviate the output. An error you retyped or trimmed is a different error, and the
-next session will grep for the string you invented.
+Never abbreviate. An error you retyped or trimmed is a different error, and the next
+session will grep for the string you invented.
 
 ## Phase 3: Write the file
 
-Path: `notes/<ISO-date>-<topic>.md`, for example `notes/2026-08-25-lease-expiry.md`.
+Path: `notes/<ISO-date>-<topic>.md`, with the patch beside it under the same stem.
 `mkdir -p notes` if absent. One file per session; never overwrite yesterday's.
 
 Fill every mandatory section. A section with nothing to report gets the literal word
@@ -90,11 +107,11 @@ Fill every mandatory section. A section with nothing to report gets the literal 
 
 |Section|What goes in it, and the failure it prevents|
 |-|-|
-|`## Resume command`|A fenced command that `cd`s to the repo and checks out **the recorded sha, not the branch**. Branch tips move. Prevents landing on a commit the handoff never described.|
-|`## State`|`branch:` (or `(detached)`), `commit:` with the full sha, and pasted `git status --porcelain`. Prevents reasoning against the wrong tree.|
+|`## Resume command`|Four lines: `cd` to the repo by **absolute** path (a relative one depends on where it is pasted), stash whatever is in the tree, `git checkout -B` **the recorded sha** onto a named branch, apply the patch. Prevents an aborted checkout on a dirty tree, a surprise detached HEAD, and landing on a branch tip that has moved.|
+|`## State`|`branch:`, `commit:` with the full 40-character sha, `uncommitted:` naming the patch, and pasted `git status --porcelain`. Prevents reasoning against the wrong tree.|
 |`## Done and verified`|Each item with the command that proved it and the observed output. Prevents inherited false confidence.|
 |`## Done but NOT verified`|The honest list. Collapsing it upward is how a session inherits a claim as a fact.|
-|`## Broken`|Exact test name, pasted error output in a fence, and a `repro:` line. Prevents a rediscovery pass.|
+|`## Broken`|Exact test name, pasted error output in a fence, and a `repro:` line that actually reproduces it. Prevents a rediscovery pass.|
 |`## Dead ends`|What was tried, that it failed, and why. The session's most expensive output, and the thing a cold session will otherwise repeat verbatim.|
 |`## Corrections to earlier notes`|Named file, quoted stale claim, what is now true. An append-only trail leaves false statements standing.|
 |`## Open decisions`|Questions that need the user. A question is not a task and must not be filed as one.|
@@ -109,13 +126,17 @@ Fill every mandatory section. A section with nothing to report gets the literal 
 ## Resume command
 
 ```bash
-cd <absolute path to repo> && git checkout <full 40-char sha> && git status --short
+cd <absolute path to the repo>
+git stash push --message "before resuming <ISO-date>" || true
+git checkout -B resume/<topic> <full 40-char sha>
+git apply <path to the patch, relative to the repo root>
 ```
 
 ## State
 
-branch: <branch, or (detached)>
-commit: <full 40-char sha>
+branch: <branch name, or (detached), or none (not a git repository)>
+commit: <full 40-char sha, or none (no commits yet), or none (not a git repository)>
+uncommitted: <patch file beside this note, or none>
 
 ```
 $ git status --porcelain
@@ -166,32 +187,36 @@ Sections with nothing to report take the literal line `None.`
 ## Phase 4: Validate mechanically
 
 A checklist you eyeball is exactly what fails under context pressure, which is the moment
-this skill fires. Run the validator instead:
+this skill fires. Run the validator instead. It lives in `scripts/` beside the `SKILL.md`
+you are reading; if you do not know that path:
 
 ```bash
-~/.claude/skills/session-handoff/scripts/check-handoff.sh notes/<your-file>.md
+find ~/.claude ~/.config/claude . -name check-handoff.sh 2>/dev/null | head -1
 ```
 
-(If this skill lives elsewhere, use the `scripts/check-handoff.sh` next to the `SKILL.md`
-you are reading.) It exits non-zero and prints one `REJECT <rule>` line per problem. Fix
-and re-run until it exits 0. Do not report the handoff written until it does.
+Then `check-handoff.sh notes/<your-file>.md`. It exits non-zero and prints one
+`REJECT <rule>` line per problem. Fix and re-run until it exits 0. Do not report the
+handoff written until it does.
 
-It proves rather than pattern-matches: the recorded sha must appear in the resume command,
-the directory that command `cd`s into must exist, and `git cat-file -e` must confirm the
-sha is a real commit there. A fabricated sha, a resume command naming only a branch, and a
-`branch: HEAD` left from a detached checkout are all rejected. Section names come from
-markers, not titles (state is whichever template section holds `branch:`, broken is
-whichever holds `repro:`), so renaming or adding a section carries through.
+It proves rather than pattern-matches. The directory the resume command `cd`s into must
+exist; what it *is* then decides what `commit:` may say. A real repository means the sha
+must be 40 hex characters, must pass `git cat-file -e`, and must be the argument of a
+`git checkout` or `git switch` in the resume block. A directory that is not a repository
+means `commit:` must say so too, so a fabricated sha has nowhere to hide. Section names
+come from markers rather than titles (state is whichever template section holds `branch:`,
+broken is whichever holds `repro:`), so renaming or adding a section carries through.
+Parsing is fence-aware, so pasted output containing a `## ` line stays output.
 
 ## Phase 5: On resume
 
 ```bash
-ls -t notes/*.md 2>/dev/null | head -3
+ls -t notes 2>/dev/null | head -3
 ```
 
-If that prints nothing, there is no handoff; do not invent one from the git log. Otherwise
-read the newest before anything else, then run its `## Resume command`. Treat
-`## Done but NOT verified` as unverified, not as done.
+Avoid `ls notes/*.md`: under zsh an unmatched glob is a shell error that a redirect cannot
+suppress. If the listing is empty there is no handoff, and you must not invent one from
+the git log. Otherwise read the newest before anything else, then run its
+`## Resume command`. Treat `## Done but NOT verified` as unverified, not as done.
 
 ## Why this exists
 
@@ -222,11 +247,11 @@ Each of these is the same thought, and each precedes an unusable handoff:
 |-|-|
 |"The compaction summary will carry this."|It carries gist. Not the sha, not the error string. The model then reasons confidently from what survived.|
 |"One more fix, then I'll write it."|The trigger fired precisely because there is no budget for one more fix.|
-|"Checking out the branch is the same thing."|Only until the tip moves, and it moves the moment anyone else pushes. Check out the sha.|
+|"Checking out the branch is the same thing."|Only until the tip moves, and it moves the moment anyone pushes. Check out the sha.|
+|"`git status` already records the uncommitted work."|It records filenames. The content exists nowhere else once the session ends. Write the patch.|
 |"Pasting the whole traceback is wasteful."|Cheaper than a rediscovery pass. The next session greps for the exact string.|
 |"Dead ends are just failures, skip them."|They are the session's most expensive output. Omitting them buys a guaranteed repeat.|
 |"The earlier note already covers most of this."|Then it also still asserts the parts that are now false. Correct it by name.|
-|"Working tree is clean, so State is empty."|Clean is a fact worth recording: branch, commit, and an empty fence.|
 |"The user can just ask me to save context."|If they knew to ask, they would not be losing it.|
 
 ## Trigger precision
@@ -248,7 +273,7 @@ Each of these is the same thought, and each precedes an unusable handoff:
 |Phase|Do|Proof it happened|
 |-|-|-|
 |1. Recognize|Notice the trigger yourself, especially "restart Claude"|You said what triggered it|
-|2. Collect|`symbolic-ref`, `rev-parse HEAD`, `status --porcelain`, re-run the failing command|Raw output in hand|
+|2. Collect|Guarded state block, `git diff HEAD > <patch>`, re-run the failing command|Raw output and a patch file|
 |3. Write|`notes/<ISO-date>-<topic>.md`, every section, `None.` where empty|File exists|
-|4. Validate|`scripts/check-handoff.sh <file>`|Exit code 0|
-|5. Resume|`ls -t notes/*.md 2>/dev/null \| head -3`, read, run the resume command|On the recorded sha|
+|4. Validate|`check-handoff.sh <file>` (or `--minimal`)|Exit code 0|
+|5. Resume|`ls -t notes 2>/dev/null \| head -3`, read, run the resume command|On the recorded sha, patch reapplied|
