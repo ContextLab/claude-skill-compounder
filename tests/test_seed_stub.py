@@ -140,8 +140,32 @@ class SeedStubTest(unittest.TestCase):
                          "without a precision measurement on an unchosen corpus")
         self.assertEqual(sorted(p.name for p in SKILL_DIR.rglob("*")), ["SKILL.md"])
         text = self.skill_text()
-        for ghost in ("stub-scan", "scripts/", "--diff", "unscanned-language"):
+        # The first four caught nothing when the scanner was deleted: three
+        # sentences from the old draft survived, referring to a `Scan` column
+        # that no longer exists and a heading that no longer exists, two lines
+        # above "There is no script here". Ghost-hunting has to name the ghosts.
+        for ghost in ("stub-scan", "scripts/", "--diff", "unscanned-language",
+                      "`Scan` column", "What this scan is worth", "phase 4's script",
+                      "the script", "run the scan"):
             self.assertNotIn(ghost, text, f"dangling reference to the deleted scanner: {ghost}")
+        body = self.frontmatter_and_body()[1]
+        for table in re.findall(r"^\|(.+?)\|\n\|[-|]+\|$", body, re.M):
+            for column in table.split("|"):
+                self.assertNotEqual(column.strip(), "Scan",
+                                    "the Scan column belonged to the deleted scanner")
+
+    def test_it_reports_the_precision_numbers_it_actually_measured(self):
+        # A skill about not shipping a flattering number must not ship one. The
+        # two rounds measured 4% and 8%, on two different corpora.
+        text = self.skill_text()
+        self.assertIn("**4% precision**", text, "round one measured 4%, not 8%")
+        self.assertIn("**8%**", text, "round two measured 8% on a different corpus")
+        self.assertNotIn("both rounds", text.lower().replace("survived both rounds", ""),
+                         "do not attribute one round's number to both")
+        for corpus in ("308 kLOC", "893 kLOC"):
+            self.assertIn(corpus, text, f"name the corpus behind each number: {corpus}")
+        self.assertIn("diff-sized procedure, not a tree-sized one", text,
+                      "the cold reader's qualifier: usable on a diff, not on a tree")
 
     def test_frontmatter_is_portable_and_within_limits(self):
         fm, body = self.frontmatter_and_body()
@@ -227,20 +251,50 @@ class SeedStubTest(unittest.TestCase):
         # Rung 2 used to forbid skip and xfail outright, which argues against
         # correct practice: a skipif naming its precondition is good engineering.
         text = self.skill_text()
-        self.assertIn("skipif", text,
-                      "the ladder must distinguish a reported skip from a hidden one")
-        self.assertIn("does the suite output tell someone this was not checked, and why?",
-                      text, "state the test that separates the two")
+        self.assertTrue("skipif" in text,
+                        "the ladder must distinguish a reported skip from a hidden one")
         rung = re.search(r"^2\. \*\*Fail the test.*?(?=^3\. )", self.frontmatter_and_body()[1],
                          re.M | re.S).group(0)
         self.assertIn("reason=", rung, "the good example must show a stated reason")
-        self.assertIn("no reason", rung, "and name the bare skip as the bad one")
+        # "the summary says skipped" passes three real stubs. Each must be named.
+        self.assertIn("not sufficient", rung,
+                      "state that a reported skip is necessary but not sufficient")
+        self.assertIn("precondition, not a symptom", rung,
+                      'the actual discriminator: "flaky" is a symptom')
+        self.assertIn('"flaky"', rung, "name the symptom-as-reason case")
+        self.assertIn("strict=True", rung,
+                      "an xfail that XPASSes silently is the second stub that passes")
+        self.assertIn("can actually be false", rung,
+                      "a condition nothing ever sets is a permanent skip in disguise")
 
     def test_the_ladder_has_a_rung_for_best_effort_work(self):
         text = self.skill_text()
         self.assertIn("Log at error level and continue", text)
         self.assertTrue("cold-start" in text.lower(),
                         "the skill must name a case where the answer is not 'raise'")
+
+    def test_a_contractual_fallback_whose_caller_consumes_it_has_somewhere_to_go(self):
+        # A feature flag client that cannot reach the service returns the coded
+        # default. Rung 5 is barred (the caller consumes it) and rung 1 takes the
+        # product down over a config lookup. Cold start and telemetry got
+        # carve-outs; this species needs one too.
+        body = self.frontmatter_and_body()[1]
+        cases = re.search(r"^### Three cases where the answer is not \"raise\"\n(.*?)(?=^## )",
+                          body, re.M | re.S)
+        self.assertIsNotNone(cases, "three cases, not two")
+        block = cases.group(1)
+        self.assertEqual(len(re.findall(r"^- \*\*", block, re.M)), 3)
+        self.assertIn("feature-flag", block, "name the species that had no rung")
+        for half in ("specified in the contract", "degradation is visible"):
+            self.assertIn(half, block, f"both halves are required: {half}")
+        self.assertIn("circuit breaker", block, "the same shape covers these too")
+        rung5 = re.search(r"^5\. \*\*Log at error level.*?(?=^\nWhichever)", body,
+                          re.M | re.S).group(0)
+        self.assertIn("contractual-fallback case", rung5,
+                      "rung 5 must point at the case it explicitly excludes")
+        taxonomy = re.search(r"^\|Cache-miss default\|.*$", body, re.M).group(0)
+        self.assertIn("contractual-fallback", taxonomy,
+                      "the taxonomy row must not contradict the carve-out")
 
     def test_the_import_shim_case_is_covered_and_its_example_behaves(self):
         text = self.skill_text()
@@ -266,44 +320,85 @@ class SeedStubTest(unittest.TestCase):
     # 4. the skill's own commands must run ------------------------------------
 
     def test_the_prescribed_handler_search_matches_the_form_that_actually_bites(self):
-        # The earlier version of this check used `except (Exception|BaseException)?\\s*:`
-        # and `\\b`, and found nothing against `except Exception as exc:` under
-        # git grep. A check that silently returns nothing reads as clean.
+        # Two earlier versions of this check found nothing and read as clean:
+        # `except (Exception|BaseException)?\\s*:` misses `as exc`, and `git grep`
+        # neither supports `\\b` nor sees untracked files. Both are pinned here.
         command = [c for c in self.fenced("bash") if "except" in c]
         self.assertEqual(len(command), 1, "one handler-search command in the skill")
-        script = command[0].replace("<the files between your raise and main>", "app.py")
-        root = self.git_repo({"app.py": (
-            "def total():\n"
-            "    try:\n"
-            "        return rate()\n"
-            "    except Exception as exc:\n"
-            "        return 0.0\n")})
-        proc = self.sh(script, root)
-        self.assertEqual(proc.returncode, 0,
-                         f"the skill's own command found nothing: {proc.stderr}")
-        self.assertIn("except Exception as exc:", proc.stdout,
-                      "it must match the aliased handler, not only the bare one")
+        self.assertNotIn("git grep", command[0],
+                         "git grep cannot see the brand-new file you just wrote")
+        script = command[0].replace("<the files between your raise and main>", ".")
+        swallower = ("def total():\n"
+                     "    try:\n"
+                     "        return rate()\n"
+                     "    except Exception as exc:\n"
+                     "        return 0.0\n")
+        for staged in (True, False):
+            with self.subTest(staged=staged):
+                self.tearDown()
+                self.setUp()
+                root = self.git_repo({"app.py": swallower}, stage=staged)
+                proc = self.sh(script, root)
+                self.assertEqual(proc.returncode, 0,
+                                 f"the skill's own command found nothing "
+                                 f"(staged={staged}): {proc.stderr}")
+                self.assertIn("except Exception as exc:", proc.stdout,
+                              "it must match the aliased handler, not only the bare one")
 
-    def test_the_marker_grep_skips_prose_that_merely_discusses_stubs(self):
-        command = [c for c in self.fenced("bash") if "git diff" in c]
+    def marker_command(self):
+        command = [c for c in self.fenced("bash") if "ls-files --others" in c]
         self.assertEqual(len(command), 1, "one marker-grep command in the skill")
-        self.assertIn("'*.py'", command[0],
-                      "the pathspec is what stops it flagging documentation")
-        root = self.git_repo({}, stage=False)
-        (root / "svc.py").write_text("x = 1\n", encoding="utf-8")
-        (root / "NOTES.md").write_text("prose\n", encoding="utf-8")
-        subprocess.run(["git", "add", "-A"], cwd=str(root), env=self.env, check=True,
-                       capture_output=True)
+        return command[0]
+
+    def test_the_marker_grep_sees_a_brand_new_untracked_file(self):
+        # The commonest place a stub lives is a file created in this session, and
+        # `git diff` never mentions it. The deleted scanner handled this; losing
+        # it in the rewrite was a regression, so it is pinned.
+        root = self.git_repo({"brandnew.py": "# TODO: wire this up\ndef f():\n    return []\n"},
+                             stage=False)
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(root),
+                                env=self.env, capture_output=True, text=True)
+        self.assertIn("?? brandnew.py", status.stdout, "the file must really be untracked")
+        proc = self.sh(self.marker_command(), root)
+        self.assertIn("brandnew.py", proc.stdout,
+                      f"a new untracked stub read as clean: {proc.stderr}")
+        self.assertIn("TODO: wire this up", proc.stdout)
+
+    def test_the_marker_grep_reports_real_source_line_numbers(self):
+        root = self.git_repo({"svc.py": "a = 1\nb = 2\nc = 3\n# TODO: swap in the real thing\n"},
+                             stage=False)
+        proc = self.sh(self.marker_command(), root)
+        self.assertIn("svc.py:4:", proc.stdout,
+                      "a `git diff | grep` pipeline numbers diff offsets, not source lines")
+
+    def test_the_marker_grep_does_not_flag_a_deleted_marker(self):
+        root = self.git_repo({"svc.py": "x = 1\n# TODO: swap in the real thing\n"})
         subprocess.run(["git", "commit", "-qm", "two"], cwd=str(root), env=self.env,
                        check=True, capture_output=True)
-        (root / "svc.py").write_text("x = 1\n# TODO: swap in the real thing\ny = []\n",
-                                     encoding="utf-8")
-        (root / "NOTES.md").write_text("prose\nmore TODO and placeholder and MagicMock\n",
-                                       encoding="utf-8")
-        proc = self.sh(command[0], root)
+        (root / "svc.py").write_text("x = 1\n", encoding="utf-8")
+        proc = self.sh(self.marker_command(), root)
+        self.assertNotIn("TODO", proc.stdout,
+                         "removing a TODO is progress, not a finding")
+
+    def test_the_marker_grep_skips_prose_that_merely_discusses_stubs(self):
+        command = self.marker_command()
+        self.assertIn("grep -E", command,
+                      "the extension filter is what stops it flagging documentation")
+        root = self.git_repo({
+            "svc.py": "x = 1\n# TODO: swap in the real thing\ny = []\n",
+            "NOTES.md": "prose about TODO and placeholder and MagicMock\n",
+        }, stage=False)
+        proc = self.sh(command, root)
         self.assertIn("TODO: swap in the real thing", proc.stdout, proc.stderr)
-        self.assertNotIn("placeholder", proc.stdout,
+        self.assertNotIn("NOTES.md", proc.stdout,
                          "documentation about stubs is not a finding")
+
+    def test_the_marker_grep_does_not_hang_or_error_on_a_clean_tree(self):
+        root = self.git_repo({}, stage=False)
+        proc = self.sh(self.marker_command(), root)
+        self.assertEqual(proc.stdout, "", "nothing changed, so nothing to report")
+        self.assertNotIn("usage", proc.stderr.lower(),
+                         "an empty file list must not leave grep reading the terminal")
 
     # 5. the fixture corpus, as running worked examples -----------------------
 

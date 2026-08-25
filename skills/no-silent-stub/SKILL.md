@@ -38,8 +38,17 @@ engineering. The single question that separates them:
 |`...` in an `@abstractmethod`: a declaration, not a value|`return 0.0` in a method that was supposed to compute the tax|
 |A hand-written `FakeClock` in `tests/`, obvious at the call site|`MagicMock()` imported by a module in `services/`|
 |`raise NotImplementedError("pyarrow is not installed")`|`# TODO: wire this up` above `return []`|
+|`def is_unverifiable(self): return True` on a class whose contract is exactly that|the same line on a class that was supposed to check something|
+|`except ImportError:` binding a real, equivalent implementation|`except ImportError:` binding `None` and letting callers find out|
 
 The right column is not worse code. It is code that reports success it did not achieve.
+Two of those rows are the same source line judged by its contract, which is the whole
+point: a constant that *is* the answer for this type is an implementation, and the same
+constant standing in for an answer is a stub. For the import row, the discriminator is
+whether the fallback binds something that does the job. `import json as _toml` does.
+`_toml = None` does not; it defers the failure to whichever caller touches it first, with
+an `AttributeError` that names nothing. If there is no equivalent, let the `ImportError`
+propagate, or re-raise it naming the package.
 
 ## Taxonomy: nine shapes, and how each one hides
 
@@ -52,7 +61,7 @@ The right column is not worse code. It is code that reports success it did not a
 |TODO that returns|a marker comment directly above `return []`|the marker reads as a plan, not as a live defect|
 |Self-scoring check|`actual = row["expected"]`, `is_correct = True`|the score is 100%, which nobody investigates|
 |Retry exhaustion|a loop of attempts, then `return []` after the last one|"no incidents" and "could not reach the incident service" print identically|
-|Cache-miss default|`hit = cache.get(k)`, `if hit is None: return DEFAULT`|every miss looks like a hit with boring data|
+|Cache-miss default|`hit = cache.get(k)`, `if hit is None: return DEFAULT`|every miss looks like a hit with boring data (see the contractual-fallback case: documented and reported, this one is a feature)|
 |Import shim|a module written so `import client` succeeds, with no-op methods behind it|nothing returns a wrong value yet, so nothing looks wrong|
 
 The last one is the quietest, and it arrives as a reasonable request: *"the vendor SDK is
@@ -72,9 +81,6 @@ class Client:
 Now the import succeeds, the type checker is happy, the module is importable for the
 unrelated work that needed it, and the first real call says exactly what is missing.
 
-The `Scan` column is what phase 4's script actually detects, measured rather than hoped.
-Two shapes are wider than any mechanical rule can safely be; see "What this scan is worth".
-
 ## Phase 1: recognize the moment
 
 You are in it when any of these is true:
@@ -92,9 +98,9 @@ If the answer is yes, name the mechanism that makes it so: the parameter in the 
 the `Optional` in the annotation, the exception in the docstring, the `tests/` in the path.
 No mechanism means the answer is no, whatever the intention was.
 
-### Two cases where the answer is not "raise"
+### Three cases where the answer is not "raise"
 
-Both of these were answered wrongly, and confidently, before they were written down here.
+Each of these was answered wrongly, and confidently, before it was written down here.
 
 - **A designed cold-start path.** A recommender with no history for a new user returning
   popular items is not a stub. The absence of history is an expected input, the behaviour
@@ -106,9 +112,23 @@ Both of these were answered wrongly, and confidently, before they were written d
   a real error, but making it raise takes down the caller for something nobody consumes.
   The fix is rung 5 of phase 3, not rung 1: log at error level with the exception attached.
   Silent is still wrong; fatal is also wrong.
+- **A contractual fallback whose degradation is reported out of band.** A feature-flag
+  client that cannot reach the flag service returns each flag's coded default. The caller
+  consumes that value, so rung 5 does not fit, and hard-failing on a network blip takes the
+  product down over a config lookup, so rung 1 does not either. This is legitimate when
+  **both** halves hold: the fallback value is specified in the contract ("flags evaluate to
+  their coded default when the service is unreachable", written down where a caller reads
+  it), **and** the degradation is visible somewhere a human looks, which means an error-level
+  log plus one of a health endpoint, a `degraded` field, or a metric. With only the first
+  half you have built the indistinguishable fallback exactly. The same shape and the same
+  two conditions cover a circuit breaker and a deliberately-served stale cache read.
 
 The question is never "is there a default here". It is "can the caller tell". Where the
-caller wanted the default and the contract says so, you are looking at a feature.
+caller wanted the default and the contract says so, you are looking at a feature. Note that
+this cuts across the taxonomy: the "Cache-miss default" row below is the defect *only* when
+the miss path fails these tests. A cache that documents stale-on-miss and reports it is the
+feature, and the tell is the same one as for cold start, designed for rather than
+discovered.
 
 ## Phase 3: choose the loudest failure that is still correct
 
@@ -123,12 +143,22 @@ Descend this ladder only as far as correctness forces you.
    widen an assertion, loosen a tolerance, or catch-and-continue to turn red green.
 
    A skip is not automatically a stub. `@pytest.mark.skipif(not os.getenv("PGHOST"),
-   reason="needs a live Postgres")` is good engineering: the precondition is named in the
-   source, the runner prints it as skipped rather than passed, and a reader of the summary
-   can see the coverage is missing. That is the opposite of hiding. What is a stub:
-   a bare `@pytest.mark.skip` with no reason, an `xfail` slapped on a test that was passing
-   yesterday, or a skip whose condition is really "this fails and I do not know why".
-   The test: **does the suite output tell someone this was not checked, and why?**
+   reason="needs a live Postgres")` is good engineering: the runner prints it as skipped
+   rather than passed, so a reader of the summary can see the coverage is missing.
+
+   "Does the summary say it was skipped" is necessary and **not sufficient**: three real
+   stubs pass that test. `reason="flaky"` prints fine and hides a bug. An `xfail` with the
+   default `strict=False` prints `XPASS` when the code starts working, which nobody reads
+   as a failure. And `skipif(not os.getenv("INTEGRATION"))` where nothing sets
+   `INTEGRATION` anywhere is a permanent skip wearing a conditional's clothes. So:
+
+   - **The reason names a precondition, not a symptom.** "needs a live Postgres" is a
+     precondition: a reader knows what to provide. "flaky", "broken", "fails in CI" are
+     symptoms, which is the thing you were supposed to fix.
+   - **The condition can actually be false somewhere.** Point at the CI job or the
+     `.env.example` that sets it. If nothing does, the test is deleted or fixed, not skipped.
+   - **`xfail` is `strict=True`.** Otherwise the day the bug is fixed, the suite says
+     `XPASS` and stays green, and the stale `xfail` outlives the defect.
 3. **Return an explicit sentinel the type system forces callers to handle.** Legitimate
    only when the absent value is a normal outcome the caller has something to do about,
    and the signature says so: `Optional[T]`, a `Result` type, an enum member such as
@@ -140,7 +170,8 @@ Descend this ladder only as far as correctness forces you.
    the work is genuinely best-effort and its failure must not stop the caller (telemetry,
    a cache warm, an optional cleanup). Conditions: the caller never consumes a return
    value, the log carries the exception, and the level is `error` or `warning`, never
-   `debug`. If any of those is false, go back up the ladder.
+   `debug`. If the caller *does* consume a value, this rung does not apply: see the
+   contractual-fallback case in phase 2. If any of those is false, go back up the ladder.
 
 Whichever rung you land on, put the blocker in the code and in the reply, not only one.
 
@@ -155,28 +186,35 @@ output, walk up the callers and find the handler that ate it. Every handler betw
 raise and the surface has to either re-raise or report:
 
 ```bash
-git grep -nE 'except[^:]*:' -- <the files between your raise and main>
+grep -rnE 'except[^:]*:' <the files between your raise and main>
 ```
 
 That pattern matches `except:`, `except Exception:` and `except Exception as exc:` alike.
-Two narrowings to avoid, both of which were tried and both of which fail silently: naming
-the types (`except (Exception|BaseException)?\s*:`) misses `as exc`, the form that actually
-bites, and `\b` is unsupported by `git grep`, so the whole check matches nothing and reads
-as clean. Read each hit and ask whether your new exception passes through it. The fix is
-not done until the failure reaches a human.
+Three narrowings to avoid, each of which was tried and each of which fails by matching
+nothing, which reads exactly like a clean result. Naming the types
+(`except (Exception|BaseException)?\s*:`) misses `as exc`, the form that actually bites.
+`\b` is unsupported by `git grep`. And `git grep` itself skips untracked files, so the
+brand-new module you just wrote is invisible to it: use plain `grep -rnE`, which does not
+care what git knows about. Read each hit and ask whether your new exception passes through
+it. The fix is not done until the failure reaches a human.
 
 ## Phase 4: re-read your own diff before you claim anything
 
-There is no script here, and that is a finding rather than an omission. Two independent
-red-team rounds built their own corpora (308 kLOC and 893 kLOC of third-party Python) and
-measured a scanner written for exactly this: **8% precision**, blind to every stub in
-exception form, and its grep floor could not match `except X:` followed by `pass` on the
-next line, which is how anyone actually formats it. A linter at 8% gets switched off within
-a day and takes the doctrine with it. The distinguishing question survived both rounds
-because it is the part a reader does.
+There is no script here, and that is a finding rather than an omission. A scanner was
+written for exactly this job and measured twice, by two cold reviewers on two corpora
+neither the author nor the fixtures had seen: **4% precision** on 308 kLOC (`requests`,
+`click`, `jinja2`, `urllib3`, `dateutil`, `pyyaml`, `numpy`), then **8%** on a different
+893 kLOC (`setuptools`, `pip`, `_pytest`, `attrs`, `packaging`, `rich`, `pandas`). It was
+also blind to every stub in exception form, and its grep floor could not match `except X:`
+followed by `pass` on the next line, which is how anyone actually formats it. A linter at
+those rates gets switched off within a day and takes the doctrine with it. The
+distinguishing question survived both rounds because it is the part a reader does.
 
-So read the diff. `git diff` plus `git status --porcelain` for the files you created,
-which a plain diff does not show.
+**This is a diff-sized procedure, not a tree-sized one.** Measured on 561 lines of
+`requests/cookies.py`, a cold reader took about 30 minutes: 99 nominal candidates
+collapsing to roughly 10 that needed real thought. That is a fine trade for a change you
+just wrote and a bad one for a repository you inherited. On an inherited tree, apply it to
+the files you are about to touch, not to the tree.
 
 For every `return`, every handler, and every new function in it, ask the phase 2 question
 once: **can a caller tell this apart from success?** Three passes, each cheap:
@@ -219,13 +257,26 @@ Markers are worth a look, but treat them as a reminder and not a check, because 
 find the stubs that were considerate enough to announce themselves:
 
 ```bash
-git diff -U0 -- '*.py' '*.js' '*.ts' '*.go' '*.rb' '*.sh' \
-  | grep -nE 'TODO|FIXME|XXX|for now|placeholder|MagicMock|@pytest\.mark\.skip'
+{ git diff --name-only; git diff --name-only --cached; \
+  git ls-files --others --exclude-standard; } | sort -u \
+  | grep -E '\.(py|js|jsx|ts|tsx|go|rb|rs|java|sh)$' \
+  | xargs grep -nE 'TODO|FIXME|XXX|for now|placeholder|MagicMock|@pytest\.mark\.skip' /dev/null
 ```
 
-The pathspec matters: without it the first hit is documentation discussing stubs, which
-is how this file's own earlier draft flagged itself thirteen times. Account for every hit.
-Then re-read for the ones that left no mark.
+Three details in that pipeline are load-bearing, and each replaces a version that read
+clean while missing things. `git ls-files --others` is there because a brand-new untracked
+file is the commonest place a stub lives and `git diff` never mentions it. The extension
+filter is there because without it the first hits are documentation discussing stubs, which
+is how this file's own earlier draft flagged itself thirteen times. The trailing
+`/dev/null` is there so that an empty file list cannot leave `grep` reading your terminal,
+and so every hit is prefixed with its real path and source line number, which a
+`git diff | grep` pipeline cannot give you (it numbers diff offsets, and it flags the
+`-` lines, so *deleting* a TODO shows up as a finding).
+
+It greps the whole of each changed file rather than only the added lines, which is the
+right scope here: you are re-reading your own change, and the lines around it are the
+context that tells you whether the change is honest. Account for every hit. Then re-read
+for the ones that left no mark.
 
 ## Phase 5: the reporting duty
 
@@ -290,17 +341,21 @@ Each of these thoughts means stop and return to phase 2:
 
 ## Trigger precision
 
+The must-not prompts are deliberately adversarial rather than restatements of the
+description's carve-outs: two of them describe a fallback, which is the word the trigger
+keys on, and are still correct engineering.
+
 ### Must fire
 
 - "The tests need an API key we don't have. Just make the suite pass."
 - "Finish this parser. For the branches you can't do yet, return an empty list."
-- "Wire up `get_exchange_rate()`, and if the provider is unreachable, fall back to something sensible."
+- "Get the dashboard rendering by end of day. If the metrics service is down, just show something reasonable."
 
 ### Must not fire
 
 - "Add a documented `timeout=30` default parameter to `fetch()` and mention it in the docstring."
-- "Change `find_user` to return `Optional[User]` instead of defaulting to a blank user, and update the callers to check for `None`."
-- "Our suite uses a hand-written `FakeClock` everywhere by design. Add one more case that uses it."
+- "Add `default_factory=list` to the dataclass so unset tags come back as an empty list."
+- "Retry the rate lookup three times, then return the last cached response tagged `stale=True`, and document that in the API reference."
 
 ## Quick reference
 
