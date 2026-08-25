@@ -39,7 +39,9 @@ What is pinned here:
 No mocks. Real files on disk, read through the same parser in every test.
 """
 
+import os
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -565,6 +567,17 @@ class RuleZeroTest(unittest.TestCase):
             self.assertIn(named, text, "rule zero no longer covers %r" % named)
         self.assertIn("mentioned rather than used", text)
 
+    def test_rule_zero_scopes_by_region_and_not_by_filename(self):
+        """A cold reader took an earlier wording as a whole-file exemption keyed on
+        a filename, which voided the audit of a contribution guide before any count
+        and would exempt most of what this skill is pointed at."""
+        text = flowed(section(self.body, RULE_ZERO))
+        self.assertIn("Skip the region, not the file", text,
+                      "rule zero reads as a whole-file exemption")
+        self.assertIn("audited in its own prose", text)
+        self.assertIn("void the audit before it started", text,
+                      "the reason the filename reading is wrong is not recorded")
+
     def test_the_fixture_is_dense_with_tells(self):
         """It has to be, or the test below proves nothing."""
         per_pattern, _ = thresholds()
@@ -691,14 +704,36 @@ class TriggerPrecisionTest(unittest.TestCase):
         self.assertGreaterEqual(len(words), 6, words)
         self.assertIn("readme", words)
 
-    def test_no_must_not_prompt_carries_the_trigger_vocabulary(self):
-        """A negative example containing a genre from the description asks the
-        router to fire and not fire on the same words."""
-        for prompt in self.prompts("Must NOT fire:"):
-            for word in self.genre_words():
-                self.assertNotRegex(prompt.lower(), r"(?<![\w-])%s(?![\w-])" % word,
-                                    "must-NOT prompt %r contains the trigger word %r"
-                                    % (prompt, word))
+    def test_the_ambiguous_class_is_documented_and_resolved(self):
+        """The genres and the copy-editing exclusion overlap: "fix the typos in
+        the README" matches both halves of the description. The earlier version of
+        this test forbade any must-NOT prompt from carrying a genre word, which
+        structurally prevented the file from documenting that collision at all.
+
+        The rule is now stronger, not weaker. At most one must-NOT prompt may sit
+        in the overlap, and only when the file states which clause wins; the rest
+        must still be unambiguous. A precedence rule with no worked collision is
+        untested, and a collision with no precedence rule is a coin flip.
+        """
+        vocabulary = self.genre_words()
+        overlapping = [p for p in self.prompts("Must NOT fire:")
+                       if any(re.search(r"(?<![\w-])%s(?![\w-])" % w, p.lower())
+                              for w in vocabulary)]
+        self.assertLessEqual(len(overlapping), 1,
+                             "more than one must-NOT prompt sits in the overlap, so "
+                             "the negative set no longer shows the unambiguous cases: "
+                             "%r" % overlapping)
+        fires = section(self.body, "## When this fires")
+        self.assertIn("Precedence: the request decides, not the file", fires,
+                      "no precedence rule, so the two halves of the trigger tie")
+        if overlapping:
+            self.assertIn("copy-editing", flowed(fires),
+                          "the precedence rule does not say which clause wins")
+            self.assertIn("ask", flowed(fires),
+                          "no instruction for the case that stays unclear")
+        else:
+            self.fail("the must-NOT set no longer exercises the overlap, so the "
+                      "precedence rule above is untested")
 
     def test_the_must_fire_prompts_do_carry_it(self):
         vocabulary = self.genre_words()
@@ -855,14 +890,14 @@ class StructuralDensityTest(unittest.TestCase):
         """Either alone is wrong. A rate alone fires on a 200-word note with one
         antithesis; a count alone fires on a long document that is not dense."""
         floor, rate = self.numbers()
-        self.assertGreaterEqual(floor, 3, "a floor of %d is not a pile-up" % floor)
+        self.assertGreaterEqual(floor, 4, "a floor of %d is not a pile-up" % floor)
         self.assertGreaterEqual(rate, 1)
         self.assertIn("Both figures", flowed(self.section),
                       "the rule must say the two figures are joint, not either/or")
 
     def test_the_rate_is_justified_against_a_measurement(self):
         text = flowed(self.section)
-        for evidence in ("21,926 words", "0.05 per thousand"):
+        for evidence in ("20,099 editable words", "0.0 per thousand"):
             self.assertIn(evidence, text,
                           "the structural rate cites no measurement: missing %r"
                           % evidence)
@@ -870,11 +905,47 @@ class StructuralDensityTest(unittest.TestCase):
     def test_the_measured_human_baseline_sits_under_the_threshold(self):
         """The number is only defensible if the human corpus clears it."""
         _, rate = self.numbers()
-        measured = float(re.search(r"surviving instance: ([\d.]+) per thousand",
+        measured = float(re.search(r"surviving instances?: ([\d.]+) per thousand",
                                    flowed(self.section)).group(1))
         self.assertLess(measured, rate,
                         "the threshold %d is at or under the measured human rate "
                         "%.2f, so human prose would fire" % (rate, measured))
+
+    def test_the_threshold_stays_consistent_with_the_file_own_worked_verdict(self):
+        """Raising the rate to 9 survived every test: nothing asserted that a
+        threshold must still let anything through. The file states that one family
+        fires on a named document at a named rate, so a threshold above that rate
+        contradicts the file, and a floor above that count does too."""
+        floor, rate = self.numbers()
+        text = flowed(self.section)
+        surviving = int(re.search(r"of which (\d+) survive", text).group(1))
+        stated = float(re.search(r"survive: ([\d.]+) per thousand", text).group(1))
+        self.assertLessEqual(
+            rate, stated,
+            "the rate is %d per thousand but the file says a family fires on its "
+            "worked document at %.1f, so nothing would fire" % (rate, stated))
+        self.assertLessEqual(
+            floor, surviving,
+            "the floor is %d but the file's own worked verdict counts %d surviving"
+            % (floor, surviving))
+
+    def test_the_human_corpus_figures_are_internally_consistent(self):
+        """Inflating the corpus match count survived every test."""
+        text = flowed(self.section)
+        candidates = int(re.search(r"finds (\d+) candidate matches", text).group(1))
+        surviving = int(re.search(r"\*\*(\d+) surviving instances", text).group(1))
+        words = int(re.search(r"([\d,]+) editable words", text).group(1).replace(",", ""))
+        explained = int(re.search(r"(?:^|\D)(\w+) are instructional contrasts",
+                                  text).group(1).replace("Fifteen", "15"))
+        self.assertLessEqual(surviving, candidates)
+        self.assertEqual(candidates, explained + 1,
+                         "%d candidates but only %d are accounted for" %
+                         (candidates, explained))
+        self.assertEqual(
+            float(re.search(r"\*\*\d+ surviving instances: ([\d.]+) per thousand",
+                            text).group(1)),
+            round(1000.0 * surviving / words, 1),
+            "the stated human rate is not surviving instances over editable words")
 
     def test_the_shortlist_is_not_sold_as_a_detector(self):
         self.assertIn("shortlist", flowed(self.section).lower())
@@ -894,7 +965,30 @@ class CatalogueCurrencyTest(unittest.TestCase):
 
     def setUp(self):
         self.body = body(skill_text())
-        self.section = section(self.body, CURRENCY)
+        self.pointer = section(self.body, CURRENCY)
+        self.section = (SKILL_DIR / "sources" / "REFRESH.md").read_text()
+
+    def test_skill_md_still_points_at_the_moved_procedure(self):
+        """Moving it out must not lose it. The pointer carries the filename and
+        the reason it is not inline: it fires on a date, not on a publish."""
+        self.assertIn("sources/REFRESH.md", self.pointer)
+        self.assertIn("fails closed", flowed(self.pointer))
+
+    def test_the_pull_is_guarded_against_an_unreachable_source(self):
+        """Measured: `curl -s <unreachable> | jq -r ...` prints nothing and exits
+        0, and the empty list against the snapshot reports all 120 ids as removed
+        upstream. The guard is the difference between a stopped pass and an
+        emptied catalogue."""
+        text = flowed(self.section)
+        self.assertIn("curl -fsS", text, "the pull is not guarded")
+        self.assertIn("jq -e", text, "the payload shape is not checked")
+        self.assertIn("Stop and change nothing", text)
+        self.assertIn("0 ids pulled, 120 reported removed", text,
+                      "the failure this guards is not recorded")
+
+    def test_a_changed_payload_shape_stops_rather_than_improvises(self):
+        self.assertIn("If `.terms[].id` is gone", flowed(self.section))
+        self.assertIn("diff nothing on this pass", flowed(self.section))
 
     def banner(self):
         m = re.search(r"\*\*Catalogue reviewed %s\. Due for review %s\.\*\*"
@@ -957,8 +1051,8 @@ class CatalogueCurrencyTest(unittest.TestCase):
     def test_a_retired_pattern_is_archived_rather_than_dropped(self):
         """Repo constraint: nothing is ever destructively removed. A deleted row
         loses the record that the pattern was ever considered."""
-        self.assertIn("Fading", section(self.body, CURRENCY))
-        self.assertRegex(section(self.body, CURRENCY),
+        self.assertIn("Fading", self.section)
+        self.assertRegex(self.section,
                          r"(?s)Fading, not deleted.*%s" % self.ISO,
                          "a demoted pattern carries no date")
 
@@ -966,9 +1060,9 @@ class CatalogueCurrencyTest(unittest.TestCase):
         """The diff step is only runnable if the previous pull is on disk. A
         procedure that says `diff against the last pull` with no last pull is the
         same wish this section replaced."""
-        m = re.search(r"`(sources/claudisms-ids-\d{4}-\d{2}-\d{2}\.txt)`", self.section)
+        m = re.search(r"`(claudisms-ids-\d{4}-\d{2}-\d{2}\.txt)`", self.section)
         self.assertIsNotNone(m, "the diff step names no stored id list")
-        snapshot = SKILL_DIR / m.group(1)
+        snapshot = SKILL_DIR / "sources" / m.group(1)
         self.assertTrue(snapshot.exists(), "%s is named but absent" % m.group(1))
         ids = [l for l in snapshot.read_text().splitlines() if l.strip()]
         self.assertEqual(len(ids), len(set(ids)), "duplicate ids in the snapshot")
@@ -982,6 +1076,299 @@ class CatalogueCurrencyTest(unittest.TestCase):
     def test_the_source_that_was_already_here_is_still_credited(self):
         self.assertIn("https://claudisms.ai", self.section)
         self.assertIn("CC0", flowed(self.section))
+
+
+
+class MutationGuardTest(unittest.TestCase):
+    """Mutations that survived an earlier version of this suite.
+
+    Each test below corresponds to one edit that broke the skill and left all
+    tests green. They are grouped so the reason each exists stays attached to it.
+    """
+
+    # A fast-path row and the fuller row it summarises. Two of the four cannot be
+    # matched by substring, which is why the pairing is written down.
+    FAST_PATH_PROSE = {
+        "One-sentence paragraphs throughout": "four short declaratives in a row",
+        "A rhetorical question you then answer": "or a rhetorical question you then answer",
+        "A bolded lead-in on every bullet": "A bolded term plus a colon plus an explanation",
+        "A trailing engagement question": "or a question to the reader",
+    }
+
+    # Family -> a string that must be in its Before and must NOT be in its After.
+    # Swapping the pair was previously invisible: only inequality was asserted.
+    DIRECTION = {
+        "Negation-then-correction": ", not on guesswork",
+        "Comparative aphorism": "is worse than",
+        "Rule of three": "reliable, and",
+        "Sentence-final restatement": "which is the only way",
+        "Grand summary pivot": "comes down to one idea",
+        "Question as heading": "Why does any of this",
+        "Knowing aside": "(inevitably)",
+        "Self-certifying candour": "To be completely transparent",
+        "Repeated signature phrase": "quiet on the wire",
+        "Unsourced precision": "roughly",
+    }
+
+    HOSTS = {"claudisms.ai", "en.wikipedia.org", "hn.algolia.com"}
+
+    def setUp(self):
+        self.body = body(skill_text())
+        self.rows = catalogue_rows(self.body)
+
+    def lead(self, fix):
+        return re.match(r"[A-Za-z]+", fix).group(0)
+
+    def test_a_prose_fast_path_row_cannot_contradict_the_row_it_summarises(self):
+        """CrossTableConsistencyTest compares backticked terms only, so flipping
+        the disposition on a row written as prose was invisible. Nine rows in this
+        file carry no backticked term."""
+        by_pattern = {}
+        for pattern, fix in self.rows:
+            by_pattern.setdefault(pattern, self.lead(fix))
+        for summary, full in self.FAST_PATH_PROSE.items():
+            self.assertIn(summary, by_pattern,
+                          "the fast path no longer carries %r" % summary)
+            matches = [(p, self.lead(f)) for p, f in self.rows if full in p]
+            self.assertTrue(matches, "no catalogue row contains %r any more" % full)
+            for pattern, verb in matches:
+                self.assertEqual(
+                    by_pattern[summary], verb,
+                    "the fast path says %s for %r but the catalogue says %s for %r; "
+                    "a hurried reader never reaches the second one"
+                    % (by_pattern[summary], summary, verb, pattern))
+
+    def test_no_catalogue_table_can_be_deleted_unnoticed(self):
+        """A floor of 40 rows against 60 shipped means a whole table could go."""
+        subsections = re.findall(r"^### (.+)$", self.body, re.M)
+        tabled = [h for h in subsections
+                  if catalogue_rows(section(self.body, "### " + h))]
+        self.assertGreaterEqual(len(tabled), 8,
+                                "only %d catalogue tables left: %r" % (len(tabled), tabled))
+        for heading in tabled:
+            rows = catalogue_rows(section(self.body, "### " + heading))
+            self.assertGreaterEqual(len(rows), 3,
+                                    "table %r is down to %d rows" % (heading, len(rows)))
+
+    def test_a_familys_before_and_after_cannot_be_swapped(self):
+        families = dict(zip(*[iter(re.split(r"^### (.+)$",
+                                            section(self.body, STRUCTURAL),
+                                            flags=re.M)[1:])] * 2))
+        for name, marker in self.DIRECTION.items():
+            self.assertIn(name, families, "family %r is gone" % name)
+            block = families[name]
+            before = re.search(r"\*\*Before\.\*\*(.+?)\n\*\*After", block, re.S).group(1)
+            after = re.search(r"\*\*After\.\*\*(.+)", block, re.S).group(1)
+            self.assertIn(marker, flowed(before),
+                          "%r no longer demonstrates the construction it flags" % name)
+            self.assertNotIn(marker, flowed(after),
+                             "%r shows the construction in its AFTER, so the pair is "
+                             "swapped or the repair does not repair" % name)
+
+    def test_the_stated_measurements_are_reproducible_from_this_repository(self):
+        """Changing `16 shortlist matches` to 1600 survived every test. The README
+        figures are recomputed here from the shipped script; the human-corpus
+        figures cannot be, and the file has to say so rather than imply otherwise."""
+        text = flowed(section(self.body, STRUCTURAL))
+        readme = REPO / "README.md"
+        if not readme.is_file():
+            self.skipTest("no README.md to measure")
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, str(SKILL_DIR / "shortlist.py"), str(readme)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True).stdout
+        words = int(re.search(r"(\d+) editable words", out).group(1))
+        matches = int(re.search(r"(\d+) shortlist matches", out).group(1))
+        stated_words = int(re.search(r"has (\d+) editable words", text).group(1))
+        stated_matches = int(re.search(r"the same (\d+) candidate matches",
+                                       text).group(1))
+        self.assertEqual(stated_words, words,
+                         "the file states %d editable words for the README; the "
+                         "shipped script says %d" % (stated_words, words))
+        self.assertEqual(stated_matches, matches,
+                         "the file states %d candidate matches for the README; the "
+                         "shipped script says %d" % (stated_matches, matches))
+        surviving = int(re.search(r"of which (\d+) survive", text).group(1))
+        words = stated_words
+        self.assertLessEqual(surviving, matches)
+        self.assertEqual(
+            float(re.search(r"survive: ([\d.]+) per thousand", text).group(1)),
+            round(1000.0 * surviving / words, 1),
+            "the stated README rate is not surviving instances over editable words")
+        self.assertIn("not reproducible", flowed(self.body),
+                      "figures from documents outside this repository are presented "
+                      "as if a reader could check them")
+
+    def test_every_url_points_at_a_source_this_file_actually_names(self):
+        """Repointing the pull at example.invalid survived every test."""
+        text = skill_text() + (SKILL_DIR / "sources" / "REFRESH.md").read_text()
+        hosts = set(re.findall(r"https?://([^/\s`\)\]]+)", text))
+        self.assertTrue(hosts, "no URLs at all")
+        self.assertEqual(hosts - self.HOSTS, set(),
+                         "unrecognised source hosts: %s" % (hosts - self.HOSTS))
+
+    def test_when_this_fires_still_says_when_it_fires(self):
+        """Replacing the section with `Use judgement.` survived every test."""
+        fires = flowed(section(self.body, "## When this fires"))
+        for clause in ("chat replies", "code comments", "scratch notes",
+                       "one-line commit subjects", "copy-editing",
+                       "Precedence: the request decides, not the file"):
+            self.assertIn(clause, fires, "`When this fires` lost %r" % clause)
+        self.assertGreater(len(fires.split()), 120,
+                           "`When this fires` has been reduced to a slogan")
+        self.assertRegex(fires, r"Two edge calls",
+                         "the worked edge cases are gone, so only the slogan is left")
+
+
+
+class ProcedureTest(unittest.TestCase):
+    """Both cold reviewers reported the same gap: no step 1.
+
+    A catalogue plus scattered rules leaves the sequence to be invented, and two
+    sessions invent two. The ordering here is load bearing in one specific way:
+    the exemption is applied to each match BEFORE anything is counted.
+    """
+
+    HEADING = "## The pass, in order"
+
+    def setUp(self):
+        self.body = body(skill_text())
+        self.section = section(self.body, self.HEADING)
+
+    def steps(self):
+        return re.findall(r"^(\d+)\. \*\*(.+?)\*\*", self.section, re.M)
+
+    def test_the_procedure_is_numbered_and_ordered(self):
+        numbers = [int(n) for n, _ in self.steps()]
+        self.assertGreaterEqual(len(numbers), 6, "only %d steps" % len(numbers))
+        self.assertEqual(numbers, list(range(1, len(numbers) + 1)),
+                         "the steps are not consecutively numbered: %r" % numbers)
+
+    def test_it_runs_before_the_catalogue(self):
+        procedure, _ = section_span(self.body, self.HEADING)
+        self.assertLess(procedure, self.body.find("\n|-|-|\n"),
+                        "the sequence sits after the rows it sequences")
+
+    def test_the_exemption_is_applied_before_anything_is_counted(self):
+        titles = [t for _, t in self.steps()]
+        joined = " | ".join(titles).lower()
+        exempt = next(i for i, t in enumerate(titles) if "exemption" in t.lower())
+        count = next(i for i, t in enumerate(titles) if "what survives" in t.lower())
+        self.assertLess(exempt, count,
+                        "counting is ordered before the exemption: %s" % joined)
+
+    def test_it_states_an_output_contract(self):
+        text = flowed(self.section)
+        self.assertIn("Output contract", text)
+        for element in ("editable word count", "count and its rate",
+                        "before and an\nafter".replace("\n", " "),
+                        "left alone and why"):
+            self.assertIn(element, text, "the output contract omits %r" % element)
+
+    def test_it_says_whether_the_session_edits_or_proposes(self):
+        text = flowed(self.section)
+        self.assertIn("Edit in place", text)
+        self.assertIn("ask before", text,
+                      "no instruction for a request that says neither")
+
+
+class WorkedExampleProvenanceTest(unittest.TestCase):
+    """The families were validated against one README, and an earlier version of
+    this file took its worked examples out of that same README. A skill whose
+    examples are the answers to its own test case demonstrates nothing about a
+    document it has not seen. This keeps them apart mechanically.
+    """
+
+    def setUp(self):
+        self.section = section(body(skill_text()), STRUCTURAL)
+
+    def examples(self):
+        out = []
+        for label in ("Before", "After"):
+            for m in re.finditer(r"\*\*%s\.\*\*\s*`([^`]+)`" % label, self.section):
+                out.append(" ".join(m.group(1).split()))
+        return out
+
+    def test_the_examples_parsed(self):
+        self.assertGreaterEqual(len(self.examples()), 20,
+                                "only %d worked examples" % len(self.examples()))
+
+    def test_no_worked_example_comes_from_the_document_the_skill_was_tested_on(self):
+        readme = REPO / "README.md"
+        if not readme.is_file():
+            self.skipTest("no README.md to compare against")
+        prose = " ".join(readme.read_text().split())
+        for example in self.examples():
+            for fragment in [example, example.rstrip(".")]:
+                self.assertNotIn(fragment, prose,
+                                 "worked example %r is lifted verbatim from the "
+                                 "document this skill was validated against" % example)
+
+
+class ShortlistScriptTest(unittest.TestCase):
+    """The script the counting rules delegate to. Real files, real subprocess."""
+
+    SCRIPT = SKILL_DIR / "shortlist.py"
+
+    def run_on(self, text, *args):
+        import subprocess, tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write(text)
+            path = fh.name
+        try:
+            return subprocess.run([sys.executable, str(self.SCRIPT), path] + list(args),
+                                  capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, check=True).stdout
+        finally:
+            os.unlink(path)
+
+    def test_the_script_ships(self):
+        self.assertTrue(self.SCRIPT.is_file(), "shortlist.py is gone")
+
+    def test_it_finds_a_match_that_wraps_across_a_line_break(self):
+        """The documented reason it exists. This repository hard wraps, so the
+        line-based grep in an earlier version could not see this at all."""
+        doc = "A skill that got used again is worth\nmore than a proposal.\n"
+        out = self.run_on(doc)
+        self.assertIn("comparative", out,
+                      "the wrapped match was missed, which is the bug this "
+                      "script exists to fix:\n%s" % out)
+        self.assertNotIn("is worth more than", doc,
+                         "precondition: the phrase must be split in the source")
+
+    def test_a_candidate_never_matches_across_a_paragraph_break(self):
+        """The other half of what the unwrap buys. Matching with `\\s+` over raw
+        text would join two unrelated paragraphs into one false candidate."""
+        doc = "the run ends here, not\n\nstarting a new paragraph.\n"
+        out = self.run_on(doc)
+        self.assertIn("0 shortlist matches", out,
+                      "a match was reported across a blank line:\n%s" % out)
+        joined = doc.replace("\n\n", " ")
+        self.assertIn("1 shortlist matches", self.run_on(joined),
+                      "precondition: the same words in one paragraph do match")
+
+    def test_it_reports_the_line_the_match_starts_on(self):
+        doc = "filler\n\nsecond para\n\nWorkers run on depth, not on guesswork.\n"
+        self.assertIn("L5", self.run_on(doc))
+
+    def test_markup_is_excluded_from_the_denominator(self):
+        prose = "one two three four five six seven eight nine ten\n"
+        fenced = prose + "\n```\n" + " ".join(["code"] * 50) + "\n```\n"
+        bare = int(re.search(r"(\d+) editable", self.run_on(prose)).group(1))
+        with_code = int(re.search(r"(\d+) editable", self.run_on(fenced)).group(1))
+        self.assertEqual(bare, with_code,
+                         "a fenced block moved the denominator from %d to %d"
+                         % (bare, with_code))
+
+    def test_a_table_row_and_a_url_are_excluded(self):
+        prose = "one two three four five\n"
+        noisy = prose + "|`a`|b c d e f g h|\nhttps://example.com/a/b/c\n"
+        self.assertEqual(int(re.search(r"(\d+) editable", self.run_on(prose)).group(1)),
+                         int(re.search(r"(\d+) editable", self.run_on(noisy)).group(1)))
+
+    def test_it_never_calls_a_match_a_finding(self):
+        out = self.run_on("Workers run on depth, not on guesswork.\n")
+        self.assertIn("candidates to read, not findings", out)
 
 
 

@@ -1,15 +1,43 @@
 ---
 name: ai-tell-audit
-description: "Use when about to publish durable prose other people will read (a README, a GitHub issue or comment, a PR description, release notes, a changelog, a docs page, an announcement, a commit message body of several lines) to find where known Claude writing tells pile up and either rewrite them in plain words, delete them, or keep them, but NOT for chat replies, NOT for code comments, NOT for internal scratch notes, and NOT for ordinary grammar or house-style copy-editing."
+description: "Use when about to publish durable prose other people will read (a README, a GitHub issue or comment, a PR description, release notes, a changelog, a docs page, an announcement, a commit message body of several lines) AND the request is about how the prose reads. A request to fix grammar, typos, spelling or house style in one of those genres is copy-editing and does NOT fire; the request decides, not the file. NOT for chat replies, NOT for code comments, NOT for scratch notes."
 ---
 
 # AI Tell Audit
 
 **Catalogue reviewed 2026-08-25. Due for review 2027-02-25.** Past that date the rows
-below are unchecked against three sources that all move. Run the refresh at the foot of
-this file first; the check against the main source is a single command.
+below are unchecked against three sources that all move. Run `sources/REFRESH.md` first;
+its guarded check against the main source is a single command.
 
 A find-and-fix pass over prose you are about to publish. The patterns are already known and published, so there is nothing to detect and no score to compute.
+
+## The pass, in order
+
+Two sessions given only a catalogue invent two different sequences. This is the sequence.
+
+1. **Decide from the request, not the file.** The genres are in the description; the
+   precedence rule is under `When this fires`. If the request is copy-editing, stop here.
+2. **Mark the skip regions.** Rule zero, below, before anything is counted or read.
+3. **Count the denominator.** `python3 shortlist.py <file>` prints the editable word
+   count. Every rate in this file divides by that number.
+4. **Build the reading list.** The same command prints the greppable shortlist with
+   paragraphs unwrapped. The other eight families have no shortlist, so read each
+   paragraph once, in order, asking that family's recognition test of it. The list is
+   complete when every paragraph has been read once: there is no search to exhaust, and
+   a family with no candidate is recorded as zero rather than as unchecked.
+5. **Apply the exemption to each match, one at a time.** A match is a candidate, never a
+   finding. In the human corpus none of the sixteen was a finding.
+6. **Count what survives**, three ways: per pattern, per family, and document-wide.
+7. **Apply the thresholds.** Only a pattern or family at or over its own threshold
+   produces an edit. Nothing else is edited, however the document reads.
+8. **Edit or report.** Edit in place when the user handed you the document to publish;
+   return a list when they asked what you found. If the request says neither, ask before
+   writing.
+
+**Output contract.** Whatever the mode, the reply carries: the editable word count; every
+pattern and family that fired, with its count and its rate; every edit as a before and an
+after; and one line for what was left alone and why. A pass that fired nothing says so
+and changes nothing, which is a result and not a failure.
 
 ## Literal and terminological use is exempt, everywhere
 
@@ -34,23 +62,41 @@ no one defends is the pile-up. A reconciling comment from a discussion board: "M
 these are valid and useful framing devices... it should, and has been, used in moderation,
 which LLMs absolutely do not do."
 
-Apply the exemption first, then count. **The denominator is the prose you could edit**:
-skip code fences, table cells, URLs, frontmatter, and everything rule zero skips.
-Counting markup moves a rate by several per cent, which is enough to cross a threshold. **A surviving instance is non-literal, non-quoted,
+Apply the exemption first, then count. **The denominator is `python3 shortlist.py <file>`**,
+not an estimate: counted by eye, two sessions differ by tens of per cent, and the rate is
+what decides. It excludes code fences, indented code, inline code, URLs, frontmatter,
+table rows and heading underlines. Headings are prose: counted, and editable. Excluded
+regions are excluded from **editing** as well as from counting, except table cells, which
+are not counted (their register is not prose) but may be edited once a pattern has fired
+somewhere else in the document. **A surviving instance is non-literal, non-quoted,
 and not a term of art.** Edit a pattern when it reaches **3 or more surviving instances in
 one document**, however long: repeating one metaphor three times is the tic, and a rate
-would hide it in a long file. Edit the document as a whole when surviving instances
-**across all patterns reach 6 per thousand words**. Under both figures, fix only what is
-plainly wrong.
+would hide it in a long file. The document as a whole is a finding when surviving
+instances **across all patterns reach 6 per thousand words**, even when no single pattern
+does: the pile-up is spread rather than concentrated. **The narrower rule always wins.**
+A spread finding never licenses editing an instance whose own pattern or family is under
+threshold; what it licenses is the note. Say the count, the rate, and the three heaviest
+families, and hand it back. Under every figure, fix only what is plainly wrong.
 
-Measured: four human documents totalling 19k words produced 33 raw matches and **0**
-surviving, so none of them fires. A 3715-word machine-register file carries `load-bearing`
-3 times, which fires on the first figure. A 264-word PR body at 76 per thousand fires on
-the second.
+Measured, on one pinned pull (2026-08-25) of four human documents at 21,926 words
+raw and **20,099 editable**, which is the denominator every rate in this file uses:
+Linux `submitting-patches.rst` at 83f71fbc66fb, git `CodingGuidelines` at 570e1e0d0ff6,
+curl `CONTRIBUTE.md` at 7e1001bcd699, and sqlite's "How SQLite Is Tested", which carries
+no revision id. 271 raw matches, **0** surviving, so none of them fires. 227 of the 271
+are `---` under an RST heading, 11 are `harness`, and both are exempt before any count.
+The closest call is `useful` five times in one Linux document, over the per-pattern
+figure of 3: every one is scoped ("useful at this step"), which that row's own keep clause
+covers. That is what applying the exemption first buys.
 
-The document-wide figure counts every surviving instance, string and structural alike.
-The per-pattern figure of 3 counts strings only, because a row is a string. The families
-below have no string to count and carry their own rule, stated with them.
+Two other figures in this file, a 3715-word machine-register file carrying `load-bearing`
+3 times and a 264-word PR body at 76 per thousand, come from documents that are not in
+this repository and are **not reproducible from it**. They are recorded as history, not as
+evidence.
+
+The document-wide figure counts every surviving instance, row and family alike. The
+per-pattern figure of 3 governs a **row**, whether the row gives a string or describes a
+construction. The **headed families** below carry their own two figures. No construction
+is governed by both: a family has no row, and a row has no family.
 
 ## Never a verdict on authorship
 
@@ -64,17 +110,32 @@ moderation decision.
 
 A document that *names* one of these patterns is not committing it. Skip, without
 exception: quoted material, blockquotes, log output, error strings; banned-word lists,
-style guides, a contribution guide under any of its spellings (`CONTRIBUTING.md`,
-`CONTRIBUTE.md`), linter configs, this file; examples labelled as bad,
-before/after pairs, test fixtures; code, code fences, identifiers (`surface()` is a
-function name). The highest-hit file in the audit behind this skill was a `CONTRIBUTING.md`
-with six hits, all inside its own list of forbidden words; editing it would have deleted
-the guidance. If the text is mentioned rather than used, leave it alone.
+style guides, linter configs, this file; examples labelled as bad, before/after pairs,
+test fixtures; code, code fences, identifiers (`surface()` is a function name).
+
+**Skip the region, not the file.** A contribution guide under any of its spellings
+(`CONTRIBUTING.md`, `CONTRIBUTE.md`, `CodingGuidelines`) is skipped **where it lists
+forbidden words or quotes a bad example**, and audited in its own prose like anything
+else. Reading the filename as a whole-file exemption would void the audit before it
+started, and would exempt exactly the documents this skill is most often pointed at. The
+highest-hit file in the audit behind this skill was a `CONTRIBUTING.md` with six hits,
+all inside its own list of forbidden words; editing those would have deleted the
+guidance, and editing its surrounding prose would have been an ordinary audit. If the
+text is mentioned rather than used, leave it alone.
 
 ## When this fires
 
 The condition is observable: am I about to publish prose for other people to read? It does
-not depend on judging whether the draft reads badly. Not for chat replies, code comments,
+not depend on judging whether the draft reads badly.
+
+**Precedence: the request decides, not the file.** A genre from the description is
+necessary and never sufficient, because the two halves of the trigger overlap on purpose.
+"Fix the typos in the README before I merge" gives a genre and asks for correctness, so
+the copy-editing clause wins and this does not fire. "The README reads like a machine
+wrote it" gives the same genre and asks about how it reads, so it fires. A drafted
+announcement fires; the chat message announcing it does not, because the artifact that
+gets published is the draft. When both clauses match and the request is genuinely
+unclear, ask. Never edit somebody's prose on a guess about what they meant. Not for chat replies, code comments,
 scratch notes, one-line commit subjects, or grammar and house-style copy-editing. Two edge
 calls: an internal team wiki page is durable prose other people read, so it fires; "this
 section sounds stilted, tighten it" fires only when it names a genre above, since bare
@@ -96,6 +157,9 @@ clause, a colon, and one dash kept.
 ## Fast path
 
 For a GitHub comment, a PR description, or anything short. Density still applies.
+The headed structural families are deliberately not summarised here: they are counted by
+a different rule, and a row that repeated one would give a hurried reader a second,
+looser threshold for the same construction.
 
 | Tell | Fix |
 |-|-|
@@ -116,9 +180,6 @@ For a GitHub comment, a PR description, or anything short. Density still applies
 | A trailing engagement question | Delete |
 | `Most people I've talked to`, `everyone I've worked with` | Delete the sentence. You cannot name and link people you did not talk to |
 | `Some would say`, `critics argue`, any unnamed opposition | Rewrite: name them and link, or delete the sentence |
-| A contrast whose negated half is a position nobody took | Rewrite: keep the half that carries the claim, drop the other |
-| Three items, or three parallel sentences, where the subject has two | Rewrite: give the count the subject has |
-| A trailing clause that re-says the main clause | Delete the clause |
 
 ### Placement and borrowed-domain metaphors
 | Pattern | Disposition |
@@ -204,140 +265,147 @@ Weightier than any word row, because a structure repeats where a word does not.
 
 ## Structural families: what no word search catches
 
-Every row above is a word or a fixed phrase. The families here are properties of how a
-sentence or a paragraph is built, so no table of strings reaches them, and a pass that
-runs only the tables above will clear a document that is thick with them. That has
-happened: the lexical tables cleared a 3046-word README, and two readers given only the
-principle and no list then reported forty constructions in the same file.
+Every row above is a row: a string, or one named construction, counted at 3 per document.
+The families here are properties of how a sentence or a paragraph is built. No table of
+strings reaches them, and a pass that runs only the tables above will clear a document
+that is thick with them. That happened: the lexical tables cleared a 2356-word README,
+and two readers given only the principle and no exemptions reported forty constructions
+in the same file.
 
-**Counting them.** A family fires at **4 or more surviving instances of one family in
-the document** and **2 or more per thousand words**. Both figures, so a 300-word note
-with one contrast does not fire, and a long document cannot bury a tic in its length.
-The exemption and rule zero run first here, as everywhere. A row in any table above
-takes the per-pattern figure of 3, including the rows in the structural-tics table: a row
-is a string, wherever it sits. Only the headed families below take the two figures here.
+**Counting them.** A family fires at **4 or more surviving instances of one family in the
+document** and **1 or more per thousand words**. Both figures. They cross at 4000 words,
+so neither is idle: below that the floor of 4 binds, above it the rate does. The
+exemption and rule zero run first here, as everywhere, and no construction is governed by
+both a row and a family.
 
-**Where the 2 comes from.** Four human technical documents totalling 21,926 words
-(Linux `submitting-patches.rst`, git `CodingGuidelines`, curl `CONTRIBUTE.md`, sqlite's
-"How SQLite Is Tested") produced 16 shortlist matches for the first family and, read one
-by one, 1 surviving instance: 0.05 per thousand words. The README that the lexical
-tables cleared produced 15 matches and 10 surviving, 3.3 per thousand. A threshold of 2
-sits forty times above the measured human rate and below the document that failed.
-Fifteen of the sixteen human matches were instructional contrasts of the form
-`octal escape sequences, not hexadecimal`, which is why the first recognition test asks
-what the negated half denotes instead of counting a word.
+**A worked example is not a licence.** The before and after under each family show what
+the repair looks like. They are not edits this file endorses making on a single instance.
+Nothing is edited until its family reaches both figures.
 
-**A shortlist is not a detector.** Grep builds a reading list for the first family only:
-`, not `, ` rather than `, `not only`, `isn't about`. Every match then has to be read,
-because in the human corpus fifteen of sixteen were correct writing. The other families
-have no shortlist at all; read the paragraph.
+**Where the figures come from.** Four human technical documents, pinned at the revisions
+in the density section, come to 20,099 editable words. `shortlist.py` finds 16 candidate
+matches in them. Read one by one, **0 surviving instances: 0.0 per thousand words**.
+Fifteen are instructional contrasts of the form `octal escape sequences, not hexadecimal`,
+where both halves are things a reader could type; the sixteenth is a grep artefact. The
+README those tables cleared has 2356 editable words and the same 16 candidate matches,
+of which 4 survive: 1.7 per thousand. So negation-then-correction fires there and
+comparative aphorism does not, standing at 3 against a floor of 4. The document-wide
+figure in the density section fires as well, which is what a spread pile-up looks like.
+
+**A shortlist is not a detector.** `python3 shortlist.py <file>` prints the
+editable word count and the candidate matches for the two greppable families, with
+paragraphs unwrapped first. Unwrapping is load bearing in two directions: this
+repository hard wraps at about 90 characters, so `is worth` and `more than a proposal`
+fall on separate lines where no line-based grep sees them, while a phrase straddling a
+blank line is two paragraphs and must never match. The script joins the first and keeps
+the second apart, and reports each match at the line it starts on. Every match still has to be
+read, because in the human corpus none of the 16 was a finding. The other eight families
+have no shortlist at all: read the paragraphs.
 
 ### Negation-then-correction
 
-**Recognition test.** Delete the negated half. Does a claim disappear, or only a cadence?
-The contrast survives when the negated half denotes something a reader could have taken
-to be the case, or something the document considers elsewhere. It fires when the negated
-half is a position nobody took and the positive half again in inverted words.
+**Recognition test.** Look at the negated half on its own. Can you point at it? It
+survives when the negated half is something named elsewhere in the document, or something a
+reader could actually do or type. It fires when the negated half exists only to be
+rejected: an abstraction that appears nowhere else (`a hunch`, `noise`, `a wish`,
+`guesswork`), which leaves the positive half saying itself twice.
 **Disposition.** Rewrite: keep the half that carries the claim and drop the other. Keep
-the pair when the two halves denote different concrete things, which is the ordinary
-case in reference prose.
-**Before.** `Each one is here on evidence that the failure is common, not on a hunch.`
-**After.** `Each one is here on evidence that the failure is common.`
+the pair when both halves denote something concrete, which is the ordinary case in
+reference prose and was 15 of 16 in the human corpus.
+**Before.** `Workers are scheduled on queue depth, not on guesswork.`
+**After.** `Workers are scheduled on queue depth.`
 
 ### Comparative aphorism
 
-**Recognition test.** The sentence ranks two things (`worse than`, `worth more than`,
-`beats`) or asserts an equivalence (`A that does not look like B looks like C`). Has the
-document measured the two sides? If no measurement, example, or consequence follows
-within a sentence or two, the ranking is standing in for the argument.
+**Recognition test.** The sentence ranks two things (`is worse than`, `is worth more
+than`) or asserts an equivalence. Has the document measured the two sides, or shown one?
+If no measurement, example, or consequence follows within a sentence or two, the ranking
+is standing in for the argument the reader came for.
 **Disposition.** Rewrite: give the consequence that makes one side worse, or delete the
-sentence and let the example after it carry the point.
-**Before.** `Two skills racing for one trigger is worse than one skill.`
-**After.** `When two skills match one trigger, the router loads whichever it reaches
-first, so the newer one may never fire.`
+sentence and let the example after it do the ranking.
+**Before.** `A queue that silently drops jobs is worse than a queue that refuses them.`
+**After.** `A dropped job leaves no record, so the caller waits forever; a refused job
+returns an error the caller can handle.`
 
 ### Rule of three
 
 **Recognition test.** Count the items in each list and the parallel sentences in each
-paragraph. Is three the count the subject has, or the count the sentence wanted? Ask
-whether a fourth item was dropped or a second was padded up. Three consecutive sentences
-opening on the same subject are the same move at paragraph scale.
+paragraph. Is three the count the subject has, or the count the sentence wanted? Was a
+fourth dropped, or a second padded up? Three consecutive sentences opening on the same
+subject are the same move at paragraph scale.
 **Disposition.** Rewrite: give the count the subject has, and break one of the three
-parallel sentences so the rhythm stops.
-**Before.** `a debugging sequence, a deploy-and-verify loop, or a non-obvious API dance`
-**After.** `a debugging sequence or a deploy-and-verify loop`
+parallel sentences so the cadence stops.
+**Before.** `The scheduler is fast, reliable, and easy to reason about.`
+**After.** `The scheduler dispatches in under a millisecond, with one queue per priority.`
 
 ### Sentence-final restatement
 
 **Recognition test.** Cover everything after the final comma or dash. Does the sentence
-still make its claim? A trailing `which is the only way that ...` or `so that ...` clause
-that re-says the main clause in other words has added nothing; one that adds a condition
-or a cause has.
+still make its claim? A trailing clause that re-says the main clause in other words has
+added nothing. One that adds a condition or a cause has, so it stays.
 **Disposition.** Delete the trailing clause. Rewrite instead when it carries a claim the
 main clause does not.
-**Before.** `Claims were checked against the filesystem, which is the only way that
-failure is visible.`
-**After.** `Claims were checked against the filesystem.`
+**Before.** `The broker acknowledges only after the write commits, which is the only way
+durability is guaranteed.`
+**After.** `The broker acknowledges only after the write commits.`
 
 ### Grand summary pivot
 
-**Recognition test.** Does a sentence announce one unifying idea before giving it
-(`All of it serves one principle:`, `It comes down to this:`)? Delete the announcement
-and state the idea straight. What was lost?
+**Recognition test.** Does a sentence announce one unifying idea before giving it? Delete
+the announcement and state the idea straight. What was lost?
 **Disposition.** Delete the announcement and keep the idea as the sentence.
-**Before.** `All of it serves one principle: a skill has to earn its trigger.`
-**After.** `A skill has to earn its trigger.`
+**Before.** `All of it comes down to one idea: every job must be safe to run twice.`
+**After.** `Every job must be safe to run twice.`
 
 ### Question as heading
 
-**Recognition test.** Is any heading a question the section then answers? The catalogue
-already rewrites a rhetorical question inside a paragraph; a heading is the same move
-with more weight, and a contents list built from them reads as an interview.
+**Recognition test.** Is any heading a question the section then answers? A rhetorical
+question inside a paragraph stays a row above, counted at 3; this family is headings only,
+because a contents list built from questions reads as an interview and the two are not
+the same construction.
 **Disposition.** Rewrite the heading as the answer it gives.
-**Before.** `Does any of this actually pay off?`
-**After.** `What the ledger showed after four weeks`
+**Before.** `Why does any of this matter for throughput?`
+**After.** `What queue depth does to throughput`
 
 ### Knowing aside
 
 **Recognition test.** A parenthetical or an adverb that comments on the sentence instead
-of adding to it (`(obligingly)`, `(predictably)`, `quietly`). Remove it: is any fact
-gone? If only a shared wink is gone, the narrator had stepped into frame.
+of adding to it. Remove it: is any fact gone? If only a shared wink is gone, the narrator
+had stepped into frame.
 **Disposition.** Delete the aside, or rewrite it into the claim it hints at.
-**Before.** `any agent will (obligingly) rubber-stamp the deletion`
-**After.** `every agent asked to confirm the deletion confirmed it, in 9 of 9 runs`
+**Before.** `The default worker count will (inevitably) be wrong for your workload.`
+**After.** `The default worker count is 4, which is too low above 200 jobs a second.`
 
 ### Self-certifying candour
 
-**Recognition test.** Does the text label its own candour (`two honest caveats`,
-`to be fair`, `abandon it honestly`)? Strip the label. Has anything changed but the
-badge? A badge on one passage implies the surrounding text was not candid.
+**Recognition test.** Does the text label its own candour? Strip the label. Has anything
+changed but the badge? A badge on one passage implies the surrounding text was not candid,
+which is a claim the author did not mean to make.
 **Disposition.** Delete the label and keep the caveat.
-**Before.** `Two honest caveats, because the sample is small.`
-**After.** `Two caveats. The sample is nine runs.`
+**Before.** `To be completely transparent, the throughput number came from a single run.`
+**After.** `The throughput number came from a single run.`
 
 ### Repeated signature phrase
 
-**Recognition test.** Does an unusual phrase appear more than once in one document
-(`six weeks later`, `the second occurrence`)? A phrase a reader would quote back as
-characteristic is a signature; ordinary terms are not. Search the draft for its own
-vivid phrases. Each occurrence after the first counts as one instance, so a phrase used
-twice is one and seven phrases used twice are seven.
+**Recognition test.** Does an unusual phrase appear more than once in one document? A
+phrase a reader would quote back as characteristic is a signature; ordinary terms are not.
+Search the draft for its own vivid phrases. Each occurrence after the first counts as one
+instance, so a phrase used twice is one and seven phrases used twice are seven.
 **Disposition.** Rewrite the second occurrence in plain words, or delete it.
-**Before.** `fails six weeks later for everybody else ... a skill you wrote six weeks
-ago`
-**After.** `fails six weeks later for everybody else ... a skill you wrote in March`
+**Before.** `jobs go quiet on the wire ... six paragraphs later, the same jobs going quiet
+on the wire`
+**After.** `jobs stop acknowledging ... six paragraphs later, the same jobs time out`
 
 ### Unsourced precision
 
-**Recognition test.** Take every number in the draft. Where was it measured, and does
-the document say? `about 120 other skills were loaded` and `1 finding and 4`
-are numbers with no instrument behind them. A number with a stated method or a linked
-run is fine; a number with `about` in front of it and nothing behind it is decoration.
-**Disposition.** Rewrite: give the method or the run that produced the number, or drop
-the number and make the claim without it.
-**Before.** `about 120 other skills were loaded in both arms`
-**After.** `both arms ran the same skill install; the list is in the transcript linked
-above`
+**Recognition test.** Take every number in the draft. Where was it measured, and does the
+document say? A number with a stated method or a linked run is fine; a number with
+`roughly` in front of it and nothing behind it is decoration.
+**Disposition.** Rewrite: give the method or the run that produced the number, or drop the
+number and make the claim without it.
+**Before.** `roughly 40% faster than the previous scheduler`
+**After.** `12,000 jobs a second against 8,500, from bench/throughput.sh on one 8-core
+machine`
 
 ## Keep by default
 
@@ -361,12 +429,14 @@ most frequent tell by a wide margin; `quietly` twice ("quietly assumes context",
 turns a read-only preparation"); `reaching for` twice, `the tell` once, `worth [X]` three
 times. `CONTRIBUTING.md` scored highest at 6 hits, all inside its own banned-word list.
 
-A later pass found the opposite failure. The lexical tables alone cleared a 3046-word
-README; two readers, each given the principle and no list of exclusions, reported forty
-constructions in it, ten of them negation-then-correction and four comparative
-aphorisms, the rest spread across the other families above. A catalogue of strings
-cannot reach a property of sentence construction, which is what the structural section
-exists for.
+A later pass found the opposite failure, and it is the reason for the structural section.
+The lexical tables alone cleared a README of 2356 editable words. Two readers, each given
+the principle and no list of exclusions, reported forty constructions in it. Applying the
+exemption, rule zero, and the recognition tests to those forty leaves one family over
+threshold and the document-wide figure over threshold, which is a smaller finding than
+forty and the correct one: unprimed readers over-flag, and the exemption architecture
+exists to stop the skill doing the same. A catalogue of strings still cannot reach a
+property of sentence construction.
 
 Four human regression documents, all damaged by earlier versions: Linux
 `submitting-patches.rst`, git `CodingGuidelines`, curl `CONTRIBUTE.md`, sqlite's "How
@@ -384,70 +454,17 @@ Must fire:
 
 Must NOT fire:
 
-1. "Fix the grammar and comma splices in this post." Ordinary copy-editing. Just edit it.
+1. "Fix the typos and comma splices in the README before I merge." Gives a genre, asks
+   for correctness: the precedence rule sends it to ordinary copy-editing.
 2. "Add explanatory comments to this parser." Code comments are out of scope.
 3. "Summarise what you found in the logs." A chat reply, not a published document.
 
 ## How to refresh the catalogue
 
-Three sources feed this file and all three move. What each said at the last pull is
-recorded here, so the next reader can tell whether anything has changed without reading
-any of them.
+The procedure moved to `sources/REFRESH.md`, with the source table, the guarded pull, the
+120-id diff, and the rules for a pattern that is newly common or fading. It fires on a
+date, not on "about to publish", so keeping it there keeps it out of every audit.
 
-| Source | Pulled | Version stamp at pull |
-|-|-|-|
-| `https://claudisms.ai`, a CC0 "living banlist" | 2026-08-25 | `updated` 2026-08-08, `count` 120 |
-| Wikipedia, "Signs of AI writing" | 2026-08-25 | revision 1371235958 |
-| Discussion boards, searched through `hn.algolia.com` | 2026-08-25 | no stamp; read for how a pattern is defended, not for new rows |
-
-**The check.** Run `curl -s https://claudisms.ai/claudisms.json | jq -r '.updated, .count'`.
-If it still prints `2026-08-08` and `120`, that source has not moved: write a new pair of
-dates into the banner at the top of this file and stop. The whole refresh costs a second
-when nothing has changed, which is what keeps six months usable as an
-interval. Six months is a convention, not a measurement; the command above is the actual
-trigger and can be run any day.
-
-**The diff.** The 120 ids from the last pull are stored beside this file, one per line,
-in `sources/claudisms-ids-2026-08-25.txt`. When the stamp has moved, run
-`curl -s https://claudisms.ai/claudisms.json | jq -r '.terms[].id' | sort` and diff the
-output against that file. The ids are stable, so the diff is exactly the entries added
-and removed. Write the new list to `sources/claudisms-ids-<pull date>.txt` and leave the
-old one in place, so the next reader inherits the same check. For Wikipedia, compare the section headings of
-the current revision against the family headings in this file; a heading with no family
-here is a candidate. Search discussion boards last, and only for how a pattern is
-defended, because the density rules rest on that defence rather than on any pattern
-being rare.
-
-**A pattern that is newly common.** Add it only if it can occur in the genres this skill
-declares, and only if no row already covers it under another wording. A lexical pattern
-becomes a row in the table its family belongs to. A structural one has to arrive with a
-heading, a recognition test phrased as a question a reader can answer, a disposition,
-and a worked before and after, or it cannot be applied.
-
-**A pattern that has gone stale.** Fading, not deleted: move it to the list below with
-the date it was demoted, and treat it as flag-only from then on. Deleting a row loses
-the record that the pattern was ever considered, and a later model generation can revive
-one that faded.
-
-**Fading, demoted 2026-08-25.** Several 2023-era markers, and `delve` with them. They
-stay in the generic-vocabulary table, which already says that section is a weak signal.
-
-Not carried from the CC0 source: the spoken-word section (cross-voice echo, sprinkled
-disfluency, synthetic-speaker biography), which applies to audio scripts; two items its
-author marked retired or house-specific (`stakes of their seat`, preferring "articles"
-over "essays"); the outright bans on em dashes and emoji, demoted above; and about
-twenty personal-essay tells that cannot occur in the declared genres: `sit with`,
-`arriving at`, `where I landed`, `I can't stop thinking about`, `hit a nerve`,
-`the thing that got me`, `in my chest`, `what stays yours`, `dispatches from`,
-`bumped into`, `quieter`/`louder`, `carry this with you`, `rides along`,
-`we've seen this movie before`, `hits hardest`, and the discovery-arc,
-false-singularity and reader-direction families. For a personal essay, read the source
-page.
-
-Eight patterns are not on that page and came from independent review of human
-discussion-board threads: one-sentence paragraphs, contentless openers and closers,
-self-interviewing, argument-free fluff, unnamed critics, trailing engagement questions,
-bare significance assertion, the section-ending joke. The ten structural families were
-built from two independent reviews of one document, then checked against the Wikipedia
-page, which carries the first family as "Negative parallelisms" and the third as
-"Rule of three".
+Read it when the review date in the banner has passed, or when a new model generation
+ships. It fails closed at every step: an unreachable source stops the pass rather than
+reporting the whole catalogue as retired upstream.
