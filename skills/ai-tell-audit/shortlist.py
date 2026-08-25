@@ -12,13 +12,14 @@ by eye differ by tens of per cent:
      matches on the raw file. Paragraphs are unwrapped here before matching, and
      every match is reported against the line it starts on.
 
-A match is a candidate to READ, never a finding. In 21,926 words of human
-technical prose, fifteen of sixteen matches were correct writing.
+A match is a candidate to READ, never a finding. In 21,024 editable words of
+human technical prose, all sixteen matches were correct writing.
 
     python3 shortlist.py README.md
     python3 shortlist.py --words-only README.md
 """
 
+import os
 import re
 import sys
 
@@ -52,13 +53,46 @@ def strip_markup(text):
 
     text = re.sub(r"\A---\n.*?\n---\n", blank, text, flags=re.S)   # frontmatter
     text = re.sub(r"```.*?```", blank, text, flags=re.S)           # fenced code
-    text = re.sub(r"(?m)^(?: {4,}|\t).*$", blank, text)            # indented code
+    text = _blank_indented_code(text, blank)                       # indented code
     text = re.sub(r"`[^`\n]*`", blank, text)                       # inline code
     text = re.sub(r"<[^>\n]+>", blank, text)                       # html and rst roles
     text = re.sub(r"https?://\S+", blank, text)                    # urls
     text = re.sub(r"(?m)^\|.*$", blank, text)                      # table rows
     text = re.sub(r"(?m)^[=~^`'\"*+#_-]{3,}\s*$", blank, text)     # rules, underlines
     return text
+
+
+LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
+
+
+def _blank_indented_code(text, blank):
+    """Blank indented CODE blocks without blanking indented LIST CONTINUATIONS.
+
+    A four-space indent means a code block only outside a list. Inside one it is
+    a nested bullet or a continuation paragraph, and blanking those deletes real
+    prose from the denominator: a 22-word file of nested bullets counted 13 words,
+    a 41% undercount, and every rate divides by this number.
+
+    A list is open from its first marker until a non-blank line appears at column
+    zero that is not itself a marker. RST literal blocks (a line ending in `::`)
+    open a code block even inside a list.
+    """
+    out, in_list, literal = [], False, False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        indented = bool(re.match(r"[ \t]", line)) and line[:4].strip() == ""
+        if not stripped:
+            out.append(line)
+            continue
+        if LIST_ITEM.match(line):
+            in_list, literal = True, line.rstrip().endswith("::")
+        elif not indented:
+            in_list, literal = False, stripped.endswith("::")
+        if indented and (literal or not in_list):
+            out.append(re.sub(r"[^\n]", " ", line))
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 def editable_words(text):
@@ -99,8 +133,67 @@ def shortlist(text):
     return sorted(hits, key=lambda h: h[1])
 
 
-def report(path, words_only=False):
+def catalogue_rows(skill_md):
+    """Every backticked pattern in a two-column table of SKILL.md.
+
+    Parsed out of the document rather than copied here, so the counts this mode
+    reports are the counts of the rows the reader is actually applying.
+    """
+    terms, in_table = set(), False
+    for line in skill_md.split("\n"):
+        if not line.startswith("|"):
+            in_table = False
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) == 2 and cells[1] in ("Fix", "Disposition"):
+            in_table = True
+            continue
+        if in_table and len(cells) == 2:
+            terms |= set(re.findall(r"`([^`]+)`", cells[0]))
+    return sorted(terms)
+
+
+def row_regex(term):
+    """`X`, `Y`, `Z` and `[verb]` are placeholders and match one word."""
+    parts = re.split(r"(\[[^\]]*\]|(?<![A-Za-z])[XYZ](?![A-Za-z]))", term)
+    body = "".join(r"\S+" if i % 2 else re.escape(p).replace(r"\ ", r"[ \t]+")
+                   for i, p in enumerate(parts))
+    prefix = r"(?<![\w-])" if term[0].isalnum() else ""
+    suffix = r"(?![\w-])" if term[-1].isalnum() else ""
+    return re.compile(prefix + body + suffix, re.IGNORECASE)
+
+
+def rows(text, skill_md):
+    """[(term, line, matched)] for every catalogue row string in the document."""
+    flowed, per_char = unwrap(strip_markup(text))
+    hits = []
+    for term in catalogue_rows(skill_md):
+        for m in row_regex(term).finditer(flowed):
+            line = per_char[m.start()] if m.start() < len(per_char) else 0
+            hits.append((term, line, m.group(0)))
+    return sorted(hits, key=lambda h: h[1])
+
+
+def apply_skips(text, skips):
+    """Blank the line ranges rule zero says to skip, before anything is counted.
+
+    Step 2 of the procedure is otherwise inert: the denominator would include a
+    banned-word list that the same file says must be excluded.
+    """
+    lines = text.split("\n")
+    for spec in skips:
+        first, _, last = spec.partition("-")
+        first = int(first)
+        last = int(last or first)
+        for n in range(first, min(last, len(lines)) + 1):
+            lines[n - 1] = ""
+    return "\n".join(lines)
+
+
+def report(path, words_only=False, skips=(), skill_md=None):
     text = open(path, encoding="utf-8", errors="replace").read()
+    if skips:
+        text = apply_skips(text, skips)
     words = editable_words(text)
     print("%s: %d editable words" % (path, words))
     if words_only:
@@ -111,16 +204,37 @@ def report(path, words_only=False):
           "not findings)" % (path, len(hits), rate))
     for label, line, matched, context in hits:
         print("  L%-5d %-11s %s" % (line, label, context))
+    if skill_md is None:
+        return
+    found = rows(text, skill_md)
+    counted = {}
+    for term, line, matched in found:
+        counted.setdefault(term, []).append((line, matched))
+    print("%s: %d row matches across %d catalogue rows (candidates to read, "
+          "not findings)" % (path, len(found), len(counted)))
+    for term in sorted(counted, key=lambda k: -len(counted[k])):
+        where = ", ".join("L%d" % line for line, _ in counted[term][:6])
+        print("  %-24s %3d  %s" % (term, len(counted[term]), where))
 
 
 def main(argv):
     words_only = "--words-only" in argv
+    skips = [a.split("=", 1)[1] for a in argv[1:] if a.startswith("--skip=")]
+    skill_md = None
+    for arg in argv[1:]:
+        if arg.startswith("--rows="):
+            skill_md = open(arg.split("=", 1)[1], encoding="utf-8").read()
+        elif arg == "--rows":
+            beside = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "SKILL.md")
+            skill_md = open(beside, encoding="utf-8").read()
     paths = [a for a in argv[1:] if not a.startswith("--")]
     if not paths:
-        print(__doc__.strip().splitlines()[-1].strip())
+        print("usage: python3 shortlist.py [--words-only] [--rows[=SKILL.md]] "
+              "[--skip=A-B] FILE...")
         return 2
     for path in paths:
-        report(path, words_only)
+        report(path, words_only, skips, skill_md)
     return 0
 
 

@@ -6,8 +6,9 @@ description: "Use when about to publish durable prose other people will read (a 
 # AI Tell Audit
 
 **Catalogue reviewed 2026-08-25. Due for review 2027-02-25.** Past that date the rows
-below are unchecked against three sources that all move. Run `sources/REFRESH.md` first;
-its guarded check against the main source is a single command.
+below are unchecked against three sources that all move. Run `sources/REFRESH.md` first:
+its guarded check against the main source is a short shell block that fails closed, and it
+costs a second when nothing has moved.
 
 A find-and-fix pass over prose you are about to publish. The patterns are already known and published, so there is nothing to detect and no score to compute.
 
@@ -17,9 +18,13 @@ Two sessions given only a catalogue invent two different sequences. This is the 
 
 1. **Decide from the request, not the file.** The genres are in the description; the
    precedence rule is under `When this fires`. If the request is copy-editing, stop here.
-2. **Mark the skip regions.** Rule zero, below, before anything is counted or read.
-3. **Count the denominator.** `python3 shortlist.py <file>` prints the editable word
-   count. Every rate in this file divides by that number.
+2. **Mark the skip regions.** Rule zero, below, before anything is counted or read. The
+   script has no rule-zero awareness, so pass the line ranges to it: `--skip=120-148`,
+   repeatable. Without that, a banned-word list lands in the denominator this file says
+   must exclude it.
+3. **Count the denominator.** `shortlist.py` sits beside this file, so run
+   `python3 <this skill's directory>/shortlist.py <file>`; it prints the editable word
+   count. Every rate in this file divides by that document's own count.
 4. **Build the reading list.** The same command prints the greppable shortlist with
    paragraphs unwrapped. The other eight families have no shortlist, so read each
    paragraph once, in order, asking that family's recognition test of it. The list is
@@ -46,7 +51,8 @@ term of art, or on markup the format requires.** File-wide, so no row repeats it
 cases that broke earlier versions:
 
 - `harness` is banned as a corporate verb. A `test harness` is a term of art: sqlite's
-  testing page uses it 22 times and needs zero edits.
+  testing page uses it 11 times in the prose `shortlist.py --rows` counts, 22 in the raw
+  HTML including headings and navigation, and needs zero edits at either count.
 - `the entire X` is an empty intensifier. `the entire filesystem` names a scope.
 - `robust` is an empty adjective. `robust against malicious attack` carries a claim that
   contrasts with "robust in normal use", and flattening it loses the contrast.
@@ -72,31 +78,53 @@ somewhere else in the document. **A surviving instance is non-literal, non-quote
 and not a term of art.** Edit a pattern when it reaches **3 or more surviving instances in
 one document**, however long: repeating one metaphor three times is the tic, and a rate
 would hide it in a long file. The document as a whole is a finding when surviving
-instances **across all patterns reach 6 per thousand words**, even when no single pattern
-does: the pile-up is spread rather than concentrated. **The narrower rule always wins.**
+instances **across all patterns reach 6 per thousand words in a document of at least 1000
+editable words**, even when no single pattern does: the pile-up is spread rather than
+concentrated. Below 1000 words the rate is noise, and one bulleted list carries it: a
+765-word pull request description reached 12 per thousand off a single list. The rate and
+the length meet at exactly 6 instances, so there is no step at the boundary. **The narrower rule always wins.**
 A spread finding never licenses editing an instance whose own pattern or family is under
 threshold; what it licenses is the note. Say the count, the rate, and the three heaviest
-families, and hand it back. Under every figure, fix only what is plainly wrong.
+families, and hand it back. **Under every figure, an instance below threshold is left
+alone**, even where the plain version would read better. That is step 7, and it is the
+whole protection: a licence to fix what looks wrong is a licence to rewrite anything.
 
-Measured, on one pinned pull (2026-08-25) of four human documents at 21,926 words
-raw and **20,099 editable**, which is the denominator every rate in this file uses:
-Linux `submitting-patches.rst` at 83f71fbc66fb, git `CodingGuidelines` at 570e1e0d0ff6,
-curl `CONTRIBUTE.md` at 7e1001bcd699, and sqlite's "How SQLite Is Tested", which carries
-no revision id. 271 raw matches, **0** surviving, so none of them fires. 227 of the 271
-are `---` under an RST heading, 11 are `harness`, and both are exempt before any count.
-The closest call is `useful` five times in one Linux document, over the per-pattern
-figure of 3: every one is scoped ("useful at this step"), which that row's own keep clause
-covers. That is what applying the exemption first buys.
+Measured with `shortlist.py --rows` on one pinned pull (2026-08-25) of four human
+documents totalling **21,024 editable words**: Linux `submitting-patches.rst` at
+83f71fbc66fb, git `CodingGuidelines` at 570e1e0d0ff6, curl `CONTRIBUTE.md` at
+7e1001bcd699, and sqlite's "How SQLite Is Tested", which carries no revision id.
 
-Two other figures in this file, a 3715-word machine-register file carrying `load-bearing`
-3 times and a 264-word PR body at 76 per thousand, come from documents that are not in
-this repository and are **not reproducible from it**. They are recorded as history, not as
-evidence.
+Two caveats a rerun needs. The sqlite page is HTML, and stripping tags alone leaves the
+contents of `<pre>` blocks at column zero where the script cannot recognise them as code,
+which inflates the denominator; indent them by four first, or the count is wrong in the
+direction that makes every rate look smaller. And these are human-authored documents, not
+pre-LLM ones: curl's `CONTRIBUTE.md` at that pin carries a section on AI use added years
+after 2022. The claim is that people wrote them, which is what the exemption has to
+survive. Every figure below is what the command prints, so it can be rerun; every document
+is external to this repository, so rerunning it needs the pull first.
+
+**52 row matches, 0 surviving**, so none of the four fires. Three rows individually clear
+the per-row figure of 3, and every one is exempt before any count: `harness` 11 times in
+the sqlite text as a term of art, `names` 10 times in git as the plain noun
+("function names"), and `useful` 5 times in one Linux document, each scoped ("useful at
+this step"), which that row's own keep clause covers. That is what applying the exemption
+first buys, and it is why the exemption is stated above this paragraph rather than below.
+
+Two older figures survive in this file, a 3715-word machine-register file carrying
+`load-bearing` 3 times and a 264-word PR body at 76 per thousand. They come from
+documents that are not in this repository and **no command here reproduces them**. They
+are recorded as history, not as evidence.
 
 The document-wide figure counts every surviving instance, row and family alike. The
 per-pattern figure of 3 governs a **row**, whether the row gives a string or describes a
-construction. The **headed families** below carry their own two figures. No construction
-is governed by both: a family has no row, and a row has no family.
+construction. The **headed families** carry their own two figures.
+
+**A construction can be reachable by both**, and several are: `it isn't about X, it's
+about Y` is a row and is also negation-then-correction; `quietly` is a row and is also a
+knowing aside; a rhetorical question is a row and its heading form is a family. **Count
+each instance once, and under the row whenever the row's string matches.** The row's
+figure of 3 is the stricter of the two, so a matching string is judged by the row and
+never counted a second time under the family.
 
 ## Never a verdict on authorship
 
@@ -199,7 +227,7 @@ Each tells the reader what to think before showing them anything.
 | `worth noting`, `worth asking`, `worth considering`, any `worth [X]`, `the point is` | Delete |
 | `Here's the thing:`, `Let that sink in.`, `Nobody talks about this.`, `Here's where it gets interesting` | Delete. No semantic content under any of them |
 | `the right question`, `the right way`, `the right tool`, `a mature setup` | Rewrite: say why this one fits, or what the improved state does differently. Exempt when the sentence asks rather than asserts, whatever its punctuation |
-| `useful`, `what's useful`, `this matters`, `and that matters` | Delete the bare label or assertion. Keep `X matters when Y`, which scopes a claim rather than asserting one |
+| `useful`, `what's useful`, `this matters`, `and that matters` | Delete the bare label or assertion (`this is useful`, `and that matters`). Keep any use scoped to a named context, reader or noun: `X matters when Y`, `useful at this step`, `useful for debugging`, `useful display hooks`. The scope is the test, not the word |
 | `It cannot be overstated`, `Great question`, a joke at the end of a section | Delete |
 
 ### Manufactured focal points
@@ -256,7 +284,7 @@ Weightier than any word row, because a structure repeats where a word does not.
 |-|-|
 | `not just X but Y`, `it isn't about X, it's about Y`, `No X. No Y. Just Z.` | Rewrite: drop the cleft, keep both claims as plain statements. In technical prose both halves are usually true, so do not discard one |
 | One-sentence paragraphs throughout, four short declaratives in a row, or a rhetorical question you then answer | Rewrite: rejoin, join two, or make it a statement. Isolated ones are fine. Count the paragraphs before acting: the first fires only when under a quarter of them run to more than one sentence, since a document that mixes both lengths is varying its rhythm |
-| A bolded term plus a colon plus an explanation on every bullet; `---` between sections | Rewrite: bold the two that need it or none; use a heading (Markdown only) |
+| A bolded term plus a colon plus an explanation on every bullet; `---` on its own line between sections | Rewrite: bold the two that need it or none; use a heading. Only when the `---` follows a blank line: directly under a line of text it is a setext H2 underline in Markdown, and deleting it silently demotes the heading |
 | A bolded full-sentence declarative opening a paragraph, three times or more | Rewrite: unbold it and let the sentence carry itself, or promote it to a heading |
 | `Let's explore`, `Now let's turn to`, announcing the structure, restating the question before answering it, `In today's rapidly evolving X` | Delete. Make the points |
 | A closing one-liner restating the thesis, or a question to the reader | Delete. Sometimes a document just ends |
@@ -282,15 +310,40 @@ both a row and a family.
 the repair looks like. They are not edits this file endorses making on a single instance.
 Nothing is edited until its family reaches both figures.
 
-**Where the figures come from.** Four human technical documents, pinned at the revisions
-in the density section, come to 20,099 editable words. `shortlist.py` finds 16 candidate
-matches in them. Read one by one, **0 surviving instances: 0.0 per thousand words**.
-Fifteen are instructional contrasts of the form `octal escape sequences, not hexadecimal`,
-where both halves are things a reader could type; the sixteenth is a grep artefact. The
-README those tables cleared has 2356 editable words and the same 16 candidate matches,
-of which 4 survive: 1.7 per thousand. So negation-then-correction fires there and
-comparative aphorism does not, standing at 3 against a floor of 4. The document-wide
-figure in the density section fires as well, which is what a spread pile-up looks like.
+**No After invents a fact.** Every after below is reachable from its before by deletion or
+by plainer wording. None introduces a number, a filename, a measurement or a name the
+before did not carry. An earlier version replaced `(inevitably) be wrong for your
+workload` with an invented worker count and an invented throughput figure, which is the
+harm this file exists to prevent, committed in its own examples. If the plain version
+needs a fact you do not have, the disposition is keep, not rewrite.
+
+**Where the figures come from.** Both counts below are printed by the shipped script, so
+a reader can rerun them. Four human technical documents, pinned at the revisions in the
+density section, come to **21,024 editable words**; `shortlist.py --rows` reports **16
+candidate matches**, and read one by one **0 surviving instances: 0.0 per thousand
+words**. Fifteen are instructional contrasts of the form `octal escape sequences, not
+hexadecimal`, where both halves are things a reader could type; the sixteenth is a grep
+artefact.
+
+The README those tables cleared has **2356 editable words** and the same **16 candidate
+matches**. Read one by one, 4 are negation-then-correction and 3 are comparative
+aphorism. So negation-then-correction fires at 4 instances and 1.7 per thousand, and
+comparative aphorism does not, standing at 3 against a floor of 4. What the other eight
+families add to that document is deliberately **not stated here**: reaching it needs the
+step 4 paragraph read, and no command reproduces a paragraph read. A number nobody can
+rerun is the thing the Unsourced precision family is about.
+
+**The script cannot reach a verdict, and step 4 is where the finding is.** `shortlist.py`
+covers two of the ten families. On one machine-drafted document it reported 7 candidates
+and 2 survivors and fired nothing, while the paragraph read condemned the same document.
+Every family below except the first two is found only by reading. A pass that runs the
+command and stops has not audited anything; it has approved everything.
+
+**What the labels mean.** `shortlist.py` prints a label per match. `cleft`, `bare`,
+`semicolon` and `isnt-about` are all negation-then-correction, and so is `rather-than`,
+which has no negated half to look at: ask the recognition test of the rejected
+alternative instead. `comparative` is comparative aphorism. No other label maps to a
+family, because no other family is greppable.
 
 **A shortlist is not a detector.** `python3 shortlist.py <file>` prints the
 editable word count and the candidate matches for the two greppable families, with
@@ -324,8 +377,8 @@ is standing in for the argument the reader came for.
 **Disposition.** Rewrite: give the consequence that makes one side worse, or delete the
 sentence and let the example after it do the ranking.
 **Before.** `A queue that silently drops jobs is worse than a queue that refuses them.`
-**After.** `A dropped job leaves no record, so the caller waits forever; a refused job
-returns an error the caller can handle.`
+**After.** `A queue that silently drops jobs gives the caller no error to handle; one
+that refuses them does.`
 
 ### Rule of three
 
@@ -336,7 +389,7 @@ subject are the same move at paragraph scale.
 **Disposition.** Rewrite: give the count the subject has, and break one of the three
 parallel sentences so the cadence stops.
 **Before.** `The scheduler is fast, reliable, and easy to reason about.`
-**After.** `The scheduler dispatches in under a millisecond, with one queue per priority.`
+**After.** `The scheduler is fast and easy to reason about.`
 
 ### Sentence-final restatement
 
@@ -345,8 +398,8 @@ still make its claim? A trailing clause that re-says the main clause in other wo
 added nothing. One that adds a condition or a cause has, so it stays.
 **Disposition.** Delete the trailing clause. Rewrite instead when it carries a claim the
 main clause does not.
-**Before.** `The broker acknowledges only after the write commits, which is the only way
-durability is guaranteed.`
+**Before.** `The broker acknowledges only after the write commits, so an acknowledgement
+means the write has committed.`
 **After.** `The broker acknowledges only after the write commits.`
 
 ### Grand summary pivot
@@ -359,13 +412,17 @@ the announcement and state the idea straight. What was lost?
 
 ### Question as heading
 
-**Recognition test.** Is any heading a question the section then answers? A rhetorical
-question inside a paragraph stays a row above, counted at 3; this family is headings only,
-because a contents list built from questions reads as an interview and the two are not
-the same construction.
+**Recognition test.** Is any heading a question the section then answers, and is it the
+author's question rather than the reader's? The family is a document interviewing itself.
+A rhetorical question inside a paragraph stays a row above, counted at 3.
+**Exempt, and not counted:** an FAQ, a Q&A section, an interview transcript, a
+troubleshooting list, and any run of headings a reader scans to find the question they
+arrived with. `Frequently Raised Objections` in PEP 572 is three question headings and is
+correct writing. Ask whose question it is: if a reader would type it into a search box, it
+is theirs, and it stays.
 **Disposition.** Rewrite the heading as the answer it gives.
 **Before.** `Why does any of this matter for throughput?`
-**After.** `What queue depth does to throughput`
+**After.** `How this matters for throughput`
 
 ### Knowing aside
 
@@ -374,7 +431,7 @@ of adding to it. Remove it: is any fact gone? If only a shared wink is gone, the
 had stepped into frame.
 **Disposition.** Delete the aside, or rewrite it into the claim it hints at.
 **Before.** `The default worker count will (inevitably) be wrong for your workload.`
-**After.** `The default worker count is 4, which is too low above 200 jobs a second.`
+**After.** `The default worker count will be wrong for your workload.`
 
 ### Self-certifying candour
 
@@ -394,7 +451,8 @@ instance, so a phrase used twice is one and seven phrases used twice are seven.
 **Disposition.** Rewrite the second occurrence in plain words, or delete it.
 **Before.** `jobs go quiet on the wire ... six paragraphs later, the same jobs going quiet
 on the wire`
-**After.** `jobs stop acknowledging ... six paragraphs later, the same jobs time out`
+**After.** `jobs go quiet on the wire ... six paragraphs later, the same jobs stop
+acknowledging`
 
 ### Unsourced precision
 
@@ -404,8 +462,7 @@ document say? A number with a stated method or a linked run is fine; a number wi
 **Disposition.** Rewrite: give the method or the run that produced the number, or drop the
 number and make the claim without it.
 **Before.** `roughly 40% faster than the previous scheduler`
-**After.** `12,000 jobs a second against 8,500, from bench/throughput.sh on one 8-core
-machine`
+**After.** `faster than the previous scheduler`
 
 ## Keep by default
 
@@ -440,9 +497,10 @@ property of sentence construction.
 
 Four human regression documents, all damaged by earlier versions: Linux
 `submitting-patches.rst`, git `CodingGuidelines`, curl `CONTRIBUTE.md`, sqlite's "How
-SQLite Is Tested". Each must come out with zero edits. sqlite is the hardest: `harness`
-appears 22 times as a term of art, which without the exemption is maximal density aimed
-straight at the damage.
+SQLite Is Tested". Each must come out with zero edits, and each does: 52 row matches and
+16 shortlist candidates across the four, 0 surviving either way. sqlite is the hardest,
+with `harness` 11 times as a term of art, which without the exemption is the densest
+single row in the corpus aimed straight at the damage.
 
 ## Trigger precision
 

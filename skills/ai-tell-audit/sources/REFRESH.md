@@ -11,7 +11,7 @@ reading any of them.
 | Source | Pulled | Version stamp at pull |
 |-|-|-|
 | `https://claudisms.ai/claudisms.json`, a CC0 "living banlist" | 2026-08-25 | `updated` 2026-08-08, `count` 120 |
-| Wikipedia, "Signs of AI writing" | 2026-08-25 | revision 1371235958 |
+| Wikipedia, "Signs of AI writing", `https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing` | 2026-08-25 | revision 1371235958 |
 | Discussion boards, searched through `hn.algolia.com` | 2026-08-25 | no stamp; read for how a pattern is defended, not for new rows |
 
 ## Fail closed, at every step
@@ -28,6 +28,7 @@ degraded answer:
     curl -fsS https://claudisms.ai/claudisms.json -o pull.json || exit 1
     jq -e '(.updated|type=="string") and (.count|type=="number")
            and (.terms|type=="array") and (.terms|length) > 0
+           and (.count == (.terms|length))
            and all(.terms[]; .id|type=="string")' pull.json > /dev/null || exit 1
     jq -r '.updated, .count' pull.json
 
@@ -44,7 +45,9 @@ snapshot from whatever stable key the source now offers, and diff nothing on thi
 ## The check
 
 Run the guarded pull above. If it prints `2026-08-08` and `120`, that source has not
-moved: write a new pair of dates into the banner at the top of `SKILL.md` and stop. The
+moved. Editing `SKILL.md` is the point of this document and needs no further permission:
+write a new pair of dates into its banner, leaving every row untouched, and stop. That
+write is the only one a no-change refresh makes. The
 refresh costs a second when nothing has changed, which is what keeps six months usable
 as an interval. Six months is a convention, not a measurement; the command is the real
 trigger and can be run any day.

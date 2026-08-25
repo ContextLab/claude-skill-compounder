@@ -660,7 +660,16 @@ class SelfAuditTest(unittest.TestCase):
         for path in sorted(SKILL_DIR.rglob("*")) + sorted(FIXTURES.rglob("*")) \
                 + [Path(__file__)]:
             if path.is_file():
-                self.assertNotIn(EM_DASH, path.read_text(), "em dash in %s" % path)
+                self.assertNotIn(EM_DASH.encode(), path.read_bytes(),
+                                 "em dash in %s" % path)
+
+    def test_the_skill_directory_ships_no_build_artifacts(self):
+        """The directory is symlinked whole into the user's config, so anything
+        left in it ships. A stray `__pycache__` also broke the sweep above."""
+        stray = [p for p in SKILL_DIR.rglob("*")
+                 if p.name == "__pycache__" or p.suffix in (".pyc", ".pyo")]
+        self.assertEqual(stray, [], "build artifacts in the skill directory: %s"
+                         % [str(p) for p in stray])
 
 
 class TriggerPrecisionTest(unittest.TestCase):
@@ -897,7 +906,7 @@ class StructuralDensityTest(unittest.TestCase):
 
     def test_the_rate_is_justified_against_a_measurement(self):
         text = flowed(self.section)
-        for evidence in ("20,099 editable words", "0.0 per thousand"):
+        for evidence in ("21,024 editable words", "0.0 per thousand"):
             self.assertIn(evidence, text,
                           "the structural rate cites no measurement: missing %r"
                           % evidence)
@@ -918,8 +927,9 @@ class StructuralDensityTest(unittest.TestCase):
         contradicts the file, and a floor above that count does too."""
         floor, rate = self.numbers()
         text = flowed(self.section)
-        surviving = int(re.search(r"of which (\d+) survive", text).group(1))
-        stated = float(re.search(r"survive: ([\d.]+) per thousand", text).group(1))
+        m = re.search(r"fires at (\d+) instances and ([\d.]+) per thousand", text)
+        self.assertIsNotNone(m, "the file states no worked verdict to check against")
+        surviving, stated = int(m.group(1)), float(m.group(2))
         self.assertLessEqual(
             rate, stated,
             "the rate is %d per thousand but the file says a family fires on its "
@@ -932,10 +942,11 @@ class StructuralDensityTest(unittest.TestCase):
     def test_the_human_corpus_figures_are_internally_consistent(self):
         """Inflating the corpus match count survived every test."""
         text = flowed(self.section)
-        candidates = int(re.search(r"finds (\d+) candidate matches", text).group(1))
+        candidates = int(re.search(r"reports \*\*(\d+)\s*candidate matches", text).group(1))
         surviving = int(re.search(r"\*\*(\d+) surviving instances", text).group(1))
-        words = int(re.search(r"([\d,]+) editable words", text).group(1).replace(",", ""))
-        explained = int(re.search(r"(?:^|\D)(\w+) are instructional contrasts",
+        words = int(re.search(r"\*\*([\d,]+) editable words\*\*",
+                              text).group(1).replace(",", ""))
+        explained = int(re.search(r"(?:^|\W)(\w+) are instructional contrasts",
                                   text).group(1).replace("Fifteen", "15"))
         self.assertLessEqual(surviving, candidates)
         self.assertEqual(candidates, explained + 1,
@@ -1101,12 +1112,12 @@ class MutationGuardTest(unittest.TestCase):
         "Negation-then-correction": ", not on guesswork",
         "Comparative aphorism": "is worse than",
         "Rule of three": "reliable, and",
-        "Sentence-final restatement": "which is the only way",
+        "Sentence-final restatement": "so an acknowledgement",
         "Grand summary pivot": "comes down to one idea",
         "Question as heading": "Why does any of this",
         "Knowing aside": "(inevitably)",
         "Self-certifying candour": "To be completely transparent",
-        "Repeated signature phrase": "quiet on the wire",
+        "Repeated signature phrase": "same jobs going quiet on the wire",
         "Unsourced precision": "roughly",
     }
 
@@ -1165,6 +1176,32 @@ class MutationGuardTest(unittest.TestCase):
                              "%r shows the construction in its AFTER, so the pair is "
                              "swapped or the repair does not repair" % name)
 
+    def test_no_after_invents_a_fact_the_before_did_not_carry(self):
+        """The harm this skill exists to prevent, once committed in its own
+        examples: `(inevitably) be wrong for your workload` was repaired into an
+        invented worker count and an invented throughput figure, a rewrite that
+        changes what the sentence claims and trips the file's own Unsourced
+        precision family. A marker string being absent does not catch that."""
+        families = dict(zip(*[iter(re.split(r"^### (.+)$",
+                                            section(self.body, STRUCTURAL),
+                                            flags=re.M)[1:])] * 2))
+        invented = re.compile(r"\d+|[\w-]+\.(?:py|sh|md|txt|json)\b|/")
+        for name, block in families.items():
+            before = re.search(r"\*\*Before\.\*\*(.+?)\n\*\*After", block, re.S).group(1)
+            after = re.search(r"\*\*After\.\*\*(.+)", block, re.S).group(1)
+            for token in set(invented.findall(flowed(after))):
+                self.assertIn(token, flowed(before),
+                              "the AFTER for %r introduces %r, which the BEFORE does "
+                              "not carry: a rewrite that adds a fact is a fabrication"
+                              % (name, token))
+
+    def test_the_file_forbids_an_after_that_invents_a_fact(self):
+        text = flowed(section(self.body, STRUCTURAL))
+        self.assertIn("No After invents a fact", text)
+        self.assertIn("the disposition is keep, not rewrite", text,
+                      "no instruction for the case where the plain version needs a "
+                      "fact the author does not have")
+
     def test_the_stated_measurements_are_reproducible_from_this_repository(self):
         """Changing `16 shortlist matches` to 1600 survived every test. The README
         figures are recomputed here from the shipped script; the human-corpus
@@ -1179,8 +1216,8 @@ class MutationGuardTest(unittest.TestCase):
             capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True).stdout
         words = int(re.search(r"(\d+) editable words", out).group(1))
         matches = int(re.search(r"(\d+) shortlist matches", out).group(1))
-        stated_words = int(re.search(r"has (\d+) editable words", text).group(1))
-        stated_matches = int(re.search(r"the same (\d+) candidate matches",
+        stated_words = int(re.search(r"has \*\*(\d+) editable words\*\*", text).group(1))
+        stated_matches = int(re.search(r"the same \*\*(\d+)\s*candidate\s*matches\*\*",
                                        text).group(1))
         self.assertEqual(stated_words, words,
                          "the file states %d editable words for the README; the "
@@ -1188,14 +1225,17 @@ class MutationGuardTest(unittest.TestCase):
         self.assertEqual(stated_matches, matches,
                          "the file states %d candidate matches for the README; the "
                          "shipped script says %d" % (stated_matches, matches))
-        surviving = int(re.search(r"of which (\d+) survive", text).group(1))
+        surviving = int(re.search(r"fires at (\d+) instances", text).group(1))
         words = stated_words
         self.assertLessEqual(surviving, matches)
         self.assertEqual(
-            float(re.search(r"survive: ([\d.]+) per thousand", text).group(1)),
+            float(re.search(r"instances and ([\d.]+) per thousand", text).group(1)),
             round(1000.0 * surviving / words, 1),
             "the stated README rate is not surviving instances over editable words")
-        self.assertIn("not reproducible", flowed(self.body),
+        self.assertIn("not stated here", text,
+                      "the file states a document-wide verdict for a document whose "
+                      "paragraph read no command reproduces")
+        self.assertIn("no command here reproduces them", flowed(self.body),
                       "figures from documents outside this repository are presented "
                       "as if a reader could check them")
 
@@ -1366,9 +1406,151 @@ class ShortlistScriptTest(unittest.TestCase):
         self.assertEqual(int(re.search(r"(\d+) editable", self.run_on(prose)).group(1)),
                          int(re.search(r"(\d+) editable", self.run_on(noisy)).group(1)))
 
+    def test_rows_mode_works_through_a_symlinked_install(self):
+        """The installer symlinks the whole skill directory into the user's
+        config, so `--rows` finds SKILL.md relative to the symlink, not the
+        checkout. A real symlink, because that is the shape it ships in."""
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            link = Path(tmp) / "ai-tell-audit"
+            link.symlink_to(SKILL_DIR, target_is_directory=True)
+            out = subprocess.run(
+                [sys.executable, str(link / "shortlist.py"), "--rows",
+                 str(SKILL_DIR / "SKILL.md")],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("row matches across", out.stdout,
+                          "--rows cannot find SKILL.md from the installed path")
+
+    def test_skip_ranges_leave_the_denominator_smaller(self):
+        """Step 2 says to mark the rule-zero regions before counting. Without the
+        flag that step changes nothing and a banned-word list lands in the
+        denominator the same file says must exclude it."""
+        doc = "alpha beta gamma delta epsilon\n- banned\n- words\n- here\nzeta eta theta\n"
+        full = int(re.search(r"(\d+) editable", self.run_on(doc)).group(1))
+        cut = int(re.search(r"(\d+) editable",
+                            self.run_on(doc, "--skip=2-4")).group(1))
+        self.assertLess(cut, full, "--skip did not change the denominator")
+        self.assertEqual(full - cut, 6, "skipped 3 list lines should drop 6 tokens")
+
+    def test_the_script_and_this_suite_count_the_same_rows(self):
+        """Two implementations of one rule drift, and the shipped one is what a
+        reader runs while this suite guards the other. They are pinned to each
+        other on the fixture built for exactly these patterns."""
+        import subprocess
+        fixture = FIXTURES / "testing-methodology.rst"
+        out = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--rows", str(fixture)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            check=True).stdout
+        script_counts = {}
+        for line in out.splitlines():
+            m = re.match(r"^  (.+?)\s\s+(\d+)\s+L", line)
+            if m:
+                script_counts[m.group(1).strip()] = int(m.group(2))
+        terms = catalogue_terms(body(skill_text()))
+        suite_counts = {}
+        for term, _, _, _ in scan(fixture.read_text(), terms):
+            suite_counts[term] = suite_counts.get(term, 0) + 1
+        self.assertTrue(script_counts, "the script reported no rows:\n%s" % out)
+        shared = set(script_counts) & set(suite_counts)
+        self.assertGreaterEqual(len(shared), 3,
+                                "the two scanners share almost nothing: %r vs %r"
+                                % (sorted(script_counts), sorted(suite_counts)))
+        for term in sorted(shared):
+            self.assertEqual(
+                script_counts[term], suite_counts[term],
+                "the shipped script counts %r %d times and this suite counts it %d; "
+                "the reader and the guard disagree"
+                % (term, script_counts[term], suite_counts[term]))
+
+    def test_the_script_docstring_agrees_with_the_skill(self):
+        """A cold reader found the script claiming 21,926 words where SKILL.md
+        claimed 21,024. Two figures for one measurement, and the one inside the
+        tool is the one a reader trusts while running it."""
+        doc = (SKILL_DIR / "shortlist.py").read_text()
+        stated = re.search(r"In ([\d,]+) editable words", doc)
+        self.assertIsNotNone(stated, "the script no longer cites the corpus")
+        self.assertIn(stated.group(1), flowed(body(skill_text())),
+                      "the script cites %r words of human prose and SKILL.md does "
+                      "not state that figure anywhere" % stated.group(1))
+
     def test_it_never_calls_a_match_a_finding(self):
         out = self.run_on("Workers run on depth, not on guesswork.\n")
         self.assertIn("candidates to read, not findings", out)
+
+
+
+class LoadBearingClaimTest(unittest.TestCase):
+    """The sentences that change the verdict, pinned verbatim.
+
+    Eleven mutations survived an earlier suite: `narrower` to `broader`, `never
+    licenses editing` to `licenses editing`, `Flag at most; do not enforce` to
+    `Enforce these rows like any other`, `never a finding` to `is a finding`, and
+    so on. Every one of them flipped a claim while leaving its arithmetic
+    self-consistent, because the numeric tests only checked that a ratio matched
+    itself. A claim is pinned by its words or it is not pinned.
+    """
+
+    CLAIMS = (
+        # Which way a conflict resolves.
+        "**The narrower rule always wins.**",
+        "A spread finding never licenses editing an instance whose own pattern or "
+        "family is under threshold",
+        "Count each instance once, and under the row whenever the row's string matches.",
+        "Under every figure, an instance below threshold is left alone",
+        # What is advisory and what is enforced.
+        "Flag at most; do not enforce.",
+        "A paragraph thick with em dashes is a prompt to read the prose, never a finding.",
+        "Density still applies.",
+        "Headings are prose: counted, and editable.",
+        # What a repair may not do.
+        "A rewrite that changes what the sentence claims is a failed rewrite.",
+        "No After invents a fact.",
+        "the disposition is keep, not rewrite",
+        # What the tooling can and cannot settle.
+        "The script cannot reach a verdict, and step 4 is where the finding is.",
+        "A pass that runs the command and stops has not audited anything; it has "
+        "approved everything.",
+        # Scope of rule zero and of the exemption.
+        "Skip the region, not the file.",
+        # The FAQ exemption. Without it the family orders every question heading in
+        # a genuine FAQ rewritten into a statement, which is prose damage.
+        "**Exempt, and not counted:** an FAQ, a Q&A section, an interview transcript",
+        "Ask whose question it is",
+        "Nothing here measures authorship",
+        # The thresholds, in words rather than as digits alone.
+        "counted at 3 per document",
+        "They cross at 4000 words",
+        "in a document of at least 1000 editable words",
+        # The measured claims about human prose.
+        "**52 row matches, 0 surviving**",
+        "**21,024 editable words**",
+    )
+
+    def setUp(self):
+        self.body = flowed(body(skill_text()))
+
+    def test_every_load_bearing_claim_is_present_verbatim(self):
+        missing = [c for c in self.CLAIMS if c not in self.body]
+        self.assertEqual(missing, [],
+                         "these claims are gone or reworded, and each one changes "
+                         "what the skill does:\n  " + "\n  ".join(missing))
+
+    def test_the_negations_have_not_been_flipped(self):
+        """A mutation that reverses a claim usually leaves its length alone, so
+        the pin above catches it only if the polarity words are in the pinned
+        span. These are the spans where a single word carries the direction."""
+        for phrase, forbidden in (
+            ("narrower rule always wins", "broader rule always wins"),
+            ("never licenses editing", "always licenses editing"),
+            ("do not enforce", "enforce these rows like any other"),
+            ("never a finding", "is always a finding"),
+            ("is left alone", "is edited anyway"),
+        ):
+            self.assertIn(phrase, self.body, "missing %r" % phrase)
+            self.assertNotIn(forbidden, self.body.lower(),
+                             "the claim %r has been inverted" % phrase)
 
 
 
