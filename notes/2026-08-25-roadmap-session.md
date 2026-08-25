@@ -43,8 +43,12 @@ red-team findings.
 
 ## Next
 
-#5 first (small, unblocks #3). #6 in parallel starting now, because it is the only item needing
-elapsed time. Then #3, then #4, then #2.
+~~#5 first (small, unblocks #3). #6 in parallel starting now, because it is the only item needing
+elapsed time. Then #3, then #4, then #2.~~
+
+**Done 2026-08-25**, all five, on branch `roadmap-issues-2-6`. See
+`2026-08-25-implementation-session.md` for what landed, what broke along the way, and the
+three items that still need calendar time rather than code.
 
 ## Watch out for
 
