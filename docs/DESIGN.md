@@ -150,3 +150,42 @@ plugin context, and `--strict` turns that warning into a failure. Since `--stric
 the marketplace review pipeline runs, the file moved to `.claude/CLAUDE.md`. That path
 still loads as project context: verified by putting a token in it, asking a headless
 session for the token, and getting it back.
+
+---
+
+## Four things that were silently wrong, and how they were found
+
+None of these produced an error. Each looked like it worked.
+
+**An unquoted colon empties a skill.** `description: Use when X: do Y` is not valid YAML.
+The scalar ends at the first `: `, the remainder parses as a mapping, the document fails,
+and Claude Code loads the skill with **no metadata at all**: no name, no description, no
+trigger. The skill is installed, listed on disk, and inert. Three of the four seed skills
+shipped that way. Worse, the locally installed `claude plugin validate --strict` (2.1.241)
+passed all three; the version CI installs from npm rejects them. So the check lives in the
+test suite now, not in whichever CLI happens to be present.
+
+**`stat -f` means different things on the two platforms.** On BSD it selects a format; on
+GNU coreutils it means "report on the filesystem". So `stat -f %m "$cache"` exits 0 on
+Linux and prints a mount point. The chain `stat -f %m ... || stat -c %Y ...` therefore
+never reached the GNU branch, the numeric guard turned the mount point into 0, and the
+status-line cache missed on every render. Every Linux user was re-running their base
+status line, usually a `git` call, once a second. The fix is to try GNU first and validate
+that the result is numeric before trusting it.
+
+**`shutil.rmtree` in an installer is a data-loss bug waiting for a name collision.** While
+the package shipped one skill and one CLI, replacing whatever sat at the destination looked
+harmless. A seed pool makes it ten plausible names, one of which is `session-handoff`.
+A user who already had a skill by that name lost it on install, and uninstall then removed
+our link as "ours" and left them with nothing. Install now replaces only a symlink it can
+prove it made, and reports the collision instead. This is the same rule uninstall already
+followed; install had simply never been held to it.
+
+**`$?` after `if ! cmd` is the status of the negation.** It is always 0, so
+`if ! run_capped ...; then rc=$?` made the timeout diagnostic in `run_tests.sh` dead code.
+Capture the status directly.
+
+The pattern is worth naming: all four were invisible on the machine they were written on
+and visible the moment they ran somewhere else, or at a scale nobody had tried. That is
+what the ubuntu-plus-macos CI matrix and the cold red-team agents are for, and both earned
+their cost on the first run.
