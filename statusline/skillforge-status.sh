@@ -27,6 +27,21 @@ esac
 
 M=$'\033[35m'; C=$'\033[1;36m'; G=$'\033[32m'; D=$'\033[2m'; R=$'\033[31m'; X=$'\033[0m'
 
+TAIL_WIDTH="${SKILLFORGE_TAIL_WIDTH:-38}"
+
+# Pad or truncate to an exact number of DISPLAY characters.
+# Done in jq because its `length` counts codepoints: bash 3.2 substring indexing
+# and printf's %-*.*s are both byte-based, so a multibyte tail would be cut
+# mid-character and the width would still wobble.
+pad_to() {
+  jq -rn --arg s "$1" --argjson w "$2" '
+    ($s | gsub("[\n\r\t]"; " ")) as $t
+    | ($t | length) as $n
+    | if $n > $w then ($t[0:($w - 1)] + "…")
+      else $t + ((" " * ($w - $n)) // "")
+      end' 2>/dev/null || printf '%s' "$1"
+}
+
 WIDTH="${SKILLFORGE_BAR_WIDTH:-12}"
 [ "$steps" -lt 1 ] && steps=1
 [ "$step" -gt "$steps" ] && step=$steps
@@ -70,6 +85,15 @@ case "$status" in
     else
       tail="$phase"
     fi
-    printf '%s' "${M}${spin} forge${X} ${C}${name}${X} ${G}▕${bar}▏${X} ${D}${step}/${steps} ${pct}% · ${tail}${X}"
+    # The segment MUST keep a constant display width. The tail alternates between
+    # two strings of unrelated length, and a status line whose width changes makes
+    # the host clear and redraw the whole line -- which reads to the eye as the
+    # progress bar disappearing and reappearing on every update. Pad/truncate to a
+    # fixed column count so each refresh overwrites in place instead.
+    tail="$(pad_to "$tail" "$TAIL_WIDTH")"
+    # Same reason, two more places the width would otherwise wobble: 100% is a
+    # column wider than 40%, and step 10 is a column wider than step 9.
+    step_w=${#steps}
+    printf '%s' "${M}${spin} forge${X} ${C}${name}${X} ${G}▕${bar}▏${X} ${D}$(printf "%${step_w}d" "$step")/${steps} $(printf '%3d' "$pct")% · ${tail}${X}"
     ;;
 esac
