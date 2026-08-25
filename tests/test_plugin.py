@@ -273,15 +273,22 @@ class HookIdempotenceTest(unittest.TestCase):
         """
         reminders = self.state / "reminders"
         reminders.mkdir(parents=True)
-        (reminders / "s9.seen").mkdir()
-        os.chmod(str(reminders / "s9.seen"), 0o500)          # no write permission
+        seen = reminders / "s9.seen"
+        seen.mkdir()
+        os.chmod(str(seen), 0o500)                           # no write permission
         try:
+            # Pin the prune off. It samples roughly one event in CI_PRUNE_EVERY, and when
+            # it does fire it correctly removes this directory (rmdir needs write on the
+            # PARENT, not on the directory itself), which made the cleanup below fail on
+            # whichever platform happened to roll the sample.
             out = self.run_hook("prompt", {"session_id": "s9", "prompt_id": "p-x",
-                                           "prompt": "q" * 120})
+                                           "prompt": "q" * 120},
+                                CI_PRUNE_EVERY="1000000")
             self.assertIn("skill-compounder", out,
                           "an unwritable claim directory must not suppress the reminder")
         finally:
-            os.chmod(str(reminders / "s9.seen"), 0o700)
+            if seen.is_dir():
+                os.chmod(str(seen), 0o700)
 
     def test_claim_markers_do_not_leak(self):
         """The prune must actually empty the nested markers.
