@@ -137,7 +137,7 @@ moves the skill to `~/.claude/skills-archive/` with a `WHY-ARCHIVED.md`. Nothing
 While a skill is being forged, your status line shows live progress:
 
 ```
-my-project git:(main)  ⠹ forge retry-backoff-wrapper ▕█████▓······▏ 4/8 50% · red-team round 1
+my-project git:(main)  ⣻ forge parallel-agents-one-codebase ▕██████······▏ 4/8  50% · red-team round 1
 ```
 
 The tail alternates between what is happening right now and a one-line summary of what the
@@ -200,8 +200,11 @@ subprocess invocations of the shell scripts. See [docs/DESIGN.md](docs/DESIGN.md
 verified platform behavior the implementation depends on — mid-session hot-reloading, the
 two different session ids, and so on.
 
-The animation at the top is recorded from a fabricated forge (no real transcript, path, or
-skill name is ever captured). Regenerate it with
+The animation at the top replays a real forge — `parallel-agents-one-codebase`, which took
+three red-team rounds, and the findings shown are the ones the cold agents actually
+returned. The session chrome around it is redrawn rather than captured and the subagents
+are not re-run, but the progress bar is the real status line driven by the real state file.
+Regenerate it with
 [`vhs`](https://github.com/charmbracelet/vhs):
 
 ```bash
