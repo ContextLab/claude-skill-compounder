@@ -115,7 +115,7 @@ rather than intuition; the analysis of all twelve candidates is in
 |-|-|-|
 |`destructive-op-preflight`|Before `reset --hard`, `clean`, `rm -rf`, `--force`, a DB reset|Untracked files are not in the reflog. One report lost 2,229 of them; another had `git reset --hard origin/main` run autonomously in the first second of a session, twice|
 |`session-handoff`|Context is about to be lost: compaction, a usage limit, the end of a session|A handoff that summarises the error instead of quoting it is not resumable. One user built a whole memory system from scratch rather than keep re-deriving state|
-|`stale-artifact-check`|An edit appears to have had no effect, or a fix "did not work"|You are debugging a copy that never contained your change: a non-editable `pip install`, an unrebuilt `dist/`, a stale image|
+|`stale-artifact-check`|Behavior after an edit is indistinguishable from behavior before it|You are debugging a copy that never contained your change: a non-editable `pip install`, a `.pyc` beside the source, an unrebuilt `dist/`. It hands general debugging to `superpowers:systematic-debugging` rather than compete for that trigger|
 |`no-silent-stub`|You are about to return a value you did not compute|A fake that does not look like a failure looks like a pass. One reported evaluation copied the expected answer into the actual answer column and scored 100%|
 
 Four, not the five to ten originally scoped, because only four cleared the evidence bar.
