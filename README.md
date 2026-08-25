@@ -222,7 +222,7 @@ Review the queue in one batch, once a week, not once a turn:
 skillinsight list          # what is queued
 skillinsight review        # emit the batch, with the reviewing instructions
 skillinsight stats
-skillinsight prune --older-than 8
+skillinsight prune --older-than 8   # archives old week files, never deletes them
 ```
 
 The review step rewrites each candidate with repo-specific names stripped, which is the
