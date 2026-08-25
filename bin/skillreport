@@ -52,8 +52,11 @@ if [ ! -s "$LEDGER" ]; then
 fi
 
 # One row per start, joined to the first done/fail for the same name that follows it.
-# 'since' is the moment the forge ended, or its start if it never closed out: only
-# invocations strictly after that count as reuse.
+# 'since' is the moment the forge FINISHED. A forge with no done and no fail has no
+# finish time, so it gets closed=no and is excluded from the reuse fraction entirely.
+# The start timestamp must never stand in for a finish: doing that lets an invocation
+# made *during* an unfinished forge be counted as reuse, which turns the one number
+# this report exists to produce into a flattering lie.
 jq -s -R -r '
   def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
   [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $r
@@ -67,7 +70,8 @@ jq -s -R -r '
           (if $en == null then ($st.ts // 0) else ($en.ts // $st.ts // 0) end),
           (if $en == null then "no outcome" else $en.event end),
           (if $en == null then rounds_of($st.steps)
-           else ($en.rounds // rounds_of($st.steps)) end) ]
+           else ($en.rounds // rounds_of($st.steps)) end),
+          (if $en == null then "no" else "yes" end) ]
       | @tsv)
   | .[]
 ' "$LEDGER" > "$TMP/forges.tsv" 2>/dev/null
@@ -119,13 +123,33 @@ printf '%-30s %-12s %7s %-12s %12s %9s\n' \
 
 total=0
 reused=0
+unclosed=0
 during_total=0
 unparsed_total=0
 
-while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds; do
+while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed; do
   [ -n "${name:-}" ] || continue
+
+  # No finish time means no window to measure against. Print the row so the forge is
+  # visible, but show a dash rather than a count, and keep it out of both halves of
+  # the reuse fraction.
+  if [ "${closed:-yes}" != "yes" ]; then
+    unclosed=$(( unclosed + 1 ))
+    printf '%-30s %-12s %7s %-12s %12s %9s\n' \
+      "$(printf '%.30s' "$name")" \
+      "$(jq -n -r --argjson t "$start_ts" '$t | gmtime | strftime("%Y-%m-%d")' 2>/dev/null || echo "?")" \
+      "$rounds" "$outcome" "-" "-"
+    continue
+  fi
+
   total=$(( total + 1 ))
-  counts="$(awk -F'\t' -v n="$name" -v since="$since_ts" -v start="$start_ts" '
+  # The name goes through the environment, not through 'awk -v'. awk processes escape
+  # sequences in a -v value, while jq's @tsv writes them: a name holding a real tab
+  # arrives here as the two characters \t, -v would turn it back into a tab, and the
+  # comparison against the identically-escaped $1 would silently never match. ENVIRON
+  # is not unescaped, so both sides stay in the same representation.
+  counts="$(SR_NAME="$name" awk -F'\t' -v since="$since_ts" -v start="$start_ts" '
+    BEGIN { n = ENVIRON["SR_NAME"] }
     {
       bare = $1
       sub(/^[^:]*:/, "", bare)          # accept both "name" and "plugin:name"
@@ -160,11 +184,16 @@ done < "$TMP/forges.tsv"
 
 echo
 if [ "$total" -eq 0 ]; then
-  echo "no forges recorded yet"
+  echo "REUSE: not measurable. No forge in the ledger has a recorded finish, so there is"
+  echo "       no window to count invocations against."
 else
   pct=$(( reused * 100 / total ))
-  echo "REUSE: $reused of $total forged skills ($pct%) were invoked at least once after"
-  echo "       the forge that created them finished."
+  echo "REUSE: $reused of $total finished forges ($pct%) produced a skill that was invoked"
+  echo "       at least once after the forge that created it finished."
+fi
+if [ "$unclosed" -gt 0 ]; then
+  echo "       $unclosed forge(s) never closed out and are excluded from both halves of that"
+  echo "       fraction. They have no finish time, so nothing can be counted as after it."
 fi
 
 echo

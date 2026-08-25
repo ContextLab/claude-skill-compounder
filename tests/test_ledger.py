@@ -210,6 +210,29 @@ class LedgerCommandTest(LedgerTestBase):
         recs = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
         self.assertEqual([x["event"] for x in recs], ["start", "done"])
 
+    def test_missing_project_renders_as_a_dash_not_the_string_null(self):
+        self.ledger.write_text(
+            json.dumps({"event": "start", "name": "a", "ts": T0, "steps": 8,
+                        "summary": "s"}) + "\n", encoding="utf-8")
+        r = self.forge("ledger")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("a", r.stdout)
+        self.assertNotIn("null", r.stdout)
+
+    def test_empty_project_renders_as_a_dash_not_the_string_null(self):
+        self.ledger.write_text(
+            json.dumps({"event": "start", "name": "a", "ts": T0, "steps": 8,
+                        "summary": "s", "project": ""}) + "\n", encoding="utf-8")
+        r = self.forge("ledger")
+        self.assertNotIn("null", r.stdout)
+
+    def test_root_project_renders_as_a_dash_not_the_string_null(self):
+        self.ledger.write_text(
+            json.dumps({"event": "start", "name": "a", "ts": T0, "steps": 8,
+                        "summary": "s", "project": "/"}) + "\n", encoding="utf-8")
+        r = self.forge("ledger")
+        self.assertNotIn("null", r.stdout)
+
     def test_ledger_tolerates_a_corrupt_line(self):
         self.forge("start", "a", "8", "s", now=T0)
         self.forge("done", "ok", now=T0 + 10)
@@ -253,7 +276,7 @@ class ReportTest(LedgerTestBase):
         ])
         r = self.report()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("1 of 1 forged skills (100%)", r.stdout)
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
         row = [l for l in r.stdout.splitlines() if l.startswith("widget")][0]
         self.assertEqual(row.split()[-2:], ["2", "1"], row)
 
@@ -264,7 +287,7 @@ class ReportTest(LedgerTestBase):
             ("widget", T0 - 5000, "/Users/me/proj"),
         ])
         r = self.report()
-        self.assertIn("0 of 1 forged skills (0%)", r.stdout)
+        self.assertIn("0 of 1 finished forges (0%)", r.stdout)
 
     def test_during_forge_invocation_is_reported_separately_not_as_reuse(self):
         self.forge("start", "widget", "8", "summary", now=T0)
@@ -273,7 +296,7 @@ class ReportTest(LedgerTestBase):
             ("widget", T0 + 300, "/Users/me/proj"),
         ])
         r = self.report()
-        self.assertIn("0 of 1 forged skills (0%)", r.stdout)
+        self.assertIn("0 of 1 finished forges (0%)", r.stdout)
         self.assertIn("1 invocation(s) fell inside a forge window", r.stdout)
 
     def test_namespaced_invocation_matches_a_bare_ledger_name(self):
@@ -283,7 +306,7 @@ class ReportTest(LedgerTestBase):
             ("my-plugin:widget", T0 + 5000, "/Users/me/proj"),
         ])
         r = self.report()
-        self.assertIn("1 of 1 forged skills (100%)", r.stdout)
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
 
     def test_namespaced_ledger_name_matches_the_same_namespaced_invocation(self):
         self.forge("start", "my-plugin:widget", "8", "summary", now=T0)
@@ -292,7 +315,7 @@ class ReportTest(LedgerTestBase):
             ("my-plugin:widget", T0 + 5000, "/Users/me/proj"),
         ])
         r = self.report()
-        self.assertIn("1 of 1 forged skills (100%)", r.stdout)
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
 
     def test_a_different_skill_is_not_counted(self):
         self.forge("start", "widget", "8", "summary", now=T0)
@@ -302,7 +325,7 @@ class ReportTest(LedgerTestBase):
             ("other:widget-factory", T0 + 5001, "/Users/me/proj"),
         ])
         r = self.report()
-        self.assertIn("0 of 1 forged skills (0%)", r.stdout)
+        self.assertIn("0 of 1 finished forges (0%)", r.stdout)
 
     def test_distinct_projects_are_counted_across_transcripts(self):
         self.forge("start", "widget", "8", "summary", now=T0)
@@ -321,7 +344,7 @@ class ReportTest(LedgerTestBase):
         r = self.report()
         row = [l for l in r.stdout.splitlines() if l.startswith("flop")][0]
         self.assertIn("fail", row)
-        self.assertIn("0 of 1 forged skills", r.stdout)
+        self.assertIn("0 of 1 finished forges", r.stdout)
 
     def test_missing_transcripts_are_reported_not_silently_zero(self):
         self.forge("start", "widget", "8", "summary", now=T0)
@@ -341,7 +364,7 @@ class ReportTest(LedgerTestBase):
         }, separators=(",", ":")) + "\n", encoding="utf-8")
         r = self.report()
         self.assertIn("1 invocation(s) had no parseable timestamp", r.stdout)
-        self.assertIn("0 of 1 forged skills (0%)", r.stdout)
+        self.assertIn("0 of 1 finished forges (0%)", r.stdout)
 
     def test_a_line_mentioning_skill_without_a_tool_use_is_ignored(self):
         self.forge("start", "widget", "8", "summary", now=T0)
@@ -354,7 +377,76 @@ class ReportTest(LedgerTestBase):
                 {"type": "text", "text": '"name":"Skill","input":{"skill":"widget"} in prose'}]},
         }, separators=(",", ":")) + "\n", encoding="utf-8")
         r = self.report()
-        self.assertIn("0 of 1 forged skills (0%)", r.stdout)
+        self.assertIn("0 of 1 finished forges (0%)", r.stdout)
+
+    # -------------------------------------------------- forges that never closed out
+
+    def test_unclosed_forge_never_counts_a_mid_forge_invocation_as_reuse(self):
+        """A start with no done and no fail has no finish, so nothing is 'after' it."""
+        self.forge("start", "open", "6", "summary", now=T0)  # never closed out
+        self.write_transcript("-Users-me-proj", "sess-1", [
+            ("open", T0 + 300, "/Users/me/proj"),   # during the forge, still running
+            ("open", T0 + 90000, "/Users/me/proj"),  # long after, but still no finish
+        ])
+        r = self.report()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("100%", r.stdout)
+        self.assertNotIn("1 of 1", r.stdout)
+        self.assertIn("REUSE: not measurable", r.stdout)
+        self.assertIn("1 forge(s) never closed out and are excluded", r.stdout)
+        row = [l for l in r.stdout.splitlines() if l.startswith("open")][0]
+        self.assertEqual(row.split()[-2:], ["-", "-"], row)
+
+    def test_unclosed_forge_is_excluded_from_both_halves_of_the_fraction(self):
+        self.forge("start", "shipped", "8", "summary", now=T0)
+        self.forge("done", "ok", now=T0 + 600)
+        self.forge("start", "open", "6", "summary", now=T0 + 1000)  # never closed out
+        self.write_transcript("-Users-me-proj", "sess-1", [
+            ("shipped", T0 + 5000, "/Users/me/proj"),
+            ("open", T0 + 5000, "/Users/me/proj"),
+        ])
+        r = self.report()
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
+        self.assertIn("1 forge(s) never closed out and are excluded", r.stdout)
+
+    def test_no_exclusion_line_when_every_forge_closed_out(self):
+        self.forge("start", "shipped", "8", "summary", now=T0)
+        self.forge("done", "ok", now=T0 + 600)
+        r = self.report()
+        self.assertNotIn("never closed out and are excluded", r.stdout)
+
+    def test_a_cleared_forge_is_closed_and_still_measurable(self):
+        """clear records a fail, so the forge has a finish and stays in the fraction."""
+        self.forge("start", "dropped", "6", "summary", now=T0)
+        self.forge("clear", now=T0 + 200)
+        self.write_transcript("-p", "s", [("dropped", T0 + 5000, "/repos/a")])
+        r = self.report()
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
+        self.assertNotIn("never closed out and are excluded", r.stdout)
+
+    # ------------------------------------------------- names the tsv has to survive
+
+    def test_a_skill_name_holding_a_tab_is_still_counted(self):
+        self.forge("start", "odd\tname", "8", "summary", now=T0)
+        self.forge("done", "ok", now=T0 + 600)
+        self.write_transcript("-p", "s", [("odd\tname", T0 + 5000, "/repos/a")])
+        r = self.report()
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
+
+    def test_a_skill_name_holding_a_backslash_is_still_counted(self):
+        self.forge("start", "odd\\name", "8", "summary", now=T0)
+        self.forge("done", "ok", now=T0 + 600)
+        self.write_transcript("-p", "s", [("odd\\name", T0 + 5000, "/repos/a")])
+        r = self.report()
+        self.assertIn("1 of 1 finished forges (100%)", r.stdout)
+
+    def test_a_backslash_name_does_not_match_its_unescaped_twin(self):
+        """odd\\tname and odd<tab>name are different skills and must not be conflated."""
+        self.forge("start", "odd\\tname", "8", "summary", now=T0)
+        self.forge("done", "ok", now=T0 + 600)
+        self.write_transcript("-p", "s", [("odd\tname", T0 + 5000, "/repos/a")])
+        r = self.report()
+        self.assertIn("0 of 1 finished forges (0%)", r.stdout)
 
     def test_reminder_conversion_is_derived_and_labelled_an_estimate(self):
         self.forge("start", "widget", "8", "summary", now=T0)

@@ -177,8 +177,11 @@ case "$cmd" in
               rounds:   (if $en == null then rounds_of($st.steps)
                          else ($en.rounds // rounds_of($st.steps)) end),
               duration: (if $en == null then null else ($en.duration // null) end),
-              phase:    (if $en == null then "never closed out" else ($en.phase // "") end) })
-      | (.[] | "\(.ts | gmtime | strftime("%Y-%m-%d"))  \(.name)  [\(.outcome)]  \(.rounds) round(s)  \(if .duration == null then "-" else "\(.duration)s" end)  \(.project | split("/") | .[-1])  \(.phase)"),
+              phase:    (if $en == null then "never closed out" else ($en.phase // "") end) }
+          # jq 1.6 returns [] for ("" | split("/")), so .[-1] on an absent or empty
+          # project yields null, which then interpolates as the literal string "null".
+          | .where = ([ (.project | split("/"))[] | select(length > 0) ] | last // "-"))
+      | (.[] | "\(.ts | gmtime | strftime("%Y-%m-%d"))  \(.name)  [\(.outcome)]  \(.rounds) round(s)  \(if .duration == null then "-" else "\(.duration)s" end)  \(.where)  \(.phase)"),
         "",
         "\(length) forge(s): \(map(select(.outcome == "done")) | length) done, \(map(select(.outcome == "fail")) | length) abandoned, \(map(select(.outcome == "no outcome")) | length) never closed out"
     ' "$LEDGER"
