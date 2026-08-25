@@ -12,11 +12,18 @@ by eye differ by tens of per cent:
      matches on the raw file. Paragraphs are unwrapped here before matching, and
      every match is reported against the line it starts on.
 
-A match is a candidate to READ, never a finding. In 21,024 editable words of
-human technical prose, all sixteen matches were correct writing.
+A match is a candidate to READ, never a finding. In 13,560 editable words of
+human technical prose, all fifteen matches were correct writing.
 
-    python3 shortlist.py README.md
-    python3 shortlist.py --words-only README.md
+    python3 shortlist.py README.md              # denominator and shortlist
+    python3 shortlist.py --words-only README.md  # denominator only
+    python3 shortlist.py --rows README.md        # add every catalogue row string
+    python3 shortlist.py --skip=120-148 README.md  # drop a rule-zero region first
+
+Excluded from the denominator and never edited: frontmatter, fenced code, indented
+code, inline code, HTML and RST role markup, URLs, table rows, and heading
+underlines and thematic breaks. List markers are dropped as punctuation. Headings
+are prose: counted, and editable.
 """
 
 import os
@@ -96,7 +103,16 @@ def _blank_indented_code(text, blank):
 
 
 def editable_words(text):
-    return len(strip_markup(text).split())
+    """Words a person wrote, so a rate means something.
+
+    List markers are punctuation. Counting `-` and `1.` as words inflated the
+    denominator by one per bullet: five bullets of five words reported ten.
+    Every rate divides by this, so on a list-heavy document that understated
+    every rate, in the opposite direction from counting nested bullets as code.
+    """
+    stripped = strip_markup(text)
+    stripped = re.sub(r"(?m)^[ \t]*(?:[-*+]|\d+[.)])(?=[ \t])", " ", stripped)
+    return len(stripped.split())
 
 
 def unwrap(text):
@@ -124,11 +140,17 @@ def unwrap(text):
 def shortlist(text):
     """[(label, line number, matched text, context)] over unwrapped, stripped text."""
     flowed, per_char = unwrap(strip_markup(text))
+    original_flowed, _ = unwrap(text)
     hits = []
     for pattern, label in SHORTLIST:
         for m in re.finditer(pattern, flowed, re.I):
             line = per_char[m.start()] if m.start() < len(per_char) else 0
-            context = flowed[max(0, m.start() - 60):m.end() + 45]
+            # Context comes from the ORIGINAL text, not the stripped copy:
+            # step 5 judges the exemption by reading this line, and inline code
+            # blanked to spaces turns `octal escape sequences, not hexadecimal`
+            # into a sentence with a hole where the decisive term was.
+            start = max(0, m.start() - 60)
+            context = original_flowed[start:m.end() + 45]
             hits.append((label, line, m.group(0), " ".join(context.split())))
     return sorted(hits, key=lambda h: h[1])
 
@@ -174,6 +196,29 @@ def rows(text, skill_md):
     return sorted(hits, key=lambda h: h[1])
 
 
+class UsageError(Exception):
+    pass
+
+
+def parse_range(spec, total):
+    """`A` or `A-B`, 1-based and inclusive. Anything else is an error, not a
+    silent no-op: `--skip=4-2` and `--skip=abc` both used to change nothing, and
+    `--skip=0-2` reached the last line through a negative index."""
+    first, sep, last = spec.partition("-")
+    try:
+        start = int(first)
+        end = int(last) if sep and last else start
+    except ValueError:
+        raise UsageError("--skip=%s is not a line or a line range" % spec)
+    if start < 1 or end < 1:
+        raise UsageError("--skip=%s: line numbers start at 1" % spec)
+    if end < start:
+        raise UsageError("--skip=%s: the range ends before it starts" % spec)
+    if start > total:
+        raise UsageError("--skip=%s: the file has %d lines" % (spec, total))
+    return start, min(end, total)
+
+
 def apply_skips(text, skips):
     """Blank the line ranges rule zero says to skip, before anything is counted.
 
@@ -182,10 +227,8 @@ def apply_skips(text, skips):
     """
     lines = text.split("\n")
     for spec in skips:
-        first, _, last = spec.partition("-")
-        first = int(first)
-        last = int(last or first)
-        for n in range(first, min(last, len(lines)) + 1):
+        start, end = parse_range(spec, len(lines))
+        for n in range(start, end + 1):
             lines[n - 1] = ""
     return "\n".join(lines)
 
@@ -230,11 +273,18 @@ def main(argv):
             skill_md = open(beside, encoding="utf-8").read()
     paths = [a for a in argv[1:] if not a.startswith("--")]
     if not paths:
-        print("usage: python3 shortlist.py [--words-only] [--rows[=SKILL.md]] "
-              "[--skip=A-B] FILE...")
+        sys.stderr.write("usage: python3 shortlist.py [--words-only] "
+                         "[--rows[=SKILL.md]] [--skip=A-B] FILE...\n")
         return 2
     for path in paths:
-        report(path, words_only, skips, skill_md)
+        try:
+            report(path, words_only, skips, skill_md)
+        except UsageError as exc:
+            sys.stderr.write("%s: %s\n" % (path, exc))
+            return 2
+        except (IOError, OSError) as exc:
+            sys.stderr.write("%s: %s\n" % (path, exc.strerror or exc))
+            return 2
     return 0
 
 

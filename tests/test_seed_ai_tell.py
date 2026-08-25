@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests the `ai-tell-audit` seed skill.
 
-This skill ships no script, so there is no binary to run. What it ships is a
-catalogue of writing tells, a disposition for every row, and three rules that
-decide when a row fires at all. The document IS the program, and every claim
+This skill ships one script, `shortlist.py`, which is exercised for real below.
+The rest of what it ships is a catalogue of writing tells, a disposition for every
+row, and three rules that decide when a row fires at all. The document IS the program, and every claim
 below is lifted out of `SKILL.md` at run time rather than copied into this file,
 so an edit to the document that breaks one of its own load-bearing claims turns
 this suite red instead of drifting away from it.
@@ -55,6 +55,9 @@ PORTABLE_KEYS = {"name", "description", "license", "compatibility", "metadata",
 
 # Human prose. Every catalogue hit in these two must be exempt or Keep.
 CORPUS = ["testing-methodology.rst", "submitting-patches.txt"]
+# Verbatim Linux coding-style.rst v5.15. An earlier version ordered all of it
+# rewritten under "any unnamed opposition".
+CONCESSION = "concession-rebuttal.rst"
 # Mentions rather than uses. Every hit must sit inside a list item or a quote.
 RULE_ZERO_FIXTURE = "contributing-banned-words.md"
 
@@ -304,6 +307,21 @@ class FrontmatterTest(unittest.TestCase):
         self.assertLessEqual(len(self.description()), 500,
                              "description is %d chars" % len(self.description()))
 
+    def test_the_precedence_rule_is_in_the_description_itself(self):
+        """Flipping `the request decides, not the file` to its opposite in the
+        frontmatter passed every test, because both trigger tests read the body.
+        The description is the only text the router sees when deciding whether to
+        fire, so it is the one string that most needs pinning."""
+        d = self.description()
+        self.assertIn("the request decides, not the file", d,
+                      "the precedence rule is absent or inverted in the description")
+        self.assertNotIn("the file decides", d.lower())
+        self.assertIn("does NOT fire", d,
+                      "the description states no case in which it declines")
+        body_rule = section(body(self.text), "## When this fires")
+        self.assertIn("the request decides, not the file", body_rule,
+                      "the description and the body state different precedence")
+
     def test_description_carries_both_halves_of_the_trigger(self):
         d = self.description()
         self.assertTrue(d.startswith("Use when"), d[:40])
@@ -433,6 +451,22 @@ class RuleOrderingTest(unittest.TestCase):
         self.assertLess(rule_zero, first_row,
                         "rule zero must be read before any row is applied")
 
+    def test_the_document_wide_rate_agrees_with_its_own_floor(self):
+        """Changing the document-wide rate from 6 to 20 survived a 98-test suite.
+        The file states that the rate and the minimum length meet at a named
+        instance count, so the three numbers check each other."""
+        text = flowed(section(self.body, DENSITY))
+        rate = int(re.search(r"reach (\d+) per thousand words", text).group(1))
+        length = int(re.search(r"at least (\d+)\s*editable words", text).group(1))
+        meet = int(re.search(r"meet at exactly (\d+) instances", text).group(1))
+        self.assertEqual(rate * length // 1000, meet,
+                         "%d per thousand over %d words is %d instances, but the "
+                         "file says they meet at %d"
+                         % (rate, length, rate * length // 1000, meet))
+        self.assertLessEqual(rate, 10,
+                             "a document-wide rate of %d per thousand is denser than "
+                             "any measured document, so it can never fire" % rate)
+
     def test_the_density_thresholds_are_stated_as_numbers(self):
         text = section(self.body, DENSITY)
         per_document = re.search(r"(\d+) or more surviving instances", text)
@@ -552,6 +586,80 @@ class RegressionCorpusTest(unittest.TestCase):
                                "%s is too short for a rate to mean anything" % name)
 
 
+class ConcessionAndRebuttalTest(unittest.TestCase):
+    """The round-3 damage case, kept as a fixture.
+
+    Linux `coding-style.rst` opens five paragraphs by stating a belief the reader
+    may hold, then rebutting it. An earlier version of this file read all five as
+    "any unnamed opposition", a row whose section says "Softening does not fix
+    these, so they delete", and reached seven surviving instances against a floor
+    of three. Rewriting Linus's rationale for eight-character indentation is worse
+    than shipping no skill at all, so the correct output on this fixture is zero
+    edits and the clause that guarantees it is asserted verbatim.
+    """
+
+    def setUp(self):
+        self.body = body(skill_text())
+        self.text = fixture(CONCESSION)
+
+    def test_the_fixture_still_carries_the_construction(self):
+        for opening in ("some people will claim that having 8-character indentations",
+                        "Lots of people think that typedefs",
+                        "There appears to be a common misperception",
+                        "Often people argue that adding inline"):
+            self.assertIn(opening, " ".join(self.text.split()),
+                          "the fixture no longer exercises %r" % opening)
+
+    def test_the_rows_no_longer_claim_every_unnamed_opposition(self):
+        """The exact wording that caused the damage. `any unnamed opposition` in a
+        pattern cell is what a reader applied to a rebutted view."""
+        for pattern, _ in catalogue_rows(self.body):
+            self.assertNotIn("any unnamed opposition", pattern,
+                             "row %r still claims every unnamed opposition" % pattern)
+        rows = [p for p, _ in catalogue_rows(self.body) if "unnamed opposition" in p]
+        self.assertEqual(len(rows), 2, "expected the two narrowed rows, got %r" % rows)
+        for pattern in rows:
+            self.assertIn("never rebuts", pattern,
+                          "row %r does not say which opposition it means" % pattern)
+
+    def test_the_keep_clause_gives_a_recognition_test_a_reader_can_run(self):
+        keep = flowed(section(self.body, KEEP))
+        self.assertIn("Concession and rebuttal.", keep)
+        self.assertIn("read the next three sentences. Do they give a reason the view "
+                      "is wrong that a reader could check?**", keep,
+                      "the exemption states no test, so it cannot be applied")
+        self.assertIn("keep the opening, and do not count it", keep)
+        self.assertIn("zero edits", keep)
+
+    def test_the_delete_disposition_defers_to_the_keep_clause(self):
+        """The section header said deletion was unavoidable for this family."""
+        text = flowed(section(self.body, "### Invented experience and unsourced claims"))
+        self.assertIn("The exception is concession and rebuttal", text,
+                      "the section still says deletion is unavoidable")
+        self.assertIn("is not counted here", text)
+
+    # Row strings that occur inside the verbatim Linux passages, and the clause
+    # in SKILL.md that keeps each one. `useful only for:` is the scoped use the
+    # value-claim row explicitly keeps; `---` is an RST heading underline.
+    COVERING = {
+        "useful": "Keep any use scoped to a named context, reader or noun",
+        "---": "In reStructuredText it underlines a heading",
+        "names": "None fires on the literal sense",
+    }
+
+    def test_no_catalogue_string_fires_on_the_fixture(self):
+        """The greppable side has to be clean too, or the prose fix is undone by a
+        row string matching inside a rebutted passage."""
+        flowed_body = flowed(self.body)
+        for term, line_no, matched, line in scan(self.text, catalogue_terms(self.body)):
+            self.assertIn(term, self.COVERING,
+                          "%s:%d matches %r (%r) and nothing in SKILL.md keeps it:"
+                          "\n  %s" % (CONCESSION, line_no, term, matched, line.strip()))
+            self.assertIn(self.COVERING[term], flowed_body,
+                          "%s:%d relies on %r, whose covering clause is gone"
+                          % (CONCESSION, line_no, term))
+
+
 class RuleZeroTest(unittest.TestCase):
     """Named, quoted, and listed instances are never edited."""
 
@@ -563,7 +671,7 @@ class RuleZeroTest(unittest.TestCase):
     def test_rule_zero_names_the_two_shapes_in_the_fixture(self):
         text = section(self.body, RULE_ZERO)
         for named in ("banned-word lists", "blockquotes", "quoted material",
-                      "style guides", "`CONTRIBUTING.md`"):
+                      "style guides", "`CONTRIBUTING.md`", "page furniture"):
             self.assertIn(named, text, "rule zero no longer covers %r" % named)
         self.assertIn("mentioned rather than used", text)
 
@@ -906,7 +1014,7 @@ class StructuralDensityTest(unittest.TestCase):
 
     def test_the_rate_is_justified_against_a_measurement(self):
         text = flowed(self.section)
-        for evidence in ("21,024 editable words", "0.0 per thousand"):
+        for evidence in ("13,560 editable words", "0.0 per thousand"):
             self.assertIn(evidence, text,
                           "the structural rate cites no measurement: missing %r"
                           % evidence)
@@ -942,12 +1050,12 @@ class StructuralDensityTest(unittest.TestCase):
     def test_the_human_corpus_figures_are_internally_consistent(self):
         """Inflating the corpus match count survived every test."""
         text = flowed(self.section)
-        candidates = int(re.search(r"reports \*\*(\d+)\s*candidate matches", text).group(1))
+        candidates = int(re.search(r"\*\*(\d+) candidate\s*matches\*\*", text).group(1))
         surviving = int(re.search(r"\*\*(\d+) surviving instances", text).group(1))
         words = int(re.search(r"\*\*([\d,]+) editable words\*\*",
                               text).group(1).replace(",", ""))
         explained = int(re.search(r"(?:^|\W)(\w+) are instructional contrasts",
-                                  text).group(1).replace("Fifteen", "15"))
+                                  text).group(1).replace("Fourteen", "14"))
         self.assertLessEqual(surviving, candidates)
         self.assertEqual(candidates, explained + 1,
                          "%d candidates but only %d are accounted for" %
@@ -1431,7 +1539,9 @@ class ShortlistScriptTest(unittest.TestCase):
         cut = int(re.search(r"(\d+) editable",
                             self.run_on(doc, "--skip=2-4")).group(1))
         self.assertLess(cut, full, "--skip did not change the denominator")
-        self.assertEqual(full - cut, 6, "skipped 3 list lines should drop 6 tokens")
+        self.assertEqual(full - cut, 3,
+                         "three skipped bullets of one word each should drop three "
+                         "words; a bullet marker is punctuation, not a word")
 
     def test_the_script_and_this_suite_count_the_same_rows(self):
         """Two implementations of one rule drift, and the shipped one is what a
@@ -1475,6 +1585,49 @@ class ShortlistScriptTest(unittest.TestCase):
                       "the script cites %r words of human prose and SKILL.md does "
                       "not state that figure anywhere" % stated.group(1))
 
+    def test_match_context_is_read_off_the_original_text(self):
+        """Step 5 judges the exemption by reading the context the script prints.
+        Printing it from the stripped copy put a hole where the decisive term was:
+        `octal escape sequences, not hexadecimal` arrived as `, not hexadecimal`,
+        and the reader was asked to rule on a sentence with its subject removed."""
+        doc = "Use `octal escape sequences`, not hexadecimal, in printf formats.\n"
+        out = self.run_on(doc)
+        self.assertIn("octal escape sequences", out,
+                      "the inline-code term was blanked out of the context:\n%s" % out)
+
+    def test_bad_arguments_fail_loudly(self):
+        """`--skip=abc` and `--skip=4-2` used to raise a traceback or silently do
+        nothing, and a missing file raised a traceback."""
+        import subprocess, tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("one two three four five\n")
+            path = fh.name
+        try:
+            for bad in ("--skip=abc", "--skip=4-2", "--skip=0-2"):
+                r = subprocess.run([sys.executable, str(self.SCRIPT), bad, path],
+                                   capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL)
+                self.assertEqual(r.returncode, 2, "%s was accepted" % bad)
+                self.assertNotIn("Traceback", r.stderr, "%s raised: %s" % (bad, r.stderr))
+                self.assertTrue(r.stderr.strip(), "%s explained nothing" % bad)
+        finally:
+            os.unlink(path)
+        r = subprocess.run([sys.executable, str(self.SCRIPT), "/nonexistent/x.md"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_rows_and_skip_compose(self):
+        """Step 3 tells the reader to pass both in one command."""
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--rows", "--skip=1-40",
+             str(SKILL_DIR / "SKILL.md")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("row matches across", r.stdout)
+        self.assertIn("editable words", r.stdout)
+
     def test_it_never_calls_a_match_a_finding(self):
         out = self.run_on("Workers run on depth, not on guesswork.\n")
         self.assertIn("candidates to read, not findings", out)
@@ -1514,6 +1667,8 @@ class LoadBearingClaimTest(unittest.TestCase):
         "approved everything.",
         # Scope of rule zero and of the exemption.
         "Skip the region, not the file.",
+        # Page furniture: a plain-text RFC repeats its header 28 times.
+        "**page furniture**, meaning running headers and footers",
         # The FAQ exemption. Without it the family orders every question heading in
         # a genuine FAQ rewritten into a statement, which is prose damage.
         "**Exempt, and not counted:** an FAQ, a Q&A section, an interview transcript",
@@ -1523,9 +1678,34 @@ class LoadBearingClaimTest(unittest.TestCase):
         "counted at 3 per document",
         "They cross at 4000 words",
         "in a document of at least 1000 editable words",
+        # Scope, stated rather than implied: the catalogue is rhetorical, so it
+        # has almost no purchase on generated reference documentation.
+        "**Scope: argued prose, not generated reference.**",
+        "Do not read a clean pass on generated reference as evidence of anything.",
+        # A document you did not draft is in scope; judging its author never is.
+        "The condition is the publication, not the authorship",
+        # Round 3: thirteen mutations that survived a 98-test suite.
+        "directly under a line of text it is a setext H2 underline in Markdown",
+        "Isolated ones are fine.",
+        "under a quarter of them run to more than one sentence",
+        "Keep the pair when both halves denote something concrete",
+        "a troubleshooting list, and any run of headings a reader scans",
+        "test fixtures",
+        "It fires when the negated half exists only to be rejected",
+        "**Vary the repairs.**",
+        "**Use it on a draft that is about to be published, whoever wrote it**",
+        "Being asked whether they used a model is not, at any density, on any count.",
+        "**The em dash is a weak signal**",
+        # Concession and rebuttal: the round-3 damage case.
+        "unnamed opposition the document never rebuts",
+        "read the next three sentences. Do they give a reason the view is wrong "
+        "that a reader could check?**",
+        "the correct output on that file is zero edits",
+        # A row that describes a construction needs a counting unit.
+        "**A row that describes a construction counts once per paragraph**",
         # The measured claims about human prose.
-        "**52 row matches, 0 surviving**",
-        "**21,024 editable words**",
+        "**32 row matches across the first three, 19 in the fourth, 0 surviving anywhere**",
+        "**13,560 editable words**",
     )
 
     def setUp(self):
@@ -1547,6 +1727,8 @@ class LoadBearingClaimTest(unittest.TestCase):
             ("do not enforce", "enforce these rows like any other"),
             ("never a finding", "is always a finding"),
             ("is left alone", "is edited anyway"),
+            ("the request decides, not the file", "the file decides, not the request"),
+            ("em dash is a weak signal", "em dash is a strong signal"),
         ):
             self.assertIn(phrase, self.body, "missing %r" % phrase)
             self.assertNotIn(forbidden, self.body.lower(),

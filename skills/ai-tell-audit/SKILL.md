@@ -21,17 +21,22 @@ Two sessions given only a catalogue invent two different sequences. This is the 
 2. **Mark the skip regions.** Rule zero, below, before anything is counted or read. The
    script has no rule-zero awareness, so pass the line ranges to it: `--skip=120-148`,
    repeatable. Without that, a banned-word list lands in the denominator this file says
-   must exclude it.
-3. **Count the denominator.** `shortlist.py` sits beside this file, so run
-   `python3 <this skill's directory>/shortlist.py <file>`; it prints the editable word
-   count. Every rate in this file divides by that document's own count.
-4. **Build the reading list.** The same command prints the greppable shortlist with
-   paragraphs unwrapped. The other eight families have no shortlist, so read each
-   paragraph once, in order, asking that family's recognition test of it. The list is
-   complete when every paragraph has been read once: there is no search to exhaust, and
-   a family with no candidate is recorded as zero rather than as unchecked.
+   must exclude it. Scan for page furniture here too: a plain-text RFC or a man page
+   repeats a running header on every page, and those lines are not prose.
+3. **Count the denominator and the rows.** `shortlist.py` sits beside this file. Run
+   `python3 <this skill's directory>/shortlist.py --rows --skip=<each range from step 2> <file>`.
+   It prints the editable word count, the greppable shortlist, and a count for every
+   catalogue row that is a string. Carry the `--skip` ranges from step 2 into this
+   command; leaving them off re-admits the region step 2 excluded.
+4. **Read every paragraph once, in order.** The command in step 3 reaches two of the ten
+   families and only the rows that are strings. Eight families, and every row that
+   describes a construction rather than a string (`One-sentence paragraphs throughout`,
+   `A paragraph with no argument under it`, unnamed opposition, and the rest), are found
+   only here. Ask each one's recognition test of the paragraph in front of you. The pass
+   is complete when every paragraph has been read once: there is no search to exhaust,
+   and a family or row with no candidate is recorded as zero rather than as unchecked.
 5. **Apply the exemption to each match, one at a time.** A match is a candidate, never a
-   finding. In the human corpus none of the sixteen was a finding.
+   finding. Across the four revision-pinned human documents, none of the 23 was a finding.
 6. **Count what survives**, three ways: per pattern, per family, and document-wide.
 7. **Apply the thresholds.** Only a pattern or family at or over its own threshold
    produces an edit. Nothing else is edited, however the document reads.
@@ -39,20 +44,31 @@ Two sessions given only a catalogue invent two different sequences. This is the 
    return a list when they asked what you found. If the request says neither, ask before
    writing.
 
-**Output contract.** Whatever the mode, the reply carries: the editable word count; every
-pattern and family that fired, with its count and its rate; every edit as a before and an
-after; and one line for what was left alone and why. A pass that fired nothing says so
-and changes nothing, which is a result and not a failure.
+**Output contract.** Whatever the mode, the reply carries, in this order:
+
+- the editable word count, and the `--skip` ranges taken out of it;
+- every row that fired, with its **count**. Rows have no rate: the figure of 3 holds
+  however long the document is;
+- every family that fired, with its **count and its rate**;
+- if the document-wide figure fired, its count, its rate, and the three heaviest
+  families, which is what a spread finding owes the reader;
+- every edit, as a before and an after;
+- one line for what was left alone and why.
+
+A pass that fired nothing says so and changes nothing, which is a result and not a
+failure.
 
 ## Literal and terminological use is exempt, everywhere
 
-**Every row in this file is a rule about metaphor. None fires on the literal sense, on a
-term of art, or on markup the format requires.** File-wide, so no row repeats it. Four
-cases that broke earlier versions:
+**Every row in this file is a rule about a word or a construction used for effect rather
+than for meaning. None fires on the literal sense, on a term of art, or on markup the
+format requires.** Most rows are about metaphor; `worth [X]`, `robust` and the
+unnamed-opposition row are not, and the rule covers them the same way. File-wide, so no
+row repeats it. Four cases that broke earlier versions:
 
 - `harness` is banned as a corporate verb. A `test harness` is a term of art: sqlite's
-  testing page uses it 11 times in the prose `shortlist.py --rows` counts, 22 in the raw
-  HTML including headings and navigation, and needs zero edits at either count.
+  testing page uses it 11 times in the prose a tag strip produces, and needs zero edits at
+  any count.
 - `the entire X` is an empty intensifier. `the entire filesystem` names a scope.
 - `robust` is an empty adjective. `robust against malicious attack` carries a claim that
   contrasts with "robust in normal use", and flattening it loses the contrast.
@@ -89,26 +105,24 @@ families, and hand it back. **Under every figure, an instance below threshold is
 alone**, even where the plain version would read better. That is step 7, and it is the
 whole protection: a licence to fix what looks wrong is a licence to rewrite anything.
 
-Measured with `shortlist.py --rows` on one pinned pull (2026-08-25) of four human
-documents totalling **21,024 editable words**: Linux `submitting-patches.rst` at
-83f71fbc66fb, git `CodingGuidelines` at 570e1e0d0ff6, curl `CONTRIBUTE.md` at
-7e1001bcd699, and sqlite's "How SQLite Is Tested", which carries no revision id.
+Measured with `shortlist.py --rows` on four human documents pinned by revision, so every
+figure below can be rerun: Linux `submitting-patches.rst` at 83f71fbc66fb, git
+`CodingGuidelines` at 570e1e0d0ff6, curl `CONTRIBUTE.md` at 7e1001bcd699, and Linux
+`coding-style.rst` at tag v5.15. Together **13,560 editable words** for the first three,
+**5717** for the fourth. All four are external to this repository, so a rerun needs the
+pull first, and all four are human-authored rather than pre-LLM: curl's `CONTRIBUTE.md`
+at that pin carries a section on AI use added well after 2022. The claim is that people
+wrote them, which is what the exemption has to survive.
 
-Two caveats a rerun needs. The sqlite page is HTML, and stripping tags alone leaves the
-contents of `<pre>` blocks at column zero where the script cannot recognise them as code,
-which inflates the denominator; indent them by four first, or the count is wrong in the
-direction that makes every rate look smaller. And these are human-authored documents, not
-pre-LLM ones: curl's `CONTRIBUTE.md` at that pin carries a section on AI use added years
-after 2022. The claim is that people wrote them, which is what the exemption has to
-survive. Every figure below is what the command prints, so it can be rerun; every document
-is external to this repository, so rerunning it needs the pull first.
-
-**52 row matches, 0 surviving**, so none of the four fires. Three rows individually clear
-the per-row figure of 3, and every one is exempt before any count: `harness` 11 times in
-the sqlite text as a term of art, `names` 10 times in git as the plain noun
-("function names"), and `useful` 5 times in one Linux document, each scoped ("useful at
-this step"), which that row's own keep clause covers. That is what applying the exemption
-first buys, and it is why the exemption is stated above this paragraph rather than below.
+**32 row matches across the first three, 19 in the fourth, 0 surviving anywhere**, so
+none of them fires. Four rows individually clear the per-row figure of 3, and every one is
+exempt before any count: `names` 14 times in `coding-style.rst` and 10 in git as the plain
+noun ("function names"), and `useful` 5 times in one Linux document, each scoped ("useful
+at this step"), which that row's own keep clause covers. That is what applying the
+exemption first buys, and it is why the exemption is stated above this paragraph rather
+than below. sqlite's "How SQLite Is Tested" is the fifth regression document and is
+deliberately **not** in these totals: it is HTML with no revision id, and no command here
+turns it into text reproducibly.
 
 Two older figures survive in this file, a 3715-word machine-register file carrying
 `load-bearing` 3 times and a 264-word PR body at 76 per thousand. They come from
@@ -118,6 +132,13 @@ are recorded as history, not as evidence.
 The document-wide figure counts every surviving instance, row and family alike. The
 per-pattern figure of 3 governs a **row**, whether the row gives a string or describes a
 construction. The **headed families** carry their own two figures.
+
+**A row that describes a construction counts once per paragraph**, not once per sentence
+and not once per bullet: three `- **term**: explanation` bullets in one list are one
+instance, because the construction is the list. That is what keeps a correct
+Keep-a-Changelog file, whose entries are a standard definition list, from firing at three
+on its first section. Where a row states its own proportional condition, that condition
+runs first and the figure of 3 applies to whatever survives it.
 
 **A construction can be reachable by both**, and several are: `it isn't about X, it's
 about Y` is a row and is also negation-then-correction; `quietly` is a row and is also a
@@ -130,16 +151,22 @@ never counted a second time under the family.
 
 Automated AI-writing detection is widely held to be pseudoscience: a 27-page human paper
 scored 90% AI, a 2010 thesis scored 85%, with disproportionate harm to ESL and
-neurodivergent writers. Nothing here measures authorship. **Use it on your own draft
-before you publish**, never to assess who wrote something, never as input to a grade or a
-moderation decision.
+neurodivergent writers. Nothing here measures authorship. **Use it on a draft that is
+about to be published, whoever wrote it**, never to assess who wrote something, never as
+input to a grade or a moderation decision. Auditing a colleague's PR description before it
+goes out is in scope because a publication is being prepared. Being asked whether they
+used a model is not, at any density, on any count.
 
 ## Rule zero: never edit named or borrowed text
 
 A document that *names* one of these patterns is not committing it. Skip, without
 exception: quoted material, blockquotes, log output, error strings; banned-word lists,
 style guides, linter configs, this file; examples labelled as bad, before/after pairs,
-test fixtures; code, code fences, identifiers (`surface()` is a function name).
+test fixtures; code, code fences, identifiers (`surface()` is a function name);
+**page furniture**, meaning running headers and footers, page numbers, tables of
+contents and boilerplate the format repeats rather than the author. An RFC in plain text
+carries the same header 28 times, and counted as prose it feeds Repeated signature phrase
+a signature nobody wrote.
 
 **Skip the region, not the file.** A contribution guide under any of its spellings
 (`CONTRIBUTING.md`, `CONTRIBUTE.md`, `CodingGuidelines`) is skipped **where it lists
@@ -156,6 +183,14 @@ text is mentioned rather than used, leave it alone.
 The condition is observable: am I about to publish prose for other people to read? It does
 not depend on judging whether the draft reads badly.
 
+**A document you did not draft.** Step 1 asks whether you are about to publish, and most
+of what this skill is handed is somebody else's file. The condition is the publication,
+not the authorship: a review before merge, a PR you are about to open, a docs page you
+were asked to get ready all fire, because a draft is being prepared for readers. What
+does not fire is being asked to judge the document or its author. Editing prose to
+prepare it and rendering a verdict on who wrote it are different acts, and only the first
+one is here.
+
 **Precedence: the request decides, not the file.** A genre from the description is
 necessary and never sufficient, because the two halves of the trigger overlap on purpose.
 "Fix the typos in the README before I merge" gives a genre and asks for correctness, so
@@ -164,8 +199,18 @@ wrote it" gives the same genre and asks about how it reads, so it fires. A draft
 announcement fires; the chat message announcing it does not, because the artifact that
 gets published is the draft. When both clauses match and the request is genuinely
 unclear, ask. Never edit somebody's prose on a guess about what they meant. Not for chat replies, code comments,
-scratch notes, one-line commit subjects, or grammar and house-style copy-editing. Two edge
-calls: an internal team wiki page is durable prose other people read, so it fires; "this
+scratch notes, one-line commit subjects, or grammar and house-style copy-editing.
+
+**Scope: argued prose, not generated reference.** Every row and family here is a
+rhetorical construction, so the skill has purchase where a document argues, explains or
+persuades. It has almost none on generated reference documentation: API listings,
+generated changelogs, machine-written vulnerability reports and templated status pages
+come out clean whether a person or a model produced them. Three of four self-disclosed
+machine-written reference documents passed with one row match between them. That is a
+limit of the catalogue, not a verdict on the document. Do not read a clean pass on
+generated reference as evidence of anything.
+
+Two edge calls: an internal team wiki page is durable prose other people read, so it fires; "this
 section sounds stilted, tighten it" fires only when it names a genre above, since bare
 "tighten this" is copy-editing.
 
@@ -207,7 +252,7 @@ looser threshold for the same construction.
 | A rhetorical question you then answer | Rewrite as a statement |
 | A trailing engagement question | Delete |
 | `Most people I've talked to`, `everyone I've worked with` | Delete the sentence. You cannot name and link people you did not talk to |
-| `Some would say`, `critics argue`, any unnamed opposition | Rewrite: name them and link, or delete the sentence |
+| `Some would say`, `critics argue`, unnamed opposition the document never rebuts | Rewrite: name them and link, or delete the sentence. A view the document does rebut with a specific reason is concession and rebuttal, which is Keep |
 
 ### Placement and borrowed-domain metaphors
 | Pattern | Disposition |
@@ -249,11 +294,13 @@ The construction is the pattern, not the nouns: `the whole lesson` and `the whol
 
 ### Invented experience and unsourced claims
 
-Softening does not fix these, so they delete.
+Softening does not fix these, so they delete. **The exception is concession and
+rebuttal**, under Keep by default: a real view, stated plainly and then answered, is not
+invented opposition and is not counted here.
 | Pattern | Disposition |
 |-|-|
 | `most people I've talked to`, `everyone I've worked with`, `nobody I know` | Delete the sentence, or make the point with no population behind it |
-| `in my experience, most teams`, `a lot of folks`, `critics argue`, `some would say`, any unnamed opposition | Rewrite: name them and link, or delete the sentence |
+| `in my experience, most teams`, `a lot of folks`, `critics argue`, `some would say`, unnamed opposition the document never rebuts | Rewrite: name them and link, or delete the sentence. Read the next three sentences first: if they give a reason the view is wrong, this row does not apply |
 | A paragraph with no argument under it | Delete. Not rewritable |
 
 ### Corporate and consultant register
@@ -318,14 +365,15 @@ harm this file exists to prevent, committed in its own examples. If the plain ve
 needs a fact you do not have, the disposition is keep, not rewrite.
 
 **Where the figures come from.** Both counts below are printed by the shipped script, so
-a reader can rerun them. Four human technical documents, pinned at the revisions in the
-density section, come to **21,024 editable words**; `shortlist.py --rows` reports **16
-candidate matches**, and read one by one **0 surviving instances: 0.0 per thousand
-words**. Fifteen are instructional contrasts of the form `octal escape sequences, not
-hexadecimal`, where both halves are things a reader could type; the sixteenth is a grep
-artefact.
+a reader can rerun them. The three revision-pinned human documents in the density section
+come to **13,560 editable words**; `shortlist.py --rows` reports **15 candidate
+matches**, and read one by one **0 surviving instances: 0.0 per thousand words**.
+Fourteen are instructional contrasts of the form `octal escape sequences, not
+hexadecimal`, where both halves are things a reader could type; the fifteenth is a grep
+artefact. `coding-style.rst` adds 8 more candidates at 1.4 per thousand, every one an
+instructional contrast (`comments tell WHAT your code does, not HOW`), and 0 surviving.
 
-The README those tables cleared has **2356 editable words** and the same **16 candidate
+The README those tables cleared has **2354 editable words** and the same **16 candidate
 matches**. Read one by one, 4 are negation-then-correction and 3 are comparative
 aphorism. So negation-then-correction fires at 4 instances and 1.7 per thousand, and
 comparative aphorism does not, standing at 3 against a floor of 4. What the other eight
@@ -474,6 +522,26 @@ rewriting: "your real name (sorry, no pseudonyms)" lost its requirement as "your
 name"; "collisions with shorter IDs a real possibility" became "a possibility" and
 understated the risk; "real temporary directories" names genuine versus simulated.
 
+**Concession and rebuttal.** A belief the reader may actually carry, stated in the
+reader's own terms and then answered, is the backbone of a rationale document. It is not
+an invented adversary, and it is usually the argument the paragraph exists to make.
+
+Recognition test: **read the next three sentences. Do they give a reason the view is
+wrong that a reader could check?** A mechanism, a measurement, a counterexample, or a
+rule all count. If they do, keep the opening, and do not count it. What fires is the
+adversary raised and dropped: a position stated so vaguely that nothing could rebut it
+(`critics argue`, `some would say`, with no content), or one the document never returns
+to. A second question separates them when the first is close: could a reader say whether
+they agree? `some people will claim that having 8-character indentations makes
+the code move too far to the right` is a position a reader can check themselves against.
+`Some would say this is controversial` is not.
+
+Linux `coding-style.rst` at v5.15 opens five paragraphs this way and answers every one
+within two sentences. An earlier version of this file read all five as unnamed opposition
+and ordered them deleted, seven surviving instances against a floor of 3. The passages
+are kept verbatim in `tests/fixtures/ai-tell-audit/concession-rebuttal.rst`, and the
+correct output on that file is zero edits.
+
 **The em dash is a weak signal**, the most-cited tell on discussion boards and also the
 most defended, since many humans have always used it heavily. claudisms.ai bans it; that
 is house style, not evidence. A paragraph thick with em dashes is a prompt to read the
@@ -495,12 +563,15 @@ forty and the correct one: unprimed readers over-flag, and the exemption archite
 exists to stop the skill doing the same. A catalogue of strings still cannot reach a
 property of sentence construction.
 
-Four human regression documents, all damaged by earlier versions: Linux
+Five human regression documents, all damaged by earlier versions: Linux
 `submitting-patches.rst`, git `CodingGuidelines`, curl `CONTRIBUTE.md`, sqlite's "How
-SQLite Is Tested". Each must come out with zero edits, and each does: 52 row matches and
-16 shortlist candidates across the four, 0 surviving either way. sqlite is the hardest,
-with `harness` 11 times as a term of art, which without the exemption is the densest
-single row in the corpus aimed straight at the damage.
+SQLite Is Tested", and Linux `coding-style.rst`. Each must come out with zero edits, and
+each does: 51 row matches and 23 shortlist candidates across the revision-pinned four, 0
+surviving either way. sqlite is the hardest,
+with `harness` 11 times as a term of art in the text a tag strip produces, which without
+the exemption is a dense row aimed straight at the damage. A fifth document joined the
+corpus in round 3: Linux `coding-style.rst` at v5.15, whose five concession-and-rebuttal
+paragraphs an earlier version of this file ordered deleted.
 
 ## Trigger precision
 
