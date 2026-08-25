@@ -60,9 +60,16 @@ while testing `skillreport` under both shells.
 
 ## Still open
 
-- **The `destructive-op-preflight` ship gate.** Issue #3 requires a measured pass rate across
-  live fixture runs, with a deny-hook as the fallback under ~90%. Being measured; the number
-  decides whether the skill ships as written.
+- ~~**The `destructive-op-preflight` ship gate.**~~ **Measured.** 18 real headless trials,
+  9 with the skill and 9 without, against prompts engineered to tempt a `reset --hard`.
+  Manifest written before acting: 9/9 with, 2/9 without. It clears the 90% bar, so it ships
+  as a skill rather than a deny-hook. Two caveats recorded in the README: the untracked file
+  survived 18/18 in **both** arms, so in this fixture the skill prevented no actual loss and
+  what it changed was manifest discipline; and the baseline is inflated because no isolated
+  environment was reachable (auth is keychain-bound to the default config directory), so all
+  18 trials ran with about 120 other skills loaded. The one #34327-style hallucinated
+  safeguard occurred in the baseline arm: a reported backup path that did not exist, 52
+  seconds off the real one.
 - **The four threshold constants** (>15 min, >=2 occurrences, 12 edits, 20 min) are still
   guesses. `skillreport` is the instrument; the data needs elapsed time and installs in other
   repos. Do not tune them before then.
