@@ -8,9 +8,13 @@ What gets wired:
 
 * ``hooks.UserPromptSubmit``  -> compound-improvement.sh prompt   (section 1 reminder)
 * ``hooks.PostToolUse``       -> compound-improvement.sh edit     (section 2 reminder)
+* ``hooks.Stop``              -> insight-capture.sh               (skill-candidate queue)
 * ``statusLine``              -> statusline.sh                    (forge animation)
-* ``skills/skill-compounder`` -> symlink to the repo's SKILL.md directory
-* ``~/.local/bin/skillforge`` -> symlink to the repo's CLI
+* ``skills/<name>``           -> one symlink per skill in the repo's ``skills/``
+* ``~/.local/bin/<name>``     -> one symlink per executable in the repo's ``bin/``
+
+Both the skills and the CLIs are discovered from the filesystem rather than listed
+here, so adding a seed skill or a new command needs no installer change.
 
 Existing hooks from other tools are preserved; an existing status line is preserved
 by saving its command into the state directory and calling it from our wrapper.
@@ -25,6 +29,7 @@ from pathlib import Path
 
 # Markers identify our entries so install is idempotent and uninstall is surgical.
 HOOK_MARKER = "compound-improvement.sh"
+INSIGHT_MARKER = "insight-capture.sh"
 STATUSLINE_MARKER = "statusline.sh"
 EDIT_MATCHER = "Write|Edit"
 
@@ -72,6 +77,10 @@ def _hook_cmd(app_home, mode):
     return '"%s/hooks/compound-improvement.sh" %s' % (app_home, mode)
 
 
+def _insight_cmd(app_home):
+    return '"%s/hooks/insight-capture.sh"' % app_home
+
+
 def _strip_marker(groups, marker):
     """Drop our hook entries (and any group left empty) from one event's list."""
     out = []
@@ -106,6 +115,15 @@ def merge_hooks(settings, app_home):
                            "command": _hook_cmd(app_home, "edit"),
                            "timeout": 10}]})
     hooks["PostToolUse"] = ptu
+
+    # Stop carries .last_assistant_message, which is where insight capture reads from.
+    # Only wired when the script is present, so a checkout predating it still installs.
+    if (Path(app_home) / "hooks" / "insight-capture.sh").exists():
+        stop = _strip_marker(hooks.get("Stop"), INSIGHT_MARKER)
+        stop.append({"hooks": [{"type": "command",
+                                "command": _insight_cmd(app_home),
+                                "timeout": 10}]})
+        hooks["Stop"] = stop
     return settings
 
 
@@ -114,9 +132,11 @@ def remove_hooks(settings):
     hooks = settings.get("hooks")
     if not hooks:
         return settings
-    for event in ("UserPromptSubmit", "PostToolUse"):
+    for event, marker in (("UserPromptSubmit", HOOK_MARKER),
+                          ("PostToolUse", HOOK_MARKER),
+                          ("Stop", INSIGHT_MARKER)):
         if event in hooks:
-            remaining = _strip_marker(hooks[event], HOOK_MARKER)
+            remaining = _strip_marker(hooks[event], marker)
             if remaining:
                 hooks[event] = remaining
             else:
@@ -190,12 +210,49 @@ def _symlink_force(src, dst):
 
 
 def _unlink_if_ours(dst, expected_src):
-    """Only remove a link we created — never a real file the user put there."""
+    """Only remove a link we created. Never a real file the user put there."""
     dst = Path(dst)
     if dst.is_symlink() and os.path.realpath(str(dst)) == os.path.realpath(str(expected_src)):
         dst.unlink()
         return True
     return False
+
+
+def _skill_dirs(app_home):
+    """Every skill shipped in the repo: any skills/<name>/ holding a SKILL.md.
+
+    Discovered rather than listed, so the seed pool grows without touching this file.
+    """
+    root = Path(app_home) / "skills"
+    if not root.is_dir():
+        return []
+    return sorted(d for d in root.iterdir() if (d / "SKILL.md").is_file())
+
+
+def _cli_files(app_home):
+    """Every executable in the repo's bin/. Same reasoning as _skill_dirs."""
+    root = Path(app_home) / "bin"
+    if not root.is_dir():
+        return []
+    return sorted(f for f in root.iterdir()
+                  if f.is_file() and os.access(str(f), os.X_OK) and not f.name.startswith("."))
+
+
+def _link_all(sources, dest_dir):
+    return [_symlink_force(src, Path(dest_dir) / src.name) for src in sources]
+
+
+def _unlink_all(sources, dest_dir):
+    """Report per name, so "left in place (not ours)" stays visible for each one."""
+    removed, kept = [], []
+    for src in sources:
+        (removed if _unlink_if_ours(Path(dest_dir) / src.name, src) else kept).append(src.name)
+    parts = []
+    if removed:
+        parts.append("removed: " + ", ".join(removed))
+    if kept:
+        parts.append("left in place (not ours): " + ", ".join(kept))
+    return "; ".join(parts) or "(none found)"
 
 
 # ------------------------------------------------------------------- install/uninstall
@@ -215,10 +272,12 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
     write_settings(settings_path, settings)
     report["settings"] = str(settings_path)
 
-    report["skill"] = _symlink_force(Path(app_home) / "skills" / "skill-compounder",
-                                     claude_dir / "skills" / "skill-compounder")
-    report["cli"] = _symlink_force(Path(app_home) / "bin" / "skillforge",
-                                   Path(bin_dir) / "skillforge")
+    report["skills"] = ", ".join(
+        Path(p).name for p in _link_all(_skill_dirs(app_home), claude_dir / "skills")
+    ) or "(none found)"
+    report["cli"] = ", ".join(
+        Path(p).name for p in _link_all(_cli_files(app_home), Path(bin_dir))
+    ) or "(none found)"
     report["state"] = state_dir
     return report
 
@@ -239,10 +298,6 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
         write_settings(settings_path, settings)
         report["settings"] = str(settings_path)
 
-    report["skill"] = ("removed" if _unlink_if_ours(
-        claude_dir / "skills" / "skill-compounder",
-        Path(app_home) / "skills" / "skill-compounder") else "left in place (not ours)")
-    report["cli"] = ("removed" if _unlink_if_ours(
-        Path(bin_dir) / "skillforge",
-        Path(app_home) / "bin" / "skillforge") else "left in place (not ours)")
+    report["skills"] = _unlink_all(_skill_dirs(app_home), claude_dir / "skills")
+    report["cli"] = _unlink_all(_cli_files(app_home), Path(bin_dir))
     return report

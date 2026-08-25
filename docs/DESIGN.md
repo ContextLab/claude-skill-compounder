@@ -100,3 +100,53 @@ longer cold.
 The retirement check has the same structure for the same reason. Asking a second agent to
 "confirm this deletion" is a leading prompt, and it will be rubber-stamped. "Should this
 be kept, fixed, or retired?" is a question the agent can actually answer against.
+
+---
+
+## Two install paths, and what each one cannot do
+
+The repo is both a `curl | bash` install and a Claude Code plugin. Verified on
+**Claude Code 2.1.241, macOS 25.5.0, 2026-08-25** by loading it with
+`claude --plugin-dir` and reading what the hooks actually received.
+
+What the plugin path gives you for free:
+
+- `hooks/hooks.json` fires. `UserPromptSubmit`, `PostToolUse` with the
+  `Write|Edit` matcher, and `Stop` all reached the scripts. Validation passing is not
+  the same as a hook running, so this was checked by dumping the payloads.
+- `bin/` lands on the Bash tool's `PATH`. A probe binary that existed only inside the
+  plugin resolved from there, which is the test that actually proves it (a name the
+  user has already installed proves nothing).
+- Skills are namespaced `skill-compounder:<name>`, so the seed pool cannot collide
+  with a skill the user already has.
+
+What it cannot do: a plugin's `settings.json` supports only `agent` and
+`subagentStatusLine`. **`statusLine` is not among them**, so the forge animation
+cannot ship as a plugin at all.
+
+**The decision: the installer stays the primary path.** A one-line install is a
+requirement, and the animation is the most visible thing the package does; losing it
+to gain a version pin is a bad trade. The plugin manifest ships alongside so the repo
+can be loaded with `--plugin-dir`, submitted to a marketplace, and validated in CI.
+The README says plainly that the plugin path has no status line.
+
+### Running both wirings at once double-fires every hook
+
+With the installer's `settings.json` entries and the plugin both active, one `Write`
+delivered `PostToolUse` to the hook **twice**. Nothing errors. `CI_EDIT_EVERY=12`
+silently becomes 6, and every insight is queued twice.
+
+The fix is idempotence rather than a rule telling people not to do it. `UserPromptSubmit`
+carries `.prompt_id` and `PostToolUse` carries `.tool_use_id`, both confirmed present in
+real payloads. `claim_once()` claims an event by creating a directory named for that id:
+`mkdir` either succeeds or fails, atomically, so of two racing hook processes exactly one
+proceeds. An event with no usable id is always claimed, because losing reminders is worse
+than an occasional duplicate.
+
+### `CLAUDE.md` cannot sit at the plugin root
+
+`claude plugin validate .` passes with a warning that a root `CLAUDE.md` is not loaded as
+plugin context, and `--strict` turns that warning into a failure. Since `--strict` is what
+the marketplace review pipeline runs, the file moved to `.claude/CLAUDE.md`. That path
+still loads as project context: verified by putting a token in it, asking a headless
+session for the token, and getting it back.

@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 APP_HOME = str(Path(__file__).resolve().parent.parent)
+APP = Path(APP_HOME)
 
 from skill_compounder import installer
 
@@ -63,14 +64,43 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("statusline.sh", s["statusLine"]["command"])
         self.assertEqual(s["statusLine"]["refreshInterval"], 1)
 
-    def test_symlinks_point_at_the_repo(self):
-        rep = self.do_install()
-        skill = Path(rep["skill"])
-        cli = Path(rep["cli"])
-        self.assertTrue(skill.is_symlink())
-        self.assertTrue((skill / "SKILL.md").exists(), "skill symlink must expose SKILL.md")
-        self.assertTrue(cli.is_symlink())
-        self.assertTrue(os.access(str(cli), os.X_OK), "skillforge must be executable")
+    def test_every_shipped_skill_and_cli_is_linked(self):
+        """Discovery, not a hardcoded list: adding a seed skill must need no installer edit.
+
+        Asserted against what is actually in the repo, so a skill that ships without
+        being installed fails here rather than being noticed by a user.
+        """
+        self.do_install()
+        shipped_skills = sorted(d.name for d in (APP / "skills").iterdir()
+                                if (d / "SKILL.md").is_file())
+        self.assertTrue(shipped_skills, "the repo must ship at least one skill")
+        for name in shipped_skills:
+            link = self.claude / "skills" / name
+            self.assertTrue(link.is_symlink(), "%s was not linked" % name)
+            self.assertTrue((link / "SKILL.md").exists(),
+                            "%s symlink must expose SKILL.md" % name)
+
+        shipped_clis = sorted(f.name for f in (APP / "bin").iterdir()
+                              if f.is_file() and os.access(str(f), os.X_OK)
+                              and not f.name.startswith("."))
+        self.assertIn("skillforge", shipped_clis)
+        for name in shipped_clis:
+            link = self.bin / name
+            self.assertTrue(link.is_symlink(), "%s was not linked" % name)
+            self.assertTrue(os.access(str(link), os.X_OK),
+                            "%s must be executable through the link" % name)
+
+    def test_uninstall_removes_every_link_it_made(self):
+        self.do_install()
+        self.do_uninstall()
+        for d in (APP / "skills").iterdir():
+            if (d / "SKILL.md").is_file():
+                self.assertFalse((self.claude / "skills" / d.name).is_symlink(),
+                                 "%s survived uninstall" % d.name)
+        for f in (APP / "bin").iterdir():
+            if f.is_file() and os.access(str(f), os.X_OK) and not f.name.startswith("."):
+                self.assertFalse((self.bin / f.name).is_symlink(),
+                                 "%s survived uninstall" % f.name)
 
     def test_install_is_idempotent(self):
         self.do_install()
@@ -83,6 +113,21 @@ class InstallerTest(unittest.TestCase):
                       if "compound-improvement" in h["command"]]
         self.assertEqual(len(prompt_hooks), 1, "reinstall must not duplicate the prompt hook")
         self.assertEqual(len(edit_hooks), 1, "reinstall must not duplicate the edit hook")
+        stop_hooks = [h for g in s["hooks"].get("Stop", []) for h in g["hooks"]
+                      if "insight-capture" in h["command"]]
+        self.assertEqual(len(stop_hooks), 1, "reinstall must not duplicate the Stop hook")
+
+    def test_stop_hook_is_wired_and_removed(self):
+        self.do_install()
+        s = self.read()
+        self.assertTrue(any("insight-capture.sh" in h["command"]
+                            for g in s["hooks"]["Stop"] for h in g["hooks"]),
+                        "insight capture must be wired on Stop")
+        self.do_uninstall()
+        s = self.read()
+        self.assertFalse(any("insight-capture.sh" in h["command"]
+                             for g in s.get("hooks", {}).get("Stop", [])
+                             for h in g["hooks"]))
 
     # -------------------------------------------------- coexisting with other tools
 

@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite:
+    # Both, on purpose. macOS runners ship bash 3.2, which is where this repo's
+    # shell portability traps actually bite; ubuntu catches GNU-vs-BSD differences
+    # in find, stat, and sed.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update && sudo apt-get install -y jq
+            else brew install jq; fi
+          fi
+          jq --version
+
+      - name: Record the shells under test
+        run: |
+          bash --version | head -1
+          zsh --version || echo "no zsh on this runner"
+
+      - name: Run the suite
+        run: ./run_tests.sh
+
+  plugin-validate:
+    # `claude plugin validate --strict` is what the community-marketplace review
+    # pipeline runs, so a warning here is a review blocker there. It is offline and
+    # needs no credentials.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Validate the plugin
+        run: claude plugin validate . --strict
