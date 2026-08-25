@@ -41,9 +41,15 @@ case "$cmd" in
     case "$steps" in ''|*[!0-9]*) die "total-steps must be a positive integer" ;; esac
     [ "$steps" -lt 1 ] && die "total-steps must be >= 1"
     [ -z "$summary" ] && die "a one-line summary is required — it is what the user sees"
+    # Written via a temp file and mv, like update() does. A plain redirect
+    # truncates $FILE first, and the status line renders once a second: a render
+    # landing inside that window reads a partial file, its jq fails, and the whole
+    # forge segment vanishes for a frame. That is the progress bar "blinking".
+    tmp="$FILE.tmp.$$"
     jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
       '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
-        status:"active", started:$now, updated:$now}' > "$FILE" || die "could not write $FILE"
+        status:"active", started:$now, updated:$now}' > "$tmp" \
+      && mv "$tmp" "$FILE" || { rm -f "$tmp"; die "could not write $FILE"; }
     echo "skillforge: forging '$name' ($steps steps) — animation live in the status line"
     ;;
   step)

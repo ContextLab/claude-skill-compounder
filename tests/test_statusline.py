@@ -80,8 +80,9 @@ class StatusLineTest(unittest.TestCase):
 
     def test_spinner_advances_with_the_clock(self):
         self.forge("start", "s", "4", "summary")
-        frames = {self.render(SKILLFORGE_NOW=1000 + i).strip()[0] for i in range(10)}
-        self.assertEqual(len(frames), 10, "all 10 spinner frames must be distinct")
+        frames = [self.render(SKILLFORGE_NOW=1000 + i).strip()[0] for i in range(16)]
+        self.assertEqual(len(set(frames)), 8, "all 8 spinner frames must be distinct")
+        self.assertEqual(frames[:8], frames[8:], "the spinner must cycle with period 8")
 
     def test_tail_alternates_between_phase_and_summary(self):
         self.forge("start", "s", "4", "THE-SUMMARY")

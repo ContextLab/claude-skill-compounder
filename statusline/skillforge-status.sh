@@ -75,9 +75,14 @@ case "$status" in
     # A case, not an array or `cut -c`: braille glyphs are multibyte, cut -c is
     # locale-dependent, bash 3.2 substring indexing is byte-based, and zsh arrays
     # are 1-indexed. A case statement is correct under every one of those.
-    case $(( now % 10 )) in
-      0) spin=⠋ ;; 1) spin=⠙ ;; 2) spin=⠹ ;; 3) spin=⠸ ;; 4) spin=⠼ ;;
-      5) spin=⠴ ;; 6) spin=⠦ ;; 7) spin=⠧ ;; 8) spin=⠇ ;; *) spin=⠏ ;;
+    case $(( now % 8 )) in
+      # The DENSE braille set, not the light one. ⠋/⠙/⠹ are two or three lit
+      # dots in a 2x4 cell: at terminal font sizes they render as a faint speck
+      # that reads as a stray punctuation mark next to the words beside it.
+      # ⣾/⣽/⣻ light six of eight dots, so the spinner is legible as a spinner.
+      # Eight phases rather than ten, because that is the set's natural period.
+      0) spin=⣾ ;; 1) spin=⣽ ;; 2) spin=⣻ ;; 3) spin=⢿ ;;
+      4) spin=⡿ ;; 5) spin=⣟ ;; 6) spin=⣯ ;; *) spin=⣷ ;;
     esac
     # Alternate the tail: 10s of "what is happening now", 5s of "what the skill is".
     if [ -n "$summary" ] && [ $(( (now / 5) % 3 )) -eq 2 ]; then
