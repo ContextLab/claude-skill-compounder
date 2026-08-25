@@ -57,11 +57,10 @@ fires). Claude Code addresses a skill by its directory, so a mismatch makes it
 unreachable. Everything in the rest of this section is review guidance, weighed by a human,
 not a gate.
 
-An earlier version of the checker also enforced key portability and length limits. Measured
-against the 156 skills installed on one developer machine it hard-failed 46 of them,
-including four shipped by Anthropic, while an independent parse found 0 of 156 unparseable.
-Those checks were removed rather than re-tuned, because none of them is what a contribution
-is gated on. Please do not add them back to the gate.
+Key portability and length limits are not gates. Enforced as gates, measured against the
+156 skills installed on one developer machine, they hard-fail 46 of them, four shipped by
+Anthropic, while an independent parse finds 0 of 156 unparseable. None of them is what a
+contribution is gated on. Please do not add them to the gate.
 
 **Quote the description** when it contains a colon followed by a space, or use a YAML block
 scalar. An unquoted `: ` inside a plain scalar makes the frontmatter fail to parse, after

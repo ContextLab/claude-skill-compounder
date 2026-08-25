@@ -100,7 +100,7 @@ No mechanism means the answer is no, whatever the intention was.
 
 ### Three cases where the answer is not "raise"
 
-Each of these was answered wrongly, and confidently, before it was written down here.
+Each is easy to answer wrongly, and confidently.
 
 - **A designed cold-start path.** A recommender with no history for a new user returning
   popular items is not a stub. The absence of history is an expected input, the behaviour
@@ -125,7 +125,7 @@ Each of these was answered wrongly, and confidently, before it was written down 
 
 The question is never "is there a default here". It is "can the caller tell". Where the
 caller wanted the default and the contract says so, you are looking at a feature. Note that
-this cuts across the taxonomy: the "Cache-miss default" row below is the defect *only* when
+this cuts across the taxonomy: the "Cache-miss default" row above is the defect *only* when
 the miss path fails these tests. A cache that documents stale-on-miss and reports it is the
 feature, and the tell is the same one as for cold start, designed for rather than
 discovered.
@@ -190,7 +190,7 @@ grep -rnE 'except[^:]*:' <the files between your raise and main>
 ```
 
 That pattern matches `except:`, `except Exception:` and `except Exception as exc:` alike.
-Three narrowings to avoid, each of which was tried and each of which fails by matching
+Three narrowings to avoid, each of which fails by matching
 nothing, which reads exactly like a clean result. Naming the types
 (`except (Exception|BaseException)?\s*:`) misses `as exc`, the form that actually bites.
 `\b` is unsupported by `git grep`. And `git grep` itself skips untracked files, so the
@@ -208,7 +208,7 @@ neither the author nor the fixtures had seen: **4% precision** on 308 kLOC (`req
 also blind to every stub in exception form, and its grep floor could not match `except X:`
 followed by `pass` on the next line, which is how anyone actually formats it. A linter at
 those rates gets switched off within a day and takes the doctrine with it. The
-distinguishing question survived both rounds because it is the part a reader does.
+distinguishing question survives both measurements because it is the part a reader does.
 
 **This is a diff-sized procedure, not a tree-sized one.** Measured on 561 lines of
 `requests/cookies.py`, a cold reader took about 30 minutes: 99 nominal candidates
@@ -266,8 +266,8 @@ find the stubs that were considerate enough to announce themselves:
 Three details in that pipeline are load-bearing, and each replaces a version that read
 clean while missing things. `git ls-files --others` is there because a brand-new untracked
 file is the commonest place a stub lives and `git diff` never mentions it. The extension
-filter is there because without it the first hits are documentation discussing stubs, which
-is how this file's own earlier draft flagged itself thirteen times. The trailing
+filter is there because without it the first hits are documentation discussing stubs, without
+it the first hits are prose discussing stubs, including this file. The trailing
 `/dev/null` is there so that an empty file list cannot leave `grep` reading your terminal,
 and so every hit is prefixed with its real path and source line number, which a
 `git diff | grep` pipeline cannot give you (it numbers diff offsets, and it flags the

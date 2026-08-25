@@ -241,9 +241,9 @@ full confidence: *"It's almost like compact and new are the same thing."* One re
 after 59 compactions in 26 days, *"built a complete memory persistence system from scratch
 because one didn't exist."*
 
-Corrections are not optional politeness. This repository shipped two notes files both
-asserting the forging protocol had never been run end to end, long after it had, because
-every session appended and none corrected.
+Corrections are not optional politeness. An append-only trail leaves false claims standing:
+two notes can both assert something that stopped being true months ago, each as confidently
+as the line below it, because every session appended and none corrected.
 
 ## Red flags
 

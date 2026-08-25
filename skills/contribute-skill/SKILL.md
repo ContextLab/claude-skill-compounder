@@ -32,7 +32,7 @@ Propose a skill upstream only when BOTH hold:
 - **It has been used again since it was forged.** At least one later invocation that did
   the job, in real work, not a rehearsal.
 
-This was an open question and it is now settled at "both". An unproven skill costs a
+An unproven skill costs a
 reviewer more than it saves them: they have to reconstruct evidence the author never
 gathered, and a skill nobody has re-run is a guess about the future dressed up as a
 capability. Nothing automated can check either condition, so G0 makes the user say it
@@ -60,15 +60,16 @@ skillcontrib preflight <path-to-skill-dir>
 full path from wherever this repository is cloned, rather than skipping the check.
 
 It checks only what genuinely blocks a contribution: `SKILL.md` exists, the frontmatter
-parses with a real YAML parser, and `name` matches the directory (Claude Code addresses a
-skill by its directory, so a mismatch makes it unreachable). It also lists every other
+parses with a real YAML parser, `name` matches the directory (Claude Code addresses a skill
+by its directory, so a mismatch makes it unreachable), and `description` is present and
+non-empty (a skill without one never triggers). It also lists every other
 file in the directory. Those travel with the skill: a copy step that takes only
 `SKILL.md` silently drops `scripts/`, `references/`, `examples/`, and `LICENSE.txt`.
 
-Length, key portability, and prose style are review topics, not gates. An earlier version
-of this check enforced them and hard-failed 46 of 156 installed skills, four of them
-shipped by Anthropic, while a real parse found none of the 156 unparseable. Do not
-reintroduce those limits here; put them in `CONTRIBUTING.md` where a human weighs them.
+Length, key portability, and prose style are review topics, not gates. Enforced as gates
+they hard-fail 46 of the 156 skills installed on one developer machine, four of them
+shipped by Anthropic, while a real parse finds none of the 156 unparseable. Keep them out
+of the gate; `CONTRIBUTING.md` is where a human weighs them.
 
 ## 3. Identity, permission, and the identity that actually pushes (read-only)
 

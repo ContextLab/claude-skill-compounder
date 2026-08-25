@@ -53,13 +53,10 @@ queue), `skillcontrib` (read-only contribution reconnaissance).
 
 **The animation is state-driven, not process-driven.** `bin/skillforge` writes a single
 JSON file; `statusline/skillforge-status.sh` renders whatever it finds, once per second.
-Nothing streams. This decoupling is what lets a forge animate across subagent dispatches:
-builder and red-teamer are separate processes writing one file.
+Nothing streams, which is what lets a forge animate across subagent dispatches.
 
-**That file is deliberately not session-keyed.** `$CLAUDE_CODE_SESSION_ID` (what `Bash`
-sees) and `.session_id` (what hooks and the status line receive on stdin) are *different
-values for the same session*. State written under one is invisible to the other, silently.
-Hence `forge/current.json`, one forge at a time per machine. The reminder hook *does* key
+**That file is deliberately not session-keyed**, and the two session ids are why. Do not
+make it session-keyed without reading `docs/DESIGN.md` first. The reminder hook *does* key
 per session, which is correct: it both reads and writes the payload's `.session_id`.
 
 **Installation is marker-based and surgical.** `installer.py` identifies its own hook
@@ -90,13 +87,13 @@ scripts to the same events with the same matchers, so adding a hook to one and f
 other fails a test. A plugin cannot carry `statusLine`, which is why the installer stays
 primary; see `docs/DESIGN.md`.
 
-**With both wirings active every hook fires twice.** Measured, not theorised. `claim_once()`
-in `hooks/compound-improvement.sh` claims each event by `.prompt_id` / `.tool_use_id` using
-`mkdir`, which is atomic. Any new hook that counts or throttles needs the same guard.
+**With both wirings active every hook fires twice**, so any new hook that counts or
+throttles needs the `claim_once()` guard in `hooks/compound-improvement.sh`. Reasoning in
+`docs/DESIGN.md`.
 
-**`CLAUDE.md` lives at `.claude/CLAUDE.md`, not the repo root.** A root `CLAUDE.md` makes
-`claude plugin validate --strict` fail, and that is what marketplace review runs. The
-`.claude/` path still loads as project context (verified with a token round-trip).
+**`CLAUDE.md` lives at `.claude/CLAUDE.md`, not the repo root.** A root `CLAUDE.md` fails
+`claude plugin validate --strict`, which is what marketplace review runs. The `.claude/`
+path loads as project context the same way.
 
 **The installer discovers what to link.** `_skill_dirs()` and `_cli_files()` walk `skills/`
 and `bin/`, so adding a seed skill or a CLI needs no installer change, and
@@ -140,12 +137,13 @@ Retiring a skill means `mv` to an archive with a `WHY-ARCHIVED.md`, never `rm -r
 
 ## Notes and open threads
 
-`notes/` tracks status and open questions: `2026-08-24-origin.md` for where the idea came
-from, `2026-08-25-roadmap-session.md` for current state, and `notes/research/` for the
-evidence behind issues #2-#6.
+`notes/` is a dated log, not an index of current behaviour: `2026-08-24-origin.md` for
+where the idea came from, `2026-08-25-roadmap-session.md` and
+`2026-08-25-implementation-session.md` for how the seed pool and the plugin path were
+built, and `notes/research/` for the evidence behind the seed-pool selection, the insight
+queue, and the contribution mechanics. Read them for reasoning, not for the current state
+of the code.
 
-The forging protocol has been run end to end, on `parallel-agents-one-codebase`; the
-README animation replays that forge, including the findings its red-team rounds actually
-returned. The threshold constants (>15 min, >=2 occurrences, 12 edits, 20 min) are still
-first guesses, and nothing yet measures whether a forged skill ever gets used again. That
-is issue #6, and until it reports, tuning those numbers is guesswork.
+The four threshold constants (>15 min, >=2 occurrences, 12 edits, 20 min) are unvalidated.
+`bin/skillreport` is the instrument that would settle them, and it needs real usage across
+several repositories over real time. Do not tune them before that data exists.

@@ -2,9 +2,8 @@
 
 SQLite is here because it is the one datastore whose procedure was executed end to end on
 a real database, including its failure cases. **No other engine appears in this skill.**
-Postgres, MySQL, Prisma, Rails, Alembic and Django advice was drafted and then cut: none of
-it could be run on the authoring machine, and unverified instructions about wiping a
-production database are worse than none. If you are about to destroy data in one of those,
+Postgres, MySQL, Prisma, Rails, Alembic and Django are out of scope, because unverified
+instructions about wiping a production database are worse than none. If you are about to destroy data in one of those,
 the shape below still applies (census the source, restore into an empty scratch, compare,
 only then destroy), but check every flag against that tool's own `--help` first.
 
@@ -74,7 +73,7 @@ test "$SRC" = "$DST" || { echo "restore does not match the source"; exit 1; }
 rm -f "$SCRATCH"
 ```
 
-Five details, each of which was a real false proof in review:
+Five details, each of which is a way this check passes while proving nothing:
 
 - **Both censuses must be non-empty.** `sqlite3` writes errors to stderr and nothing to
   stdout, so a zero-byte dump gives `SRC=""` and `DST=""`, and `"" = ""` passes. Verified:

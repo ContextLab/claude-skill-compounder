@@ -55,7 +55,7 @@ Exit code: <!-- 0, or 3/4/5/9/18/19 with an explanation of why this is not a dup
 - [ ] `skillcontrib preflight <skill-dir>` passes
 - [ ] Frontmatter parses, `name` matches the directory, description quoted if it holds a colon
 - [ ] Every file in the skill directory is included, not only `SKILL.md`
-- [ ] `description` is a "Use when …" clause with the negative scope, at most 500 chars
+- [ ] `description` is a "Use when …" clause with the negative scope, near 500 chars
 - [ ] Body near 200 lines, or a reason it needs more
 - [ ] `./run_tests.sh` passes in full
 - [ ] No mocks, no em-dashes

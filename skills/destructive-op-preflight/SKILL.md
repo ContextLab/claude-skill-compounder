@@ -186,8 +186,8 @@ Five traps that have each caused a real loss:
 in one object. For commits, a named branch outlives the reflog. For a path git does not
 track, the copy is the recovery.
 
-Then prove coverage by subtraction rather than by comparing path lists. Path lists are
-where the last version of this skill broke: `status` quotes paths with spaces and
+Then prove coverage by subtraction rather than by comparing path lists. Path lists look
+more precise and are strictly worse: `status` quotes paths with spaces and
 `stash show` does not, renames arrive as `old -> new`, and an unanticipated status code
 silently contributes nothing to compare. The residue check has none of those failure modes,
 because git computes both sides:
@@ -264,7 +264,7 @@ if [ -n "$MINE" ]; then git stash pop --index "$(ours || true)"; else echo "Noth
 trap - EXIT
 ```
 
-Four details are load-bearing, each of them a bug found by review:
+Five details are load-bearing, each of them a way this script fails without it:
 
 - **Check the index flags before the stash, not after.** An assume-unchanged file is never
   captured by `git stash push --all`, and whether the stash also clobbers it in place is
@@ -379,8 +379,9 @@ unpushed commits stays in the reflog.
 
 ## Sources
 
-Every issue number cited above (#23913, #32938, #34327, #70378, #81508) is recorded with its
-URL and a verbatim quote in `notes/research/seed-skill-candidates.md` in this repository.
+Every issue number cited here and in `references/git-recoverability.md` (#23913, #32938,
+#34327, #70378, #81508) is recorded with its URL and a verbatim quote in
+`notes/research/seed-skill-candidates.md` in this repository.
 Check the numbers there rather than treating them as folklore.
 
 ## Quick reference
