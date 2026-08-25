@@ -5,11 +5,11 @@ description: Use when deciding whether a repeatable procedure should become a re
 
 # Compounding: turn hard-won procedures into permanent capability
 
-The goal is that every session leaves the toolchain measurably better than it found it,
-so the same problem is never solved from scratch twice. Three habits, and a bar high
-enough that the machinery pays for itself.
+Every session should leave the toolchain measurably better than it found it, so the same
+problem never gets solved from scratch twice. There are three habits to keep up, and a
+threshold that keeps the machinery from costing more than it saves.
 
-## 1. Before any major implementation — does a skill already exist?
+## 1. Before any major implementation, check for an existing skill
 
 Before writing a plan or the first line of code for anything non-trivial:
 
@@ -18,21 +18,21 @@ Before writing a plan or the first line of code for anything non-trivial:
 3. `grep -ril '<keyword>' ~/.claude/skills ./.claude/skills ~/.claude/plugins/cache/*/*/*/skills`
    when the name is not an obvious match.
 
-If a plausible skill exists, **invoke it** rather than reimplementing. If it turns out to
-be the wrong tool, that is signal — go to section 3.
+If a plausible skill exists, **invoke it**. Do not reimplement. If it turns out to be the
+wrong tool, that is useful signal: go to section 3.
 
-## 2. During work — is this pattern worth crystallizing?
+## 2. During work: is this pattern worth crystallizing?
 
-Ask continually: *is what I am doing right now a repeatable procedure?* Good candidates
-are a debugging workflow that finally worked, a deploy-and-verify sequence, a non-obvious
-API dance, a project-specific build+test+screenshot loop.
+Keep asking: *is what I am doing right now a repeatable procedure?* Good candidates are a
+debugging workflow that finally worked, a deploy-and-verify sequence, a non-obvious API
+dance, a project-specific build+test+screenshot loop.
 
-**Threshold — BOTH must hold.** Forging a skill costs several subagent rounds, so be
+**Threshold (BOTH must hold).** Forging a skill costs several subagent rounds, so be
 selective:
 
-- **Costly** — it took real effort to get right: roughly >15 minutes of trial-and-error, a
+- **Costly.** It took real effort to get right: roughly >15 minutes of trial-and-error, a
   non-obvious ordering constraint, or an error a fresh session would predictably repeat; AND
-- **Recurring** — there is concrete reason to believe it recurs: it has already happened
+- **Recurring.** There is concrete reason to believe it recurs: it has already happened
   at least twice, or it is a standing part of this project's or this user's workflow.
 
 If only one holds, write a note or update the project's `CLAUDE.md` instead. Do **not**
@@ -52,7 +52,7 @@ live status-line animation:
 skillforge start <name> <total-steps> "<one-line summary>"
 ```
 
-Budget `<total-steps>` as `2 + 2 × (planned red-team rounds)` — 8 for the usual 3-round
+Budget `<total-steps>` as `2 + 2 × (planned red-team rounds)`, so 8 for the usual 3-round
 cap. Call `skillforge step <n> "<what is happening right now>"` at **every** transition,
 and always close with `skillforge done "<outcome>"` or `skillforge fail "<why>"`. A forge
 left open strands a spinner in the user's status line; `skillforge clear` is the escape
@@ -60,13 +60,13 @@ hatch.
 
 **1. Builder agent.** Dispatch a subagent that invokes a skill-authoring skill
 (`skill-creator`, `writing-skills`, or equivalent) to write the SKILL.md. Give it the
-concrete transcript of what worked — including the dead ends, which are where the value is.
+concrete transcript of what worked, and the dead ends too. The dead ends carry the value.
 
-**2. Red-team agent.** Dispatch a **separate, fresh** subagent — never a fork of your own
-context, never the builder. A forked red-teamer already knows what the skill was *meant*
-to say and cannot detect the ambiguity that will bite a cold session six weeks from now.
-Do not tell it the skill is expected to be good. Its brief: *"Here is a skill at `<path>`.
-Try to execute it cold. Where does it fail, mislead, or under-specify?"*
+**2. Red-team agent.** Dispatch a **separate, fresh** subagent. Never a fork of your own
+context, and never the builder. A forked red-teamer already knows what the skill was
+*meant* to say, so it cannot detect the ambiguity that will bite a cold session six weeks
+from now. Do not tell it the skill is expected to be good. Its brief: *"Here is a skill at
+`<path>`. Try to execute it cold. Where does it fail, mislead, or under-specify?"*
 
 Required eval checklist:
 
@@ -80,14 +80,14 @@ Required eval checklist:
 |**Scope**|Is it doing more than one thing? Split or narrow.|
 
 **3. Loop.** Feed findings back to the builder via `SendMessage` so it keeps its context.
-Spawn a **new** red-teamer each round — a genuinely cold reader is the entire point of the
-test. Repeat until the report comes back clean.
+Spawn a **new** red-teamer each round; the whole test depends on the reader being
+genuinely cold. Repeat until the report comes back clean.
 
 **4. Cap at 3 rounds.** If it is not clean after 3, do not ship a half-working skill:
 either narrow its scope until it *is* clean, or abandon it (`skillforge fail`) and leave
 notes explaining what blocked it.
 
-## 3. When a skill does not work — fix, document, or retire
+## 3. Fixing, documenting, or retiring a skill that did not work
 
 Never silently work around a skill that misfired; that wastes the same time in every
 future session. Escalate in order:
@@ -100,13 +100,13 @@ future session. Escalate in order:
 3. **Retirement** (obsolete, superseded, or unfixable): requires **independent
    concurrence**.
    - Write the case: what was attempted, why it cannot be fixed, what supersedes it.
-   - Dispatch a second fresh subagent and ask a **neutral** question — *"Should this skill
-     be kept, fixed, or retired? Justify."* Never ask it to "confirm the deletion"; a
+   - Dispatch a second fresh subagent and ask a **neutral** question: *"Should this skill
+     be kept, fixed, or retired? Justify."* Never ask it to "confirm the deletion". A
      leading prompt defeats the check.
    - Retire only if it independently reaches "retire." If it says keep or fix, do that.
    - Retiring means `mv` to `~/.claude/skills-archive/<name>/` plus a `WHY-ARCHIVED.md`
-     recording the date, the case, and the concurring verdict. Never `rm -rf` a skill —
-     spurious deletions must be recoverable.
+     recording the date, the case, and the concurring verdict. Never `rm -rf` a skill.
+     Spurious deletions must be recoverable.
 
 ## 4. Hot-reloading
 
@@ -114,11 +114,12 @@ Skills are hot-reloaded. Writing `~/.claude/skills/<name>/SKILL.md` makes it ava
 **this** session and to other already-running sessions, with no restart.
 
 - There is a lag of roughly one tool round-trip. If `Skill` returns `Unknown skill: <name>`
-  right after you create it, make any other tool call and retry — do not conclude it failed.
+  right after you create it, make any other tool call and retry. Do not conclude it failed.
 - Fallback: `cat` the SKILL.md and follow it by path. The content works regardless of
   registry state.
 - Consequence: finish and red-team a skill **during** the session that discovered the need
-  for it. The benefit propagates immediately; deferring to "next session" loses it.
+  for it. The benefit propagates immediately, and deferring to "next session" throws that
+  benefit away.
 
 ## Troubleshooting
 
@@ -128,5 +129,5 @@ Skills are hot-reloaded. Writing `~/.claude/skills/<name>/SKILL.md` makes it ava
   `skillforge show`. If `settings.json` was just installed, the status line picks up
   changes without a restart, but `/hooks` forces a config reload.
 - Reminders too frequent or too rare → tune `CI_EDIT_EVERY`, `CI_PROMPT_COOLDOWN`,
-  `CI_PROMPT_MIN_CHARS` in the hook entries in `settings.json`. Noise is a tuning problem,
-  not a reason to uninstall.
+  `CI_PROMPT_MIN_CHARS` in the hook entries in `settings.json`. If they are noisy, raise
+  the thresholds instead of uninstalling.

@@ -1,8 +1,8 @@
 # Design notes
 
 Platform behavior this implementation depends on, and why each piece is shaped the way it
-is. Everything below was verified empirically on **Claude Code 2.1.243, macOS 25.5.0,
-2026-08-24** — not assumed. Re-verify before relying on any of it in a much later version.
+is. Everything below was verified by running it on **Claude Code 2.1.243, macOS 25.5.0,
+2026-08-24**. Re-verify before relying on any of it in a much later version.
 
 ---
 
@@ -19,8 +19,8 @@ There is a lag of roughly one tool round-trip. The observed sequence:
 4. `Skill(hotreload-probe)` → succeeds.
 
 **Consequence for the design:** a skill forged mid-session pays off *in that session*.
-This is what makes the compounding loop worth running immediately rather than deferring to
-a follow-up session, and it is why the SKILL.md tells sessions not to treat the first
+That is why the compounding loop is worth running immediately instead of deferring to a
+follow-up session. It is also why the SKILL.md tells sessions not to treat the first
 `Unknown skill` as a failure.
 
 ---
@@ -34,7 +34,7 @@ in one session: `32c3cd9e-…` in the environment variable, `f2d5c428-…` in th
 **Consequence for the design:** `skillforge` writes to a single `forge/current.json`
 rather than a session-keyed file. The first implementation keyed state on the environment
 variable, so the status line looked for a filename that never existed and rendered
-nothing — silently, with no error anywhere.
+nothing, silently, with no error anywhere.
 
 The reminder hook *does* key its counters per session, and that is correct: it both writes
 and reads using the payload's `.session_id`, so the two sides agree.
@@ -52,12 +52,12 @@ Nothing else in the terminal UI updates continuously:
 
 - `Bash` tool output is not reliably shown to the user.
 - Writing to `/dev/tty` fights the TUI for the screen and risks corrupting it.
-- Hook `systemMessage` output is discrete, not continuous.
+- Hook `systemMessage` output is discrete, arriving one message at a time.
 
 **Consequence for the design:** the animation is **state-driven, not process-driven**.
 `skillforge` writes a small JSON file; the status line paints whatever it finds each
-second. That decoupling is what lets the animation survive across subagent dispatches —
-the builder and each red-teamer are separate processes, but they all update one file.
+second. That decoupling is what lets the animation survive across subagent dispatches.
+The builder and each red-teamer are separate processes, but they all update one file.
 
 A 1-second refresh would otherwise re-run the user's base status line (typically `git`
 calls) every second, so base output is cached for `STATUSLINE_BASE_TTL` seconds.
@@ -69,8 +69,8 @@ calls) every second, so base output is cached for `STATUSLINE_BASE_TTL` seconds.
 Each of these produced a real, silent failure during development.
 
 **Bash folds multibyte glyphs into variable names.** `bar="$bar▓"` fails with
-`bar<mojibake>: unbound variable` — the UTF-8 bytes of `▓` are parsed as part of the
-variable name. Every append must brace the expansion: `bar="${bar}▓"`.
+`bar<mojibake>: unbound variable`, because the UTF-8 bytes of `▓` are parsed as part of
+the variable name. Every append must brace the expansion: `bar="${bar}▓"`.
 
 **There is no portable way to index into a string of multibyte glyphs.** `cut -c` is
 locale-dependent, bash 3.2 substring indexing (`${v:i:1}`) is byte-based, and zsh arrays
@@ -84,10 +84,10 @@ statement, which is correct under all of them.
 
 ## Why the red-teamer must be a fresh agent
 
-This is the load-bearing constraint of the whole protocol, so it is worth stating plainly.
+This one constraint decides whether the red-team loop is worth running at all.
 
-A skill's failure mode is not usually a wrong command. It is an *assumed* piece of context
-— a directory the author happened to be in, a tool they happened to have installed, an
+Skills rarely fail on a wrong command. They fail on an *assumed* piece of context: a
+directory the author happened to be in, a tool they happened to have installed, an
 ordering they knew about and did not write down. The author cannot see those assumptions,
 because to them they are not assumptions.
 
@@ -98,5 +98,5 @@ a *new* red-teamer rather than reusing the previous one: after round 1, that age
 longer cold.
 
 The retirement check has the same structure for the same reason. Asking a second agent to
-"confirm this deletion" is a leading prompt that will be rubber-stamped; asking it
-"should this be kept, fixed, or retired?" is a question it can actually answer against.
+"confirm this deletion" is a leading prompt, and it will be rubber-stamped. "Should this
+be kept, fixed, or retired?" is a question the agent can actually answer against.
