@@ -305,6 +305,43 @@ DOCTRINE = (
      "whether the original issue was fixed. Only a verbatim trigger held independently of "
      "A's account of it can surface a misframing."),
 
+    ("boundary-without-the-address",
+     "Where a boundary must still be stated, describe what it encloses and never name what "
+     "lies outside it.",
+     (SKILL_PATH,),
+     "Isolation is a property of what an agent is GIVEN, and a prohibition is the one place "
+     "that principle can be violated by the wording alone. The first end-to-end run told the "
+     "orchestrator not to read a named project path, which handed it the address of the "
+     "held-out data in the act of forbidding it. Both wordings are checked the same way -- "
+     "grep the transcript, expect zero -- so naming the path buys nothing and leaks a target."),
+
+    ("standard-is-not-project-content",
+     "Isolation withholds the project, never the authoring standard.",
+     (SKILL_PATH,),
+     "The other side of the isolation rule, and the one a session gets wrong by being "
+     "thorough. On the first end-to-end run B and C were denied the required section shape "
+     "and the existence of the routing gate along with the project, so the draft came back "
+     "with no `## Trigger precision` section and could not be gated at all. Neither cold "
+     "reviewer could have caught it: a stranger cannot audit a convention they were never "
+     "told."),
+
+    ("quiesce-before-reading",
+     "Nothing reads a draft while its author is still writing it.",
+     (SKILL_PATH,),
+     "The acceptance tester on the first end-to-end run reported the skill file changing "
+     "underneath it, because the builder was applying fixes concurrently, so that review "
+     "scored a file nobody shipped. Same hazard `docs/DESIGN.md` records from the other "
+     "side for a script edited while it executes. A message saying `done` is not the "
+     "confirmation; a marker file and an unchanged checksum are."),
+
+    ("state-the-cost-bound",
+     "The skill must state when it is not worth its own cost.",
+     (SKILL_PATH,),
+     "Raised by stage E against criteria A had pre-registered, which never asked for it. A "
+     "reader who already suspects the procedure is more expensive than the problem is the "
+     "one who abandons it halfway and does not say so; without a stated bound the skill has "
+     "no exit ramp to offer them, and the forge has nowhere to record the judgement."),
+
     ("concurrent-forges",
      "Concurrent forges are fine — each gets its own record and its own slot in the status "
      "line, and starting one never disturbs another.",

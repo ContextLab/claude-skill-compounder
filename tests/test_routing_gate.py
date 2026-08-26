@@ -318,6 +318,17 @@ class PinnedGateSentenceTest(unittest.TestCase):
          'step"` flipped a losing prompt to a winning one. Four words.',
          "The measured reason the description is the lever, and the reason a re-run is "
          "cheap enough to be mandatory."),
+        ("record where a ceded claim went",
+         "Record what is ceded, at the moment it is ceded: the must-not-fire half names "
+         "the neighbour that now owns the prompt, and the pin's `result:` says which claim "
+         "was dropped and to whom.",
+         "Retiring a must-fire claim is allowed, and on the first end-to-end run through "
+         "the forging pipeline it was the right call -- a prompt lost 0/3, consistently, "
+         "to a neighbour with the better claim. But nothing in the protocol asked where "
+         "the territory went, so stage E had to raise it. A drop nobody recorded is "
+         "indistinguishable from a claim quietly abandoned, and the next session "
+         "re-litigates it from scratch."),
+
         ("re-run after the last description edit",
          "Re-run it after the last description edit.",
          "A gate run against a draft that the red team then rewrote certifies text "
