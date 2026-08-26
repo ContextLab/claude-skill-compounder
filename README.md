@@ -61,6 +61,7 @@ what got built answers them.
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
+|`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
 |`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
@@ -148,8 +149,9 @@ and never into `~/.claude/skills`, so a forge cannot reach your live config with
 having seen it.
 
 `skillreport`, `skillinsight`, `skillforge`, the status line,
-`hooks/compound-improvement.sh`, `hooks/insight-capture.sh` and `hooks/skill-use.sh` make
-no network calls.
+`hooks/compound-improvement.sh`, `hooks/insight-capture.sh`, `hooks/skill-use.sh` and
+`hooks/claim-gate.sh` make no network calls. `skillcontrib` reaches the network, but only
+through `gh` and only to read: see [Contributing a skill back](#contributing-a-skill-back).
 
 ---
 
@@ -282,7 +284,8 @@ Measured: one long session fired the 12-edit checkpoint at edits 12, 24 and 36,
 disregarded it all three times, and fixed nine defects of one kind in between. Per
 instance the answer it gave — "no, I am just fixing a bug" — was honest. So the second
 habit also has an arm that asks nothing of the session and that the session cannot
-decline.
+decline, and a fourth mechanism below the three refuses outright rather than asking at
+all: [The claim gate](#the-claim-gate).
 
 ### 1. Before implementing, reuse before you build
 
@@ -482,6 +485,49 @@ move the resolved directory, then drop the dangling link.
 
 ---
 
+## The claim gate
+
+The three habits above are reminders, and the section opens by conceding what a reminder
+is worth. `hooks/claim-gate.sh` is the one mechanism here that refuses rather than asks. It
+reads the closing message of a turn on `Stop`, and the message of a `git commit` on
+`PreToolUse`, looks for an integer of `CLAIM_GATE_MIN_DIGITS` digits or more, and checks
+whether that figure appears anywhere in what the session's own tools printed. If it does
+not, the turn is blocked once with the finding, or the commit is denied.
+
+Two things it deliberately does not count as evidence. A subagent's report — the gate cuts
+`Agent` and `Task` tool results out of the evidence before it looks, because relayed
+testimony is what produced both of the defects it was written for: a commit message here
+claimed 1495 tests when the derived figure was 1195, and an earlier one claimed 544 tests
+passing on a tree that failed one. And a verification that has gone stale, which is the
+second tier: a figure supported only by a run that predates a later edit to a file that run
+covered.
+
+**What it costs you in false blocks.** Replaying real closing messages turn by turn, with
+the transcript truncated to each turn's end so nothing was judged against evidence that did
+not exist yet: 6 blocks in 205 messages (2.9%) on the session the rules were tuned against,
+and 3 in 88 (3.4%) on a held-out draw from 14 transcripts of other projects, measured
+2026-08-26. Read the held-out figure, not the tuned one — the tuned corpus was optimistic
+by roughly threefold on work the gate had never seen. Of the 3, one is a relayed figure and
+is flagged on purpose; the other 2 quote a number in order to dispute it, and no
+deterministic rule separates quoting a figure from asserting it. The full calibration,
+including the two rule sets that were measured and discarded, is in the script's own
+header.
+
+Only the last `CLAIM_GATE_MAX_BYTES` of the transcript is scanned — 16 MiB by default. A
+figure printed before that window and restated at the end reads as unsupported, which is a
+false block in the one direction this gate is not supposed to err. The window exists
+because the hook is wired with a 10-second timeout: 16 MiB parses in about 1.6s against
+that budget, and on the machine where this was measured 9 of 419 transcripts (2.1%) were
+larger than it. An earlier 64 MiB cap was dead code on every BSD box, because `wc -c` there
+prints a leading-space-padded count and the numeric guard read the space as non-numeric and
+zeroed the cap.
+
+The gate spends at most `CLAIM_GATE_MAX_SESSION` blocks and denials in one session and
+then stands down, so it cannot wedge a session it is wrong about. `CLAIM_GATE=0` switches
+it off; the rest of its knobs are in [Tuning](#tuning).
+
+---
+
 ## The animation
 
 While a skill is being forged, your status line shows live progress:
@@ -579,11 +625,12 @@ A `Skill` call whose result came back `"is_error":true` — `Unknown skill`, usu
 failure and not a reuse; before those were excluded, one uninstalled skill took the
 headline from 80% to 100%. Invocations made by this package's own routing probes and
 end-to-end tests are excluded too, recognised by the session entrypoint that says a script
-rather than a person was driving: on the transcripts this was measured against, 93 of 98
-recorded invocations of these skills came from probe and test working directories.
-Excluded traffic is reported on its own line rather than dropped, as are invocations that
-fall inside a forge window, and a forge that never closed stays out of the denominator
-altogether.
+rather than a person was driving. On this repository's own transcripts that is most of the
+traffic, and it stays most of it as the suite gets run again, so `skillreport` prints the
+excluded count and where it ran rather than this README quoting a ratio that decays between
+releases. Excluded traffic is reported on its own line rather than dropped, as are
+invocations that fall inside a forge window, and a forge that never closed stays out of the
+denominator altogether.
 
 ### What the ledger records
 
@@ -658,7 +705,7 @@ grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|STATUSLINE|SKILL_COMPOUNDER|CLAIM_G
 ```
 
 Most of what that prints is an internal budget or a clock pin the test suite freezes. The
-eleven below are not all read by the same component, so they do not all go in the same
+ones below are not all read by the same component, so they do not all go in the same
 place in `~/.claude/settings.json`:
 
 |Variable|Default|Set it in|Meaning|

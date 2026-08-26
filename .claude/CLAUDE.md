@@ -4,8 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code *configuration* package. It installs every skill under `skills/`, three hook
-wirings, four CLIs, and a status-line wrapper into `~/.claude/`. There is no runtime service: the "program" is the
+A Claude Code *configuration* package. It installs every skill under `skills/`, four CLIs,
+a status-line wrapper, and seven hook entries into `~/.claude/`. Those seven span five
+events (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`) and
+name four of the five scripts in `hooks/`; derive them from
+`OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
+There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
 `README.md` is the user-facing description. The two documents under `docs/` are split by
 audience, and the split is load-bearing:
@@ -109,6 +113,25 @@ delays a checkpoint; counting `ls` teaches the user to ignore it. A second branc
 `ai-tell-audit` once per durable-prose file per session, because that skill's description
 names a README but nothing otherwise connects editing one to invoking it.
 
+**`hooks/claim-gate.sh` is the only component here that refuses, and its evidence rule is
+an exclusion.** It dispatches on `.hook_event_name` and takes no argv: on `Stop` it judges
+`last_assistant_message`, on `PreToolUse` it judges a `git commit` message, and a figure of
+`CLAIM_GATE_MIN_DIGITS` digits or more is unsupported unless it appears in what this
+session's own tools printed. Tool results belonging to an `Agent` or `Task` call are cut out
+of the evidence first, deliberately: a subagent's report is testimony, and relayed testimony
+is what both founding defects were made of. The `PreToolUse` arm is not a nicety — a commit
+message never reaches `last_assistant_message`, so the `Stop` arm alone cannot see the shape
+of defect the gate was written for.
+
+Two of its constants are worth knowing before touching either. `CLAIM_GATE_MAX_BYTES` is
+`16777216`; it was `67108864` and that cap was **dead code on BSD**, because `wc -c < file`
+prints a leading-space-padded count and the numeric `case` guard read the space as
+non-numeric and zeroed the value. `tr -cd '0-9'` is the fix and the `case` stays as the
+belt. And the header's calibration carries **two** false-positive rates, not one: 2.9% on
+the corpus the rules were tuned against and 3.4% held out. Quote the held-out figure; the
+tuned one was optimistic by roughly threefold, and the arm the tuned corpus recorded as
+never firing was the arm carrying the difference.
+
 **With both wirings active every hook fires twice**, so anything a hook counts, stamps,
 appends to, or does once must survive being handed the same event twice. That includes
 work a hook *launches* rather than does itself: `hooks/session-review.sh` is not wired to
@@ -131,8 +154,9 @@ delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a 
 `docs/DESIGN.md`.
 
 **`hooks/session-review.sh` is a shipped component that spends money, and it is in
-neither wiring.** `settings.json` and `hooks/hooks.json` between them name only
-`compound-improvement.sh` (twice) and `insight-capture.sh`; grep either for
+neither wiring.** `settings.json` and `hooks/hooks.json` between them name
+`compound-improvement.sh` (twice), `claim-gate.sh` (twice), `skill-use.sh` (twice) and
+`insight-capture.sh`; grep either for
 `session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
 detached, never waited on, and only when that turn's session audit actually wrote a
 record. Look for it there, not in a hooks list. Stage 1 is a single `claude -p` with no
@@ -140,10 +164,15 @@ tools at all -- `--disallowed-tools` over every built-in, `--strict-mcp-config`,
 `--setting-sources ''` -- reading a bounded digest of the transcript and answering
 `VERDICT: NONE` or `VERDICT: CANDIDATE <name>`.
 
-Its gates all fail closed and exit 0 in silence, and each has its own exit code (10-21)
-so a test asserts on the code rather than on prose: off switch, recursion, CI/test
-environment, a state root under a temp directory, no `claude` on `PATH`, bad argv, then
-the lock, the 21-hour cooldown and the per-session claim. `SKILL_COMPOUNDER_DISPATCHED` is
+Its gates all fail closed, and each reports through one `refuse` helper that prints a
+single line to stderr — `/dev/null` in production — and exits on that gate's own code, so
+a test asserts on the code rather than on prose. The gates run 10 through 20: off switch,
+recursion, CI/test environment, a state root under a temp directory, no `claude` on
+`PATH`, bad argv, then the per-session claim, the lock, the 21-hour cooldown, an
+unwritable state directory and an empty digest. 21 and 22 are not gates — they report a
+verdict that errored or would not parse, after the money has been spent. Nothing here
+exits 0 on a refusal, and nothing needs to: the script is detached, so its status reaches
+no turn. `SKILL_COMPOUNDER_DISPATCHED` is
 the recursion barrier that does the work -- a `claude -p` we launch is a real session
 carrying these same hooks, so its own `Stop` would fire this same script; the variable is
 exported into every process the script starts and inherited without limit, and the first
@@ -203,9 +232,11 @@ stanza. Changing the protocol means updating all three.
 
 **No mocks, ever.** Every test writes real files, runs the real shell scripts through
 `subprocess`, and reads results back off disk. Tests pin nondeterminism with environment
-variables the scripts read for exactly that purpose. There are **four clocks, not one** --
+variables the scripts read for exactly that purpose. There are **five clocks, not one** --
 `SKILLFORGE_NOW` (`bin/skillforge`), `CI_NOW` (`hooks/compound-improvement.sh`),
-`SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`) and `SKILL_COMPOUNDER_NOW` (the
+`INSIGHT_NOW` (`hooks/insight-capture.sh` and `bin/skillinsight`, which fall back to
+`CI_NOW`), `SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`) and
+`SKILL_COMPOUNDER_NOW` (the
 installer's backup stamp) -- and session-review refuses `CI_NOW` on purpose, because a
 frozen `CI_NOW` makes its `|NOW - last|` cooldown zero forever and silences the trigger
 permanently with nothing on any surface to say why. Two more redirect what a script reads
@@ -214,9 +245,11 @@ the status line expires on, `SKILLFORGE_DONE_TTL` and `SKILLFORGE_FAIL_TTL`; and
 a refusal, `SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE`, without which `session-review.sh`
 declines to spend money from any state root under a temp directory. A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
-`grep -rhoE '\b(SKILLFORGE|CI|SKILL_COMPOUNDER)_[A-Z_]+' hooks/ bin/ statusline/
-skill_compounder/ | sort -u` and reading each hit; re-run it rather than trusting the list
-if the two have drifted. If new behavior is hard to test without a mock, add a pin like
+`grep -rhoE '\b(SKILLFORGE|CI|INSIGHT|SKILLUSE|STATUSLINE|CLAIM_GATE|SKILL_COMPOUNDER)_[A-Z0-9_]+'
+hooks/ bin/ statusline/ skill_compounder/ | sort -u` and reading each hit; re-run it rather
+than trusting the list if the two have drifted. Four of those seven prefixes were missing
+from the command this paragraph used to print, so it could not produce the list it
+introduces; a prefix added to a new script has to be added here too. If new behavior is hard to test without a mock, add a pin like
 those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 
@@ -237,8 +270,10 @@ temp dir, so scripts must not depend on the ambient environment.
   running for a long time. `hooks/session-review.sh` is wrapped in one brace group so the
   file must parse in a single pass, and every path through it ends in `exit` so bash never
   resumes past the closing brace; both halves are required, and neither is decoration.
-  No other script here is wrapped -- `bin/skillcontrib` blocks on `gh` and has the same
-  exposure.
+  Every shipped script now carries both halves, not only that one, and
+  `tests/test_script_wrapping.py` is the ratchet: its `KNOWN_UNWRAPPED` set is empty, so a
+  new script under `hooks/`, `bin/` or `statusline/` that is neither wrapped nor excused
+  fails the suite. Adding one means wrapping it, not adding it to that set.
 
 **The red-teamer must never be a fork of either layer** — not of the orchestrator that
 dispatches it, and not of the session that dispatched the orchestrator. This applies to the
@@ -266,7 +301,12 @@ built, `2026-08-25-forging-session.md` for the seed skills being forged through 
 builder/red-team loop, `2026-08-25-issue9-fix-session.md` for the parallel-agent session
 behind issue #9 (auto-install, the routing gate, and the routing probes measured on cli
 2.1.245), `2026-08-25-first-live-review-verdict.md` for the first real session-review
-dispatch and the lazy-parse failure that lost its verdict, and `notes/research/` for the evidence behind the seed-pool selection, the
+dispatch and the lazy-parse failure that lost its verdict,
+`2026-08-25-completion-claim-gap.md` for the argument that a skill cannot catch a
+completion claim and a hook can — the reasoning `hooks/claim-gate.sh` was built on —
+`2026-08-26-pipeline-and-claim-gate.md` for the A-E pipeline replacing the numbered
+protocol and for the gate landing, `2026-08-26-handoff.md` for the resume state of that
+work, and `notes/research/` for the evidence behind the seed-pool selection, the
 insight queue, and the contribution mechanics. `notes/OPEN-THREADS.md` is the one file
 there that tracks current state rather than history. Read the dated ones for reasoning,
 not for the current state of the code.

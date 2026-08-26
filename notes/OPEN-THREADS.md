@@ -1,74 +1,104 @@
 # Open threads
 
-What is actually open, as of **2026-08-25**, on `41a2427`. Written so nothing here depends
+What is actually open, as of **2026-08-26**, on `0c4ee6a`. Written so nothing here depends
 on a session remembering it: every entry carries the command or the path that establishes
 it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
 close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
 outright — this is a working list, not a changelog.
 
-## In flight right now
+The GitHub issues are the other half of this picture and they do not duplicate it:
+`gh issue list --repo ContextLab/claude-skill-compounder --state open` is the authority on
+what is scoped as work. This file is for what is known and unresolved, including the parts
+nobody has opened an issue for.
 
-Agents hold these files. A suite run touching them proves nothing until they report, and a
-red test in this section is not evidence of a defect.
+## Open: routing verification is a draw, not a verdict
 
-- **`hooks/session-review.sh` lost its first real report.** Dispatched for real for the
-  first time on 2026-08-25 at 21:29 and the analysis it paid for never reached the queue.
-  Evidence still on disk:
-  `~/.claude/skill-compounder/reviews/.stage1-f0feae4c-834a-409b-8e25-9a2894341168.json`
-  holds a complete result — `is_error: false`, `total_cost_usd` 0.2221734, and a body
-  beginning `VERDICT: CANDIDATE orchestrator-sendmessage-delivery-unreliable` — while
-  `ls ~/.claude/skill-compounder/reviews/2026-W35/` is empty and neither `index.jsonl` nor
-  `.unread` exists anywhere under `reviews/`. `.last-dispatch` **was** stamped
-  (`1787707752`), so the 21h cooldown then suppressed the next run: the failure spends the
-  quota and hides itself. An agent holds the file and is fixing it now. The recovered
-  verdict is being written to `notes/2026-08-25-first-live-review-verdict.md` (not yet on
-  disk as of this writing).
-- **`bin/skillreport` counts probes as reuse.** See the next section for the measurement;
-  the fix is dispatched and the file is modified in the working tree
-  (`git status --porcelain` -> ` M bin/skillreport`).
-- **`README.md:380` overstated the no-network claim** while `session-review.sh` dispatches a
-  billable API call by default. Being repaired now by another agent. Record it as the shape
-  of drift that recurs here: a true sentence about one CLI (`skillreport` really does make
-  no network calls) read as a claim about the package, and nothing tested the difference.
-  This is what `claim-provenance` exists for, and it did not fire on its own README.
+The routing gate was treated as pass/fail until 2026-08-26, and it is not. Three separate
+three-run probes of `skill-compounder`'s own six prompts, same description, nothing edited
+between them, read 9/9, then 8/9, then 9/9. The one that lost fired *nothing at all*, so it
+was not a neighbouring skill winning the prompt.
 
-## Open: the reuse evidence is contaminated
+What follows, and what is unfinished:
+
+- `scripts/probe_routing_claims.py` now takes `--runs N`, default and floor 3, and folds
+  each prompt into a k/N count. `k == N` is PASS; `0 < k < N` is SPLIT and is reported as a
+  finding rather than retried until it goes green; a section is `verified` only when every
+  prompt won every draw, and `partial` otherwise. Re-run the arithmetic rather than quoting
+  a call count: it is `len(prompts_for(claims)) * runs`, so one six-prompt skill is 18 calls
+  and the eight pinned skills are 48 prompts, ~144 calls, ~12 minutes at the floor.
+- **Eight of the nine shipped skills carry a routing pin** (`grep -l routing-pin
+  skills/*/SKILL.md`). `contribute-skill` has none, and has never been probed. That is the
+  concrete gap.
+- **`skill-compounder`'s own pin says `partial`**, naming the prompt that scored 8/9. It is
+  the only pin recording `runs:`; the other seven still read `verified 3/3 must-fire, 3/3
+  must-not-fire` from single passes on 2026-08-25 and have not been re-probed at the floor.
+  Do not carry any of those seven forward as though three runs were behind them.
+- Undecided: whether a `partial` pin should block a forge from being reported clean, or
+  whether shipping it named-and-recorded is the honest end state. Record the answer here.
+
+## Open: the reuse evidence is still mostly harness traffic
 
 The one number this whole package is supposed to produce — does a forged skill get used
-again — is currently unusable.
+again — is still dominated by this repository's own tests and probes.
 
-**Method** (re-derived 2026-08-25, independent of the audit that first found it): scan every
-`~/.claude/projects/**/*.jsonl` for `tool_use` blocks with `name == "Skill"` whose
-`input.skill` is one of the nine shipped skills, and bucket by the record's `cwd`.
+`skillreport`, run 2026-08-26: 4 of 5 finished forges (80%) produced a skill invoked after
+the forge that created it, one forge never closed and is excluded from both halves, and
+**103 invocations were excluded as harness traffic**, every one of them from a system temp
+directory. The exclusion is by session entrypoint (`sdk-cli`), which is what a script
+driving the session looks like, not by directory.
 
-**Result: 99 invocations, of which 94 came from probe and test-harness directories**
-(`routing-probe-*`, `sac-probe`, `sktest-proj`, `gateproof-*`, `isolated-*`, `shadow-*`, and
-scratchpad staging dirs). Five were genuine uses in a real project directory:
+Two things follow, both open:
 
-|skill|cwd|n|
-|-|-|-|
-|`claim-provenance`|`/Users/jmanning/claude-skill-compounder`|2|
-|`skill-compounder`|`/Users/jmanning/claude-skill-compounder`|1|
-|`skill-compounder`|`/Users/jmanning/orchestrator`|1|
-|`ai-tell-audit`|`/Users/jmanning/claude-skill-compounder`|1|
+1. **The excluded traffic dwarfs the genuine.** Nothing is wrong with the instrument — it
+   reports the exclusion on its own line rather than dropping it — but a ratio computed on
+   four counted uses is not evidence about anything. This needs real use in other
+   repositories over real time, and until then no percentage from `skillreport` should be
+   quoted anywhere as a result.
+2. **The forge ledger no longer sees only a third of the inventory, and that changed
+   quietly.** `jq -r '.skill // .name' ~/.claude/skill-compounder/ledger.jsonl | sort -u`
+   now lists 16 names, including every shipped skill plus several forged elsewhere. The
+   older thread here recorded three names and asked whether `skillreport`'s blindness to
+   the rest was a defect or a documented limit. The blindness is gone; the question was
+   never answered, and it should be closed explicitly rather than by attrition — is the
+   ledger meant to census the installed pool, or only what the forge built?
 
-Two consequences, both open:
+## Open: the session review has still never delivered a report end to end
 
-1. **Six of the nine shipped skills have zero real-world uses**: `session-handoff`,
-   `no-silent-stub`, `stale-artifact-check`, `destructive-op-preflight`, `contribute-skill`,
-   `skill-authoring`. Routing is verified for all nine — live `claude -p` probes, 3/3
-   must-fire and 3/3 must-not-fire, sonnet, cli 2.1.245, recorded in
-   `notes/2026-08-25-issue9-fix-session.md` §6–8 — so they fire when asked. Whether they
-   *help* is unmeasured. Do not report routing verification as evidence of usefulness.
-2. **The forge ledger sees a third of the inventory.** `~/.claude/skill-compounder/ledger.jsonl`
-   contains records for exactly three names: `ai-tell-audit`, `skill-compounder`,
-   `claim-provenance`. `skill-authoring` was built by a Workflow and never entered the
-   ledger; the six seed skills predate it. So `skillreport`, which joins the ledger against
-   transcript invocations, is structurally blind to six of nine.
-   **Undecided and needs deciding:** is that a defect to fix (backfill the ledger, or teach
-   `skillreport` to enumerate `skills/` and show unledgered rows) or a documented limit
-   ("this reports on what the forge built, by construction")? Record the answer here either
-   way — an unstated choice will be rediscovered as a bug.
+The 2026-08-25 dispatch was charged, produced a well-formed candidate and lost it to a
+lazy-parse failure. The failure is understood and written up
+(`notes/2026-08-25-first-live-review-verdict.md`, `docs/DESIGN.md` "Never edit a script that
+may still be running"), and `tests/test_session_review.py` now covers the handoff — it
+asserts `index.jsonl` and `.unread` are both written.
+
+What is not established is that it works in production. On disk right now:
+`~/.claude/skill-compounder/reviews/` still holds only the recovered
+`.stage1-*.json`, an empty `2026-W35/`, and a `.last-dispatch` of `1787707752`; there is no
+`index.jsonl` anywhere under it. That is the *pre-fix* state, preserved, not a new failure —
+no qualifying session has dispatched since. Do not read the empty directory as a regression,
+and do not read the green test as a live result. The next real dispatch is the evidence,
+and the 21-hour cooldown means it can be waited for rather than forced.
+
+## Open: the claim gate's recall is bounded and one arm is unwired
+
+`hooks/claim-gate.sh` ships wired on `Stop` and on `PreToolUse` with matcher `Bash`, in
+both install paths. Two known limits, neither a defect to fix blind:
+
+- **The scan window costs recall.** `CLAIM_GATE_MAX_BYTES` is `16777216`. A figure printed
+  before the last 16 MiB of a session and restated at the end reads as unsupported. The
+  obvious repair — searching outside the window for the candidate figures — was built and
+  rejected on measurement (BSD `grep` has no fast multi-pattern path; 21.0s for four
+  patterns). The `PostToolUse` accumulator arm is the path that restores full-session
+  recall for Tier 1, and **it is not wired in either install path**. Whether to wire it is
+  open: it costs a hook invocation on every tool call.
+- **The false-positive figures are two, and only one of them generalises.** 6 of 205 (2.9%)
+  on the corpus the rules were tuned against; 3 of 88 (3.4%) held out, after the 2026-08-26
+  fixes and down from 8.0% before them. An independent reviewer running the same procedure
+  over a different draw measured 5.7% before the fixes. Quote the held-out figure and treat
+  the pair as agreeing on order of magnitude only. Both corpora are one machine's
+  transcripts, so neither is a rate for anyone else.
+- The gate cannot see a causal claim with no number in it — "the hook caught this", "this
+  fixes the race" — and nothing in it should be stretched to try. That is a stated limit,
+  not a backlog item.
 
 ## Open: unvalidated constants
 
@@ -77,87 +107,92 @@ that would settle the first two, and it needs real usage across several reposito
 real time first. Do not tune any of them before that data exists.
 
 - `CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` in `hooks/compound-improvement.sh`.
-- `REVIEW_COOLDOWN=75600` (21h) in `hooks/session-review.sh:155`. The reasoning in that
-  file's header is sound — 24h *ratchets* against someone who works the same hours daily —
-  but the resulting 1.7 dispatches/week is arithmetic, not observation.
-- `$0.19` per stage-1 review (`hooks/session-review.sh:36`, measured once on 2026-08-25 over
-  a 60 KB digest on sonnet). Every weekly-cost figure in that header multiplies this single
-  observation.
+- `REVIEW_COOLDOWN=75600` (21h) in `hooks/session-review.sh`. The reasoning in that file's
+  header is sound — 24h *ratchets* against someone who works the same hours daily — but the
+  resulting 1.7 dispatches/week is arithmetic, not observation.
+- `$0.19` per stage-1 review, measured once on 2026-08-25 over a 60 KB digest on sonnet.
+  Every weekly-cost figure in that header, and in the README, multiplies one observation.
 
 ## Open: stage-2 auto-forge cannot finish its own gate
 
 `SKILL_COMPOUNDER_REVIEW_FORGE` ships **off** and has never run in production. The reason is
 not cost: it was measured once end to end at $3.02 / 19 minutes / two cold red-team rounds,
-verdict ABANDONED (`hooks/session-review.sh:44-47`). The blocker is that a dispatched forge
-**cannot complete its own routing gate** — `claude --version` came back "This command
-requires approval" at the permission layer, confirmed independently by a fresh subagent it
-sent to try (`hooks/session-review.sh:718-724`). A skill is not finished until a real
-`claude -p` session routes to it, so an automatic forge is structurally unable to finish.
-Turning it on before that is solved means paying ~$3 a time for forges that cannot conclude.
+verdict ABANDONED. The blocker is that a dispatched forge **cannot complete its own routing
+gate** — `claude --version` came back "This command requires approval" at the permission
+layer, confirmed independently by a fresh subagent it sent to try. A skill is not finished
+until real `claude -p` sessions route to it, so an automatic forge is structurally unable to
+finish. Turning it on before that is solved means paying ~$3 a time for forges that cannot
+conclude. The stochastic-routing finding above makes this worse, not better: the gate a
+dispatched forge cannot run is now a gate that needs three passes.
 
 ## Known tree-state dependency — do not "fix" it
 
 `tests/test_seed_claim_provenance.py::test_the_measured_sweep_figures_are_re_derived_not_restated`
-(line 726) runs the skill's own diff sweep with `git diff HEAD -U0` against
-`skills/ai-tell-audit/SKILL.md`, and the skill states that sweep matched **0** lines. True of
-a committed tree, false of a dirty one: while that file has uncommitted changes the sweep
+runs `skills/claim-provenance/SKILL.md`'s own diff sweep with `git diff HEAD -U0` against
+`skills/contribute-skill/SKILL.md`, and the skill states that sweep matched **0** lines. True
+of a committed tree, false of a dirty one: while that file has uncommitted changes the sweep
 matches them and the test fails.
 
-The `0` is correct. If you find this red, check whether `skills/ai-tell-audit/SKILL.md` is
-modified before changing any number — committing resolves it. The whole-file figure beside
-it (currently 121) is a different kind of claim and does move permanently when that file
-grows.
+The `0` is correct. If you find this red, check whether `skills/contribute-skill/SKILL.md` is
+modified before changing any number — committing resolves it. The whole-file figure beside it
+(currently 103) is a different kind of claim and does move permanently when that file grows.
+Both numbers are re-derived by that test rather than pinned, so neither can be corrected by
+editing the prose alone.
 
 ## Known limits, deliberately open
 
 - **`tests/test_doctrine_sync.py` has a measured ceiling.** A cold reviewer defeated the
   verbatim-pinning guards by keeping each pinned sentence and repudiating it in the next
-  clause, exit 0. Recorded as measured fact in the module docstring (line 50). The guard
-  catches drift, deletion, softening and truncation; it does not catch repudiation. Do not
-  report it as catching more than that.
-- **Every scope measurement used `--model sonnet`.** The frontmatter findings in
-  `docs/CLAUDE-CODE-BEHAVIOR.md` now cover all three scopes (see Closed, below), but the
-  model tier is a remaining limit stated in that file, not a closed question.
+  clause, exit 0. Recorded as measured fact in the module docstring. The guard catches
+  drift, deletion, softening and truncation; it does not catch repudiation. Do not report it
+  as catching more than that.
+- **`tests/test_docs_split.py` detects copying, not restating.** Its overlap check is a
+  ten-word shingle intersection between the two `docs/` files. A paraphrase moved by hand
+  passes it, and the docstring says so. The split is maintained by the rule, not by the test.
+- **Every scope and routing measurement used `--model sonnet`.** The frontmatter findings in
+  `docs/CLAUDE-CODE-BEHAVIOR.md` cover all three scopes; the model tier is a remaining limit
+  stated in that file, and the same limit applies to every routing pin in `skills/`.
 
 ## Still wanted: end-to-end testing the way a user meets it
 
 Partly addressed by `edc2f60` ("Test the package as a user meets it, and fix what that
-found") and by the live routing probes, but not finished. The remaining gap: install the
-package into a throwaway config directory, run real `claude -p` sessions against it, and
-watch the state files, the ledger and the weekly queue *while they run*, evaluating the
-outputs critically rather than checking exit codes. Never against the real `~/.claude`.
+found") and by the live routing probes, but not finished; this is issue #10. The remaining
+gap: install the package into a throwaway config directory, run real `claude -p` sessions
+against it, and watch the state files, the ledger and the weekly queue *while they run*,
+evaluating the outputs critically rather than checking exit codes. Never against the real
+`~/.claude`. Issue #14 (run the A-E pipeline end to end on a real trigger) and issue #15
+(trigger each of the nine skills from a real session) are the two concrete pieces of it.
 
 ## Closed
 
 Kept as one line each so a returning session does not reopen them.
 
-- **`claim-provenance` forge.** Shipped. `README.md:157` carries its row; `PYTHONPATH=$PWD
-  python3 tests/test_doctrine_sync.py` -> Ran 20 tests, OK.
-- **Concurrent `skillforge done` race.** Fixed by the `.outcome.<id>.claim` scheme in
-  `bin/skillforge` (see the header comment at line 40 and the claim path at line 513);
-  `tests/test_forge_close_race.py`.
-- **Personal-scope skill loading.** Measured on 2026-08-25 and recorded in
-  `docs/CLAUDE-CODE-BEHAVIOR.md` ("Run at all three scopes: **project**, `--plugin-dir`
-  **plugin**, and, on 2026-08-25, **personal**"). `CLAUDE_CONFIG_DIR` alone broke auth; the
-  missing piece was handing the OAuth token in through `CLAUDE_CODE_OAUTH_TOKEN`. All three
-  scopes agreed. *This file previously asserted both that it was measured and that it was
-  unmeasured, in two different sections; the unmeasured claim was the stale one and is gone.*
-- **`204acb0`'s false commit message** ("544 tests pass"). Reworded by rebase.
-  `git merge-base --is-ancestor 204acb0 HEAD` exits 1 — that commit is no longer reachable —
-  and its successor is `83a75b5`, whose message states the actual result.
-- **Commit everything as one tree.** Done; the tree with `skill-authoring`, its README row
-  and `tests/test_doctrine_sync.py` landed together.
-- **Status-line honesty and the overrun record.** Landed, and the prose that was owed has
-  been applied: `docs/DESIGN.md:183-192` and `:544-552` describe the 99%-with-reason and
-  `over` rendering, and `skills/skill-compounder/SKILL.md:95` now reads "The overrun is
-  visible; you do not have to narrate it" rather than documenting a workaround for a
-  display defect.
-- **`docs/CLAUDE-CODE-BEHAVIOR.md` split** out of `docs/DESIGN.md`, guarded by
-  `tests/test_docs_split.py`.
-- **`skill-authoring` mutation gaps** (`tests/test_seed_authoring.py`) and the
-  **deterministic insight record** (`hooks/insight-capture.sh` writes the queue on Stop;
-  `hooks/compound-improvement.sh:17-27` surfaces it on the first prompt of a session;
-  `bin/skillinsight` ships).
+- **The lost session-review report.** The lazy-parse cause is written up in
+  `notes/2026-08-25-first-live-review-verdict.md` and in `docs/DESIGN.md`; every shipped
+  script is now wrapped in one brace group and ends in `exit`, ratcheted by
+  `tests/test_script_wrapping.py` with an empty `KNOWN_UNWRAPPED`. Live confirmation is
+  still owed and is its own open thread above.
+- **`bin/skillreport` counted probes as reuse.** Fixed; harness traffic is excluded by
+  session entrypoint and reported on its own line.
+- **The README's no-network claim.** Corrected; `## What runs against the API` now states
+  plainly that `hooks/session-review.sh` bills by default, and the no-network sentence
+  enumerates the components it actually covers.
+- **The forging protocol is the A-E pipeline** (`d1a8f62`), replacing the numbered steps in
+  `skills/skill-compounder/SKILL.md`.
+- **The completion-claim gap has a mechanism** (issue #16): `hooks/claim-gate.sh`, wired on
+  `Stop` and `PreToolUse` in both install paths, calibrated on a tuned and a held-out corpus.
+  Its remaining limits are an open thread above.
+- **`stale-artifact-check`'s organic routing** (issue #11), **`ai-tell-audit` under the body
+  ceiling** (issue #12), and **the missed-fire denominator** (issue #13,
+  `scripts/probe_missed_fires.py`, `tests/test_missed_fire_probe.py`).
+- **Cold red-team of the protocol, the skills and the hooks** (issue #17). Three claim-gate
+  defects it found are fixed in `6df980a`, two of them dead guards.
+- **`claim-provenance` forge**, **the concurrent `skillforge done` race**
+  (`tests/test_forge_close_race.py`), **personal-scope skill loading**, **`204acb0`'s false
+  commit message**, **status-line honesty and the overrun record**, the
+  **`docs/CLAUDE-CODE-BEHAVIOR.md` split**, **`skill-authoring` mutation gaps** and the
+  **deterministic insight record**. Each has its evidence in `docs/`, in a test file named
+  above, or in the dated notes.
 
 ## The failure that produced this file
 
@@ -169,8 +204,8 @@ one kind were fixed in that session without the pattern being noticed. The lesso
 fail exactly when it is most needed. Prefer mechanisms that produce their record whether or
 not anyone reads anything.
 
-The lost session review at the top of this file is the same failure in a new place. That
-mechanism *did* produce its record without anyone noticing — and then dropped it on the
-floor between the model call and the queue, while stamping the cooldown that stopped it from
-trying again. Producing the record is necessary. It is not sufficient; the handoff has to be
-verified too.
+The lost session review was the same failure in a new place. That mechanism *did* produce
+its record without anyone noticing — and then dropped it on the floor between the model call
+and the queue, while stamping the cooldown that stopped it from trying again. Producing the
+record is necessary. It is not sufficient; the handoff has to be verified too, and until a
+live dispatch shows one arriving, it has not been.

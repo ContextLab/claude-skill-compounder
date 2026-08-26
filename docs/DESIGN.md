@@ -371,10 +371,18 @@ clock on this machine, 2026-08-25.
 - `statusline/statusline.sh` is 58 lines, but on a cache miss it blocks on the user's own
   base status line command, so its window is whatever that costs and not what its length
   suggests.
+- `hooks/claim-gate.sh` is the only hook here whose window scales with
+  the user's history rather than with its own length: it parses up to `CLAIM_GATE_MAX_BYTES`
+  of the transcript on every `Stop` and every `Bash` call. Measured 2026-08-26 against this
+  session's own 30 MB transcript, three runs: 1202ms, 1242ms, 1234ms. So it is roughly an
+  order of magnitude wider than the two below it, on the two most frequent events there are.
 - `hooks/insight-capture.sh` (176ms on a 380KB transcript) and `hooks/compound-improvement.sh`
   (120ms) have short windows, but they fire on Stop and on every qualifying tool call, and a
   hook that executes garbage prints it on the channel Claude Code parses. The rule that hooks
   must never break a turn is not enforceable through a file being rewritten underneath one.
+- `hooks/skill-use.sh` (283ms cold and 154ms warm on the same transcript, same date) fires
+  only on a `Skill` call, which is rare beside the two above. Its exposure is the ledger
+  row it appends rather than anything a turn reads.
 - `bin/skillforge`, `bin/skillreport` and `bin/skillinsight` are short-lived and local-only.
   They are exposed only in the narrow sense that a `git pull` can land inside one invocation.
 
@@ -656,6 +664,44 @@ reads ledger rows, which are a live census of invocations that ran. The default 
 transcripts, which is the only place a refused call leaves a trace at all. Adding the two
 would produce a total that is neither, so nothing in `bin/skillreport` adds them, and the
 view says on its own first screen which one it is showing.
+
+---
+
+## Why the claim gate is a hook, and why its evidence is defined by subtraction
+
+`skills/claim-provenance` is about this defect class and deliberately hands off the
+moment of claiming done. Nothing picked that moment up. The skill written for it ships in
+the `superpowers` plugin and has never been invoked here, and the wording is not why: a
+skill has to be *chosen*, and the party who would have to choose it is the one who already
+believes the work is finished. So the check cannot be something a session elects. It has to
+be something a session meets. That is the whole argument for `hooks/claim-gate.sh` being a
+hook, and it is the reason the same defect could not be fixed by rewording a description.
+
+**Evidence is what this session's own tools printed, minus what a subagent said.** The
+subtraction is the design, not a filter bolted on. Both defects the gate exists for were
+figures handed up by a dispatched agent and then repeated as fact — a commit message
+asserting 1495 tests where the derived count was 1195, and another asserting 544 passing
+tests on a tree that failed one. A rule that accepts any digits appearing anywhere in the
+transcript accepts precisely those, because a subagent's report is in the transcript. So
+tool results belonging to `Agent` and `Task` calls are removed before the search runs, and
+a relayed figure is a finding by construction.
+
+**The window is a latency budget, not a correctness choice, and it should be read as a
+recall cost.** The hook is wired with a ten-second timeout, and only the last
+`CLAIM_GATE_MAX_BYTES` of the transcript is parsed, so a figure printed early in a very
+long session and repeated at the end is judged unsupported. That is a false block, in the
+direction this gate is least allowed to err. The obvious repair is to search the part of
+the file outside the window for the candidate figures and suppress any that turn up there;
+it was built and rejected on measurement, because BSD `grep` has no fast multi-pattern path
+and the trial took 21 seconds for four patterns. Do not re-attempt that without a different
+tool. The `PostToolUse` accumulator is the path that actually restores full-session recall,
+and it is not wired by default.
+
+A refusing mechanism needs a spending limit more than an asking one does, so the gate stops
+after `CLAIM_GATE_MAX_SESSION` blocks and denials in a session and lets everything through
+afterwards. A reminder that misfires is noise; a refusal that misfires and cannot be
+exhausted is a session nobody can finish, and the honest failure mode for a heuristic this
+imprecise is to stand down rather than to keep insisting.
 
 ---
 

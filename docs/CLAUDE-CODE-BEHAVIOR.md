@@ -357,6 +357,70 @@ transcript's `is_error` flag stays the only dependable count of failures.
 
 ---
 
+## A `Stop` hook is handed the closing message already extracted, and can block twice
+
+**Finding.** The `Stop` payload carries exactly these keys: `session_id`,
+`transcript_path`, `cwd`, `prompt_id`, `permission_mode`, `effort`, `hook_event_name`,
+`stop_hook_active`, `last_assistant_message`, `background_tasks`, `session_crons`.
+`last_assistant_message` is a plain string holding the whole final assistant text of the
+turn, so a hook that judges what the turn said needs no transcript parsing to find it.
+
+Two separate mechanisms stop the turn and they are not interchangeable.
+`{"decision":"block","reason":"…"}` on stdout with status 0 reaches the model as a user
+record marked `isMeta`, reading `Stop hook feedback:` followed by the reason. Text on
+stderr with status 2 reaches the model too, but the CLI staples the script's absolute path
+into it and renders it as a blocking *error* from a command, which reads to the model as a
+malfunctioning tool rather than as a finding about the turn.
+
+`stop_hook_active` is the loop flag, and `prompt_id` is what makes a per-turn budget
+possible. Across one probe's three deliveries the flag went false, true, true: false on the
+first `Stop` of a turn, true on any `Stop` that exists only because a `Stop` hook blocked
+the previous one. All three deliveries carried an identical `prompt_id`, while the record
+uuid changed every time.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-25. Probe hooks were wired
+into a scratch project's `.claude/settings.json`, each appending its raw stdin to a log and
+returning a chosen decision, driven by
+`claude -p … --output-format stream-json --verbose`; the payload logs and the resulting
+transcripts are the record. Both blocking mechanisms were exercised in turn and the
+resulting transcript records compared.
+
+**What it means.** Anything that gates the end of a turn should read
+`last_assistant_message` and honour `stop_hook_active`, which is sufficient on its own as a
+loop guard; disk counters are a backstop for its absence, not a substitute. Prefer the
+stdout `block` form, because the stderr form's framing invites the model to treat a
+deliberate refusal as a broken hook. And key a per-turn allowance on `prompt_id`:
+`session_id` caps the whole session instead of the turn, and the record uuid caps nothing.
+
+---
+
+## A `PreToolUse` denial reaches the model as untrusted text, and is treated that way
+
+**Finding.** A `PreToolUse` hook denies a call by emitting
+`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`
+on stdout with status 0. The call does not execute and the model reports the reason
+verbatim. Its payload keys are `cwd`, `effort`, `hook_event_name`, `permission_mode`,
+`prompt_id`, `session_id`, `tool_input`, `tool_name`, `tool_use_id`, `transcript_path`.
+
+The part that changed how we write these: an instruction placed inside the reason was
+explicitly refused. The model answered that it was not acting on an instruction embedded in
+that message, because text coming back from a blocked call is not a directive it follows.
+That is correct behaviour — tool-result text is untrusted input — and it is a constraint on
+the author, not a defect.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-25, in the same probe
+harness as the entry above: a denying hook wired on `PreToolUse`, a session told to run
+`echo DENYME 999`, and the transcript read back for whether the command ran and what the
+model did with the reason text.
+
+**What it means.** Write a denial reason as a statement about what is wrong, never as a
+command to run something — the imperative form is the one shape the model is right to
+ignore. The `Stop` channel is different: its `reason` arrives labelled as hook feedback
+rather than as tool output, and is acted on, so guidance is legitimate there. A hook that
+gates both events needs two registers for the same finding.
+
+---
+
 ## `CLAUDE.md` at a plugin root fails `--strict`
 
 **Finding.** `claude plugin validate .` passes with a warning that a root `CLAUDE.md` is
