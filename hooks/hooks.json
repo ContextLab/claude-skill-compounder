@@ -1,5 +1,5 @@
 {
-  "description": "claude-skill-compounder: the two compounding reminders, insight capture and the claim gate on Stop, the claim gate on a git commit, and one ledger row per skill invocation.",
+  "description": "claude-skill-compounder: the two compounding reminders, insight capture and the claim gate on Stop, the claim gate and the documentation gate on a git command, the repeat gate across the three events a repeated failure spans, the apply gate on Stop, and one ledger row per skill invocation.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -19,6 +19,26 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/claim-gate.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/doc-gate.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/repeat-gate.sh\"",
             "timeout": 10
           }
         ]
@@ -44,6 +64,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash|Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/repeat-gate.sh\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [
@@ -53,6 +83,16 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/skill-use.sh\" fail",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/repeat-gate.sh\"",
             "timeout": 10
           }
         ]
@@ -73,6 +113,15 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/claim-gate.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/apply-gate.sh\"",
             "timeout": 10
           }
         ]

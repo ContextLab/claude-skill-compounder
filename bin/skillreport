@@ -3,14 +3,31 @@
 #
 #   skillreport [--help]
 #   skillreport skills
+#   skillreport applied [--json]
 #
-# `skillreport skills` is the four-question view: for every skill the ledger knows about,
-# what triggered its build, what was built and when, how often it has been used since,
-# and whether anyone judged that it worked. It is a SEPARATE view rather than more
+# `skillreport skills` is the five-question view: for every skill the ledger knows about,
+# what triggered its build, what was built and when, WHETHER IT WAS EVER PUT ON THE
+# PROBLEM THAT CAUSED IT, how often it has been used since, and whether anyone judged
+# that it worked. It is a SEPARATE view rather than more
 # columns on the table below, and deliberately so: the table is forge-centric, one row per
-# forge, and its denominator is the number that the reuse headline rests on. The four
+# forge, and its denominator is the number that the reuse headline rests on. The five
 # questions are skill-centric -- most skills in the pool were never forged at all, so
 # folding them in would silently change what that headline is a fraction of.
+#
+# THE FIFTH QUESTION IS NOT THE FOURTH ONE AGAIN, and `skillreport applied` is the view
+# built for it. A `use` row is ANY invocation, ever, by anyone, for any reason. An `apply`
+# row is the ONE that closes the forge loop: a skill here is built AS NEEDED, out of a
+# problem that was in front of somebody, so a forge that ends at "installed" has produced
+# a tool and left the problem exactly where it was. An `apply` row carries an outcome
+# (`used`, `declined` or `failed`) and the verbatim evidence behind it, and only
+# `skillforge apply` writes one. A forge that closed `done` and has no `apply` row is the
+# visible form of a loop that never closed, and the headline below counts them by name.
+#
+# APPLY IS SELECTED BY NAME, LIKE EVERY OTHER EVENT THIS FILE READS, and no existing
+# count moved to make room for it. The reuse fraction, the forge table, the coverage
+# block and the reminder conversion all answer against a ledger holding `apply` rows
+# exactly as they answered before those rows existed; tests/test_skillreport_apply.py
+# pins that by asserting the same headline against the same ledger with and without them.
 #
 # Joins the forge ledger written by 'skillforge' against skill invocations recovered
 # from Claude Code transcripts, and prints one table plus the number that matters: the
@@ -20,8 +37,14 @@
 # non-interactively, they call these very skills, and they are counted and reported on
 # their own line rather than folded into the headline.
 #
-# PRIVACY. This script reads three files, all already on your disk, and writes nothing
-# except its own output to the terminal:
+# PRIVACY. This script reads 5 files, all already on your disk, and writes nothing
+# except its own output to the terminal. THAT NUMBER IS NOT MAINTAINED BY HAND ANY MORE.
+# It said "three" while the list below held five, because the repeat store and the
+# override store were appended to the list and the sentence was left alone -- an
+# understated claim about what a privacy-relevant tool opens, printed by `--help` to the
+# user directly above the five entries contradicting it. tests/test_skillreport_apply.py
+# now DERIVES the count from the list and fails when the two disagree, so the sentence
+# cannot go stale again. These are the files:
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/ledger.jsonl
 #       one JSON line per forge: skill name, your one-line summary, the originating
 #       repository path, epoch timestamps, step counts, outcome and reason.
@@ -33,11 +56,24 @@
 #       responses, file contents and tool output are never parsed or printed.
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/*.edits
 #       per-session edit counters written by the reminder hook (an integer each).
+#   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/repeats/index.jsonl
+#       the repeat gate's append-only failure/recovery store. THAT FILE HOLDS THE TEXT OF
+#       THE COMMAND THAT FAILED AND THE ERROR IT PRINTED, so it is worth saying what is
+#       done with them here: nothing. Only the row type, the failure signature, its
+#       session id and the timestamp are read out; the command and the error text are
+#       counted and never printed.
+#   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/doc-gate/overrides.jsonl
+#       one row per time the documentation gate's escape hatch was taken. THAT FILE HOLDS
+#       A REASON SOMEBODY TYPED, and this one IS printed: the count and the override kinds
+#       are reported, and the most recent reason is quoted back, clipped to 60 characters.
+#       An escape nobody counts is indistinguishable from a gate nobody has, which is why
+#       the reason is on the report rather than only on disk.
 # `skillreport skills` reads the ledger and nothing else. The ledger also holds the
 # ledger-v2 rows: `origin` (one per skill, carrying the verbatim text passed to
 # `skillforge start --trigger`), `use` (one per invocation: skill name, session id,
 # working directory, success flag, and whether a script or a person drove the session)
-# and `verdict` (a judgement plus the quote behind it).
+# `verdict` (a judgement plus the quote behind it) and `apply` (an outcome plus the
+# verbatim evidence that the forged skill was put on the problem that caused it).
 # There are no network calls anywhere in this script. Nothing leaves the machine.
 # Nothing is uploaded, and no summary is sent anywhere.
 set -uo pipefail
@@ -87,6 +123,10 @@ set -uo pipefail
 STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 LEDGER="$STATE_ROOT/ledger.jsonl"
 REMINDERS="$STATE_ROOT/reminders"
+# The two gate surfaces. Both are append-only stores written by hooks, and both are read
+# here for counts alone -- see the GATES section near the bottom of this file.
+REPEATS="$STATE_ROOT/repeats/index.jsonl"
+DOC_OVERRIDES="$STATE_ROOT/doc-gate/overrides.jsonl"
 TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
 EDIT_EVERY="${CI_EDIT_EVERY:-12}"
 # It reaches integer arithmetic twice. Unguarded, `CI_EDIT_EVERY=abc` aborted the whole
@@ -94,19 +134,392 @@ EDIT_EVERY="${CI_EDIT_EVERY:-12}"
 # either way the reminder section reported the wrong reason or never printed at all.
 case "$EDIT_EVERY" in ''|*[!0-9]*|???????*) EDIT_EVERY=12 ;; esac
 [ "$EDIT_EVERY" -lt 1 ] && EDIT_EVERY=12
+# The repeat gate's own refusal threshold, read here only to say which of the signatures
+# it knows about would refuse. Guarded the same way EDIT_EVERY is, and for the same
+# reason: it reaches an integer comparison, and a typo'd export must not abort the report.
+MIN_SESSIONS="${REPEAT_MIN_SESSIONS:-2}"
+case "$MIN_SESSIONS" in ''|*[!0-9]*|???????*) MIN_SESSIONS=2 ;; esac
+[ "$MIN_SESSIONS" -lt 1 ] && MIN_SESSIONS=1
 
 VIEW="table"
+JSON=0
 case "${1:-}" in
   -h|--help|help)
-    sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+    # Printed by walking the comment block rather than by `sed -n '2,42p'`. The line
+    # numbers were a maintenance trap in the most literal way: the block grew by twenty
+    # lines when the fifth question landed and the fixed range would have silently
+    # truncated the help halfway through a sentence, with nothing failing anywhere.
+    # This stops at the first line that is not a comment, which is `set -uo pipefail`.
+    awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
     exit 0
     ;;
   skills) VIEW="skills" ;;
+  applied)
+    VIEW="applied"
+    [ $# -gt 0 ] && shift
+    case "${1:-}" in
+      --json) JSON=1 ;;
+      "") : ;;
+      *) echo "skillreport: unknown option '$1' for 'applied' (try: skillreport --help)" >&2; exit 2 ;;
+    esac
+    ;;
   "") : ;;
   *) echo "skillreport: unknown option '$1' (try: skillreport --help)" >&2; exit 2 ;;
 esac
 
 command -v jq >/dev/null 2>&1 || { echo "skillreport: jq is required" >&2; exit 1; }
+
+# --------------------------------------------------------- the fifth question: apply
+#
+# WAS THE NEW SKILL EVER USED ON THE PROBLEM THAT CAUSED IT? One row per `done`, joined
+# to the `apply` row that discharged it.
+#
+# `apply` IS SELECTED BY NAME AND SO IS `done`. Nothing here is classified by exclusion,
+# and no selector anywhere in this file was widened to accommodate a new event: the forge
+# join still names `start`, `done` and `fail`, and it cannot see an `apply` row at all.
+# That is the whole reason `apply` is a new event name rather than a field on `done` --
+# a reader written before it existed counts a ledger holding these rows exactly as it did
+# before.
+#
+# THE JOIN MATCHES ON EITHER NAME. `skillforge done` records the FORGE's name; the apply
+# marker it writes records the INSTALLED SKILL's name, which is the directory that was
+# actually linked and is not always the same string. `skillforge apply` therefore writes
+# both -- `name` for the skill and `forge` for the forge -- and a `done` is discharged by
+# an apply row that matches either. Matching on `name` alone silently reported every forge
+# whose installed directory was named differently from its forge as never applied.
+#
+# ONE APPLY PER DONE, greedily and in ledger order, for the reason the forge join gives
+# one outcome per start: a skill forged twice and applied once must not read as applied
+# twice. An apply row that no `done` claims is not discarded -- `skillforge apply --force`
+# writes one for a skill this machine never forged, and that is a real record of a real
+# act. It is reported separately, under its own heading, and it is not in the denominator.
+#
+# AN UNNAMED `done` IS NEVER DISCHARGED. Two rows that both lack a name are not thereby
+# the same forge, so the sentinels below deliberately never compare equal. The cost is
+# reporting such a forge as never applied, which is the honest direction: nothing on disk
+# says it was.
+apply_join() {          # -> one compact JSON object on stdout; empty output on failure
+  [ -s "$LEDGER" ] || return 1
+  jq -s -R -c '
+    def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                 | select(type == "object") ];
+    parse as $rec
+    | [ range(0; ($rec | length)) | select($rec[.].event == "done")  ] as $dones
+    | [ range(0; ($rec | length)) | select($rec[.].event == "apply") ] as $applies
+    | (reduce $dones[] as $i ({used: [], pairs: []};
+         . as $acc
+         | ([ $applies[]
+              | select(. > $i
+                       and ((($rec[.].name  // " no-name")  == ($rec[$i].name // "no-name"))
+                            or (($rec[.].forge // " no-forge") == ($rec[$i].name // "no-forge")))) ]
+            - $acc.used | .[0]) as $a
+         | { used:  (if $a == null then $acc.used else ($acc.used + [$a]) end),
+             pairs: ($acc.pairs + [[$i, $a]]) })) as $join
+    | ($applies - $join.used) as $loose
+    | { forges: [ $join.pairs[]
+          | .[0] as $i | .[1] as $ai
+          | $rec[$i] as $d
+          | (if $ai == null then null else $rec[$ai] end) as $a
+          | { name:      ($d.name // "(unnamed)"),
+              closed:    ($d.ts // 0),
+              applied:   ($a != null),
+              outcome:   ($a.outcome // null),
+              evidence:  ($a.evidence // null),
+              apply_name:($a.name // null),
+              apply_ts:  ($a.ts // null),
+              marker:    ($a.marker // null),
+              elapsed:   (if $a == null then null
+                          elif ($a.elapsed // null) != null then $a.elapsed
+                          else (($a.ts // 0) - ($d.ts // 0)) end) } ],
+        loose: [ $loose[] | $rec[.]
+          | { name:     (.name // "(unnamed)"),
+              outcome:  (.outcome // null),
+              evidence: (.evidence // null),
+              forge:    (.forge // null),
+              marker:   (.marker // null),
+              ts:       (.ts // 0) } ] }
+    | . + { closed:   (.forges | length),
+            never:    ([ .forges[] | select(.applied | not) ] | length),
+            used:     ([ .forges[] | select(.outcome == "used")     ] | length),
+            declined: ([ .forges[] | select(.outcome == "declined") ] | length),
+            failed:   ([ .forges[] | select(.outcome == "failed")   ] | length) }
+  ' "$LEDGER" 2>/dev/null
+}
+# The row carries its own `elapsed` when a pending-apply marker was there to measure
+# against. When that field is absent -- an apply recorded with --force, or a marker that
+# had aged out -- the difference between the two timestamps is the same interval,
+# computed rather than recorded, so the join derives it instead of printing a hole.
+
+# ------------------------------------------------------------------------ the gates
+#
+# AN ESCAPE NOBODY COUNTS IS INDISTINGUISHABLE FROM A GATE NOBODY HAS. hooks/doc-gate.sh
+# refuses a push whose commits changed code and no documentation, and it ships an escape
+# hatch deliberately: a refusal with no way past it is a hook breaking somebody's work
+# rather than steering it. But an escape taken in silence leaves the same trace on disk as
+# a gate that was never installed -- the push went through, and nothing anywhere says a
+# rule was bent. That is why every override writes a row carrying the WRITTEN REASON, and
+# why this section exists to count them. The number is not a scold. It is the only thing
+# that separates a gate that is working (few overrides, each with a reason someone had to
+# type) from one that is being routed around on every push, and without it neither state
+# is observable.
+#
+# NEITHER STORE'S ABSENCE IS A ZERO, and this section never prints one as if it were. A
+# missing file means the gate has recorded nothing on this machine, which is a different
+# claim from "nothing has been refused" -- the same distinction the ledger horizon makes
+# a few hundred lines up.
+#
+# ROW TYPES ARE SELECTED BY NAME HERE TOO. `fail`, `recover` and `forget` for the repeat
+# store; `override` for the doc gate. A row carrying a type neither script knows is
+# skipped, not counted as the other thing.
+#
+# THE REFUSAL COUNT IS THE GATE'S OWN QUERY, NOT A RESTATEMENT OF ITS THRESHOLD. This is a
+# report about another component's behaviour, so a sentence here that the component would
+# not honour is simply false. Read out of hooks/repeat-gate.sh (arm 3, "THE QUERY") at the
+# time this was written, its refusal is
+#
+#   map(select(.n >= $min and .selfn == 0)) | sort_by(-.n) | (.[0] // empty)
+#
+# over signatures built with: a `forget` tombstone suppressing only rows stamped BEFORE it;
+# `.n` the distinct sessions among the surviving `fail` rows; and `.selfn` the distinct
+# sessions among the surviving `recover` rows whose `norm` equals the LAST surviving fail
+# row's `norm` -- a SELF-RECOVERY, an earlier session running the identical call and
+# getting it to work. The gate treats that as an observation that the call is not broken
+# and never refuses the signature at all, however many sessions it failed in. Counting
+# `.n >= $min` alone reported those as refusals that would happen; they do not.
+#
+# ONE CLAUSE OF THAT QUERY CANNOT BE APPLIED HERE, and it is named rather than ignored:
+# the gate also drops fail rows from the session it is running in (`.session != $sid`),
+# which a report belongs to no session and cannot evaluate. Its only effect is on a
+# signature whose sessions include the one asking, so the count below can be one session
+# high for a signature that is failing right now, and never wrong about a stale store.
+print_gates() {
+  echo
+  echo "GATES — the repeat gate's store and the documentation gate's escape hatch"
+  if [ -s "$REPEATS" ]; then
+    jq -s -R -r --argjson min "$MIN_SESSIONS" '
+      def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                   | select(type == "object") ];
+      parse as $rows
+      | [ $rows[] | select(.t == "forget")  ] as $tomb
+      | [ $rows[] | select(.t == "fail")    ] as $f
+      | [ $rows[] | select(.t == "recover") ] as $rec
+      # A tombstone suppresses rows recorded BEFORE it and only those, exactly as the
+      # gate reads them: a signature forgotten and then failing again is live again, so
+      # counting every fail row would report signatures the gate itself no longer sees.
+      | [ ($f | map(.sig) | unique)[] as $sig
+          | (([ $tomb[] | select(.sig == $sig) | (.ts // 0) ] | max) // -1) as $cut
+          | [ $f[] | select(.sig == $sig and ((.ts // 0) > $cut)) ] as $live
+          | select(($live | length) > 0)
+          # The gate compares against the norm the FAIL rows recorded, not the norm of
+          # whatever call is being judged, and takes the LAST surviving one. Copied
+          # exactly: a paraphrase here is how the two drift.
+          | (($live[-1].norm // "")) as $fn
+          | [ $rec[] | select(.sig == $sig and ((.ts // 0) > $cut)
+                              and ((.norm // "") == $fn)) ] as $self
+          | { sig: $sig,
+              n:     ($live | map(.session) | unique | length),
+              selfn: ($self | map(.session) | unique | length) } ] as $sigs
+      | [ $sigs[] | select(.n >= $min and .selfn == 0) ] as $deny
+      | [ $sigs[] | select(.n >= $min and .selfn > 0) ] as $transient
+      | "  repeat gate:   \($sigs | length) distinct failure signature(s) known,"
+        + " \($f | length) failure row(s), \($rec | length) recovery row(s)",
+        "                 \($deny | length) of them at or past the deny threshold"
+        + " (>= \($min) distinct sessions) with",
+        "                 no self-recovery behind them, so a new session repeating one"
+        + " would be refused."
+        + (if ($tomb | length) > 0 then "  \($tomb | length) signature(s) forgotten." else "" end),
+        (if ($transient | length) == 0 then empty else
+          "                 \($transient | length) more reached that count, but an earlier"
+          + " session ran the identical",
+          "                 call and it worked. The gate reads those as transient and"
+          + " never refuses them."
+         end)
+    ' "$REPEATS" 2>/dev/null
+  else
+    echo "  repeat gate:   no store yet ($REPEATS)."
+    echo "                 Nothing has been recorded on this machine, which is not the"
+    echo "                 same claim as nothing having failed twice."
+  fi
+  if [ -s "$DOC_OVERRIDES" ]; then
+    jq -s -R -r '
+      def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                   | select(type == "object") ];
+      parse as $rows
+      | [ $rows[] | select(.event == "override") ] as $ov
+      | "  doc gate:      \($ov | length) override(s) taken"
+        + (if ($ov | length) == 0 then "." else
+             " (" + ([ $ov | group_by(.kind // "unrecorded")[]
+                       | "\(length) \(.[0].kind // "unrecorded")" ] | join(", ")) + ")."
+           end),
+        (if ($ov | length) == 0 then empty else
+          ($ov | sort_by(.ts // 0) | .[-1]
+            | "                 most recent reason: \"\((.reason // "") | tostring
+                | gsub("[\\n\\t\\r]"; " ") | if length > 60 then .[0:60] + "..." else . end)\"")
+         end)
+    ' "$DOC_OVERRIDES" 2>/dev/null
+  else
+    echo "  doc gate:      no overrides recorded ($DOC_OVERRIDES)."
+  fi
+  echo "  An escape nobody counts is indistinguishable from a gate nobody has, which is"
+  echo "  why the overrides are counted here rather than only permitted."
+}
+
+# --------------------------------------------------------------- one `dur`, two views
+#
+# ONE DEFINITION, PREPENDED TO BOTH JQ PROGRAMS. The `applied` view and the `skills` view
+# both render the interval between a forge closing and the skill being applied, and each
+# used to carry its own copy of this function. They drifted, exactly as two copies do:
+# only one copy guarded a NEGATIVE interval, so an apply row stamped BEFORE its `done`
+# row -- a stepped clock, a ledger merged from two machines, a hand-edited file -- read
+# as "-" in one view and as a fabricated "-200s" in the other, off the same bytes on
+# disk. Sharing the text is the only fix that cannot come apart again; both views also
+# call `apply_join`, for the same reason.
+#
+# COARSE ON PURPOSE. The question this column answers is whether applying happened while
+# the problem was still in front of somebody or a fortnight later, and a figure to the
+# second implies a precision the ledger timestamps do not carry. A null interval and a
+# negative one are both "-": not an interval of zero, and not a number invented to fill
+# a column. Callers that want prose around the value ask whether it came back "-" rather
+# than re-testing the interval themselves, which would put the rule back in two places.
+JQ_DUR='
+    def dur: if . == null then "-"
+             elif . < 0 then "-"
+             elif . < 60 then "\(.)s"
+             elif . < 3600 then "\((. / 60) | floor)m"
+             elif . < 86400 then "\((. / 3600) | floor)h"
+             else "\((. / 86400) | floor)d" end;
+'
+
+# ------------------------------------------------------- the APPLIED headline
+#
+# THE HEADLINE THE APPLY ROWS EXIST TO PRODUCE. REUSE answers "was the skill ever invoked
+# again"; this answers the narrower and harder question the forge protocol turns on --
+# was it ever put on the PROBLEM THAT CAUSED IT. The two are counted from different
+# instruments and are never added: reuse counts transcript invocations against a forge
+# window, this counts `apply` rows against `done` rows, both selected by name.
+#
+# IT IS A FUNCTION BECAUSE THE TABLE VIEW HAS THREE EXITS, NOT ONE. It is printed whether
+# or not the number is flattering, and it is printed when it is zero of zero, because a
+# count that only appears once it looks good is not a measurement -- and that was written
+# in this file while both early exits, the empty ledger and the ledger with no `start`
+# rows, returned without printing it at all. The second of those is not a corner: a
+# ledger holding an `origin` row and a `--force` apply row, which is the whole supported
+# shape for a skill forged on another machine, has no `start` row in it, so the one view
+# a user runs by default said "no forges recorded yet" and went silent about the apply
+# rows sitting in the file. Same argument as `print_gates` directly above, which is
+# surfaced on those paths for the same reason.
+print_applied_headline() {
+  aj_t="$(apply_join)"
+  a_closed="$(printf '%s' "${aj_t:-}" | jq -r '.closed // 0' 2>/dev/null)"
+  a_never="$(printf '%s' "${aj_t:-}" | jq -r '.never // 0' 2>/dev/null)"
+  a_loose="$(printf '%s' "${aj_t:-}" | jq -r '.loose | length' 2>/dev/null)"
+  # A missing or unreadable ledger makes every one of those the empty string, and the
+  # `case` guards are what keep an empty string out of the integer comparisons below.
+  case "${a_closed:-}" in ''|*[!0-9]*) a_closed=0 ;; esac
+  case "${a_never:-}" in ''|*[!0-9]*) a_never=0 ;; esac
+  case "${a_loose:-}" in ''|*[!0-9]*) a_loose=0 ;; esac
+  echo
+  echo "APPLIED: $a_closed forges closed, $a_never never applied."
+  if [ "$a_never" -gt 0 ]; then
+    echo "         A forge with no \`apply\` row produced a tool and left the problem where it"
+    echo "         was. Run \`skillreport applied\` for the breakdown and \`skillforge pending\`"
+    echo "         for the markers still open."
+  elif [ "$a_closed" -eq 0 ]; then
+    echo "         No forge in this ledger has closed \`done\`, so there is nothing to apply yet."
+  fi
+  # Counted here rather than only in `skillreport applied`, because a headline that reads
+  # "0 forges closed" over a ledger holding real apply rows understates what is on disk in
+  # the one direction this report must never understate.
+  if [ "$a_loose" -gt 0 ]; then
+    echo "         $a_loose apply row(s) name no forge in this ledger -- recorded with --force, or"
+    echo "         for a skill forged on another machine. They are real records and are in"
+    echo "         neither half of the count above; \`skillreport applied\` lists them."
+  fi
+}
+
+# ------------------------------------------------------------------ the applied view
+if [ "$VIEW" = "applied" ]; then
+  JOINED="$(apply_join)"
+  case "${JOINED:-}" in
+    '{'*) : ;;
+    # An unreadable or absent ledger still has to answer in the shape the caller asked
+    # for. `--json` over an empty file is a parse error in the caller's script, and a
+    # report that cannot be parsed is worse than one that says zero.
+    *) JOINED='{"forges":[],"loose":[],"closed":0,"never":0,"used":0,"declined":0,"failed":0}' ;;
+  esac
+  if [ "$JSON" -eq 1 ]; then
+    printf '%s\n' "$JOINED"
+    exit 0
+  fi
+  printf '%s' "$JOINED" | jq -r "$JQ_DUR"'
+    def day: if . == null then "-" else (. | gmtime | strftime("%Y-%m-%d")) end;
+    def one: (. // "") | tostring | gsub("[\\n\\t\\r]"; " ");
+    def clip($n): one | if (length > $n) then (.[0:$n] + "...") else . end;
+    # MARKED, LIKE `clip` DIRECTLY ABOVE. A bare `.[0:$n]` cut a name off at the column
+    # width with nothing saying it had been cut, so a truncated name was indistinguishable
+    # from one that really ends there and two skills sharing a 28-character prefix rendered
+    # as the same label. The marker costs three characters of the name and buys the reader
+    # the fact that there is more of it. `length == $n` is its own arm because a jq
+    # `" " * 0` yields null rather than the empty string.
+    def pad($n): one
+                 | if (length > $n) then
+                     (if $n > 3 then (.[0:($n - 3)] + "...") else .[0:$n] end)
+                   elif (length == $n) then .
+                   else . + (" " * ($n - length)) end;
+    "APPLIED - was the new skill ever used on the problem that caused it?",
+    "A `use` row is any invocation, ever. An apply row is the one that closes the forge",
+    "loop: it carries an outcome and the verbatim evidence, and only `skillforge apply`",
+    "writes one. Read from the ledger alone; no transcript is consulted here.",
+    "",
+    ([ ("SKILL" | pad(28)), ("CLOSED" | pad(12)), ("APPLIED" | pad(10)),
+       ("AFTER" | pad(7)), "EVIDENCE" ] | join(" ")),
+    ([ "----------------------------", "------------", "----------",
+       "-------", "--------" ] | join(" ")),
+    (if (.forges | length) == 0 then "(no forge has closed `done` in this ledger)" else empty end),
+    # LABELLED BY THE INSTALLED SKILL, WHICH IS WHERE `skillreport skills` FILES THE SAME
+    # ROW. The join matches an apply row to a `done` by either name, so a forge run as
+    # `widget-forge` can be discharged by the skill installed as `widget-skill`; the skills
+    # view puts that row in the `widget-skill` block (it is the name `use` rows carry and
+    # the name COVERAGE counts) while this column printed `widget-forge`. One row, two
+    # views, two labels, and no way for a reader to line them up. The forge name is not
+    # dropped -- the footnote under the table names it for every row where they differ.
+    (.forges | sort_by(.closed)[]
+      | ([ ((if .applied then (.apply_name // .name) else .name end) | pad(28)),
+           (.closed | day | pad(12)),
+           ((if .applied then .outcome else "NEVER" end) | pad(10)),
+           ((if .applied then (.elapsed | dur) else "-" end) | pad(7)),
+           (if .applied then (.evidence | clip(60)) else "" end) ] | join(" "))),
+    "",
+    "\(.closed) forges closed, \(.never) never applied.",
+    (if .closed == 0 then empty
+     else "  of the \(.closed - .never) applied: \(.used) used, \(.declined) declined, \(.failed) failed." end),
+    (if .never > 0 then
+       "  A forge with no apply row produced a tool and left the problem where it was.",
+       "  `skillforge pending` lists the markers still open; `skillforge apply --name <skill>",
+       "  --outcome used --evidence \"<verbatim quote>\"` is what discharges one."
+     else empty end),
+    (if ([ .forges[] | select(.applied and ((.apply_name // .name) != .name)) ] | length) == 0
+     then empty
+     else "",
+       "  The SKILL column names the INSTALLED skill, which is the block `skillreport skills`",
+       "  files the same row under. These rows were forged under another name:",
+       (.forges[] | select(.applied and ((.apply_name // .name) != .name))
+         | "    \(.apply_name | pad(28)) discharged the forge run as \(.name)")
+     end),
+    (if (.loose | length) == 0 then empty
+     else "",
+       "APPLY ROWS WITH NO FORGE IN THIS LEDGER (\(.loose | length))",
+       "  Recorded with --force, or for a skill forged on another machine. Real records of",
+       "  real acts, so they are shown; they are in neither half of the fraction above.",
+       (.loose | sort_by(.ts)[]
+         | "    \(.name | pad(28)) \(.ts | day | pad(12)) \(.outcome | pad(10)) \(.evidence | clip(60))")
+     end),
+    "",
+    "A forge with no apply row has not been shown to be useless. It has been shown to be",
+    "unapplied, which is a different claim and the one this ledger is careful to make."
+  '
+  exit 0
+fi
 
 # ------------------------------------------------------- the four-question view
 #
@@ -137,18 +550,37 @@ if [ "$VIEW" = "skills" ]; then
     echo "installer, and by the Skill hook on every invocation."
     exit 0
   fi
-  jq -s -R -r '
-    def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty) ];
+  # The apply join is computed ONCE, by the same function the `applied` view uses, and
+  # handed in here. Writing the join a second time in this filter is how the two views
+  # start disagreeing about the same ledger.
+  AJ="$(apply_join)"
+  case "${AJ:-}" in
+    '{'*) : ;;
+    *) AJ='{"forges":[],"loose":[],"closed":0,"never":0,"used":0,"declined":0,"failed":0}' ;;
+  esac
+  jq -s -R -r --argjson aj "$AJ" "$JQ_DUR"'
+    # `select(type == "object")` is not decoration. Without it ONE well-formed but
+    # non-object line in the ledger -- a bare `[1,2,3]` from a tool that appended to the
+    # wrong file -- makes `$rec[.].event` raise "Cannot index array with string", jq exits
+    # 5, and the whole view collapses to "no forges recorded yet" with every real row
+    # still sitting on disk. Measured against a real mixed ledger while the apply column
+    # was being added; hooks/repeat-gate.sh already guards its own store the same way.
+    def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                 | select(type == "object") ];
     def day: if . == null then "-" else (. | gmtime | strftime("%Y-%m-%d")) end;
     def plural($n; $one; $many): if $n == 1 then $one else $many end;
+    def one: (. // "") | tostring | gsub("[\\n\\t\\r]"; " ");
+    def clip($n): one | if (length > $n) then (.[0:$n] + "...") else . end;
     parse as $rec
     | [ $rec[] | select(.event == "origin") ]  as $origins
     | [ $rec[] | select(.event == "use") ]     as $uses
     | [ $rec[] | select(.event == "verdict") ] as $verdicts
     | [ $rec[] | select(.event == "horizon") ] as $horizons
     | ( [ $origins[].name ] + [ $uses[].name ] + [ $verdicts[].name ]
+        + [ $aj.forges[] | select(.applied) | (.apply_name // .name) ]
+        + [ $aj.loose[].name ]
         | map(select(. != null)) | unique ) as $names
-    | "SKILLS — what triggered the build, what was built, used since, did it work",
+    | "SKILLS — what triggered the build, what was built, was it applied, used since, did it work",
       "Read from the ledger alone. The default view counts skill invocations recovered",
       "from transcripts instead; the two are different instruments over different",
       "intervals and are never added together.",
@@ -173,9 +605,32 @@ if [ "$VIEW" = "skills" ]; then
         | [ $u[] | select(.harness == null) ] as $unclassified
         | [ $u[] | select(.ok == false) ] as $failed
         | [ $verdicts[] | select(.name == $n) ] as $v
+        # THE FIFTH QUESTION. Selected by name out of the join above, never by exclusion,
+        # and kept separate from `uses` on purpose: a use is any invocation ever, an apply
+        # is the one that closed the loop the forge opened.
+        #
+        # ONE ROW, ONE BLOCK, AND THE NAME CHOSEN IS THE ONE ON THE APPLY ROW -- `.apply_name`,
+        # falling back to the name on the forge only when the apply row carries none. The
+        # dual-name match this join performs (`apply.name == done.name` OR
+        # `apply.forge == done.name`) exists precisely so a skill INSTALLED under one name
+        # can discharge a forge run under another, and testing the joined row against both
+        # names here printed it under both blocks -- the same apply, the same evidence,
+        # twice, in the exact case the dual match was built for. The installed name is the
+        # one to keep: it is the name the `use` rows carry (the Skill hook records what was
+        # invoked), the name $names is built from a few lines up, and the name COVERAGE
+        # counts, so the apply now lands in the block a reader arrives at by looking up the
+        # skill they actually call. The block for the forge name is not left lying either:
+        # $ap_elsewhere
+        # below says where its debt was discharged instead of claiming there was none.
+        | ([ $aj.forges[] | select(.applied and ((.apply_name // .name) == $n)) ]
+           + [ $aj.loose[] | select(.name == $n) ]
+           | sort_by((.apply_ts // .ts // 0))) as $ap
+        | [ $aj.forges[] | select(.applied and .name == $n
+                                  and ((.apply_name // .name) != $n)) ] as $ap_elsewhere
+        | [ $aj.forges[] | select((.applied | not) and .name == $n) ] as $unapplied
         | $n,
           (if $o == null then
-             "  origin    NO ORIGIN ROW — this skill has invocations but nothing says where it came from"
+             "  origin    NO ORIGIN ROW — this skill has rows here but nothing says where it came from"
            else
              "  origin    \($o.origin)"
              # `has`, not `//`: jq treats false as empty, so `.shipped // null` on a row
@@ -207,6 +662,37 @@ if [ "$VIEW" = "skills" ]; then
                then ", last genuine use \(($genuine | map(.ts) | max) | day)"
                else "" end)
           end),
+          # FOUR INDEPENDENT CONDITIONS, NOT AN `elif` CHAIN, AND THAT IS THE WHOLE POINT.
+          # These facts are not alternatives: a name can carry a discharged forge and a
+          # standing one at the same time -- the skill was forged twice, the older one was
+          # applied and the newer one was not -- and the chain made the NOT APPLIED arm
+          # unreachable for any name with a single apply row anywhere behind it. A debt
+          # disappeared from the view BECAUSE an earlier debt had been paid, which is the
+          # one direction this report must never fail in. Only the closing line is
+          # conditional on the other three, because it is the statement that there is
+          # nothing to say.
+          (if ($ap | length) > 0 then
+             ($ap[]
+              | "  applied   \(.outcome // "outcome not recorded")"
+                # The shared `dur` decides what a null or negative interval renders as;
+                # this asks what it returned rather than re-testing the interval, so the
+                # rule stays in the one place the two views agree on.
+                + ((.elapsed | dur) as $d
+                   | if $d == "-" then "" else ", \($d) after the forge closed" end)
+                + (if ((.evidence // "") | length) > 0
+                   then " — \"\(.evidence | clip(70))\"" else "" end))
+           else empty end),
+          (if ($unapplied | length) > 0 then
+             "  applied   NOT APPLIED — \($unapplied | length) forge(s) closed for this name and nothing says the skill was put on the problem that caused it"
+           else empty end),
+          (if ($ap_elsewhere | length) > 0 then
+             ($ap_elsewhere[]
+              | "  applied   \(.outcome // "outcome not recorded"), but recorded under the installed name \"\(.apply_name)\" — the row is in that block, not repeated here")
+           else empty end),
+          (if ($ap | length) == 0 and ($unapplied | length) == 0
+              and ($ap_elsewhere | length) == 0 then
+             "  applied   no closed forge under this name, so there is nothing to discharge"
+           else empty end),
           (if ($v | length) == 0 then
              "  verdict   none recorded"
            else
@@ -216,11 +702,13 @@ if [ "$VIEW" = "skills" ]; then
            end),
           ""
       ),
-      "COVERAGE — how much of the four questions this ledger can actually answer",
+      "COVERAGE — how much of the five questions this ledger can actually answer",
       "  skills with an origin row:      \($origins | length)",
       "  of those, trigger recorded:     \([ $origins[] | select((.trigger_verbatim // "") != "") ] | length)",
       "  skills with a recorded use:     \([ $uses[].name ] | unique | length)",
       "  skills with a verdict:          \([ $verdicts[].name ] | unique | length)",
+      "  skills with an apply row:       \((([ $aj.forges[] | select(.applied) | (.apply_name // .name) ] + [ $aj.loose[].name ]) | unique | length))",
+      "  forges closed, never applied:   \($aj.never) of \($aj.closed)",
       "  rows that were reconstructed:   \([ $rec[] | select(.backfilled == true) ] | length) of \($rec | length)",
       "",
       "A skill with no rows here has not been shown to be unused. It has been shown to be",
@@ -237,6 +725,14 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 if [ ! -s "$LEDGER" ]; then
   echo "no forges recorded yet ($LEDGER)"
   echo "Nothing to measure. Run a forge with the skill-compounder skill first."
+  # Zero of zero, printed. See print_applied_headline: the claim that it appears on every
+  # path is only worth making if the paths with nothing to show print it too.
+  print_applied_headline
+  # The gates are surfaced even with no ledger. They are written by hooks, not by a
+  # forge, so a machine that has never forged anything can still have refused a repeat
+  # and can still have had its documentation gate overridden -- and those are exactly
+  # the numbers a user with no forges is owed a sight of.
+  print_gates
   exit 0
 fi
 
@@ -261,7 +757,8 @@ fi
 # finished and the denominator of the reuse fraction grew by one.
 jq -s -R -r '
   def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
-  [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $rec
+  [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+    | select(type == "object") ] as $rec
   | [ range(0; ($rec | length)) | select($rec[.].event == "start") ] as $starts
   | [ range(0; ($rec | length))
       | select($rec[.].event == "done" or $rec[.].event == "fail") ] as $ends
@@ -298,6 +795,10 @@ jq -s -R -r '
 
 if [ ! -s "$TMP/forges.tsv" ]; then
   echo "no forges recorded yet ($LEDGER has no 'start' records)"
+  # No `start` row does not mean no `apply` row: a skill forged on another machine and
+  # recorded here with `skillforge apply --force` lands in exactly this ledger shape.
+  print_applied_headline
+  print_gates
   exit 0
 fi
 
@@ -579,6 +1080,10 @@ if [ "$unclosed" -gt 0 ]; then
   echo "       fraction. They have no finish time, so nothing can be counted as after it."
 fi
 
+# The same headline the two early exits above print, from the same function, so the three
+# paths cannot say different things about one ledger. See print_applied_headline.
+print_applied_headline
+
 echo
 echo "$during_total invocation(s) fell inside a forge window and were not counted as reuse."
 if [ "$unparsed_total" -gt 0 ]; then
@@ -639,7 +1144,31 @@ if [ -d "$REMINDERS" ]; then
     checkpoints=$(( checkpoints + n / EDIT_EVERY ))
   done < "$TMP/counters"
 fi
-starts="$(grep -c '"event":"start"' "$LEDGER" 2>/dev/null || echo 0)"
+# COUNTED BY SELECTOR, because every other reader in this file is -- not because the
+# substring it replaced was observed failing. A reviewer flagged the old line,
+# `grep -c '"event":"start"' "$LEDGER"`, as newly unsafe now that `apply` rows carry
+# free-text `evidence`: a session quoting a ledger line into its own evidence would be
+# counted as a forge that never happened. THAT DOES NOT REPRODUCE, and the reason is worth
+# keeping so nobody re-reports it. A string value is JSON-encoded, so an evidence quote
+# containing `"event":"start"` is written to disk as `\"event\":\"start\"` -- the byte
+# after `event` is a backslash, not a quote, and the grep pattern cannot match. Measured on
+# a ledger holding exactly that evidence, plus a malformed line and a foreign array: both
+# the old grep and the selector below answered 2.
+#
+# The change stands anyway, for the reason .claude/CLAUDE.md gives: "every reader selects
+# its events BY NAME". A rule with one exception in it is a rule nobody can apply. The
+# selector is also immune to a hand-edited or foreign line that is not JSON-encoded at all,
+# which the grep is not.
+#
+# `-R -n` with `inputs` reads the file a RAW LINE AT A TIME, and `fromjson? // empty` drops
+# a line that does not parse. `jq -s` would have been shorter and is wrong here: it aborts
+# on the first malformed line and takes the whole count with it, and this ledger is
+# append-only, hand-editable, and deliberately exercised with malformed and foreign lines.
+# jq returns a bare integer, so nothing here parses `wc -l` output -- which on BSD is padded
+# with a leading space and has already zeroed one cap in this package.
+starts="$(jq -R -n '[inputs | fromjson? // empty
+                    | select(type == "object" and .event == "start")] | length' \
+            < "$LEDGER" 2>/dev/null || echo 0)"
 case "${starts:-}" in ''|*[!0-9]*) starts=0 ;; esac
 
 echo
@@ -654,6 +1183,8 @@ else
 fi
 echo "  The numerator covers all time and the denominator only the last 7 days, so read"
 echo "  the conversion as a loose upper bound rather than a rate."
+
+print_gates
 exit
 
 # Closes the brace group opened just under `set -uo pipefail`. See the note there.

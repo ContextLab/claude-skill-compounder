@@ -37,6 +37,13 @@
 # the percentage — meaningless once the budget is gone — reads `over`, which is exactly
 # as wide as ` 99%` so nothing shifts.
 #
+# WHEN NOTHING IS FORGING, THE LINE IS NOT NECESSARILY EMPTY. `skillforge done` leaves a
+# marker per closed forge under <state>/apply-pending/, and `skillforge apply` clears it.
+# While one stands, and no forge is on screen, this prints `⚑ <name> forged · not yet
+# used · <age>` instead. A live forge always wins: the flag is only rendered where the
+# forge renderer would have printed nothing at all. Details, and why this segment reads
+# those markers but never deletes one, are at pending_segment().
+#
 # SKILLFORGE_NOW pins the clock so the animation can be exercised deterministically.
 set -uo pipefail
 
@@ -80,7 +87,11 @@ set -uo pipefail
 # sanitised environment). Under `set -u` reading it then aborts the script non-zero
 # before it has printed anything, and the segment silently goes blank.
 : "${HOME:=/tmp}"
-DIR="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/forge"
+STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+DIR="$STATE_ROOT/forge"
+# Markers written by `skillforge done` and cleared by `skillforge apply`; read
+# here, never written and never removed. See pending_segment() for why.
+PENDING_DIR="$STATE_ROOT/apply-pending"
 command -v jq >/dev/null 2>&1 || exit 0
 
 cat >/dev/null 2>&1   # payload is not needed: state is keyed on forge name, not session
@@ -137,6 +148,10 @@ col_or() { # <value> <default> <min> <max>
 }
 DONE_TTL="$(num_or "${SKILLFORGE_DONE_TTL:-}" 30)"
 FAIL_TTL="$(num_or "${SKILLFORGE_FAIL_TTL:-}" 60)"
+# Not a reaper. This one only decides how long the ⚑ segment is SHOWN; the marker
+# behind it belongs to hooks/apply-gate.sh and to `skillforge apply`. 86400 is the
+# gate's APPLY_GATE_WINDOW default, deliberately -- see pending_segment().
+PENDING_TTL="$(num_or "${APPLY_PENDING_TTL:-}" 86400)"
 TAIL_WIDTH="$(col_or "${SKILLFORGE_TAIL_WIDTH:-}" 38 2 "$SEGMENT_MAX")"
 NAME_WIDTH="$(col_or "${SKILLFORGE_NAME_WIDTH:-}" 32 2 "$SEGMENT_MAX")"
 WIDTH="$(col_or "${SKILLFORGE_BAR_WIDTH:-}" 12 1 "$BAR_MAX")"
@@ -156,6 +171,220 @@ SEGMENT_CHROME=40
 if [ $(( NAME_WIDTH + WIDTH + TAIL_WIDTH + SEGMENT_CHROME )) -gt "$SEGMENT_MAX" ]; then
   NAME_WIDTH=32; WIDTH=12; TAIL_WIDTH=38
 fi
+
+M=$'\033[35m'; C=$'\033[1;36m'; G=$'\033[32m'; D=$'\033[2m'; R=$'\033[31m'; X=$'\033[0m'
+Y=$'\033[33m'
+
+# The hard byte bound `fit` trims every input to before it reaches an exec. Not a knob:
+# it is not a display choice, it is the distance between this script and E2BIG, and there
+# is no value of it a user could want to change. Derived in the comment above fit().
+FIT_MAX_BYTES=8192
+
+# Pad or truncate to an exact number of TERMINAL COLUMNS.
+#
+# Done in jq because bash 3.2 substring indexing and printf's %-*.*s are both
+# byte-based, so a multibyte tail would be cut mid-character.
+#
+# COLUMNS, NOT CODEPOINTS. jq's `length` counts codepoints, and a CJK or emoji
+# codepoint occupies TWO terminal cells. A phase of "スキルを鍛える段階" padded to 38
+# codepoints therefore drew 47 columns while the summary beside it drew 38, and the
+# segment oscillated by nine columns every five seconds -- inside a single rotation
+# window, which is exactly the blink the padding exists to prevent. Measured: 86 columns
+# against 77 on alternating frames. The width table below is the standard wide/fullwidth
+# set; anything outside it counts as one, which is right for Latin, the block-drawing
+# glyphs, the braille spinner and `…`.
+#
+# <string> <columns> <pad|nopad>. `nopad` truncates but does not extend: a terminal
+# state prints once and holds still, so it needs a ceiling, not a fixed width.
+#
+# ================================================================================
+# THE WIDTH CAP USED TO INVERT ON EXACTLY THE INPUT IT EXISTS FOR, AND THE REPAIR IS
+# BELOW THE jq, NOT AROUND IT.
+#
+# `jq -rn --arg s "$1"` is an EXEC, and the string travels in the argument vector. Past
+# ARG_MAX (1048576 here, `getconf ARG_MAX`) the exec fails, `2>/dev/null` hides it, and
+# the `|| printf '%s' "$1"` fallback then printed the RAW, UNCAPPED string -- so the
+# larger the input, the less the cap did, and past a megabyte it did nothing at all.
+# Measured through a marker written to <state>/apply-pending/: a 2000000-byte `name`
+# rendered 2000064 bytes into a 32-COLUMN budget, and the same shape through a forge slot
+# rendered 2000132. Control, same run: a 500000-byte name rendered 98 bytes, capped
+# correctly. That is a guard whose only failure mode is the case it was written for.
+#
+# THE FIX IS IN `fit` AND NOT AT THE CALL SITE, deliberately. Every caller feeds it a
+# string read out of a file some other program wrote -- the forge slot's `name`, `phase`
+# and `summary`, and the pending marker's `name` -- so the exposure is `fit`'s, not any
+# one caller's. Repairing it at pending_segment() would have left the forge-name path
+# (measured above at 2000132 bytes) broken in the identical way.
+#
+# Two halves, and both are needed:
+#
+#   1. TRIM BEFORE THE EXEC, so the exec cannot fail. `printf '%.*s'` is bytes in bash
+#      under both C and UTF-8 locales (measured; `${s:0:n}` is NOT -- it is codepoints
+#      under a UTF-8 locale), so this is a hard byte bound however the user's locale is
+#      set. 8192 bytes is ~5x the largest string that could survive the widest budget any
+#      caller may pass -- SEGMENT_MAX is 400 columns, and 400 columns of 4-byte
+#      codepoints is 1600 bytes -- so nothing that could legitimately have been shown is
+#      lost, and the jq below still marks the cut with `…` because 8192 is far past every
+#      budget. A byte trim can sever a UTF-8 sequence; jq accepts the broken tail and
+#      substitutes U+FFFD (measured on jq 1.6), and the column truncation discards it.
+#   2. BOUND THE FALLBACK, so it cannot be worse than the path it stands in for. It now
+#      cuts to $2-1 BYTES and appends `…`, which is at most $2 columns because a UTF-8
+#      string never has fewer bytes than terminal columns. It is compared rather than
+#      measured so the `…` appears only when something was actually dropped.
+fit() {
+  f_s="$(printf '%.*s' "$FIT_MAX_BYTES" "$1")"
+  jq -rn --arg s "$f_s" --argjson w "$2" --arg mode "${3:-pad}" '
+    # Zero first, then two, then one. Combining marks, variation selectors and the
+    # zero-width joiner advance the cursor by nothing; counting them as one made an
+    # NFD-decomposed "café näive résumé" measure 73 columns against a padded 77.
+    def cw: if   (. >= 768   and . <= 879)    or (. >= 6832  and . <= 6911)
+              or (. >= 7616  and . <= 7679)   or (. >= 8400  and . <= 8447)
+              or (. >= 65024 and . <= 65039)  or (. >= 65056 and . <= 65071)
+              or (. >= 8203  and . <= 8207)   or (. >= 8288  and . <= 8303)
+            then 0
+            # The wide/fullwidth blocks, plus the emoji that render double-width
+            # despite living in the narrow Miscellaneous Symbols ranges. Without the
+            # second group a summary of "✅✅✅ all checks passed" drew 80 columns while
+            # the ASCII phase beside it drew 77, and the segment blinked every 5s.
+            elif (. >= 4352  and . <= 4447)   or (. >= 11904 and . <= 42191)
+              or (. >= 44032 and . <= 55203)  or (. >= 63744 and . <= 64255)
+              or (. >= 65040 and . <= 65049)  or (. >= 65072 and . <= 65135)
+              or (. >= 65280 and . <= 65376)  or (. >= 65504 and . <= 65510)
+              or (. >= 127744 and . <= 129791) or (. >= 129792 and . <= 130041)
+              or (. >= 131072 and . <= 262141)
+              or (. >= 8986  and . <= 8987)   or (. >= 9193  and . <= 9196)
+              or . == 9200 or . == 9203
+              or (. >= 9725  and . <= 9726)   or (. >= 9748  and . <= 9749)
+              or (. >= 9800  and . <= 9811)   or . == 9855 or . == 9875
+              or . == 9889 or (. >= 9898 and . <= 9899)
+              or (. >= 9917  and . <= 9918)   or (. >= 9924 and . <= 9925)
+              or . == 9934 or . == 9940 or . == 9962
+              or (. >= 9970  and . <= 9971)   or . == 9973 or . == 9978
+              or . == 9981 or . == 9989 or (. >= 9994 and . <= 9995)
+              or . == 10024 or . == 10060 or . == 10062
+              or (. >= 10067 and . <= 10069) or . == 10071
+              or (. >= 10133 and . <= 10135) or . == 10160 or . == 10175
+              or (. >= 11035 and . <= 11036) or . == 11088 or . == 11093
+            then 2 else 1 end;
+    ($s | gsub("[\n\r\t]"; " ")) as $t
+    | ($t | explode) as $cps
+    | ([foreach $cps[] as $c (0; . + ($c | cw))]) as $cum
+    | ($cum | last // 0) as $total
+    | if $total <= $w then
+        (if $mode == "pad" then $t + ((" " * ($w - $total)) // "") else $t end)
+      else
+        # $cum rises monotonically, so the codepoints under the budget are a prefix.
+        ([range(0; ($cps | length)) | select($cum[.] <= ($w - 1))] | length) as $k
+        | (($cps[0:$k] | implode) + "…") as $cut
+        | (if $k == 0 then 0 else $cum[$k - 1] end) as $used
+        | (if $mode == "pad" then $cut + ((" " * ($w - 1 - $used)) // "") else $cut end)
+      end' 2>/dev/null || {
+    # jq refused the string it was handed (a program error; the exec itself can no longer
+    # fail, see 1 above). Bytes, not columns, and no padding: this path exists because the
+    # thing that measures columns is unavailable, so it may only promise a CEILING.
+    f_cut="$(printf '%.*s' "$(( $2 - 1 ))" "$f_s")"
+    if [ "$f_cut" = "$f_s" ]; then printf '%s' "$f_s"; else printf '%s…' "$f_cut"; fi
+  }
+}
+pad_to() { fit "$1" "$2" pad; }
+
+# "45m", "3h07m", "2d03h". Bounded above so a foreign record with a year-zero stamp
+# cannot hand the tail a twenty-digit number.
+fmt_idle() {
+  f_m=$(( ${1:-0} / 60 ))
+  if   [ "$f_m" -lt 60 ];   then printf '%dm' "$f_m"
+  elif [ "$f_m" -lt 2880 ]; then printf '%dh%02dm' $(( f_m / 60 )) $(( f_m % 60 ))
+  else
+    f_d=$(( f_m / 1440 ))
+    if [ "$f_d" -gt 999 ]; then printf '999d+'
+    else printf '%dd%02dh' "$f_d" $(( (f_m % 1440) / 60 ))
+    fi
+  fi
+}
+
+# ------------------------------------------------------------------ pending applies
+#
+# A forge that closed is not a forge that finished. `skillforge done` leaves a marker at
+# <state>/apply-pending/<safe-name>.json for every skill it forged, and
+# `skillforge apply` is what removes it. Until then the skill exists and has never been
+# used on the problem that caused it, which is the state issue #19 requirement 4 exists
+# to make visible. hooks/apply-gate.sh refuses to end a turn on one of these -- but ONLY
+# for the session that forged it, because refusing a session that was not present for
+# the forge leaves it no honest move. The flag has to live somewhere the OTHER sessions
+# can see it without being interrupted, and that is here.
+#
+# THIS SEGMENT NEVER DELETES A MARKER, and that is the difference between
+# APPLY_PENDING_TTL and the DONE_TTL / FAIL_TTL beside it. Those two reap: a terminal
+# forge record has no consumer left once it has been on screen for half a minute, so the
+# renderer that shows it is also the right thing to remove it. A pending-apply marker has
+# two other consumers -- the Stop gate and `skillforge apply` -- so a renderer that
+# deleted one would silently disarm a refusal, which is a liberty no display may take.
+# APPLY_PENDING_TTL therefore governs SHOWING only; the marker outlives it untouched.
+#
+# THE DEFAULT IS THE GATE'S WINDOW, 86400, and the two are meant to move together. A flag
+# on the line that the gate will no longer act on is decoration, and a refusal about
+# something the line never showed is an ambush. One day is also the honest span: a forge
+# closed yesterday is still the forge this work asked for; one closed last month is
+# archaeology, and the ledger is where archaeology belongs.
+#
+# `num_or` rejects anything over six digits, so the largest settable TTL is 999999s
+# (~11.6 days). That is a shape guard, not a policy: a longer value is a typo, and the
+# ledger already holds the long-run record.
+#
+# A single frame is rendered even when several markers are pending, with `[N]` for the
+# count, and the one shown is the MOST RECENTLY closed. There is no rotation here on
+# purpose: a live forge rotates because each frame carries a bar that is genuinely
+# changing, whereas these frames would differ only in a name and would blink for no new
+# information. The most recent is shown rather than the oldest because it is the one the
+# session in front of you most likely just made.
+pending_segment() {
+  [ -d "$PENDING_DIR" ] || return 1
+  ps_n=0
+  ps_name=""
+  ps_closed=-1
+  ps_list="$(find "$PENDING_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null \
+             | LC_ALL=C sort | while IFS= read -r pf; do
+    # Same skip-never-repair rule the forge reader uses: a marker that does not parse, or
+    # that carries no usable name or no numeric `closed`, produces nothing and is left
+    # exactly where it is. A stamp in the future is a clock disagreeing with itself, so
+    # its age is floored at zero rather than being treated as expired.
+    jq -r --arg sep "$SEP" --argjson now "$now" --argjson ttl "$PENDING_TTL" '
+      def clean: (. // "") | tostring | gsub("[[:cntrl:]]"; " ");
+      select(type == "object")
+      | select((.name | clean | gsub("^ +| +$"; "")) != "")
+      | select((.closed | type) == "number")
+      | (if .closed > $now then 0 else ($now - (.closed | floor)) end) as $age
+      | select($age <= $ttl)
+      | [ ((.closed | floor) | tostring), ($age | tostring), (.name | clean) ]
+      | join($sep)' "$pf" 2>/dev/null
+  done)"
+  [ -n "$ps_list" ] || return 1
+  while IFS="$SEP" read -r ps_c ps_a ps_nm; do
+    [ -n "${ps_nm:-}" ] || continue
+    ps_n=$(( ps_n + 1 ))
+    case "$ps_c" in ''|*[!0-9]*) ps_c=0 ;; esac
+    case "$ps_a" in ''|*[!0-9]*) ps_a=0 ;; esac
+    if [ "$ps_c" -ge "$ps_closed" ]; then
+      ps_closed=$ps_c; ps_name="$ps_nm"; ps_age=$ps_a
+    fi
+  done <<PENDLIST
+$ps_list
+PENDLIST
+  [ "$ps_n" -gt 0 ] || return 1
+  [ -n "$ps_name" ] || return 1
+  # Capped, not padded, by the same argument the terminal forge states make: this segment
+  # is not animated, so it prints once and then holds still until something changes. It
+  # needs a ceiling, not a fixed width.
+  ps_name="$(fit "$ps_name" "$NAME_WIDTH" nopad)"
+  ps_count=""
+  [ "$ps_n" -gt 1 ] && ps_count="${D}[${ps_n}]${X} "
+  # ⚑ is a single-column glyph in the width table `fit` uses, and the whole segment is
+  # NAME_WIDTH + 33 columns at most (2 for the flag and its space, 24 for the fixed
+  # words and separators, up to 6 for the age, plus the optional counter), which is
+  # comfortably narrower than the forge segment it stands in for.
+  printf '%s' "${ps_count}${Y}⚑${X} ${C}${ps_name}${X} ${D}forged · not yet used · $(fmt_idle "${ps_age:-0}")${X}"
+  return 0
+}
 
 # One jq per slot file. Everything the renderer needs -- including whether the record
 # has expired -- comes out of that one call. Control characters are stripped from the
@@ -251,7 +480,20 @@ done <<SLOTS
 $(reap_and_read)
 SLOTS
 
-[ "$n" -eq 0 ] && exit 0
+# A LIVE FORGE ALWAYS WINS THE LINE. The pending flag is only reached when the forge
+# renderer would otherwise print nothing at all -- no active forge, and no terminal
+# record still inside its DONE_TTL / FAIL_TTL. That covers the rotation case for free:
+# with N forges on disk this branch is never taken, so a ⚑ can never displace a bar, and
+# the line never carries two segments competing for the same width budget.
+#
+# The handoff it produces is the intended one. A forge closes, the ✓ holds the line for
+# DONE_TTL seconds saying it was forged, the ✓ is reaped, and the ⚑ takes its place
+# saying it has still not been used. Requirement 4's third and fourth notifications, in
+# that order, on the one surface a user actually watches.
+if [ "$n" -eq 0 ]; then
+  pending_segment
+  exit 0
+fi
 
 # Which one is on screen right now. With a single forge this is always the only one, so
 # nothing about the common case changes.
@@ -287,80 +529,18 @@ pick="$(printf '%s\n' "$live" | sed -n "$(( idx + 1 ))p")"
 IFS="$SEP" read -r started slotfile fstate finished step steps updated name phase summary <<PICK
 $pick
 PICK
-[ -n "${name:-}" ] || exit 0
+# Defensive: the reader already skips nameless records, so reaching here means a slot
+# shape nothing understands. Printing nothing is right for the forge, but "nothing" is
+# also what a pending flag would have filled, so it gets the line rather than the
+# segment going blank for a reason no surface explains.
+if [ -z "${name:-}" ]; then
+  pending_segment
+  exit 0
+fi
 
 case "$steps"   in ''|*[!0-9]*) steps=1 ;; esac
 case "$step"    in ''|*[!0-9]*) step=0 ;; esac
 case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
-
-M=$'\033[35m'; C=$'\033[1;36m'; G=$'\033[32m'; D=$'\033[2m'; R=$'\033[31m'; X=$'\033[0m'
-Y=$'\033[33m'
-
-# Pad or truncate to an exact number of TERMINAL COLUMNS.
-#
-# Done in jq because bash 3.2 substring indexing and printf's %-*.*s are both
-# byte-based, so a multibyte tail would be cut mid-character.
-#
-# COLUMNS, NOT CODEPOINTS. jq's `length` counts codepoints, and a CJK or emoji
-# codepoint occupies TWO terminal cells. A phase of "スキルを鍛える段階" padded to 38
-# codepoints therefore drew 47 columns while the summary beside it drew 38, and the
-# segment oscillated by nine columns every five seconds -- inside a single rotation
-# window, which is exactly the blink the padding exists to prevent. Measured: 86 columns
-# against 77 on alternating frames. The width table below is the standard wide/fullwidth
-# set; anything outside it counts as one, which is right for Latin, the block-drawing
-# glyphs, the braille spinner and `…`.
-#
-# <string> <columns> <pad|nopad>. `nopad` truncates but does not extend: a terminal
-# state prints once and holds still, so it needs a ceiling, not a fixed width.
-fit() {
-  jq -rn --arg s "$1" --argjson w "$2" --arg mode "${3:-pad}" '
-    # Zero first, then two, then one. Combining marks, variation selectors and the
-    # zero-width joiner advance the cursor by nothing; counting them as one made an
-    # NFD-decomposed "café näive résumé" measure 73 columns against a padded 77.
-    def cw: if   (. >= 768   and . <= 879)    or (. >= 6832  and . <= 6911)
-              or (. >= 7616  and . <= 7679)   or (. >= 8400  and . <= 8447)
-              or (. >= 65024 and . <= 65039)  or (. >= 65056 and . <= 65071)
-              or (. >= 8203  and . <= 8207)   or (. >= 8288  and . <= 8303)
-            then 0
-            # The wide/fullwidth blocks, plus the emoji that render double-width
-            # despite living in the narrow Miscellaneous Symbols ranges. Without the
-            # second group a summary of "✅✅✅ all checks passed" drew 80 columns while
-            # the ASCII phase beside it drew 77, and the segment blinked every 5s.
-            elif (. >= 4352  and . <= 4447)   or (. >= 11904 and . <= 42191)
-              or (. >= 44032 and . <= 55203)  or (. >= 63744 and . <= 64255)
-              or (. >= 65040 and . <= 65049)  or (. >= 65072 and . <= 65135)
-              or (. >= 65280 and . <= 65376)  or (. >= 65504 and . <= 65510)
-              or (. >= 127744 and . <= 129791) or (. >= 129792 and . <= 130041)
-              or (. >= 131072 and . <= 262141)
-              or (. >= 8986  and . <= 8987)   or (. >= 9193  and . <= 9196)
-              or . == 9200 or . == 9203
-              or (. >= 9725  and . <= 9726)   or (. >= 9748  and . <= 9749)
-              or (. >= 9800  and . <= 9811)   or . == 9855 or . == 9875
-              or . == 9889 or (. >= 9898 and . <= 9899)
-              or (. >= 9917  and . <= 9918)   or (. >= 9924 and . <= 9925)
-              or . == 9934 or . == 9940 or . == 9962
-              or (. >= 9970  and . <= 9971)   or . == 9973 or . == 9978
-              or . == 9981 or . == 9989 or (. >= 9994 and . <= 9995)
-              or . == 10024 or . == 10060 or . == 10062
-              or (. >= 10067 and . <= 10069) or . == 10071
-              or (. >= 10133 and . <= 10135) or . == 10160 or . == 10175
-              or (. >= 11035 and . <= 11036) or . == 11088 or . == 11093
-            then 2 else 1 end;
-    ($s | gsub("[\n\r\t]"; " ")) as $t
-    | ($t | explode) as $cps
-    | ([foreach $cps[] as $c (0; . + ($c | cw))]) as $cum
-    | ($cum | last // 0) as $total
-    | if $total <= $w then
-        (if $mode == "pad" then $t + ((" " * ($w - $total)) // "") else $t end)
-      else
-        # $cum rises monotonically, so the codepoints under the budget are a prefix.
-        ([range(0; ($cps | length)) | select($cum[.] <= ($w - 1))] | length) as $k
-        | (($cps[0:$k] | implode) + "…") as $cut
-        | (if $k == 0 then 0 else $cum[$k - 1] end) as $used
-        | (if $mode == "pad" then $cut + ((" " * ($w - 1 - $used)) // "") else $cut end)
-      end' 2>/dev/null || printf '%s' "$1"
-}
-pad_to() { fit "$1" "$2" pad; }
 
 # The name is not padded -- a short name must not grow trailing space -- but it IS
 # capped. Nothing bounded it before: `skillforge start "$(printf 'x%.0sx' {1..200})"`
@@ -401,20 +581,6 @@ if [ "$running" -eq 1 ] && [ "$updated" -gt 0 ]; then
   [ "$idle" -lt 0 ] && idle=0
   if [ "$idle" -ge "$IDLE_SECS" ]; then is_idle=1; fi
 fi
-
-# "45m", "3h07m", "2d03h". Bounded above so a foreign record with a year-zero stamp
-# cannot hand the tail a twenty-digit number.
-fmt_idle() {
-  f_m=$(( ${1:-0} / 60 ))
-  if   [ "$f_m" -lt 60 ];   then printf '%dm' "$f_m"
-  elif [ "$f_m" -lt 2880 ]; then printf '%dh%02dm' $(( f_m / 60 )) $(( f_m % 60 ))
-  else
-    f_d=$(( f_m / 1440 ))
-    if [ "$f_d" -gt 999 ]; then printf '999d+'
-    else printf '%dd%02dh' "$f_d" $(( (f_m % 1440) / 60 ))
-    fi
-  fi
-}
 
 # [k/N] whenever more than one forge is live, and nothing at all when only one is, so
 # a single forge renders exactly as it always did.

@@ -23,13 +23,37 @@
 #   skillforge verdict --name <skill> --verdict <WORKED|NO-OP|MISFIRED|UNKNOWN>
 #                      --evidence "<verbatim quote>" [--use-ts <epoch>]
 #                      [--use-session <id>] [--judged-by <who>]
+#   skillforge apply   --name <skill> --outcome <used|declined|failed>
+#                      --evidence "<verbatim quote>" [--forge <forge>] [--session <id>]
+#                      [--force]
+#   skillforge pending [--json] [--full]
 #   skillforge backfill <file.jsonl | ->
 #
-# THE LEDGER ANSWERS FOUR QUESTIONS: what triggered the build, what was built, when it
-# has been used since, and whether it worked. `--trigger` is the first of those and it
-# is the one nothing else can recover later, so `start` warns loudly without it and
-# records `trigger_kind:"unrecorded"` rather than leaving a silent gap. Set
-# SKILLFORGE_REQUIRE_TRIGGER=1 to make a missing trigger a refusal instead.
+# THE LEDGER ANSWERS FIVE QUESTIONS: what triggered the build, what was built, WHETHER
+# THE SKILL WAS THEN PUT ON THE PROBLEM THAT CAUSED IT, when it has been used since, and
+# whether it worked. `--trigger` is the first of those and it is the one nothing else can
+# recover later, so `start` warns loudly without it and records `trigger_kind:"unrecorded"`
+# rather than leaving a silent gap. Set SKILLFORGE_REQUIRE_TRIGGER=1 to make a missing
+# trigger a refusal instead.
+#
+# THE THIRD QUESTION IS THE ONE THIS FILE ANSWERED LAST, AND IT IS THE ONE THE WHOLE
+# PROTOCOL IS FOR. Skills here are built AS NEEDED, out of a problem that was in front of
+# somebody; a forge that ends at "installed" has produced a tool and left the problem
+# where it was. `done` therefore writes a PENDING-APPLY MARKER -- one small JSON file per
+# closed forge, under apply-pending/ -- and `apply` is what discharges it, with the
+# verbatim evidence that the skill was actually put on that problem. A marker nobody
+# discharges is the visible form of a loop that never closed: `skillforge pending` lists
+# them oldest first, and the status line shows them.
+#
+# WHY `done` COULD NOT SIMPLY BE RENAMED, OR MADE TO MEAN "APPLIED". `done` closes the
+# FORGE. Applying happens afterwards, in a different command, usually minutes later and
+# sometimes in a different session -- and it can come back `declined` (the skill was read
+# and judged not to fit) or `failed` (it fired and did not help), both of which are true
+# outcomes of a forge that closed perfectly well. Folding the two together would also move
+# the ledger join: `start` is matched to the first `done` or `fail` that follows it, and
+# every reader of this file selects those events BY NAME. `apply` is a NEW event name, so
+# the join cannot see it and no existing count changes -- the rule stated under "ledger v2
+# rows" below, applied to itself.
 #
 # `origin`, `use` and `verdict` rows are written by `done`, by the installer, by
 # hooks/skill-use.sh and by whatever judges a session; `backfill` is the only door
@@ -62,12 +86,18 @@
 # session, so a session-keyed file written here would never be found by the renderer.
 # A forge name is visible to both sides, which is why it is the key.
 #
-# PRIVACY. Three kinds of file are written, all under
+# PRIVACY. Four kinds of file are written, all under
 # ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}, all local, all plain text:
 #   forge/<name>.forge.json  one in-progress forge (name, summary, step, phase, times).
 #   forge/.outcome.<id>.claim  a copy of the record that closed one forge, left behind so
 #                       that a second 'done' cannot append a second outcome row for it.
 #                       Same contents as the forge file. Reaped an hour later.
+#   apply-pending/<name>.json  one per closed forge, holding the name, the forge, the
+#                       skill directory, the summary, the verbatim trigger, the epoch the
+#                       forge closed, the session id if the environment carried one, and
+#                       whether the skill was installed. Deleted by `skillforge apply`.
+#                       It is the only file here that holds the trigger text outside the
+#                       forge record itself, which is why `pending` redacts it by default.
 #   ledger.jsonl        one JSON line per start/done/fail, appended forever. Each line
 #                       holds the skill name, the one-line summary you passed to
 #                       'start', the originating repository path, epoch timestamps,
@@ -78,10 +108,12 @@
 #                       you passed to --trigger), `use` (one per skill invocation: the
 #                       skill name, your session id, the working directory, whether it
 #                       succeeded, and whether a script or a person drove the session),
-#                       `verdict` (a judgement plus the quote behind it), and one
-#                       `horizon` row saying where the record begins. The trigger text
-#                       and a verdict's evidence are the only free text stored, and both
-#                       are text you passed in yourself.
+#                       `verdict` (a judgement plus the quote behind it), `apply` (the
+#                       skill was put on the problem that caused it, or was not, plus the
+#                       quote behind that), and one
+#                       `horizon` row saying where the record begins. The trigger text,
+#                       a verdict's evidence and an apply's evidence are the only free
+#                       text stored, and all of it is text you passed in yourself.
 # Any other *.json left in forge/ by an older version is read as a forge too, so an
 # upgrade neither loses it nor deletes it behind your back.
 # Nothing is transmitted. This script makes no network calls. Delete ledger.jsonl at
@@ -135,6 +167,14 @@ STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$STATE_ROOT/forge"
 mkdir -p "$DIR" 2>/dev/null || { echo "skillforge: cannot create $DIR" >&2; exit 1; }
 LEDGER="$STATE_ROOT/ledger.jsonl"
+# One file per closed forge whose skill has not yet been put on the problem that caused
+# it. NOT created here: `done` makes it when it has something to put in it, and every
+# reader treats "the directory does not exist" and "the directory is empty" as the same
+# answer -- nothing pending. Creating it eagerly would have `pending` report an empty
+# queue on a machine that has never forged anything, which is true but says more than we
+# know; more practically, the status line and hooks/apply-gate.sh both stat this path and
+# neither should be made to care which of the two it found.
+APPLY_DIR="$STATE_ROOT/apply-pending"
 # Fields in the slot index below are separated by US (0x1f), not by a tab. Two reasons,
 # and both are load-bearing: a skill name is allowed to contain a tab (skillreport has a
 # regression test for exactly that), and tab is IFS whitespace, so `read` would collapse
@@ -158,7 +198,41 @@ case "${SKILLFORGE_NOW:-}" in
     die "SKILLFORGE_NOW must be epoch seconds (digits only, at most 10); got '$SKILLFORGE_NOW'" ;;
 esac
 
-field() { jq -r --arg k "$2" '.[$k] // empty' "$1" 2>/dev/null; }   # <file> <key>
+# `.[$k] // empty` WAS WRONG ABOUT EXACTLY ONE VALUE, `false`. jq's `//` is the
+# alternative operator, not a null coalesce: it takes the right-hand side whenever the
+# left is `null` OR `false`. Measured, today, against a file holding
+# `{"installed":false,"name":"w"}`:
+#
+#   jq -r --arg k installed '.[$k] // empty'                          -> (nothing)
+#   jq -r --arg k installed '.[$k] | if . == null then empty else . end' -> false
+#
+# So `if . == null then empty else . end` keeps the two answers that were always right --
+# absent and JSON null both read as "" -- and stops folding `false` in with them. THAT IS
+# ALL IT DOES, AND IT IS NOT WHAT MAKES `apply` RECORD `installed:false` TODAY. `apply`
+# does not read the marker through this accessor: five separate reads could straddle the
+# marker's deletion by a racing applier, so it takes ONE jq snapshot of the file (search
+# for `a_snap`) and spells the same rule inline there, as
+# `(.installed | if . == null then "" else tostring end)`. Two spellings of one rule, in
+# two places, and the caller that carries the field is the second one -- fixing the
+# accessor alone would have left the row exactly as broken as it was.
+#
+# WHICH OTHER CALLERS THIS MOVES: none, today, and the audit is mechanical rather than a
+# judgement. Every other `field` call site reads `id`, `started`, `trigger`,
+# `trigger_kind`, `name`, `steps`, `summary`, `step`, `finished`, `phase`, `status`,
+# `skill_dir` or `root` off a forge record, or `session` off a pending-apply marker. No
+# boolean is written into a forge record at all (`start` and `close_forge` write strings
+# and numbers only), and the marker carries exactly one, `installed`, which is the field
+# above. Booleans do exist in this file -- `shipped`, `marker`, `backfilled` -- and all of
+# them are written into LEDGER ROWS, which no reader here reads back through `field`.
+#
+# The hazard therefore returns the moment a boolean is added to a record and read back,
+# and there is a third spelling waiting for it: `sfield` still reads `(.[$k] // "")`,
+# which prints nothing for `false` (measured, same file, same key). It is display-only
+# today -- `name`, `step`, `steps`, `phase` -- so it is left as it is rather than changed
+# blind, but a boolean read through it would vanish the same way this one did.
+field() { # <file> <key>
+  jq -r --arg k "$2" '.[$k] | if . == null then empty else . end' "$1" 2>/dev/null
+}
 
 # ONE LINE, ALWAYS, WHATEVER IS IN THE FILE. `field` with -r pretty-prints a container,
 # so a foreign record holding `"step": {"a":1}` put raw newlines through `list`'s
@@ -173,8 +247,15 @@ sfield() { # <file> <key>
 # from its neighbours on screen, so wherever a name is DISPLAYED it is replaced by the
 # one handle that does identify it: its file. Counting such a record while refusing to
 # name it made `step` say "b, c, d are all live" with four records blocking it.
+#
+# `LC_ALL=C` on the `tr`, and it is not cosmetic. BSD `tr` ABORTS with "Illegal byte
+# sequence" on a byte that is not valid in the ambient locale, and the failed substitution
+# then yields the empty string -- which is exactly the answer this `case` reads as "the
+# name is blank". A name that is merely not UTF-8 would be relabelled "(unnamed: ...)".
+# The class being matched is ASCII whitespace, so byte semantics are what was wanted here
+# anyway; see the same fix on `apply --evidence`.
 label_of() { # <name> <path>
-  case "$(printf '%s' "${1:-}" | tr -d '[:space:]')" in
+  case "$(printf '%s' "${1:-}" | LC_ALL=C tr -d '[:space:]')" in
     '') printf '(unnamed: %s)' "$(basename "$2")" ;;
     *)  printf '%s' "$1" ;;
   esac
@@ -236,8 +317,14 @@ update() { # <file> <jq args...>
 # always ends in `.json`, so the two sets are separable -- but only if the separation is
 # stated.
 reap_temps() {
+  # `.apply.*` covers everything `apply` leaves in here: its staged row, and the three
+  # claims -- forge instance, act, session -- that stop a second delivery of one intent
+  # from appending a second row. A claim is a TEMP FILE and not a permanent record -- the
+  # marker deletion is what makes an apply durable -- so it ages out on the same hour as
+  # everything else, for the same reason: no write survives sixty minutes. None of these
+  # names ends in `.json`, so the guard above still separates them from every slot.
   find "$DIR" -maxdepth 1 -type f ! -name '*.json' \
-       \( -name '.start.*.tmp' -o -name '*.tmp.*' \) \
+       \( -name '.start.*.tmp' -o -name '*.tmp.*' -o -name '.apply.*' \) \
        -mmin +60 -exec rm -f {} + 2>/dev/null || true
 }
 
@@ -525,7 +612,14 @@ ledger_append() { # <same arguments as ledger_line>
   la_line="$(ledger_line "$@")"
   [ -n "$la_line" ] || return 0
   ledger_ensure_horizon
-  printf '%s\n' "$la_line" >> "$LEDGER" 2>/dev/null || return 0
+  # `2>/dev/null` BEFORE the `>>`, AND THE ORDER IS THE WHOLE POINT. Redirections are
+  # applied left to right, so written the other way round `>>` is opened first and a
+  # failure to open it is reported by the SHELL to a stderr that is still the terminal --
+  # the suppression that looks like it is there does nothing. Measured: `printf x >> ro
+  # 2>/dev/null` prints "Permission denied", `printf x 2>/dev/null >> ro` is silent. Every
+  # append in this file is written this way; see the one in `apply`, where the same
+  # ordering printed bash's own error above skillforge's success message.
+  printf '%s\n' "$la_line" 2>/dev/null >> "$LEDGER" || return 0
   return 0
 }
 
@@ -562,6 +656,12 @@ ledger_append() { # <same arguments as ledger_line>
 # fact about the forge worth counting.
 TRIGGER_KINDS="user-prompt hook-checkpoint review-dispatch agent-decision"
 VERDICT_VALUES="WORKED NO-OP MISFIRED UNKNOWN"
+# `apply` answers what happened when the forged skill was put on the problem it was forged
+# for. THREE OUTCOMES, NOT ONE, and the two that are not `used` are the reason this is an
+# outcome rather than a flag: `declined` (it was read and judged not to fit) and `failed`
+# (it fired and did not help) are true results of a forge that closed perfectly well, and
+# a queue that only accepted `used` would be discharged by lying or not at all.
+APPLY_OUTCOMES="used declined failed"
 
 # A CLOSE THAT PRODUCED NO SKILL IS A FACT ABOUT THE FORGE, AND IT USED TO BE SAID ONCE
 # AND THEN LOST. `done` prints "no SKILL.md was found ... nothing was installed" to a
@@ -639,7 +739,7 @@ ledger_ensure_horizon() {
       confidence:"measured", backfilled:false}
      + (if $complete == "" then {} else {complete_from:($complete|tonumber)} end)' 2>/dev/null)"
   [ -n "$lh_line" ] || return 0
-  printf '%s\n' "$lh_line" >> "$LEDGER" 2>/dev/null || return 0
+  printf '%s\n' "$lh_line" 2>/dev/null >> "$LEDGER" || return 0
   return 0
 }
 
@@ -647,7 +747,7 @@ ledger_ensure_horizon() {
 ledger_raw_append() { # <compact json line>
   [ -n "${1:-}" ] || return 0
   ledger_ensure_horizon
-  printf '%s\n' "$1" >> "$LEDGER" 2>/dev/null || return 0
+  printf '%s\n' "$1" 2>/dev/null >> "$LEDGER" || return 0
   return 0
 }
 
@@ -738,6 +838,118 @@ ledger_close_line() { # <closed record file> <event>
   printf '%s' "$ledger_close_line_out"
 }
 
+# ------------------------------------------------------------ the pending-apply marker
+#
+# A FORGE THAT ENDS AT "INSTALLED" HAS BUILT A TOOL AND LEFT THE PROBLEM WHERE IT WAS.
+# The skill was forged because something was in front of somebody; the loop closes when
+# that something is dealt with USING the skill, and until this existed nothing in the
+# package could tell the two apart. The ledger showed a `done` row and a skill directory,
+# and both are true of a forge whose output nobody ever opened.
+#
+# So `done` leaves a marker behind: one small JSON file naming the skill, the forge, where
+# the skill landed, what set the forge off, when it closed and whether it installed. It is
+# a DEBT, and `apply` is the only thing that pays it. Three consumers read it -- the status
+# line segment, hooks/apply-gate.sh on Stop, and `skillforge pending` -- and the on-disk
+# shape is the contract between them, so it is written here and nowhere else.
+#
+# `fail` WRITES NO MARKER: an abandoned forge produced nothing to apply, and a debt nobody
+# can discharge is a permanent false alarm that teaches every reader to ignore the queue.
+# A `done` THAT INSTALLED NOTHING STILL WRITES ONE, with installed:false. That is exactly
+# the case that must not be forgotten quietly -- a forge that ran its rounds and produced
+# a skill nobody could invoke is the loudest thing this package can find, and the old
+# behaviour was to print one line to a terminal that scrolls.
+
+# The filename component for a name. The SAME expression every script in this package
+# uses for the same job (hooks/compound-improvement.sh claim_once, insight-capture.sh):
+# one spelling, or one skill becomes two entries under two spellings and the debt is paid
+# against the wrong file.
+#
+# `tr -c` is MANY-TO-ONE, and unlike forge_id -- which refuses an unsafe id rather than
+# repairing it, because two live forges sharing one claim cannot both be closed -- a
+# collision here is tolerable and deliberate: `a/b` and `a:b` share a marker, so the
+# second `done` overwrites the first marker rather than adding one. The cost is a lost
+# reminder for a name shape no skill directory can have (a skill name IS a directory
+# name), against a filename that is guaranteed openable on every filesystem. `printf '%s'`
+# and not `echo`: a name of `-n` or `-e` is otherwise eaten by the builtin.
+safe_name() { # <name>
+  sn="$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  [ -n "$sn" ] || sn="_"
+  printf '%s' "$sn"
+}
+
+apply_marker_path() { # <skill name>
+  printf '%s/%s.json' "$APPLY_DIR" "$(safe_name "$1")"
+}
+
+# Written by `done`, atomically, through a temp file and a rename -- the status line reads
+# this directory once a second and hooks/apply-gate.sh reads it at the end of every turn,
+# so a plain redirect would put a half-written file in front of both. Same reasoning as
+# the forge slot itself; see `start`.
+#
+# A failure here NEVER breaks `done`. The forge closed, the ledger row is already on disk,
+# and a marker that could not be written is a missing reminder, not a missing record.
+#
+# `forge_id` IS WHAT MAKES ONE DEBT DISTINGUISHABLE FROM THE NEXT. The name is not enough
+# and neither is name+session: re-forging a skill after a red-team fix is this protocol's
+# own prescribed workflow, so one session routinely closes two forges of one name and owes
+# two separate debts. `apply` keys its idempotence claim on this value, so without it the
+# second debt was swallowed by the first apply's claim -- the row was never written and the
+# marker was deleted anyway, taking the evidence with it. It is the id `close_forge` used
+# for its own outcome claim, so the two agree by construction and it is unique per forge.
+apply_marker_write() { # <skill name> <forge name> <skill dir> <trigger> <trigger kind>
+                       # <summary> <closed epoch> <installed true|false> [forge id]
+  am_name="${1:-}"; [ -n "$am_name" ] || return 0
+  mkdir -p "$APPLY_DIR" 2>/dev/null || return 0
+  am_path="$(apply_marker_path "$am_name")"
+  am_tmp="$am_path.tmp.$$"
+  { jq -n -c --arg name "$am_name" --arg forge "${2:-}" --arg dir "${3:-}" \
+      --arg trigger "${4:-}" --arg tkind "${5:-}" --arg summary "${6:-}" \
+      --argjson closed "$(int_or_zero "${7:-0}")" \
+      --arg session "${CLAUDE_CODE_SESSION_ID:-}" \
+      --argjson installed "${8:-false}" --arg fid "${9:-}" \
+      '{name:$name, forge:$forge, skill_dir:$dir, trigger:$trigger,
+        trigger_kind:$tkind, summary:$summary, closed:$closed,
+        session:$session, installed:$installed}
+       + (if $fid == "" then {} else {forge_id:$fid} end)' > "$am_tmp"; } 2>/dev/null \
+    || { rm -f "$am_tmp" 2>/dev/null; return 0; }
+  mv "$am_tmp" "$am_path" 2>/dev/null || rm -f "$am_tmp" 2>/dev/null
+  return 0
+}
+
+# Every marker on disk, oldest CLOSE first, one compact JSON object per line with an `age`
+# added. `find` and not a glob, for the reason slots() gives: an unmatched glob is fatal
+# under zsh. A file that does not parse is skipped and never deleted -- the same rule the
+# forge slots follow, and for the same reason: a half-written file from a concurrent
+# writer, or a marker from a future version, must not take the queue down.
+apply_markers() { # -> compact JSON per line
+  [ -d "$APPLY_DIR" ] || return 0
+  find "$APPLY_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | while IFS= read -r m_f; do
+    jq -c --argjson now "$(now)" --arg path "$m_f" \
+      'select((has("name")) and ((.name|type) == "string") and (.name | length > 0))
+       | . + {age: ($now - (.closed // $now)), path: $path}' "$m_f" 2>/dev/null
+  done | jq -s -c 'sort_by(.closed // 0, .name)[]' 2>/dev/null
+}
+
+# The names that are pending, as one comma-separated line, for the message `apply` prints
+# when it is asked to discharge a debt that does not exist. Saying only "nothing is
+# pending for X" leaves a caller who typo-ed the name with no way to see the right one.
+apply_pending_names() {
+  apply_markers | jq -r '.name' 2>/dev/null \
+    | while IFS= read -r p_n; do printf '%s, ' "$p_n"; done | sed 's/, $//'
+}
+
+# Seconds as something a person reads at a glance. Deliberately coarse: the queue is
+# answering "has this been sitting here", not "how long exactly", and a bare second count
+# for a two-day-old marker is a number the reader has to do arithmetic on.
+ago() { # <seconds>
+  a_s="$(int_or_zero "${1:-0}")"
+  if   [ "$a_s" -lt 60 ];    then printf '%ss' "$a_s"
+  elif [ "$a_s" -lt 3600 ];  then printf '%sm' "$(( a_s / 60 ))"
+  elif [ "$a_s" -lt 86400 ]; then printf '%sh' "$(( a_s / 3600 ))"
+  else                            printf '%sd' "$(( a_s / 86400 ))"
+  fi
+}
+
 # ------------------------------------------------------------------- outcome claim
 #
 # EXACTLY ONE OUTCOME ROW PER FORGE, WITH NO LOCK ANYWHERE. Two concurrent `done`s both
@@ -811,8 +1023,17 @@ close_forge() { # <slot file> <status to write> <event> <phase> [keep|drop]
   # an unset variable is not a missing word in a sentence, it is `CLOSED_NAME: unbound
   # variable` on stderr and a non-zero exit from a `done` that did nothing wrong.
   CLOSED_NAME="${RESOLVED_NAME:-}"
+  # Same reasoning, same place: an id is INTERNAL STATE, and a variable this file reads
+  # with a `:-` default but never assigns on some path is a variable the ambient
+  # environment can supply. The early return below is that path.
+  CLOSED_ID=""
   [ -f "$cf_f" ] || return 1
   cf_id="$(forge_id "$cf_f")"
+  # Published for the caller, because `done` needs the id of the forge IT closed and
+  # cannot re-derive it from the slot afterwards: publish_close may legitimately decline
+  # to publish (a `start` raced it), leaving a DIFFERENT forge in that file. Reading the
+  # slot again there would stamp the pending-apply marker with the new forge's identity.
+  CLOSED_ID="$cf_id"
   cf_claim="$DIR/.outcome.$cf_id.claim"
   cf_tmp="$cf_f.tmp.$$"
   # The closed record is written COMPLETE, to a temp file, before anything is claimed --
@@ -847,7 +1068,7 @@ close_forge() { # <slot file> <status to write> <event> <phase> [keep|drop]
   # the filesystem refused the link. Proceed. The claim exists to stop a duplicate row,
   # and a claim that cannot be created must never become a reason a forge cannot be
   # closed -- that is the failure mode a lock would have had.
-  if [ -n "$cf_line" ]; then printf '%s\n' "$cf_line" >> "$LEDGER" 2>/dev/null || true; fi
+  if [ -n "$cf_line" ]; then printf '%s\n' "$cf_line" 2>/dev/null >> "$LEDGER" || true; fi
   if [ "$cf_mode" = "keep" ]; then
     publish_close "$cf_tmp" "$cf_f" "$cf_id"
   else
@@ -1042,9 +1263,13 @@ cmd="${1:-}"; shift 2>/dev/null || true
 NAME_OPT="${SKILLFORGE_NAME:-}"
 ALL_OPT=0
 case "$cmd" in clear|show|list) ALLOW_ALL=1 ;; *) ALLOW_ALL=0 ;; esac
-# --full lifts the HELD-OUT REDACTION on the two read commands. See redact_prog().
+# --full lifts the HELD-OUT REDACTION on the read commands. See redact_prog().
+# `pending` is one of them: a pending-apply marker carries the verbatim trigger, so
+# `pending --json` is a third door onto the forging protocol's held-out test data, and it
+# would be open to exactly the orchestrator subagent that is handed this CLI and told to
+# drive it. Held back by default, and the omission is named, like the other two.
 FULL_OPT=0
-case "$cmd" in show|ledger) ALLOW_FULL=1 ;; *) ALLOW_FULL=0 ;; esac
+case "$cmd" in show|ledger|pending) ALLOW_FULL=1 ;; *) ALLOW_FULL=0 ;; esac
 # --skill-dir is only an option where it means something, for the same reason --all is:
 # a `fail` reason or a `step` phase that happens to contain the word is left alone.
 SKILLDIR_OPT="${SKILLFORGE_SKILL_DIR:-}"
@@ -1319,6 +1544,39 @@ SLOTS
       # US-separated for exactly that reason). Installing off the printable form looked
       # for a directory nobody had written.
       install_forged_skill "$(field "$FILE" name)" "$FILE" || true
+      # THE DEBT. Written LAST, because `installed` is not knowable until the install has
+      # been attempted, and inside the `close_forge` winner branch, because a marker is a
+      # reminder to do something once -- a losing second `done` exits through closed_out
+      # above and must not re-create a debt the winner may already have discharged.
+      #
+      # THE NAME ON THE MARKER IS THE DIRECTORY'S, NOT THE FORGE'S, the same rule
+      # install_forged_skill and origin_for_forge follow and for the same reason: a
+      # session invokes a skill by the directory it sits in, so a marker under the forge
+      # name would tell somebody to apply a skill that answers `Unknown skill`. FOUND is
+      # whatever find_skill_dir last resolved -- set by the SKILL_PRESENT check above even
+      # when SKILLFORGE_NO_INSTALL kept install_forged_skill from looking again.
+      apply_name="$(field "$FILE" name)"
+      [ -n "${FOUND:-}" ] && apply_name="$(basename "$FOUND")"
+      # `installed` answers ONE question: can a session invoke this now. `project` counts,
+      # because a skill under a repo's .claude/skills/ is already live for that repo --
+      # that is precisely why install_forged_skill declines to widen it. Everything else,
+      # including SKILLFORGE_NO_INSTALL being set, is false: nothing was linked, and
+      # saying otherwise is the "it worked" this package exists to stop producing.
+      apply_installed=false
+      case "${INSTALL_STATUS:-}" in
+        linked|already-linked|already-there|project) apply_installed=true ;;
+      esac
+      # now(), not the record's `finished`: publish_close may legitimately decline to
+      # publish the closed record (a `start` that raced it), leaving the slot without a
+      # `finished` field at all, and a debt dated 1970 sorts to the head of the queue
+      # forever. Both are the same clock, so under a pinned SKILLFORGE_NOW they agree.
+      # CLOSED_ID and not `forge_id "$FILE"`: it is the id of the forge THIS close_forge
+      # won, captured before publish_close could decline to publish over a slot a racing
+      # `start` had already taken.
+      apply_marker_write "$apply_name" "$(field "$FILE" name)" "${FOUND:-}" \
+        "$(field "$FILE" trigger)" "$(field "$FILE" trigger_kind)" \
+        "$(field "$FILE" summary)" "$(now)" "$apply_installed" "${CLOSED_ID:-}"
+      echo "skillforge: '$apply_name' is forged but NOT YET APPLIED. Use it on the problem that caused it, then record what happened: skillforge apply --name '$apply_name' --outcome used --evidence \"<verbatim quote>\""
     else
       closed_out "$FILE"
     fi
@@ -1493,6 +1751,512 @@ SLOTS
         ledger_raw_append "$vd_line"
         ;;
     esac
+    exit 0
+    ;;
+
+  apply)
+    # THE FIFTH QUESTION, ANSWERED. `done` left a debt; this is the only thing that pays
+    # it. It appends one `apply` row and deletes the marker, and it touches no forge slot:
+    # the forge closed long ago, possibly in another session.
+    #
+    # Flags are normalised to --key=value first, for the reason the use/verdict/origin arm
+    # gives: writing the two-form parse out per flag is where a `[ $# -ge 2 ]` guard gets
+    # forgotten, and a missing value then silently becomes the NEXT flag's name --
+    # recorded, in the ledger, as if it were evidence. Which is the exact defect this
+    # command exists to make impossible.
+    AARGS=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --force) AARGS[${#AARGS[@]}]="$1"; shift ;;
+        --*=*)   AARGS[${#AARGS[@]}]="$1"; shift ;;
+        --*)     [ $# -ge 2 ] || die "$1 requires a value"
+                 AARGS[${#AARGS[@]}]="$1=$2"; shift 2 ;;
+        *)       die "skillforge apply takes flags only; got '$1'" ;;
+      esac
+    done
+    set -- ${AARGS[@]+"${AARGS[@]}"}
+
+    # INITIALISED, ALL OF THEM, INCLUDING THE FLAGS THIS ARM SETS ON ONE BRANCH ONLY.
+    # `A_NO_MARKER` was assigned on a single `elif` and read as `${A_NO_MARKER:-0}`, which
+    # made it the one value in this arm that could arrive from the ambient environment: an
+    # exported `A_NO_MARKER=1` sent a delivery WITH a pending marker down the no-marker
+    # path and had it refused. Nothing here is a knob, so nothing here is read from
+    # outside; the knobs this file does take are named in the header.
+    a_name="$NAME_OPT"; a_outcome=""; a_evidence=""; a_forge=""; a_session=""; a_force=0
+    A_NO_MARKER=0
+    for a in "$@"; do
+      k="${a%%=*}"; v="${a#*=}"
+      case "$k" in
+        --name|--skill) a_name="$v" ;;
+        --outcome)      a_outcome="$v" ;;
+        --evidence)     a_evidence="$v" ;;
+        --forge)        a_forge="$v" ;;
+        --session)      a_session="$v" ;;
+        --force)        a_force=1 ;;
+        *)              die "unknown option '$k' for skillforge apply" ;;
+      esac
+    done
+    [ -n "$a_name" ] || die "usage: skillforge apply --name <skill> --outcome <used|declined|failed> --evidence \"<verbatim>\""
+    case " $APPLY_OUTCOMES " in
+      *" ${a_outcome:-} "*) : ;;
+      *) die "--outcome must be one of: $APPLY_OUTCOMES (got '${a_outcome:-}')" ;;
+    esac
+    # --EVIDENCE IS REQUIRED, AND THE ARGUMENT FOR IT IS NOT THE ONE `--trigger` GETS.
+    # `start` only WARNS without a trigger because refusing there produces no forge record
+    # at all, and a row with one missing field beats no row. Here the row IS the claim:
+    # "the skill was used" with nothing to quote is not an incomplete measurement, it is
+    # the unsupported completion claim this whole package was built to stop -- the same
+    # thing hooks/claim-gate.sh refuses on a Stop, arriving through a CLI instead. There
+    # is nothing to preserve by accepting it, because what would be preserved is the
+    # assertion without the evidence. `declined` and `failed` are held to it too: those
+    # are also claims about what happened when somebody put the skill in front of the
+    # problem, and "it did not fit" needs a quote exactly as much as "it worked" does.
+    #
+    # `LC_ALL=C` ON THE `tr`, AND IT IS THE DIFFERENCE BETWEEN THIS GUARD WORKING AND IT
+    # REFUSING REAL EVIDENCE. BSD `tr` aborts with "Illegal byte sequence" the moment it
+    # meets a byte that is not valid in the ambient locale; the command substitution then
+    # yields the empty string and this `case` concludes that no evidence was given.
+    # Measured under LANG=en_US.UTF-8 with a quote beginning \377: "tr: Illegal byte
+    # sequence" on stderr, then "--evidence is required", exit 2, for 40 characters of
+    # perfectly good evidence. A verbatim quote is pasted terminal output -- latin-1, a
+    # truncated multibyte character, a stray control byte are all ordinary in it, and the
+    # one input this flag exists to carry is the one it refused. The class being tested is
+    # ASCII whitespace, so byte semantics are also simply the right semantics here.
+    case "$(printf '%s' "$a_evidence" | LC_ALL=C tr -d '[:space:]')" in
+      '') die "--evidence is required: record the verbatim quote showing what happened when '$a_name' was put on the problem that caused it. \"used it\" with nothing to quote is the claim this package exists to refuse." ;;
+    esac
+    # A BOUND, BECAUSE THE ROW IS APPENDED VERBATIM AND FOREVER. Every reader of this file
+    # slurps the whole ledger through `jq -s`, so one pasted megabyte is carried by every
+    # `skillforge ledger`, `pending` and `skillreport` run from then on. The bound below is
+    # far past any quote a human pastes and far short of a transcript dump; the figure is
+    # here and nowhere else -- tests/test_forge_apply.py reads it out of this line rather
+    # than restating it. What is being refused is
+    # a mistake -- a file redirected into the flag -- not a use case. Refused rather than
+    # truncated: a truncated quote is still presented as verbatim, and this flag's entire
+    # value is that it is. `${#...}` counts characters under a multibyte locale and bytes
+    # under bash 3.2, and either bounds the row; the test pins it in the C locale, where
+    # the two agree.
+    APPLY_EVIDENCE_MAX=65536
+    if [ "${#a_evidence}" -gt "$APPLY_EVIDENCE_MAX" ]; then
+      die "--evidence is ${#a_evidence} long; the limit is $APPLY_EVIDENCE_MAX. Quote the part that shows what happened, not the whole transcript -- every reader of this ledger carries the row forever."
+    fi
+
+    a_marker="$(apply_marker_path "$a_name")"
+    a_have=0; a_closed=""; a_installed=""; a_instance=""
+    # ONE READ, NOT FIVE, AND THE RACE IS WHY. The marker is deleted by whichever apply
+    # discharges it, so five separate `field` calls against the path can straddle that
+    # deletion: the first returns a value and the rest return nothing. Reproduced with six
+    # concurrent appliers -- a late racer read `forge_id` as empty, fell back to a
+    # different claim key, won it, and appended a SECOND row for one act. A single jq takes
+    # one snapshot; every field below comes out of it, so they are consistent or all
+    # absent. US-separated for the reason slots() gives: a forge name may contain a tab.
+    a_snap="$(jq -r '[(.closed // 0), (.installed | if . == null then "" else tostring end),
+                      (.forge // ""), (.session // ""), (.forge_id // "")]
+                     | join("\u001f")' "$a_marker" 2>/dev/null)"
+    if [ -n "$a_snap" ]; then
+      a_have=1
+      IFS="$SEP" read -r a_closed a_installed a_m_forge a_m_session a_instance <<SNAP
+$a_snap
+SNAP
+      a_closed="$(int_or_zero "$a_closed")"
+      [ -n "$a_forge" ] || a_forge="$a_m_forge"
+      # WHICH FORGE THIS DEBT BELONGS TO. See the claim below for why name+session was not
+      # enough. A marker written by an older version carries no `forge_id`; the close epoch
+      # stands in, because `done` rewrites the marker every time it closes a forge and the
+      # two closes a caller could confuse are seconds to hours apart.
+      [ -n "$a_instance" ] || a_instance="legacy.$a_closed"
+    elif [ -f "$a_marker" ]; then
+      # The file is there but says nothing this build understands -- half-written by a
+      # concurrent `done`, or from a future version. The debt is real, so it is still
+      # discharged; with no instance to name, the claim falls back to the session, which
+      # is where the winner's tombstone is. Never deleted for being unparseable: that is
+      # the rule every reader of this directory follows.
+      a_have=1
+    elif [ "$a_force" -eq 0 ]; then
+      # NOTHING TO DISCHARGE. Whether that is an error is decided a few lines down, once
+      # the session key is known -- NOT here, and the difference is a whole delivery. The
+      # second delivery of one act arrives after the winner has removed the marker and
+      # carries no `--force`, because it is the SAME COMMAND; refused here it exited 2
+      # saying "no forge is waiting to be applied" about an act that is on the ledger, and
+      # a hook wired through both install paths took that on every event. Two of ten
+      # concurrent racers hit it, in two runs out of eight.
+      A_NO_MARKER=1
+    fi
+    # WHOSE SESSION IS THIS. The applier's, not the forger's: the row answers "who put it
+    # on the problem". An explicit --session wins, then the environment; the marker's own
+    # session is the last resort, because in the ordinary case the two are the same
+    # session and an id is better than a hole. It is also half the idempotence key below,
+    # so it has to be stable across two deliveries of one intent -- which every one of
+    # those three is.
+    [ -n "$a_session" ] || a_session="${CLAUDE_CODE_SESSION_ID:-}"
+    [ -n "$a_session" ] || { [ "$a_have" -eq 1 ] && a_session="$(field "$a_marker" session)"; }
+
+    # THE THREE CLAIM PATHS, BUILT ONCE AND IN ONE PLACE. The refusal below consults two
+    # of them and the claim further down takes them, and while the refusal spelled its own
+    # path inline the two spellings were one edit away from disagreeing -- the same hazard
+    # the session-id sanitising note in .claude/CLAUDE.md describes, in one file.
+    #
+    # THE ACT ID IS WHAT MAKES A SECOND ACT VISIBLE. name+outcome+evidence, in this
+    # session: it is the identity of what somebody did, and it is the only thing on disk
+    # that can tell a genuinely SECOND act on one skill from the SAME act delivered twice.
+    # The row itself cannot -- a first delivery carries marker:true, elapsed and installed
+    # and its re-delivery carries none of them, so two records of one act do not match
+    # byte for byte. `cksum` because it is POSIX and already on the minimal PATH these
+    # scripts run under; both of its fields are kept, so a collision needs the same CRC
+    # AND the same length. Two acts that really do share a name, an outcome and a verbatim
+    # quote are one act as far as this ledger can tell, and are folded on purpose.
+    a_act_id="$(printf '%s\037%s\037%s\037%s' "$a_name" "$a_session" "$a_outcome" \
+      "$a_evidence" | cksum 2>/dev/null | tr -cd '0-9 ' | tr ' ' '.')"
+    a_base="$DIR/.apply.$(safe_name "$a_name")"
+    a_claim_session="$a_base.s.$(safe_name "$a_session").claim"
+    # No `cksum` on PATH leaves no act id, and the fallback is the behaviour that shipped
+    # before it: the session tombstone answers for the whole session. It absorbs a
+    # re-delivery, which is the case that must not regress, and it cannot see a second
+    # act, which is the case that then gets refused rather than dropped.
+    a_claim_row=""
+    [ -n "$a_act_id" ] && a_claim_row="$a_base.r.$(safe_name "$a_act_id").claim"
+    # WHICH KEY THIS DELIVERY IS HELD TO, and the middle branch is the whole of `--force`.
+    #
+    # With a marker, the forge instance: one debt, one claim.
+    #
+    # WITHOUT a marker and WITHOUT `--force`, the SESSION -- and it must stay the session,
+    # because that is what makes a racer safe. A delivery that finds no marker at all is
+    # usually not a second act; it is a racer that read the directory a few milliseconds
+    # after the winner discharged the debt, and it carries its own wording of the evidence
+    # because two agents describing one act do not type the same sentence. Keyed on the
+    # act it would find its key FREE and append a second row for one act, which is the
+    # duplicate this whole scheme exists to prevent. The concurrent case, and the count of
+    # duplicate rows it produced before the tombstone, are in
+    # tests/test_forge_apply.py DebtsAreDistinguishedByForgeInstance; the figure lives
+    # there and is not repeated here.
+    # So it loses the session key, exits 0, and what it is TOLD depends on the act claim --
+    # see the loser branch, which is where a second act is named and pointed at --force.
+    #
+    # WITH `--force`, the act: the flag is a deliberate statement that this is a real act
+    # with no marker to discharge, so it must be able to get past a session key some
+    # earlier apply is holding -- otherwise the advice the loser branch gives is advice
+    # that does not work. Two identical forced deliveries still collide on the act.
+    if [ -n "$a_instance" ]; then
+      a_claim="$a_base.f.$(safe_name "$a_instance").claim"
+    elif [ "$a_force" -eq 1 ] && [ -n "$a_claim_row" ]; then
+      a_claim="$a_claim_row"
+    else
+      a_claim="$a_claim_session"
+    fi
+
+    # THE REFUSAL, DECIDED HERE, WHERE THE TOMBSTONE CAN BE SEEN. A winner claims the
+    # session key as well as its forge instance for exactly this case: a later delivery
+    # with no marker to key on lands on a path that is already taken and loses quietly.
+    # That protection was unreachable while the refusal above ran first -- the delivery it
+    # was built for never got as far as the claim. So a session that already holds a
+    # tombstone for this skill falls THROUGH, loses the claim below, and is told there
+    # what happened; everything else is refused exactly as before.
+    #
+    # NOTHING IS REFUSED HERE FOR BEING A SECOND ACT, and that is deliberate. This branch
+    # cannot tell a second act from a racer -- both arrive with no marker and evidence of
+    # their own -- and a racer that exits non-zero is a hook failing on every event. The
+    # distinction is drawn where it is cheap and safe: past the claim, where nothing can
+    # be appended by either of them, the loser branch reads the act claim and says which
+    # of the two this was.
+    #
+    # NAME WHAT IS PENDING. A refusal that says only "nothing is pending for 'wdiget'"
+    # leaves a caller who mistyped the name with no way to see the right one, and the
+    # cheapest way past a CLI that refuses without helping is to stop calling it.
+    if [ "$A_NO_MARKER" -eq 1 ]; then
+      if [ -z "$a_session" ] || [ ! -e "$a_claim_session" ]; then
+        a_names="$(apply_pending_names)"
+        [ -n "$a_names" ] || a_names="(nothing)"
+        die "no forge is waiting to be applied for '$a_name'. Pending: $a_names. If '$a_name' really was applied and its marker is gone (or it was never forged here), record it anyway with --force and the row will say so (marker:false)."
+      fi
+    fi
+
+    a_ts="$(now)"
+    a_elapsed=""
+    if [ "$a_have" -eq 1 ] && [ -n "$a_closed" ] && [ "$a_closed" -gt 0 ]; then
+      a_elapsed=$(( a_ts - a_closed ))
+      # Clamped for the same reason ledger_close_line clamps a duration: a state directory
+      # copied between machines, or a clock stepped backwards, must not put a negative
+      # number in the record and make every later reader special-case it.
+      [ "$a_elapsed" -lt 0 ] && a_elapsed=0
+    fi
+    a_marker_flag=false
+    [ "$a_have" -eq 1 ] && a_marker_flag=true
+    a_line="$(jq -n -c --arg name "$a_name" --arg outcome "$a_outcome" \
+      --arg evidence "$a_evidence" --arg forge "$a_forge" --arg session "$a_session" \
+      --arg elapsed "$a_elapsed" --arg installed "$a_installed" \
+      --argjson marker "$a_marker_flag" --argjson ts "$a_ts" \
+      '{event:"apply", ts:$ts, name:$name, outcome:$outcome, evidence:$evidence,
+        marker:$marker, confidence:"measured", backfilled:false}
+       + (if $forge     == "" then {} else {forge:$forge}                 end)
+       + (if $session   == "" then {} else {session:$session}             end)
+       + (if $elapsed   == "" then {} else {elapsed:($elapsed|tonumber)}  end)
+       + (if $installed == "" then {} else {installed:($installed|test("true"))} end)' 2>/dev/null)"
+    [ -n "$a_line" ] || die "could not build an apply row for '$a_name'"
+
+    # THE SAME CLAIM SCHEME `done` USES. `ln` of a fully-written file onto a path that has
+    # never been used is atomic: exactly one process links it, nothing is HELD, and a
+    # killed process leaves no lock because there was none. What it stops is two deliveries
+    # of ONE act -- a retried command, a hook wired through both install paths, two agents
+    # told the same thing -- both finding the marker, both appending, and the ledger saying
+    # a skill was applied twice on the strength of one act.
+    #
+    # THE KEY IS THE FORGE INSTANCE, NOT name+session, AND name+session WAS A BUG. Forging
+    # a skill again after a red-team fix is this protocol's own prescribed workflow, so one
+    # session closes two forges of one name and owes two separate debts. Keyed on
+    # name+session the first apply's claim was still on disk (reaped only at -mmin +60)
+    # when the second arrived: the second took the LOSER branch, deleted the new marker,
+    # printed "already been recorded", and exited 0 -- one apply row on disk, the second
+    # forge's evidence gone for good. Reproduced, one session id throughout.
+    #
+    # A `--force` REPORT HAS NO FORGE INSTANCE TO NAME, so it falls back to the session:
+    # nothing on disk ties it to a forge, and within one session a second unattached report
+    # of the same skill is a re-delivery rather than a second act. The two kinds of key
+    # share one namespace, hence the `f.`/`s.` prefixes -- a forge id and a session id are
+    # both opaque strings and neither may be mistaken for the other. The name and one key
+    # are all that is in the path: three `safe_name` components would exceed NAME_MAX on
+    # a long skill name, and `ln` failing for want of a shorter filename hands back the
+    # duplicate row the claim exists to prevent (measured at 230 characters, in forge_id).
+    #
+    # THE TWO RECEIPTS. Whatever it keyed on, the winner ALSO claims the other two: the
+    # SESSION key, so a later delivery with no marker to key on lands on a taken path and
+    # loses quietly, and the ACT key -- this name, this outcome, this evidence, in this
+    # session -- which is what the loser branch reads to tell a re-delivery of the
+    # recorded act from a genuinely different one. Both are best effort and neither is
+    # fatal: they prevent a duplicate and they explain one, they are not what makes the
+    # apply durable. Both are also why every winner takes all three even when it needed
+    # only one: a receipt nobody left is a question nobody can answer later.
+    #
+    # Everything that forks is on the near side of the claim -- the row is already built,
+    # and ledger_ensure_horizon runs here rather than inside the append below -- so the
+    # interval between winning the claim and having the row on disk is one printf builtin.
+    ledger_ensure_horizon
+    a_tmp="$DIR/.apply.$$.$a_ts.tmp"
+    { printf '%s\n' "$a_line" > "$a_tmp"; } 2>/dev/null || a_tmp=""
+    a_won=1
+    # WHAT THIS INVOCATION CREATED, AND NOTHING ELSE. The release below is keyed on these
+    # two flags rather than on the paths, because the tombstone path may already be held
+    # by an EARLIER apply of this skill in this session -- the one whose row is on the
+    # ledger. `ln` failing on it is the normal case, not an error, and a release that
+    # deleted it anyway handed the session key back: the next report with no marker to key
+    # on (a `--force` re-delivery of that first act) then won it and wrote its row a
+    # second time. Reproduced, one session, two forges, one failed append.
+    a_made_claim=0
+    a_made_session=0
+    a_made_row=0
+    if [ -n "$a_tmp" ]; then
+      if ln "$a_tmp" "$a_claim" 2>/dev/null; then
+        a_made_claim=1
+        if [ "$a_claim" = "$a_claim_session" ]; then
+          a_made_session=1
+        elif ln "$a_tmp" "$a_claim_session" 2>/dev/null; then
+          a_made_session=1
+        fi
+        if [ -z "$a_claim_row" ]; then
+          :
+        elif [ "$a_claim" = "$a_claim_row" ]; then
+          a_made_row=1
+        elif ln "$a_tmp" "$a_claim_row" 2>/dev/null; then
+          a_made_row=1
+        fi
+      elif [ -e "$a_claim" ]; then
+        a_won=0
+      fi
+      # `ln` failed with no claim to explain it -- a read-only state directory, or a
+      # filesystem that refuses links. Proceed: the claim exists to stop a duplicate row,
+      # and a claim that cannot be created must never become the reason an apply cannot be
+      # recorded at all. Exactly the fall-through close_forge takes, for the same reason.
+      rm -f "$a_tmp" 2>/dev/null
+    fi
+    if [ "$a_won" -eq 0 ]; then
+      # LOST, AND THE HEAL BELOW MAY NOT BE TAKEN ON FAITH. Deleting the marker finishes
+      # work the winner may not have reached -- but only if the winner GOT there. A winner
+      # killed between the claim and the append, or one whose append failed, writes no row
+      # and keeps its marker on purpose; the heal then deleted the debt anyway, said the
+      # act "has already been recorded", and exited 0. No row, no debt, `pending` reporting
+      # nothing waiting: the same false completion claim a failed append used to produce,
+      # arriving by the other door. Every hook event is delivered twice, so this branch is
+      # the ordinary path and not an edge.
+      #
+      # THE CLAIM FILE IS THE WINNER'S ROW, byte for byte -- it is a hard link to the file
+      # the winner built the row in -- so whether that row reached the ledger is a question
+      # about this file's own contents and needs nothing from the winner. The match is on
+      # a WHOLE LINE, exactly: the row is one line of JSON, and a substring match would say
+      # yes to a longer row that merely contains this one.
+      #
+      # NOT `grep -F -x`, AND THE REASON IS A HARD CEILING. BSD grep 2.6.0-FreeBSD -- the
+      # `grep` in /usr/bin, which is what these scripts get under a minimal PATH -- aborts
+      # with `grep: out of memory` and exit 2 once a fixed pattern passes a ceiling, and
+      # the longest row APPLY_EVIDENCE_MAX allows is past it. No figure is quoted here on
+      # purpose: `python3 tests/test_forge_apply.py TheLandedCheckHasNoPatternLengthLimit`
+      # bisects that ceiling on the machine it runs on and prints it, with the length of
+      # the row each of its three cases builds, on every run. Exit 2 reads here as "no
+      # match", and the loser then concludes the winner recorded nothing: it keeps a debt
+      # that HAS been discharged and tells the caller its act was never written. Wrong in
+      # the direction that loses a paid debt.
+      #
+      # `awk` has no pattern-length limit -- it is comparing two strings, not compiling a
+      # matcher -- and the row is handed to it as a FILE rather than through the
+      # environment or argv, both of which are bounded by ARG_MAX. `NR == FNR` selects the
+      # claim file's one line, which is why the emptiness guard below is load-bearing: on
+      # an empty claim file that test would fall on the ledger's first line and take IT as
+      # the pattern. Both sides are concatenated with "" so a row that happened to look
+      # numeric is still compared as text.
+      a_wrow="$(cat "$a_claim" 2>/dev/null)"
+      a_landed=0
+      if [ -n "$a_wrow" ] && awk '
+        NR == FNR { aw_row = $0 ""; next }
+        ($0 "") == aw_row { aw_hit = 1; exit }
+        END { exit (aw_hit ? 0 : 1) }
+      ' "$a_claim" "$LEDGER" 2>/dev/null; then
+        a_landed=1
+      fi
+      if [ "$a_landed" -eq 1 ]; then
+        # The row is on disk. What is said about it depends on WHICH claim was lost, and
+        # ONE RUN MUST NOT PRINT TWO INCOMPATIBLE STATEMENTS: the stderr line here used to
+        # say the recorded row does not discharge that forge while the stdout line on the
+        # same run said it had been recorded "for this forge". A caller reading either
+        # alone was misled by the other, so each branch carries its own stdout line and
+        # none of them borrows another's.
+        if [ -n "$a_instance" ]; then
+          # Lost on this forge's own instance claim: the recorded row IS this debt, so the
+          # marker is healed -- the winner may have been killed before it could.
+          [ "$a_have" -eq 1 ] && rm -f "$a_marker" 2>/dev/null
+          echo "skillforge: '$a_name' has already been recorded as applied for this forge; nothing was written"
+          exit 0
+        fi
+        # No instance: the claim we lost names an act or a session, and neither says the
+        # forge behind any pending marker was applied. A marker written by a LATER `done`,
+        # or one this build could not parse, therefore STAYS.
+        if [ "$a_have" -eq 1 ]; then
+          echo "skillforge: the pending marker for '$a_name' is LEFT WHERE IT IS: this delivery lost on a claim that names an act rather than a forge, so it does not say the pending forge was applied. Check it with 'skillforge pending'." >&2
+        fi
+        # THE SECOND ACT, NAMED RATHER THAN SWALLOWED. The act claim is this name, this
+        # outcome, this evidence, in this session: a winner takes it alongside whatever it
+        # keyed on, so its presence answers the one question the session key cannot. Taken
+        # means this very act is the one on the ledger -- a re-delivery, or a racer typing
+        # the same quote -- and there is nothing to record. FREE means the recorded row is
+        # a DIFFERENT act, and this one has not been written anywhere: saying "already
+        # been recorded" about it is the false completion claim this package exists to
+        # refuse, and saying nothing at all is worse. It cannot be appended here (the
+        # session key is held, and letting it through would give every concurrent racer a
+        # row of its own), so
+        # the caller is told exactly that, and told the flag that does record it.
+        #
+        # EXIT 0 EITHER WAY, and the racer is why: a delivery with no marker is far more
+        # often a lost race than a second act, and a hook wired through both install paths
+        # would take a non-zero exit on every event. Nothing is claimed to have been
+        # recorded, so nothing is claimed falsely.
+        if [ -n "$a_claim_row" ] && [ ! -e "$a_claim_row" ]; then
+          echo "skillforge: NOTHING WAS RECORDED for this act on '$a_name'. An apply row for '$a_name' from this session is already on $LEDGER, but it is a DIFFERENT act -- the outcome or the evidence differs -- and this one has not been written anywhere. If it really is a second, distinct act, record it with: skillforge apply --name '$a_name' --outcome $a_outcome --force --evidence \"<the quote>\"" >&2
+          echo "skillforge: nothing was written for '$a_name'; see the note above about recording it with --force"
+          exit 0
+        fi
+        echo "skillforge: that act on '$a_name' -- same outcome, same evidence -- has already been recorded in this session; nothing was written"
+        exit 0
+      fi
+      if [ -e "$a_claim" ]; then
+        # The claim is still held and no row carrying it is on the ledger. Either the
+        # winner is between its `ln` and its `printf` right now -- microseconds, and it
+        # will delete the marker itself -- or it died in that window and never will. The
+        # two are indistinguishable from here and the same answer is right for both: touch
+        # NOTHING, say what is true, and leave the debt for `pending` to keep showing.
+        # Exit 0, because a second delivery of one act is not a failure of this caller's;
+        # the delivery that owns the row is the one that reports on it.
+        echo "skillforge: another delivery of '$a_name' holds the claim and NO row for it has reached $LEDGER, so nothing was written here and the pending marker is left where it is -- the debt is still owed. If that delivery died before it could append, the claim is reaped after an hour and the same command will then record it." >&2
+        exit 0
+      fi
+      # The claim is gone: the winner released it, which it does on exactly one path --
+      # its append failed and it exited non-zero saying so. Nothing was recorded by
+      # either of us and the key is free again, so the retry is a plain re-run.
+      echo "skillforge: the delivery of '$a_name' that held the claim recorded NOTHING and released it, so nothing was written and the debt is still owed. Fix the ledger (is $LEDGER writable?) and run the same command again." >&2
+      exit 1
+    fi
+    # THE MARKER IS DISCHARGED ONLY IF THE ROW REALLY LANDED, and until this was written it
+    # was discharged either way. The append was `printf ... >> "$LEDGER" 2>/dev/null ||
+    # true` with an unconditional `rm -f "$a_marker"` under it: with the ledger chmod 444,
+    # `apply` printed bash's own "Permission denied", then "recorded — 'ro' was USED ... The
+    # loop is closed.", exited 0, wrote no row, deleted the debt, and `pending` reported
+    # nothing waiting. That is precisely the unsupported completion claim hooks/claim-gate.sh
+    # exists to refuse, arriving through this package's own CLI -- and the evidence quote,
+    # which nothing else holds, was gone with it.
+    #
+    # `2>/dev/null` AFTER THE `>>` DID NOT EVEN SUPPRESS THAT MESSAGE, which is why the
+    # reproduction shows bash's own "Permission denied" ABOVE skillforge's own line.
+    # Redirections are applied left to right: written that way round `>>` is opened first
+    # and its failure is reported by the SHELL, to a stderr that is still the terminal.
+    # Putting `2>/dev/null` FIRST is the fix -- measured, `printf x 2>/dev/null >> ro` is
+    # silent where `printf x >> ro 2>/dev/null` is not -- and unlike a brace group it
+    # leaves the line shape the reconstructions in tests/test_forge_close_race.py anchor
+    # on. Every other append in this file now reads the same way.
+    #
+    # THE CLAIM IS RELEASED ON FAILURE, AND ONLY THE PART OF IT THIS INVOCATION CREATED.
+    # It was taken for an act that did not happen, and leaving it would make the retry --
+    # the whole point of exiting non-zero -- lose, which now leaves the debt but still
+    # records nothing until the claim is reaped. What must NOT be released is a tombstone
+    # this invocation found already taken: that one is an earlier apply's receipt, its row
+    # is on the ledger, and deleting it reopens the session key for a duplicate.
+    if printf '%s\n' "$a_line" 2>/dev/null >> "$LEDGER"; then
+      rm -f "$a_marker" 2>/dev/null
+    else
+      [ "$a_made_claim" -eq 1 ] && rm -f "$a_claim" 2>/dev/null
+      [ "$a_made_session" -eq 1 ] && rm -f "$a_claim_session" 2>/dev/null
+      [ "$a_made_row" -eq 1 ] && rm -f "$a_claim_row" 2>/dev/null
+      echo "skillforge: could not append the apply row to $LEDGER, so NOTHING was recorded for '$a_name'. The pending marker is left where it is -- the debt is still owed. Fix the ledger (is it writable?) and run the same command again." >&2
+      exit 1
+    fi
+    reap_temps
+    a_when=""
+    [ -n "$a_elapsed" ] && a_when=" $(ago "$a_elapsed") after it was forged"
+    case "$a_outcome" in
+      used) echo "skillforge: recorded — '$a_name' was USED on the problem that caused it$a_when. The loop is closed." ;;
+      *)    echo "skillforge: recorded — '$a_name' was $a_outcome on the problem that caused it$a_when." ;;
+    esac
+    [ "$a_have" -eq 0 ] && echo "skillforge: no pending marker existed for '$a_name', so the row records marker:false — it is a report, not something this ledger watched happen." >&2
+    a_left="$(apply_markers | jq -s 'length' 2>/dev/null)"
+    case "$(int_or_zero "${a_left:-0}")" in
+      0) : ;;
+      *) echo "skillforge: $a_left forge(s) still waiting to be applied (skillforge pending)" ;;
+    esac
+    exit 0
+    ;;
+
+  pending)
+    # THE QUEUE OF UNPAID DEBTS, oldest first, which is the order they should be worked
+    # off in: the longest-standing one is the forge most likely to have been forgotten.
+    # `--json` is what the status line and hooks/apply-gate.sh would read if they went
+    # through the CLI; both read the directory directly, and this is the human door.
+    p_rows="$(apply_markers)"
+    if [ "${1:-}" = "--json" ]; then
+      # One compact object per line, redacted like `show` and `ledger --json`: a marker
+      # carries the verbatim trigger. `--full` lifts it for the party the held-out set
+      # belongs to.
+      [ -n "$p_rows" ] && printf '%s\n' "$p_rows" | jq -c "$(redact_prog)" 2>/dev/null
+      exit 0
+    fi
+    if [ -z "$p_rows" ]; then
+      echo "nothing is waiting to be applied ($APPLY_DIR)"
+      exit 0
+    fi
+    p_n=0
+    printf '%-28s %-6s %-9s %-20s %s\n' "SKILL" "AGE" "INSTALLED" "FORGE" "SUMMARY"
+    while IFS= read -r p_line; do
+      [ -n "$p_line" ] || continue
+      p_n=$(( p_n + 1 ))
+      # Through jq, one field per read, for the reason sfield exists: a summary holding a
+      # control character would otherwise split one marker across three rows of the table.
+      p_name="$(printf '%s' "$p_line" | jq -r '(.name // "") | gsub("[[:cntrl:]]"; " ")' 2>/dev/null)"
+      p_age="$(printf '%s' "$p_line" | jq -r '.age // 0' 2>/dev/null)"
+      p_forge="$(printf '%s' "$p_line" | jq -r '(.forge // "") | gsub("[[:cntrl:]]"; " ")' 2>/dev/null)"
+      p_sum="$(printf '%s' "$p_line" | jq -r '(.summary // "") | gsub("[[:cntrl:]]"; " ")' 2>/dev/null)"
+      p_ins="$(printf '%s' "$p_line" | jq -r 'if .installed then "yes" else "NO" end' 2>/dev/null)"
+      printf '%s %-6s %-9s %s %s\n' \
+        "$(cell "$p_name" 28)" "$(ago "$p_age")" "$p_ins" "$(cell "$p_forge" 20)" "$p_sum"
+    done <<PENDING
+$p_rows
+PENDING
+    echo ""
+    echo "$p_n forge(s) closed and not yet applied. A skill is built AS NEEDED, so the loop is not closed until it has been put on the problem that caused it: skillforge apply --name <skill> --outcome used --evidence \"<verbatim quote>\""
+    echo "(the verbatim trigger each one recorded is held out of this view; skillforge pending --json --full shows it)"
     exit 0
     ;;
 
@@ -1763,11 +2527,23 @@ SLOTS
         (([ .[] | select(.orphan) ] | length) as $o
          | if $o == 0 then empty
            else "* \($o) outcome record(s) have no matching start record, so only the outcome survives and its date is reconstructed from the recorded duration. A start row is missing when `start` was killed between claiming its slot and appending its row, or when the ledger was truncated after a forge had begun."
+           end),
+        # THE FIFTH QUESTION, SELECTED BY NAME AND BY NOTHING ELSE. `apply` rows are
+        # picked out of $rec directly; they never touch $starts, $ends or the join, so
+        # every count above reads exactly as it did before this event type existed --
+        # which is the rule this file states for itself and then has to keep.
+        (([ $rec[] | select(.event == "apply") ]) as $ap
+         | if ($ap | length) == 0 then empty
+           else "\($ap | length) apply row(s): \($ap | map(select(.outcome == "used")) | length) used, \($ap | map(select(.outcome == "declined")) | length) declined, \($ap | map(select(.outcome == "failed")) | length) failed. An apply row says a forged skill was put on the problem that caused it; skillforge pending lists the forges still waiting."
            end)
     ' "$LEDGER"
     ;;
   ""|-h|--help|help)
-    sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'
+    # The header block is the help text, and the range ENDS ONE LINE ABOVE
+    # `set -uo pipefail` (line 121 as this is written). Add a line to the header and
+    # this number moves with it: too small silently truncates the help, too large
+    # prints shell code at the user.
+    sed -n '2,120p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac

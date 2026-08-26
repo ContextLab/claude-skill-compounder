@@ -697,7 +697,13 @@ class DerivationCommandTest(unittest.TestCase):
     # a new prefix means editing it in a commit a reviewer can see -- the same reason the
     # doctrine sentences above are pinned rather than derived.
     AMBIENT = {"HOME", "PATH", "PWD", "SHELL", "TMPDIR", "RANDOM", "IFS", "LANG", "LC_ALL",
-               "CLAUDE_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"}
+               "CLAUDE_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN",
+               # Exported by Claude Code into every process a session starts. `skillforge
+               # apply` reads it so a ledger row can say which session closed the loop,
+               # and `bin/skillforge`'s own header explains at length that it is NOT the
+               # id a hook payload carries. Ours to read, never ours to set, so it belongs
+               # here rather than in a tuning table nobody could act on.
+               "CLAUDE_CODE_SESSION_ID"}
 
     def command(self):
         i = README.find("prints every")

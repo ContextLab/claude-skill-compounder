@@ -214,6 +214,87 @@ class WrappingInvariantTest(unittest.TestCase):
                          "a script cannot be both required and tolerated")
 
 
+class IdentitySanitisationTest(unittest.TestCase):
+    """One spelling for turning an id into a filename, across every shipped script.
+
+    `.claude/CLAUDE.md`: "the session id must be sanitised with the IDENTICAL expression
+    in every script, or one event becomes two claims under two spellings". That was prose
+    until two sites drifted from it in one afternoon -- `bin/skillforge` truncated at 64
+    instead of 96, and `bin/skillinsight` did not truncate at all while carrying a comment
+    saying "Must sanitise exactly as hooks/compound-improvement.sh does".
+
+    The second one shows why a comment is not a check. The two expressions agree for every
+    36-character UUID, so nothing was ever observed wrong; they diverge only past 96
+    characters, where the WRITER produces a 96-character filename and the READER looks for
+    the full-length one, finds nothing, and continues. No error, no empty result to notice
+    -- just a report that silently omits a session. Measured on a 130-character id: 97
+    bytes from the writer's spelling, 130 from the reader's.
+
+    Scope, stated so this does not creep: the identity class is `A-Za-z0-9._-`, used for
+    session ids, tool-use ids, prompt ids and skill names -- values that become a path
+    component and must round-trip between whoever writes it and whoever reads it. The
+    narrower `A-Za-z0-9` class is a DIFFERENT job with different rules: it launders the
+    output of `cksum`, which is digits and spaces, and its callers pick their own widths
+    (40 in claim-gate, none in statusline). Those are deliberately not covered here.
+    """
+
+    IDENTITY_TR = "tr -c 'A-Za-z0-9._-' '_'"
+    REQUIRED_CUT = "cut -c1-96"
+
+    def sites(self):
+        """Every line applying the identity class, with the comment lines removed.
+
+        A comment QUOTING the expression is documentation, not a call, and this file is
+        full of headers that quote it correctly on purpose.
+        """
+        out = []
+        for rel in shipped_scripts():
+            for n, line in enumerate((REPO / rel).read_text().split("\n"), 1):
+                if self.IDENTITY_TR not in line:
+                    continue
+                if line.lstrip().startswith("#"):
+                    continue
+                out.append((rel, n, line.strip()))
+        return out
+
+    def test_every_identity_sanitisation_uses_the_same_expression(self):
+        found = self.sites()
+        self.assertTrue(found, "no identity sanitisation found in any shipped script at "
+                               "all, which means this test is looking for the wrong thing")
+        for rel, n, line in found:
+            self.assertIn(
+                self.REQUIRED_CUT, line,
+                "%s:%d applies the identity character class without `%s`:\n    %s\n"
+                "Every other site truncates at 96. A shorter cut, or none, makes the "
+                "writer and the reader of the same id disagree for any id longer than "
+                "that -- silently, because they agree for every UUID."
+                % (rel, n, self.REQUIRED_CUT, line))
+
+    def test_the_two_spellings_really_do_diverge(self):
+        """Non-vacuity: without this guard the drift is invisible, so prove it is real.
+
+        If these two ever produced the same answer the test above would be asserting
+        nothing, and would keep passing while every site quietly disagreed.
+        """
+        long_id = "s" * 130
+        with_cut = subprocess.run(
+            ["bash", "-c", "printf '%%s' \"$1\" | %s | %s" % (self.IDENTITY_TR, self.REQUIRED_CUT),
+             "_", long_id], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        without = subprocess.run(
+            ["bash", "-c", "printf '%%s' \"$1\" | %s" % self.IDENTITY_TR, "_", long_id],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        # `.rstrip("\n")` mirrors what the scripts actually see: every one of these runs
+        # inside `$( )`, and command substitution strips trailing newlines. Comparing the
+        # raw bytes instead measures `cut`'s own trailing newline and reports 97 for a
+        # 96-character id -- an off-by-one in the TEST, of exactly the kind this file
+        # exists to catch in the scripts.
+        cut_out = with_cut.stdout.rstrip("\n")
+        raw_out = without.stdout.rstrip("\n")
+        self.assertEqual(len(cut_out), 96)
+        self.assertEqual(len(raw_out), 130)
+        self.assertNotEqual(cut_out, raw_out)
+
+
 class HomeUnsetTest(unittest.TestCase):
     """`set -u` plus an unset HOME kills a script before it prints anything.
 

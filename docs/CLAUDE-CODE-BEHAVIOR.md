@@ -419,6 +419,21 @@ ignore. The `Stop` channel is different: its `reason` arrives labelled as hook f
 rather than as tool output, and is acted on, so guidance is legitimate there. A hook that
 gates both events needs two registers for the same finding.
 
+**Reconciled with the later measurement below, because the two look contradictory and are
+not.** The entry further down ("A denial reason is acted on, not merely reported") records
+sessions running the exact command a deny reason named, 4/4. The variable separating the two
+results is **coherence, not grammatical mood**. A three-condition probe on 2026-08-26, scored
+only over the runs where the gate actually fired: a reason naming a remediation that plainly
+follows from the stated block was acted on **2 of 2**; a bare imperative unconnected to the
+block ("Run this exact command: `echo DENYME 999`") was acted on **1 of 3**. Both n's are
+small, and 4 of 9 runs never attempted a push at all, so this is consistent with the two
+findings rather than a demonstration.
+
+The safe rule for an author is therefore unchanged, and it is safe precisely because it works
+under either reading: **state what is wrong and name what exists.** Every deny reason in this
+package is written that way — "the `claim-provenance` skill exists for exactly this", not "run
+`claim-provenance`" — which needs no bet on which of these measurements generalises.
+
 ---
 
 ## `CLAUDE.md` at a plugin root fails `--strict`
@@ -532,3 +547,193 @@ least one user prompt, across 475 transcripts on this machine, 2026-08-25.
 **What it means.** Anything spent at `SessionStart` — an announcement, a query, a token
 cost — is spent on sessions that are then abandoned without a single prompt. Work that
 needs a person present belongs on the first `UserPromptSubmit` instead.
+
+---
+
+## `--permission-mode bypassPermissions` does not bypass a hook denial
+
+**Finding.** A `PreToolUse` hook that returns `permissionDecision: "deny"` still blocks the
+call in a session started with `--permission-mode bypassPermissions`. The flag governs the
+permission system; it does not govern hooks.
+
+**How established.** Claude Code 2.1.246, macOS 25.5.0, 2026-08-26. Four headless sessions
+run with `--permission-mode bypassPermissions` against a scratch git repository, each asked
+to push. A `PreToolUse` hook on matcher `Bash` denied any command containing `git push` on
+its first delivery. All four pushes were blocked; the bare remote held no `refs/heads/main`
+until the session had cleared the gate.
+
+**What it means.** A gate built as a hook keeps working in the mode people reach for when
+they want to stop being asked things — which is the mode in which they are least likely to
+be reading. That is the mode a gate most needs to survive. It also means a hook denial
+cannot be waved through with a flag, so the escape hatch has to be built into the hook.
+
+---
+
+## A denial reason is acted on, not merely reported
+
+**Finding.** The `permissionDecisionReason` string reaches the model verbatim as the tool
+result, with `is_error: true` and no command output at all, and a session given a reason
+naming an exact remediation command runs that command and then retries.
+
+**How established.** Claude Code 2.1.246, `claude-haiku-4-5-20251001`, 2026-08-26. Four runs
+(one smoke, three measured). The reason instructed the session to run `echo DOC-GATE-OBEYED`
+and retry. In 4/4 runs the session's next `Bash` call was exactly that command and the call
+after it was the identical `git push`, which the hook then allowed. All three measured
+sessions also narrated the gate unprompted in their final report ("Blocked by documentation
+gate requiring acknowledgment" / "Gate cleared" / "Retried push succeeded"), so the reason
+reached the model's reasoning and not only its tool loop. No session attempted to route
+around the gate — no `--no-verify`, no git plumbing.
+
+The raw delivery, from the stream:
+
+```
+{"type":"tool_result","content":"Push blocked by the documentation gate. To clear the gate
+you MUST first run this exact command: echo DOC-GATE-OBEYED   Then retry the git push; it
+will be allowed on the second attempt.","is_error":true,"tool_use_id":"toolu_016pdCz..."}
+```
+
+**What it means.** A deny reason is a place to put an instruction, not just an explanation.
+**Limits, and they matter.** The remediation measured was one trivially cheap `echo`, which
+is the easy case for compliance; an expensive or ambiguous remediation is untested. The gate
+opened on attempt two in every run, so what a session does when the retry is denied *again*
+was never measured — "it does not blindly retry" is established only for a gate that opens.
+One model, four trials.
+
+---
+
+## A chain of skills fires four levels deep, but there is no call stack
+
+**Finding.** Skill-to-skill composition works at depth 3 (3/3) and depth 4 (3/3) when each
+level names its callee and states that delegating is mandatory. A depth-2 chain whose outer
+skill does *not* name its callee — "delegate this sub-check to whichever installed skill
+covers it", with exactly one plausible candidate present — also fired 3/3.
+
+**How established.** Claude Code 2.1.246, `claude-haiku-4-5-20251001`, 2026-08-26. Chains of
+project-scoped skills in scratch directories, driven by one plain prompt naming only the
+outermost skill, read from `--output-format stream-json`. Every level appears as its own
+`Skill` tool use in every run (`4 Skill` tool uses, and no `Read` or `Grep`, in each depth-4
+run), and the innermost marker string existed in exactly one file on disk, so it could only
+have arrived through the chain. Depth-4 runs took 9 turns and ~12s.
+
+**What it means.** The part that is easy to get wrong: this measures **chain length, not
+stack depth**. A `Skill` invocation loads the skill body into the *same* session context. It
+does not spawn an isolated sub-session, there is no return value, and there is no isolation
+between levels — "L2 returned what L3 gave it" is really "the top-level model still has the
+marker in its context". A design that needs per-level isolation is not what this establishes;
+that needs subagents. Consistent with the absence of real returns, several runs dropped the
+outer levels' required output wrappers while still carrying the inner marker, so a chain that
+depends on each level *transforming* a value is untested.
+
+**Further limits.** Every level used strong compulsion language ("MANDATORY", "do NOT read
+files"). Weaker wording is untested, and the depth-2 prior work suggests wording carries the
+result. The unnamed-callee variant had exactly one plausible candidate whose description
+echoed the caller's phrasing; discrimination among two or more candidates is not established.
+n = 3 per condition cannot distinguish 100% from about 70%.
+
+---
+
+## A project-local skill routes on its own, and a user-level skill of the same name shadows it
+
+**Finding.** A skill at `<project>/.claude/skills/<name>/SKILL.md` routes automatically from
+a plain prompt that never names it, and appears in the session's skill list. When a skill of
+the **same directory name** exists at `~/.claude/skills/`, the user-level one wins, 3/3, and
+only one entry of that name is visible to the session.
+
+**How established.** Claude Code 2.1.246, `claude-haiku-4-5-20251001`, 2026-08-26. A project
+skill with a distinctive `Use when` clause fired from an unnamed prompt in 2/3 runs under the
+real `HOME` and 2/2 under an isolated one, and a `--output-format stream-json` run recorded
+`TOOL_USE Skill {"skill": "widget-flange-check"}` — genuine Skill-tool routing, not the model
+reading the file. With a same-named user-level copy present, 3/3 runs executed the user-level
+body. Renaming the user copy away restored the project one, 2/2.
+
+**What it means.** Project scope is real and usable, so a skill too idiosyncratic to
+generalise can live with its repository. The shadowing rule is the trap: a project cannot
+override a user-level skill by reusing its name — it silently loses. Give a project-local
+skill a distinct name.
+
+**Limits.** Precedence was tested only for identical directory names. Nothing here says what
+happens for two skills with different names and overlapping descriptions, nor for
+plugin-supplied skills. The one non-firing run was under the real `HOME` with roughly 200
+competing skills loaded, and whether roster size caused it was not isolated.
+
+---
+
+## Hot reload, re-measured: it works, the lag varies, and a subagent never sees it
+
+**Finding.** The hot-reload entries above hold at 2.1.246 for **project** scope too. A skill
+created mid-session became invocable in that session in 4 of 4 runs. The one-round-trip lag
+is real but not constant: 2 of 4 runs answered `Unknown skill` on the first `Skill` call and
+launched on the second, and 2 of 4 launched on the first. **A subagent dispatched after the
+install saw it on its first attempt in 4 of 4 runs** — no lag at all.
+
+**How established.** Claude Code 2.1.246, macOS 25.5.0, `claude-haiku-4-5-20251001`,
+2026-08-26. Headless sessions copied a valid `SKILL.md` into
+`<project>/.claude/skills/<name>/`, confirmed it with `ls -l`, then called the `Skill` tool
+three times with an intervening tool call before each retry. Scored from
+`--output-format stream-json`, never from prose, for the reason two paragraphs down. The
+subagent arm used a separate set of runs in which the main thread was forbidden to invoke
+any skill and dispatched one subagent to do it, so the single `Skill` tool use in each
+transcript is the subagent's.
+
+```
+run 1  USE → Unknown skill   USE → Launching skill   USE → Launching skill
+run 2  USE → Unknown skill   USE → Launching skill   USE → Launching skill
+run 3  USE → Launching skill USE → Launching skill   USE → Launching skill
+run 4  USE → Launching skill USE → Launching skill   USE → Launching skill
+subagent runs 1-4   USE → Launching skill   (first attempt, every time)
+```
+
+**A methodological warning worth more than the finding.** Two earlier attempts at this probe
+got opposite wrong answers. One reported "not invocable, 4/4"; the other reported a success
+that had not happened. Both scored the run by whether a marker string appeared in the
+session's prose. A session that has *read* the SKILL.md reproduces its marker without the
+skill ever launching, and a session that makes only one attempt sees only the lag. **Only the
+`tool_result` in the stream is evidence that a skill launched.** Score skill-routing probes
+on `Launching skill:` versus `Unknown skill:`, never on output text.
+
+**What it means.** Something that installs a skill and then wants it used in the same session
+has two options, and the second is strictly better. Retrying in the main thread works but
+must survive one `Unknown skill` — treating that as a failed install gives up one call too
+early, in half the runs. Handing the job to a **subagent** dispatched after the install has
+no lag to survive at all, which is what makes closing a forge loop with a subagent reliable
+rather than racy.
+
+**Limits.** n = 4 per arm, one model, one CLI version, project scope. The lag's cause is not
+established, so nothing here says what makes a run land in the 2 that needed a retry. Whether
+`~/.claude/skills` behaves identically was not re-measured here; the two entries at the top of
+this document cover user scope at 2.1.241 and 2.1.245.
+
+---
+
+## A hook matcher is a regex over the tool name, not a substring
+
+**Finding.** A hook entry's `matcher` is matched as a regular expression against the tool
+name, and a bare substring does **not** match. Of eight matchers wired to the same
+`PostToolUse` event, the ones that received a `Bash` call were `Bash`, `^Ba`, `Ba.*`,
+`Bash|mcp__.*`, `*` and `.*`. The two that received nothing were `Ba` and `as` — a prefix and
+an infix of the tool name.
+
+**How established.** Claude Code 2.1.246, macOS 25.5.0, 2026-08-26. One scratch project with
+eight `PostToolUse` entries differing only in matcher, each running the same script with a
+distinct label, and one headless session told to run a single `echo`. The labels that appear
+in the dump file are the matchers that fired:
+
+```
+alt-with-mcp Bash      anchored-^Ba Bash      dotstar Bash
+exact-Bash   Bash      star-Ba.*    Bash      wildcard-star Bash
+(no line for prefix-Ba, none for infix-as)
+```
+
+**What it means.** Alternation and `.*` both work, so `Bash|Skill` and `mcp__.*` are valid
+ways to select a family of tools, and `.*` or `*` selects every tool. But a matcher written
+as a fragment of a tool name selects **nothing**, silently — there is no error, no warning,
+and the hook simply never runs. A wiring that matches nothing is indistinguishable at every
+surface from a hook that is working and has nothing to say, which is why a new matcher is
+worth one probe before it is trusted.
+
+**Limits.** `^Ba` firing on `Bash` while `Ba` did not is not explained by a whole-string match
+nor by a plain search, and nothing here establishes which regex dialect or anchoring rule is
+in use. Take the positive results as the reliable half: exact names, alternation, and `.*`
+work. Do not infer a general rule about anchors from one probe. Whether `mcp__.*` reaches a
+real MCP tool was **not** measured — no MCP tool failure was observed arriving at a hook — so
+a wiring that depends on it is unproven, not proven.

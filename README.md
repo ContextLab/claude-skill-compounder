@@ -700,7 +700,7 @@ All fifteen are environment variables, and they are not the whole set — this p
 name any shipped script reads:
 
 ```bash
-grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE)(_[A-Z0-9_]+)?' \
+grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?' \
   hooks/*.sh bin/* statusline/*.sh | sort -u
 ```
 

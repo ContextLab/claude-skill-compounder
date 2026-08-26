@@ -70,6 +70,23 @@ CLAIM_GATE_MARKER = "claim-gate.sh"
 # succeeded, and a failure arrives as `PostToolUseFailure` (measured, 2.1.245). A
 # success-only wiring would record every failed invocation as a use.
 USE_MARKER = "skill-use.sh"
+# THE THREE GATES ISSUE #19 ADDED, and each is wired to the events it can act on.
+#
+# `repeat-gate.sh` is the only entry of ours on THREE events at once, because the thing it
+# recognises is a sequence rather than a moment: a failure (PostToolUseFailure), the call
+# that worked instead (PostToolUse), and the next attempt at the failure (PreToolUse). Drop
+# any one wiring and it degrades silently -- without the failure arm it learns nothing,
+# without the success arm every deny is "this failed before" with no workaround to offer,
+# and without the PreToolUse arm it is a log nobody reads.
+REPEAT_GATE_MARKER = "repeat-gate.sh"
+# `doc-gate.sh` denies a `git push` carrying code changes and no documentation change. Same
+# event and same matcher as the claim gate's commit arm, and for the same reason: a matcher
+# selects a tool, never a command, so which Bash commands are pushes is decided in-script.
+DOC_GATE_MARKER = "doc-gate.sh"
+# `apply-gate.sh` blocks the end of a turn that forged a skill and never used it. Issue #19
+# asks for a notification at that moment; the measurement in that issue's own thread is that
+# notifications at that moment are read past, so it refuses instead.
+APPLY_GATE_MARKER = "apply-gate.sh"
 # Substring matching against the user's status line command was wrong twice. A bare
 # "statusline.sh" matched their ~/bin/git-statusline.sh; adding the directory component
 # still matched "$HOME/dotfiles/statusline/statusline.sh", a pipeline mentioning our path,
@@ -90,6 +107,14 @@ SKILL_MATCHER = "Skill"
 # for `Bash`. Which Bash commands are commits is decided inside the script, which exits 0
 # on everything else; a matcher cannot express it.
 COMMIT_MATCHER = "Bash"
+# The repeat gate runs on every delivery of three events, so its matcher is a COST BOUND as
+# much as a filter. `Bash|Skill` covers both failures issue #19 names by example -- a broken
+# built-in retried as a `gh` command, and a skill that does not connect -- while leaving the
+# high-frequency read tools (Read, Grep, Glob) out of the stream entirely. MCP tool names
+# are deliberately NOT matched: `mcp__.*` may well work, but nothing here has measured that
+# a matcher regex is applied to an MCP tool name, and a wiring that silently matches nothing
+# is worse than one that admits its scope. Widening it is this one string.
+REPEAT_MATCHER = "Bash|Skill"
 LEDGER = "ledger.jsonl"
 BACKUP_PREFIX = ".bak-skill-compounder-"
 MAX_BACKUPS = 10
@@ -336,6 +361,21 @@ def _has_use_hook(app_home):
     return (Path(app_home) / "hooks" / "skill-use.sh").exists()
 
 
+def _gate_cmd(app_home, script):
+    return '"%s/hooks/%s"' % (app_home, script)
+
+
+def _has_gate(app_home, script):
+    """A checkout predating one of the issue-#19 gates still installs, minus its wiring.
+
+    Same judgement as _has_claim_gate and _has_use_hook, factored because there are now
+    three of them: the package must remain installable from a checkout older than any
+    individual component, and the alternative -- refusing to install because one script is
+    absent -- turns a partial upgrade into no upgrade at all.
+    """
+    return (Path(app_home) / "hooks" / script).exists()
+
+
 def _hooks_map(settings, strict):
     """The ``hooks`` object, or a clear error naming the key that is wrong.
 
@@ -417,10 +457,11 @@ OUR_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailu
 # tuple per event. Stripping only the first would leave the second wired to a checkout the
 # user had just removed.
 OUR_EVENT_MARKERS = (("UserPromptSubmit", (HOOK_MARKER,)),
-                     ("PreToolUse", (CLAIM_GATE_MARKER,)),
-                     ("PostToolUse", (HOOK_MARKER, USE_MARKER)),
-                     ("PostToolUseFailure", (USE_MARKER,)),
-                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER)))
+                     ("PreToolUse", (CLAIM_GATE_MARKER, DOC_GATE_MARKER,
+                                     REPEAT_GATE_MARKER)),
+                     ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_MARKER)),
+                     ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_MARKER)),
+                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER)))
 
 
 def preexisting_events(settings, recorded=()):
@@ -485,16 +526,40 @@ def merge_hooks(settings, app_home):
     # entry of ours that can deny a tool call, and the only one wired to an event the user
     # may already be using for permission rules of their own, so the marker strip matters
     # here as much as the append does.
+    #
+    # Three of our entries now live on PreToolUse and all three can deny. Every marker is
+    # stripped before any is appended, so an entry left by an older checkout is never found
+    # sitting beside a fresh one -- and the strip is per marker, so a gate whose script is
+    # missing from this checkout has its stale entry removed rather than left orphaned
+    # pointing at a file that is gone.
+    pre = _event_groups(hooks, "PreToolUse", True)
+    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_MARKER):
+        pre = _strip_marker(pre, _m)
+    _pre_wired = False
     if _has_claim_gate(app_home):
-        pre = _strip_marker(_event_groups(hooks, "PreToolUse", True), CLAIM_GATE_MARKER)
         pre.append({"matcher": COMMIT_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _claim_gate_cmd(app_home),
                                "timeout": 10}]})
+        _pre_wired = True
+    if _has_gate(app_home, "doc-gate.sh"):
+        pre.append({"matcher": COMMIT_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "doc-gate.sh"),
+                               "timeout": 10}]})
+        _pre_wired = True
+    if _has_gate(app_home, "repeat-gate.sh"):
+        pre.append({"matcher": REPEAT_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "repeat-gate.sh"),
+                               "timeout": 10}]})
+        _pre_wired = True
+    if _pre_wired or pre:
         hooks["PreToolUse"] = pre
 
     ptu = _strip_marker(_event_groups(hooks, "PostToolUse", True), HOOK_MARKER)
     ptu = _strip_marker(ptu, USE_MARKER)
+    ptu = _strip_marker(ptu, REPEAT_GATE_MARKER)
     ptu.append({"matcher": EDIT_MATCHER,
                 "hooks": [{"type": "command",
                            "command": _hook_cmd(app_home, "edit"),
@@ -504,16 +569,38 @@ def merge_hooks(settings, app_home):
                     "hooks": [{"type": "command",
                                "command": _use_cmd(app_home, "ok"),
                                "timeout": 10}]})
+    # The repeat gate's recovery arm: the success that followed a failure is the only place
+    # the workaround can be observed, and observing it is what makes the deny useful rather
+    # than merely obstructive.
+    if _has_gate(app_home, "repeat-gate.sh"):
+        ptu.append({"matcher": REPEAT_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "repeat-gate.sh"),
+                               "timeout": 10}]})
     hooks["PostToolUse"] = ptu
 
     # The failure twin. Wiring only the success event does not merely miss failures, it
     # records each one as a success, which is a wrong number rather than a missing one.
+    ptf = _strip_marker(_event_groups(hooks, "PostToolUseFailure", True), USE_MARKER)
+    ptf = _strip_marker(ptf, REPEAT_GATE_MARKER)
+    _ptf_wired = False
     if _has_use_hook(app_home):
-        ptf = _strip_marker(_event_groups(hooks, "PostToolUseFailure", True), USE_MARKER)
         ptf.append({"matcher": SKILL_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _use_cmd(app_home, "fail"),
                                "timeout": 10}]})
+        _ptf_wired = True
+    # This is the arm the repeat gate learns from. It is also the ONLY event that carries
+    # both the failing command and the error text: measured 2026-08-26 on 2.1.246, the
+    # payload holds tool_input and an `error` field reading "Exit code 1\n<stderr>", and a
+    # failed Bash call fires no PostToolUse at all.
+    if _has_gate(app_home, "repeat-gate.sh"):
+        ptf.append({"matcher": REPEAT_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "repeat-gate.sh"),
+                               "timeout": 10}]})
+        _ptf_wired = True
+    if _ptf_wired or ptf:
         hooks["PostToolUseFailure"] = ptf
 
     # Stop carries .last_assistant_message, which is where both of our Stop hooks read
@@ -523,6 +610,7 @@ def merge_hooks(settings, app_home):
     # sitting beside a fresh one.
     stop = _strip_marker(_event_groups(hooks, "Stop", True), INSIGHT_MARKER)
     stop = _strip_marker(stop, CLAIM_GATE_MARKER)
+    stop = _strip_marker(stop, APPLY_GATE_MARKER)
     wired_stop = False
     if (Path(app_home) / "hooks" / "insight-capture.sh").exists():
         stop.append({"hooks": [{"type": "command",
@@ -532,6 +620,11 @@ def merge_hooks(settings, app_home):
     if _has_claim_gate(app_home):
         stop.append({"hooks": [{"type": "command",
                                 "command": _claim_gate_cmd(app_home),
+                                "timeout": 10}]})
+        wired_stop = True
+    if _has_gate(app_home, "apply-gate.sh"):
+        stop.append({"hooks": [{"type": "command",
+                                "command": _gate_cmd(app_home, "apply-gate.sh"),
                                 "timeout": 10}]})
         wired_stop = True
     if wired_stop:

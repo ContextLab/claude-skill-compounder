@@ -794,3 +794,85 @@ of a green suite is "my guard has a hole" — so a working guard gets reported a
 then widened for no reason. This has now happened twice in this repository, both times on
 text wrapped at the column limit, which is most prose here. Assert that the mutated file
 differs from the original before you run anything against it.
+
+## Three gates, and the reason there are now three
+
+`hooks/claim-gate.sh` was for a long time the one component here that refused anything, and
+its own header argued that a refusal is a different mechanism from a reminder rather than a
+louder one. Issue #19 supplied the measurement that turns that argument into a rule for the
+whole package: the edit checkpoint fired at edits 12, 24 and 36 in one session and was read
+past every time, seven of nine shipped skills never arrived on their own in real work, and
+`superpowers:verification-before-completion` — whose description is an excellent statement
+of its own problem — had been invoked zero times in 1,988 transcripts. Wording was never the
+variable. A thread absorbed in one fix answers *"is this recurring?"* honestly with *"no"*,
+every time, because from inside the fix it is not recurring.
+
+So the three components issue #19 asked for are refusals, not notices, and each refuses at
+the only moment its evidence exists.
+
+**The documentation gate refuses at the push, because that is where the diff is knowable.**
+A session about to push knows exactly which commits are leaving and exactly which files they
+touched. Nowhere earlier is that set decidable, and nowhere later does it matter. What the
+gate does not do is audit the prose itself — that is `claim-provenance`'s procedure, and the
+deny reason names it. The division is the point: **a hook decides *when*, a skill carries
+*how*.** Building the audit into the hook would have meant a second, worse copy of a mature
+skill, running in a context with no model in it.
+
+**The escape hatch is read from the command text and never from the environment.** An
+exported variable is an escape taken without noticing it was taken — it survives from an
+unrelated shell, it applies to every push for the rest of the session, and nothing on any
+surface records that it was in force. Requiring `DOC_GATE_OVERRIDE="<reason>" git push …` to
+appear in the command, or a `Doc-Gate-Override:` trailer in the commit being pushed, makes
+taking the escape a deliberate act with a written reason, and every one of them appends a
+row to `<state>/doc-gate/overrides.jsonl`. An escape nobody can count is indistinguishable
+from a gate nobody has.
+
+**`notes/` is classified as neither code nor documentation, and that is deliberate.** It is
+a dated log rather than a description of the system. Counting it as documentation would let
+every push this repository makes satisfy the gate by adding a session note, which is exactly
+the shape of compliance the gate exists to refuse.
+
+**The repeat gate spans three events because the thing it recognises is a sequence.** A
+failure is one event, the call that worked instead is another, and the next attempt at the
+failure is a third, in a later session. No single event carries a repeated mistake; only the
+join does. `PostToolUseFailure` is the only event that carries both the failing command and
+the error text, which is why the learning arm hangs there and not on `PostToolUse` — a
+failed `Bash` call fires no `PostToolUse` at all.
+
+**Its signature is split into a call key and an error class, and the split is forced by the
+event ordering.** A `PreToolUse` hook is asked to judge a call *before* it has failed, so it
+cannot know which error it is about to get; it can only ask whether *any* recorded error
+class is attached to this call key. Folding the two into one opaque hash would have made the
+gate unable to answer its own question at the moment it is asked. Keeping them separate also
+stops a command that failed once for a transient reason — a timeout, a rate limit — from
+sharing a signature with the same command failing structurally, which is the difference
+between a useful refusal and noise.
+
+**The gate denies once per session per signature, and would be worse if it denied always.**
+The recovery it names is a heuristic — the first success of the same tool after a failure,
+inside a bounded window, agreed across sessions by plurality — and a heuristic that cannot be
+overruled is a trap. One refusal forces a decision; a second attempt in the same session goes
+through. That is the same shape the claim gate's per-claim `dfile` has, for the same reason.
+
+**The apply gate exists because "installed" and "used" were two hopes, not one event.** A
+forge used to end at `skillforge done`, which links the skill and writes the outcome row.
+Nothing then used the skill on the problem that caused it, and nothing could tell the
+difference between a skill that solved its case and one that was never tried. `done` keeps
+its ledger contract untouched — every existing reader selects `start`/`done`/`fail` by name
+and must keep answering as it did — and instead writes a **debt**: a marker under
+`<state>/apply-pending/`. `skillforge apply` discharges it with an `apply` row carrying
+verbatim evidence, and the `Stop` hook refuses to end the forging session's turn while the
+debt stands.
+
+**Only the forging session is refused, and a marker from another session is shown rather
+than blocked on.** Blocking someone's turn over a forge they did not run is the misfire that
+gets a hook switched off, and a hook that has been switched off protects nothing. The status
+line carries the other case instead, which is where a standing debt belongs: visible,
+unignorable, and costing nobody a turn.
+
+**`--outcome declined` is escapable, and has to be.** A session that finds the new skill did
+not apply must have a correct move available; the alternative is a session with no way out
+of a gate, which is worse than no gate. What is enforced is therefore that *an outcome was
+recorded with a reason*, not that the outcome was true. That is a real limit and it is
+stated rather than papered over — the ledger can count declines, and a skill declined every
+time it comes up is a finding the ledger can surface even though no hook could.

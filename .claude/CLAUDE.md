@@ -245,7 +245,7 @@ the status line expires on, `SKILLFORGE_DONE_TTL` and `SKILLFORGE_FAIL_TTL`; and
 a refusal, `SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE`, without which `session-review.sh`
 declines to spend money from any state root under a temp directory. A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
-`grep -rhoE '\b(SKILLFORGE|CI|INSIGHT|SKILLUSE|STATUSLINE|CLAIM_GATE|SKILL_COMPOUNDER)_[A-Z0-9_]+'
+`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
 hooks/ bin/ statusline/ skill_compounder/ | sort -u` and reading each hit; re-run it rather
 than trusting the list if the two have drifted. Four of those seven prefixes were missing
 from the command this paragraph used to print, so it could not produce the list it

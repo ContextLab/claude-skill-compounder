@@ -64,8 +64,21 @@ def main():
               "and run this again to finish.", file=sys.stderr)
         return 1
     print("\nNext steps:")
-    print("  1. Ensure %s is on your PATH (for skillforge, skillreport,\n"
-          "     skillinsight, and skillcontrib)." % args.bin_dir)
+    # The CLI names are RE-DERIVED from what was just linked, never listed here. The
+    # hardcoded list said "skillforge, skillreport, skillinsight, and skillcontrib" and
+    # stayed saying it after `skillrepeat` shipped -- a fifth CLI, linked by the same
+    # install whose closing advice denied it existed. The installer already discovers what
+    # to link by walking `bin/`, so a sentence that enumerates them by hand is a second
+    # source of truth that only ever falls behind.
+    clis = rep.get("cli") or ""
+    names = [n for n in (c.strip() for c in clis.split(",")) if n]
+    if len(names) > 1:
+        which = "for %s and %s" % (", ".join(names[:-1]), names[-1])
+    elif names:
+        which = "for %s" % names[0]
+    else:
+        which = "for this package's CLIs"
+    print("  1. Ensure %s is on your PATH\n     (%s)." % (args.bin_dir, which))
     print("  2. jq is required: `brew install jq` / `apt install jq`.")
     print("  3. Hooks and skills load without a restart, but /hooks forces a reload.")
     print("  4. Try:  skillforge start demo 4 \"checking the animation\"  then  skillforge clear")

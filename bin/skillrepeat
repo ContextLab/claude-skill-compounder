@@ -1,0 +1,487 @@
+#!/usr/bin/env bash
+# skillrepeat: read and retire what hooks/repeat-gate.sh has learned about broken calls.
+#
+#   skillrepeat list   [--json] [--tool <name>] [--all]
+#   skillrepeat show   <sig> [--json]        (every row, tombstoned ones included)
+#   skillrepeat forget <sig> [--why <reason>]
+#   skillrepeat stats  [--json]
+#   skillrepeat --help
+#
+# The store is <state>/repeats/index.jsonl, written by hooks/repeat-gate.sh:
+#   {"t":"fail",    ts, sig, ck, ec, tool, norm, cmd, err, session, tuid}
+#   {"t":"recover", ts, sig, ck, tool, norm, cmd, session, tuid}
+#   {"t":"forget",  ts, sig, session, why}
+#
+# WHY `forget` APPENDS AND NEVER REWRITES. The store is the only record of which calls are
+# broken and what fixed them, and it is written by a hook nobody watches. A subcommand
+# that rewrote the file could lose an hour of observations to one bad jq expression, and
+# nothing would say so afterwards. So forgetting is a TOMBSTONE: a `forget` row suppresses
+# rows for that signature recorded BEFORE its timestamp, and only those. Three consequences
+# worth knowing:
+#   * every reader here and in the gate applies the same cutoff, so what `list` shows is
+#     what the gate would refuse on;
+#   * forgetting is RE-ARMABLE. A signature that starts failing again afterwards
+#     accumulates fresh sessions past the tombstone and can refuse again, which is correct:
+#     "I know about this, stop telling me" is a statement about today, not forever;
+#   * the original rows are still there. `skillrepeat show <sig>` prints every row for a
+#     signature whatever any tombstone says, so a forget can be audited and, if it was
+#     wrong, understood.
+# This is the same stance `skillinsight decline` takes and for the same reason: declining
+# is visible, disregarding is what leaves the record standing.
+#
+# WHY THERE IS NO `skillrepeat add`. Every row in this store is a thing that was OBSERVED
+# to happen, by a hook, from a real payload. A hand-written row would be indistinguishable
+# from an observed one afterwards and would make the whole store testimony rather than
+# measurement -- the same distinction hooks/claim-gate.sh is built on. If a call should be
+# refused and the gate has not learned it, the honest fix is to let it be observed.
+#
+# ENV:
+#   SKILL_COMPOUNDER_STATE   state root ($HOME/.claude/skill-compounder).
+#   REPEAT_MIN_SESSIONS (2)  the gate's refusal threshold, used here only to report which
+#                            signatures are over it. Read from the same variable the gate
+#                            reads so the two cannot disagree.
+#   SKILLREPEAT_NOW          this CLI's clock, epoch seconds, falling back to
+#                            REPEAT_GATE_NOW. It writes the tombstone timestamp, and a
+#                            tombstone that lands before the rows it is meant to suppress
+#                            suppresses nothing -- which is why tests need to pin it.
+#
+# EXIT CODES: 0 success. 1 environment (no jq). 2 usage. 3 the named signature has no rows.
+set -uo pipefail
+
+# ------------------------------------------------------------------------------------
+# THE ENTIRE BODY OF THIS SCRIPT IS ONE BRACE GROUP, AND THE `}` AT THE END OF THE FILE IS
+# WHAT CLOSES IT. bash reads a script LAZILY, by byte offset, and resumes at that offset in
+# whatever the file holds AT THAT MOMENT. This file is symlinked into the user's bin
+# directory and runs out of the checkout, so the same `git pull` that rewrites a hook
+# rewrites this. A brace group is a single compound command, so the whole file must parse
+# in ONE pass before any of it runs. The `exit` before the closing `}` is load-bearing
+# too: a group protects its body and nothing past it, and a script that falls off its end
+# can have bash resume past `}` and run the body a SECOND time. It is a BARE `exit` so the
+# `case` this ends in keeps the exit codes documented above; `exit 0` would erase them.
+# tests/test_script_wrapping.py enforces both halves; docs/DESIGN.md has the reproduction.
+# ------------------------------------------------------------------------------------
+{
+
+# HOME can be unset (cron, a stripped env, a container). Under `set -u` reading it aborts
+# the script non-zero before it has printed anything.
+: "${HOME:=/tmp}"
+ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+DIR="$ROOT/repeats"
+STORE="$DIR/index.jsonl"
+
+MIN_SESSIONS="${REPEAT_MIN_SESSIONS:-2}"
+case "$MIN_SESSIONS" in ''|*[!0-9]*) MIN_SESSIONS=2 ;; esac
+[ "$MIN_SESSIONS" -lt 1 ] && MIN_SESSIONS=1
+
+command -v jq >/dev/null 2>&1 || { echo "skillrepeat: jq is required" >&2; exit 1; }
+
+usage() {
+  sed -n '2,9p' "$0" | sed -e 's/^# \{0,1\}//'
+  echo
+  echo "State: $DIR"
+}
+
+# Portable epoch -> date. GNU first, then BSD, and the RESULT is validated rather than the
+# exit status trusted: `stat -f` and `date -d` both exist on both platforms and mean
+# different things, so a chain that trusts exit codes never reaches its second branch
+# (docs/DESIGN.md, "Six failures that produce no error"). Falls back to the raw epoch,
+# which is ugly and correct, rather than to a wrong date.
+fmt_ts() {
+  case "${1:-}" in ''|*[!0-9]*) printf '%s' "${1:-?}"; return 0 ;; esac
+  d="$(date -d "@$1" '+%Y-%m-%d' 2>/dev/null)"
+  case "$d" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$d"; return 0 ;;
+  esac
+  d="$(date -r "$1" '+%Y-%m-%d' 2>/dev/null)"
+  case "$d" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$d"; return 0 ;;
+  esac
+  printf '%s' "$1"
+}
+
+# Every malformed or foreign line is dropped HERE, once. A file that is not ours landing
+# in the state directory, or a row half-written by a killed hook, must not take out the
+# whole CLI -- so `fromjson? // empty` swallows it and the rest of the store still reads.
+rows() {
+  [ -f "$STORE" ] && [ -r "$STORE" ] || return 0
+  jq -Rc 'fromjson? // empty | select(type=="object")' "$STORE" 2>/dev/null
+}
+
+# THE SUMMARY QUERY. It and the gate's must AGREE about what refuses, and they do: the same
+# per-signature tombstone cutoff, the same distinct-session counts, the same plurality rule
+# for naming a recovery (a tie names nothing -- announcing one of two equally-supported
+# commands as "what worked" would be an invention), and the same self-recovery rule (a
+# success that normalises to the failing call is proof the failure was transient, so it is
+# never named as the fix and its signature never refuses).
+#
+# THEY ARE NOT THE SAME QUERY, AND MUST NOT BE. The gate cuts to ONE callkey and drops the
+# current session BEFORE it groups, so what it walks is a handful of rows however large the
+# store; this CLI reports the whole store and has no such cut available. Written the gate's
+# way -- select every `fail` row, then rescan the whole set once per distinct signature --
+# it is O(signatures x rows), and at the gate's own byte cap with every signature distinct
+# -- the first of the two stores described below, whose size this stanza deliberately does
+# not restate -- `list` and `stats` were both still running after 120 s and had to be
+# killed. Scaling measured 4x per doubling of the signature count. So this groups ONCE, by
+# signature, and looks the tombstones and recoveries up in objects built in the same pass.
+# Those two figures are the ONLY ones in this file that cannot be reproduced by running
+# something today: they describe a query that no longer exists here. Read them as history,
+# not as a measurement, and do not carry them anywhere else.
+#
+# WHAT IT COSTS NOW, printed on this machine 2026-08-26 by TEN runs of
+#   PYTHONPATH=$PWD python3 tests/test_repeat_gate.py CliCostTest -v
+# which builds the store and PRINTS the time on every run, so none of this can quietly stop
+# being true. Observed min to max over those ten, not a mean:
+#   15831 rows, every signature distinct, 4190377 B:  stats 0.50-0.53 s   list 1.15-1.25 s
+#   16446 rows, one signature,            4190440 B:  stats 0.34-0.36 s
+# TEN RUNS AND NOT FIVE, AND RE-RUN WHENEVER THE CODE UNDER THEM CHANGES. A range from too
+# few runs is narrower than the thing it describes and reads as a precision the data does
+# not carry; a range measured on code this is no longer the code of is not a measurement of
+# it at all. These are the ranges the shipped formatter printed -- the earlier ones were of
+# the fixed-width one, and `list` moved. They are wall times on a laptop doing other work,
+# noise-dominated at this width; what actually holds is the assertion, CliCostTest.LIMIT.
+#
+# THE GATE'S OWN FIGURE ON THE IDENTICAL STORES IS NOT RESTATED HERE. It is in the
+# REPEAT_GATE_MAX_BYTES stanza of hooks/repeat-gate.sh, which is where to read it. This file
+# carried its own copy until the two disagreed: a bare `0.31 s` here against `0.32-0.47 s`
+# there, neither naming the run it came from, and independent timings matching neither.
+# A measurement written down in two places is a measurement that disagrees with itself.
+#
+# `list` IS LOCALE-SENSITIVE AND `stats` IS NOT, so the figures above need their environment
+# named. That harness pins a minimal environment with no locale variables, so what it prints
+# is the C-LOCALE figure -- and the stanza above is the ONE place `list`'s wall time is
+# written down. This stanza carried a second copy of it, measured its own way, and the two
+# ranges did not contain each other. That is what a figure restated in a second place does,
+# so the copy is deleted rather than re-measured; what stays here is the COMPARISON, which
+# the stanza above cannot make. Twenty runs of each of
+#   /usr/bin/time -p env -i PATH=<minimal> HOME=<tmp> SKILL_COMPOUNDER_STATE=<store> \
+#     LC_ALL=$L bash bin/skillrepeat list >/dev/null
+# with L=C and L=en_US.UTF-8, on that same store, two rounds of ten each so the two locales
+# were interleaved rather than measured an hour apart -- and re-run against the SHIPPED
+# formatter, not the fixed-width one: UTF-8 costs `list` ROUGHLY A THIRD AGAIN for the same
+# work. `stats` over the same command, five runs each, moved by a hundredth of a second.
+# That is the whole comparison: no absolute time is quoted here, because the stanza above
+# is where `list`'s wall time lives. What `list` has and `stats` has not is the awk
+# formatting stage, and multibyte-aware padding is not free. Quote a figure here WITH its
+# locale, or not at all. It is also why the C-locale figure above is the LOW one: a user's
+# own shell will usually be running this in a UTF-8 locale, and will see the higher number.
+#
+# One deliberate difference from the shape this replaced: where a signature is fully
+# tombstoned, the fallback for `tool` and `call` is the last fail row OF THAT SIGNATURE. It
+# used to be the last fail row of the whole store, which reported another signature's
+# command against this one.
+SUMMARY_JQ='
+  . as $rows
+  | ([ $rows[] | select(.t=="forget" and (.sig|type=="string")) ]
+     | group_by(.sig)
+     | map({key: .[0].sig, value: (map(.ts // 0) | max)})
+     | from_entries) as $tomb
+  | ([ $rows[] | select(.t=="recover" and (.sig|type=="string")) ]
+     | group_by(.sig)
+     | map({key: .[0].sig, value: .})
+     | from_entries) as $recs
+  | [ [ $rows[] | select(.t=="fail" and (.sig|type=="string")) ]
+      | group_by(.sig)[]
+      | . as $fs
+      | ($fs[0].sig) as $s
+      | (($tomb[$s]) // -1) as $cut
+      | [ $fs[] | select((.ts // 0) > $cut) ] as $rr
+      | [ (($recs[$s]) // [])[] | select((.ts // 0) > $cut) ] as $rec
+      | (($rr[-1].norm // $fs[-1].norm) // "") as $fn
+      | [ $rec[] | select((.norm // "") == $fn) ] as $self
+      | ([ [ $rec[] | select((.norm // "") != $fn) ] | group_by(.norm)[]
+           | {cmd: (.[-1].cmd // .[-1].norm // ""), c: (map(.session) | unique | length)} ]
+         | sort_by(-.c)) as $g
+      | { sig: $s,
+          tool: (($rr[-1].tool // $fs[-1].tool) // "?"),
+          sessions: ($rr | map(.session) | unique | length),
+          failures: ($rr | length),
+          suppressed: ([ $fs[] | select((.ts // 0) <= $cut) ] | length),
+          forgotten: ($cut >= 0),
+          first: (($rr | map(.ts // 0) | min) // 0),
+          last: (($rr | map(.ts // 0) | max) // 0),
+          call: (($rr[-1].norm // $fs[-1].norm) // ""),
+          error: (($rr[-1].ec // $rr[-1].err) // ""),
+          recovery: (if ($g|length) == 0 then ""
+                     elif ($g|length) == 1 then $g[0].cmd
+                     elif $g[0].c > $g[1].c then $g[0].cmd
+                     else "" end),
+          recovery_sessions: (if ($g|length) == 0 then 0 else $g[0].c end),
+          recovery_tied: (($g|length) > 1 and $g[0].c == $g[1].c),
+          transient_sessions: ($self | map(.session) | unique | length),
+          candidates: ($g | length) }
+    ]
+  | sort_by(-.sessions, .sig)
+'
+
+# The one place the refusal rule is spelled out for this CLI, so `list` and `stats` cannot
+# drift apart from each other or from the gate.
+REFUSES_JQ='(.sessions >= $min and .transient_sessions == 0)'
+
+summary() { rows | jq -s -c "$SUMMARY_JQ" 2>/dev/null; }
+
+# ------------------------------------------------------------------------- list
+cmd_list() {
+  json=0; want_tool=""; show_all=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1 ;;
+      --all) show_all=1 ;;
+      --tool) shift; want_tool="${1:-}" ;;
+      --tool=*) want_tool="${1#--tool=}" ;;
+      *) echo "skillrepeat list: unknown argument $1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  s="$(summary)"
+  [ -z "$s" ] && s='[]'
+  s="$(printf '%s' "$s" | jq -c --arg t "$want_tool" --argjson all "$show_all" '
+        map(select($t == "" or .tool == $t))
+        | map(select($all == 1 or .sessions > 0))' 2>/dev/null)"
+  if [ "$json" = "1" ]; then
+    printf '%s\n' "$s" | jq --argjson min "$MIN_SESSIONS" \
+      'map(. + {refuses: '"$REFUSES_JQ"'})'
+    return 0
+  fi
+  n="$(printf '%s' "$s" | jq -r 'length' 2>/dev/null)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -eq 0 ]; then
+    echo "No repeated failures recorded. ($STORE)"
+    return 0
+  fi
+  # NO COLUMN WIDTH IS WRITTEN DOWN HERE. Every padded column is widened to the widest
+  # value it actually holds, the header is printed with those same widths in the same
+  # pass, and so the header cannot stop being the ruler.
+  #
+  # It was written down twice and was wrong twice, for one reason: a width pinned by hand
+  # is a fact about a producer, kept away from the producer, where nothing re-reads it.
+  # GATE was `%-8s` against a nine-character `transient`. SIGNATURE was `%-30s` against
+  # the thirty-one-character signatures hooks/repeat-gate.sh writes from ordinary input --
+  # `c<crc32>x<bytes>-e<crc32>x<bytes>`, from its hashof(), whose byte counts reach three
+  # digits well inside the normaliser's own caps. Three of the five producers are not
+  # bounded even in principle: SIGNATURE and TOOL are read off a store any writer may
+  # append to, and SESS counts distinct sessions. So there is no number to pin, and the
+  # two columns that ARE closed sets are not pinned either -- one rule for the table is
+  # what stops a third instance of this.
+  #
+  # awk does the MEASURING and the PADDING, both in its own `length()`, so the two agree
+  # whatever the locale. jq's `length` counts codepoints and printf pads by bytes in the C
+  # locale; measuring in one and padding in the other would put the bug straight back on
+  # any non-ASCII value.
+  # tests/test_repeat_gate.py::CliTest::test_no_column_can_overflow_its_header derives the
+  # widest value each producer can emit and asserts CALL still begins where the header
+  # says -- deriving it, rather than pinning it a third time.
+  # THE COLUMNS ARE LAID OUT BY awk, NOT BY A `while IFS=$'\t' read` LOOP, AND THE REASON
+  # IS CORRECTNESS. Tab is IFS WHITESPACE, so `read` COLLAPSES RUNS OF IT: one empty field
+  # silently shifts every field after it left by a column. That is the identical trap that
+  # made the pending file in hooks/repeat-gate.sh use US (0x1f) instead of tab. Measured on
+  # a foreign row carrying an empty `tool` -- a row this CLI promises to survive, and one
+  # the gate itself can never write -- the loop printed the RECOVERY value under TOOL and
+  # started CALL left of the column its own header puts it in; awk -F'\t' did not.
+  # tests/test_repeat_gate.py::CliTest::test_an_empty_column_does_not_shift_the_ones_after_it
+  # is that row, and it FAILS with the loop restored. Verified by restoring it, not assumed.
+  #
+  # SPEED IS NOT WHY awk IS HERE, and this comment no longer quotes any. It used to carry
+  # six timings for a `read` loop that no longer exists in this file -- four of them
+  # sub-ranges that later re-measurement fell outside of, which is what a figure nothing
+  # re-runs does. The loop is slower, by well under the 10 s bound CliCostTest asserts,
+  # which is exactly why restoring it left the suite green and left this change uncovered
+  # until the alignment test above was written. The argument above is a CORRECTNESS one
+  # and needs no timings at all. If speed ever becomes the reason, measure it then.
+  #
+  # Fields arrive @tsv-escaped, so a tab or newline inside a command is `\t` / `\n` and
+  # cannot break the field split.
+  printf '%s' "$s" | jq -r --argjson min "$MIN_SESSIONS" '.[]
+    | [ .sig, (.sessions|tostring), .tool,
+        (if .recovery != "" then "agreed" elif .recovery_tied then "disputed"
+         elif .candidates > 0 then "unclear" else "none" end),
+        (if .transient_sessions > 0 then "transient"
+         elif .sessions >= $min then "refuses" else "-" end),
+        (.call | .[0:60]) ]
+    | @tsv' 2>/dev/null \
+  | awk -F'\t' '
+      { n++; a[n] = $0
+        for (i = 1; i <= 5; i++) if (length($i) > w[i]) w[i] = length($i) }
+      END {
+        h[1] = "SIGNATURE"; h[2] = "SESS"; h[3] = "TOOL"; h[4] = "RECOVERY"; h[5] = "GATE"
+        for (i = 1; i <= 5; i++) if (length(h[i]) > w[i]) w[i] = length(h[i])
+        f = "%-" w[1] "s %" w[2] "s %-" w[3] "s %-" w[4] "s %-" w[5] "s %s\n"
+        printf f, h[1], h[2], h[3], h[4], h[5], "CALL"
+        for (j = 1; j <= n; j++) {
+          split(a[j], c, "\t")
+          printf f, c[1], c[2], c[3], c[4], c[5], c[6]
+        }
+      }'
+  echo
+  echo "GATE refuses = denied once per session, from >= $MIN_SESSIONS distinct sessions."
+  echo "     transient = an earlier session re-ran the identical call and it worked, so"
+  echo "                 the gate never refuses this one, whatever the count."
+  return 0
+}
+
+# ------------------------------------------------------------------------- show
+cmd_show() {
+  json=0; sig=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1 ;;
+      -*) echo "skillrepeat show: unknown argument $1" >&2; return 2 ;;
+      *) [ -n "$sig" ] && { echo "skillrepeat show: one signature at a time" >&2; return 2; }
+         sig="$1" ;;
+    esac
+    shift
+  done
+  [ -z "$sig" ] && { echo "usage: skillrepeat show <sig> [--json]" >&2; return 2; }
+
+  all="$(rows | jq -s -c --arg s "$sig" 'map(select(.sig == $s))' 2>/dev/null)"
+  [ -z "$all" ] && all='[]'
+  cnt="$(printf '%s' "$all" | jq -r 'length' 2>/dev/null)"
+  case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+  if [ "$cnt" -eq 0 ]; then
+    echo "skillrepeat: no rows for signature '$sig'" >&2
+    return 3
+  fi
+  if [ "$json" = "1" ]; then
+    printf '%s' "$all" | jq '.'
+    return 0
+  fi
+
+  one="$(summary | jq -c --arg s "$sig" '.[] | select(.sig == $s)' 2>/dev/null)"
+  echo "signature: $sig"
+  if [ -n "$one" ]; then
+    printf '%s' "$one" | jq -r '"tool:      " + .tool,
+      "sessions:  " + (.sessions|tostring) + " distinct" +
+        (if .suppressed > 0 then " (" + (.suppressed|tostring) + " rows suppressed by a forget)" else "" end),
+      "call:      " + .call,
+      "error:     " + .error' 2>/dev/null
+    fts="$(printf '%s' "$one" | jq -r '.first' 2>/dev/null)"
+    lts="$(printf '%s' "$one" | jq -r '.last' 2>/dev/null)"
+    echo "seen:      $(fmt_ts "$fts") .. $(fmt_ts "$lts")"
+    rec="$(printf '%s' "$one" | jq -r '.recovery' 2>/dev/null)"
+    tr_n="$(printf '%s' "$one" | jq -r '.transient_sessions' 2>/dev/null)"
+    case "$tr_n" in ''|*[!0-9]*) tr_n=0 ;; esac
+    if [ -n "$rec" ]; then
+      echo "recovery:  $rec"
+    elif [ "$(printf '%s' "$one" | jq -r '.recovery_tied' 2>/dev/null)" = "true" ]; then
+      echo "recovery:  disputed -- sessions recorded different commands, none agreed"
+    else
+      echo "recovery:  none recorded"
+    fi
+    # A self-recovery is why the gate is silent about a signature that otherwise looks
+    # well over the threshold, so `show` has to say it or the count reads as a bug.
+    if [ "$tr_n" -gt 0 ]; then
+      echo "transient: $tr_n session(s) re-ran this identical call and it worked, so the"
+      echo "           gate does not refuse it -- see hooks/repeat-gate.sh, A SUCCESS OF"
+      echo "           THE SAME CALL IS NOT A RECOVERY."
+    fi
+  fi
+  echo
+  echo "rows, oldest first (verbatim):"
+  printf '%s' "$all" | jq -r 'sort_by(.ts)[]
+    | "  [" + (.ts|tostring) + "] " + .t + "  session=" + (.session // "?")
+      + (if .t == "fail" then
+           "\n      call:  " + (.cmd // "")
+           + "\n      error: " + ((.err // "") | gsub("\n"; "\n             "))
+         elif .t == "recover" then
+           "\n      ran:   " + (.cmd // "")
+         else
+           "\n      why:   " + (.why // "(no reason given)")
+         end)' 2>/dev/null
+  return 0
+}
+
+# ----------------------------------------------------------------------- forget
+cmd_forget() {
+  sig=""; why=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --why) shift; why="${1:-}" ;;
+      --why=*) why="${1#--why=}" ;;
+      -*) echo "skillrepeat forget: unknown argument $1" >&2; return 2 ;;
+      *) [ -n "$sig" ] && { echo "skillrepeat forget: one signature at a time" >&2; return 2; }
+         sig="$1" ;;
+    esac
+    shift
+  done
+  [ -z "$sig" ] && { echo "usage: skillrepeat forget <sig> [--why <reason>]" >&2; return 2; }
+
+  cnt="$(rows | jq -s -r --arg s "$sig" 'map(select(.sig == $s)) | length' 2>/dev/null)"
+  case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+  # Refusing an unknown signature is the point: a mistyped signature that silently
+  # appended a tombstone matching nothing would look exactly like a successful forget, and
+  # the gate would go on refusing the call the user thought they had just cleared.
+  if [ "$cnt" -eq 0 ]; then
+    echo "skillrepeat: no rows for signature '$sig' -- nothing to forget" >&2
+    return 3
+  fi
+
+  now="${SKILLREPEAT_NOW:-${REPEAT_GATE_NOW:-}}"
+  case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
+  case "$now" in ''|*[!0-9]*) echo "skillrepeat: no usable clock" >&2; return 1 ;; esac
+
+  mkdir -p "$DIR" 2>/dev/null || { echo "skillrepeat: cannot write $DIR" >&2; return 1; }
+  row="$(jq -nc --arg ts "$now" --arg sig "$sig" --arg why "$why" \
+    '{t:"forget", ts:($ts|tonumber), sig:$sig, session:"cli", why:$why}' 2>/dev/null)"
+  [ -z "$row" ] && { echo "skillrepeat: could not build the tombstone" >&2; return 1; }
+  printf '%s\n' "$row" >> "$STORE" 2>/dev/null || {
+    echo "skillrepeat: cannot append to $STORE" >&2; return 1; }
+  echo "forgot $sig -- its $cnt recorded row(s) no longer count, as of $(fmt_ts "$now")."
+  echo "Nothing was deleted; \`skillrepeat show $sig\` still prints all of them."
+  return 0
+}
+
+# ------------------------------------------------------------------------ stats
+cmd_stats() {
+  json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1 ;;
+      *) echo "skillrepeat stats: unknown argument $1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  # ONE jq over the store, and the rows never leave the pipe. Slurping them into a shell
+  # variable and handing them back with `--argjson raw` was the earlier shape, and at the
+  # gate's byte cap that argument is four megabytes -- past ARG_MAX on macOS, where it
+  # fails as E2BIG rather than as anything a reader would recognise. `$sum` is derived
+  # here from the same slurped array, so the summary is computed once.
+  st="$(rows | jq -s -c --argjson min "$MIN_SESSIONS" '
+    ('"$SUMMARY_JQ"') as $sum
+    | { rows: length,
+        failures: ([.[] | select(.t=="fail" and (.sig|type=="string"))] | length),
+        recoveries: ([.[] | select(.t=="recover")] | length),
+        tombstones: ([.[] | select(.t=="forget")] | length),
+        signatures: ($sum | length),
+        sessions: ([.[] | .session // empty] | unique | length),
+        tools: ([.[] | .tool // empty] | unique | length),
+        refusing: ([$sum[] | select('"$REFUSES_JQ"')] | length),
+        with_recovery: ([$sum[] | select(.recovery != "")] | length),
+        threshold: $min }' 2>/dev/null)"
+  [ -z "$st" ] && { echo "skillrepeat: could not summarise the store" >&2; return 1; }
+  if [ "$json" = "1" ]; then
+    printf '%s' "$st" | jq '.'
+    return 0
+  fi
+  printf '%s' "$st" | jq -r --arg store "$STORE" '
+    "store:        " + $store,
+    "rows:         " + (.rows|tostring) + "  (" + (.failures|tostring) + " failures, "
+      + (.recoveries|tostring) + " recoveries, " + (.tombstones|tostring) + " tombstones)",
+    "signatures:   " + (.signatures|tostring),
+    "sessions:     " + (.sessions|tostring),
+    "refusing:     " + (.refusing|tostring) + "  (>= " + (.threshold|tostring) + " distinct sessions)",
+    "with a fix:   " + (.with_recovery|tostring) + "  signatures name a recovery"'
+  return 0
+}
+
+sub="${1:-}"
+[ $# -gt 0 ] && shift
+case "$sub" in
+  list)   cmd_list "$@" ;;
+  show)   cmd_show "$@" ;;
+  forget) cmd_forget "$@" ;;
+  stats)  cmd_stats "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) echo "skillrepeat: unknown subcommand '$sub'" >&2; usage >&2; exit 2 ;;
+esac
+exit
+
+}

@@ -538,7 +538,18 @@ INSTRUCTIONS
         [ -z "$rsid" ] && continue
         # Must sanitise exactly as hooks/compound-improvement.sh does, or this looks
         # for a filename that never existed and silently shows nothing.
-        safe="$(printf '%s' "$rsid" | tr -c 'A-Za-z0-9._-' '_')"
+        #
+        # THE `cut` IS HALF OF "EXACTLY", AND IT WAS MISSING. Every other site in this
+        # package spells it `tr -c 'A-Za-z0-9._-' '_' | cut -c1-96`; this one stopped at
+        # the `tr` while the comment above it claimed the spellings matched. The two
+        # agree for a 36-character UUID and diverge the moment an id is longer than 96:
+        # measured on a 130-character id, the writer produces a 96-character name and
+        # this reader looked for the 129-character one, found no file, and `continue`d --
+        # showing nothing, with no error, which is indistinguishable from a session that
+        # touched no files. A comment asserting two things are identical is not a check;
+        # tests/test_insights.py now compares the two expressions on an id long enough
+        # to tell them apart.
+        safe="$(printf '%s' "$rsid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
         live="$REMINDERS/$safe.paths"
         [ -f "$live" ] || continue
         total="$(sort -u "$live" 2>/dev/null | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
