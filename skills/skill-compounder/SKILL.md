@@ -1,6 +1,6 @@
 ---
 name: skill-compounder
-description: "Use when a skill you just used misfired — it told you the wrong thing (to run from the wrong directory, an outdated command), or fired when it should not have — so it needs fixing or retiring; when deciding whether a repeatable procedure has earned becoming a skill; or when asking, before implementing something new, 'is there already something for this?'. Do NOT use to author a skill you have already decided on (that is writing-skills), for a one-off script, or for ordinary refactoring."
+description: "Use when a skill you just used misfired — it told you the wrong thing (to run from the wrong directory, an outdated command), or fired when it should not have — so it needs fixing or retiring; when deciding whether a repeatable procedure has earned becoming a skill; or when asking, before implementing something new, 'is there already something for this?'. Do NOT use to author a skill already decided on (that is superpowers:writing-skills), for a one-off script, or ordinary refactoring."
 ---
 
 # Compounding: turn hard-won procedures into permanent capability
@@ -137,20 +137,21 @@ anyone needed to keep; the finished skill is.
 **B is the orchestrator, not a fourth agent.** It decides scope, sets the cap, dispatches C
 and D, and confirms every fix by running it rather than trusting the report that claims it —
 builders in this loop have reported fixes that were not made and figures that did not
-reproduce. A subagent dispatched by the main session can itself dispatch subagents: probed
-three times it had the `Agent` tool every time, with `skillforge` on its `PATH`, so B drives
-the animation while it works. One level further down availability is inconsistent — at depth
-two, one agent had `Agent` and another reported the identical tool list *minus* `Agent`, with
-no rule predicting which — so **use exactly one orchestrator layer, and never nest
-orchestrators**; C and D dispatch nobody (`docs/CLAUDE-CODE-BEHAVIOR.md`). If you are
+reproduce. A subagent dispatched by the main session can itself dispatch subagents (probed
+three times, it had `Agent` every time) so B drives the animation while it works; one level
+further down, availability is inconsistent with no rule predicting which way. So **use
+exactly one orchestrator layer, and never nest orchestrators**; C and D dispatch nobody
+(`docs/CLAUDE-CODE-BEHAVIOR.md`). If you are
 invoking this skill from *inside* a subagent already, B would start in that inconsistent
 band: run the rounds yourself from step 3, keeping the announcement and the close here.
 
 Do **not** hand B the project, the repository path, or the verbatim trigger; those are the
-test set. Hand it: A's framing and the generalised transcript, **dead ends included**; the
-round cap; the `skillforge step` numbering **spelled out** (`step 1` on dispatching C, `step
-2` when its draft passes the parse gate, `step 3`/`step 4` for the first D round, and so on —
-the numbered headings here are prose sections and do not coincide); steps 3 to 7 below
+test set — and the CLI B drives holds them back rather than trusting it: `skillforge show`
+and `skillforge ledger` omit `root`, `trigger`, `project` and `trigger_verbatim` without
+`--full`, naming what they left out. Hand it: A's framing and the generalised transcript,
+**dead ends included**; the round cap; the `skillforge step` numbering **spelled out** (`step
+1` on dispatching C, `step 2` when its draft passes the parse gate, `step 3`/`step 4` for the
+first D round, and so on — the headings are prose sections and do not coincide); steps 3 to 7
 **pasted in full** rather than referenced, so it does not read step 2 and nest a second
 orchestrator; and one abort condition: **if it has no `Agent` tool it stops and says so
 immediately** — it must never write the skill itself or review its own draft, because an
@@ -201,9 +202,10 @@ level, since where a skill installs decides which router sees it.
 
 **4. C: build it in a scratch directory, and run everything it claims.** Dispatch a subagent
 and tell it to invoke **`skill-authoring`**, which ships with this package and is therefore
-present wherever this skill is. Name it explicitly: an earlier version of this step named
-`skill-creator` and `writing-skills`, neither of which resolves on a fresh Claude Code
-install, so a cold session followed the instruction and found nothing.
+present wherever this skill is. Name it explicitly: an earlier version of this step said
+`skill-creator` and `writing-skills`, and neither bare name resolves — they exist only as
+`compound-engineering:skill-creator` and `superpowers:writing-skills`, inside plugins a fresh
+install does not carry — so a cold session followed the instruction and found nothing.
 
 **Isolation is structural, and it is test discipline rather than tidiness.** Hand C a scratch
 working directory and no path into the project — "do not look at the project" is a sentence,
@@ -256,7 +258,7 @@ conclusions. D's required eval checklist:
 |-|-|
 |**Inferred scenario**|Can D say what this skill is for, from the skill alone? A guess it cannot make is a hanging reference.|
 |**Cold start**|Can step 1 be executed with no prior context and no clarifying question?|
-|**Trigger precision**|**Run** the section's 3 must-fire and 3 must-not-fire prompts through real `claude -p --model sonnet` sessions, per step 7. A row with no observed `Skill` call behind it is a finding.|
+|**Trigger precision**|**Run** the section's 3 must-fire and 3 must-not-fire prompts through real `claude -p --model sonnet` sessions, per step 7. Nothing has installed the draft yet, so copy it to `<scratch>/.claude/skills/<name>/SKILL.md` and run each prompt with that scratch directory as the working directory: a headless run started there sees a project skill, and only there. A row with no observed `Skill` call behind it is a finding.|
 |**Verified claims**|Actually run every command, path, and API call the skill asserts. Unverified claims are defects.|
 |**Portability**|Does any example need a project D cannot see? That is the contamination the isolation was for.|
 |**Unhappy path**|What does a session do when a step fails partway through?|
@@ -285,6 +287,9 @@ the only party who has seen both the project and the finished skill, so this is 
 place "did it actually solve the thing that started this" can be asked at all. Re-read the
 step-1 file — not your memory of it — and:
 
+- **move the clean draft into place first**: it is still in C's scratch directory, and `done`
+  looks only under `<repo>/skills/<name>/`, `<repo>/.claude/skills/<name>/`, or `--skill-dir`
+  from `start`. B reports that path and never learns the destination, so the copy is yours;
 - **attempt the original triggering problem again, with the skill**, and say what happened;
 - score each success criterion as written — one that now looks wrong is a finding for E,
   never a criterion to edit;
@@ -321,6 +326,11 @@ descriptions were measured absent from the router on haiku, so a haiku probe pro
 Cost: six prompts, one session each, 30-90s apiece, six in parallel — about 6 calls and 1–3
 minutes per skill per pass; the whole eight-skill seed pool is ~48 calls and ~15 minutes.
 
+**One run is one draw, and a draw is not a verdict.** Routing is stochastic: one unchanged
+description here gave 3/3, then 1/3, then 2/3. So the gate is **at least three runs of the
+whole section**, and the pin records `runs: N` and a k/N count per prompt, not a binary:
+`verified` only when every prompt won every draw, `partial` when any of them split.
+
 **When a must-fire prompt loses, the description is what changes.** Not the prompt and not
 the verdict; routing is brutally sensitive to the opening clause, so this is usually a small
 edit with a large effect — changing `"Use before debugging logic"` to `"Use before any other
@@ -342,8 +352,8 @@ this skill stays out of it and the neighbour the section names actually wins it.
 <!-- doctrine: unmeasured-is-not-verified -->
 **A probe that could not run is never a pass.** No login, no quota, offline: the skill may
 still ship, but it ships marked unmeasured and says so where the next session will read it —
-the pin records `measured: never`, `model: n/a`, `cli: n/a`, `result: unmeasured`; the close
-message names it; and in this repository the name goes into `UNVERIFIED` in
+the pin records `measured: never`, `model: n/a`, `cli: n/a`, `runs: 0`,
+`result: unmeasured`; the close message names it; and here the name goes into `UNVERIFIED` in
 `tests/test_routing_claims.py`, a debt ledger that may only shrink. What is forbidden is the
 silent promotion. **The gate proves a claim at a moment; it cannot keep it true.** A claim can
 go false with no change to the skill and no commit anywhere near it — `stale-artifact-check`
@@ -381,11 +391,10 @@ once the second condition holds.
 
 **On failure, quarantine the skill with a report neither agent may rewrite.** Each of A, B, C
 and D **appends a signed section** — who they were, what they were given, what they concluded —
-and nothing is edited by anyone else; contradictions are kept and flagged rather than
-reconciled, because a merged narrative hides disagreement, the most informative thing a failed
-forge produces. Then archive the pair the way section 3 archives a retirement: into
-`~/.claude/skills-archive/<name>/`, with the report as its `WHY-ARCHIVED.md`, resolving symlinks
-first, and never `rm -rf`.
+edited by nobody else; contradictions are kept and flagged rather than reconciled, because a
+merged narrative hides disagreement, the most informative thing a failed forge produces. Then
+archive the pair the way section 3 archives a retirement: into `~/.claude/skills-archive/`,
+report as `WHY-ARCHIVED.md`, symlinks resolved first, never `rm -rf`.
 
 ## 3. Fixing, documenting, or retiring a skill that did not work
 
@@ -440,17 +449,17 @@ on. It is written once per skill, ever, so a re-forge does not produce a second 
 "how did this skill get here".
 
 - `done` looks under `<repo>/skills/<name>/` and `<repo>/.claude/skills/<name>/`, or wherever
-  `--skill-dir <dir>` said, and prints what it installed and where. **Read that line.**
-  Anything else — a name already taken, a directory it could not write, no `SKILL.md` found —
-  means the skill is *not* live, and `skillforge install <name> --skill-dir <dir>` is the
-  retry. The name that answers is the skill **directory's**, and a name held by something this
-  package cannot prove it created is refused rather than overwritten.
+  `--skill-dir <dir>` said, and prints what it installed and where. **Read that line.** Anything
+  else — a name taken, a directory it could not write, no `SKILL.md` found — means the skill is
+  *not* live, and `skillforge install <name> --skill-dir <dir>` is the retry. The close row
+  records `skill: present` or `skill: missing` either way, so a forge that shipped nothing stays
+  countable once that line scrolls. The name that answers is the **directory's**, and one held
+  by something this package cannot prove it created is refused.
 - **Lag.** If `Skill` returns `Unknown skill: <name>` right after `done`, make any other tool
   call and retry rather than concluding it failed. Fallback: `cat` the SKILL.md and follow it
-  by path. A skill written to `<repo>/.claude/skills/` stays project-scoped and `done` leaves
-  it there; a headless `claude -p` run started in that repository sees it, one that narrows
-  its setting sources does not, which matters when the gate is probed that way. Both
-  measurements are in `docs/CLAUDE-CODE-BEHAVIOR.md` in the `claude-skill-compounder` repo.
+  by path. A skill written to `<repo>/.claude/skills/` stays project-scoped and `done` leaves it
+  there; a headless `claude -p` run started in that repository sees it, one that narrows its
+  setting sources does not — measured, with the gate's own case, in `docs/CLAUDE-CODE-BEHAVIOR.md`.
 - **Did it get used again?** `skillreport skills` prints all four ledger questions per skill,
   fed by the `use` row `hooks/skill-use.sh` writes per invocation. A *failed* invocation
   (`Unknown skill: <name>`) reaches no hook at all on 2.1.245, so that census counts successes
@@ -461,12 +470,13 @@ on. It is written once per skill, ever, so a re-forge does not produce a second 
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 3bdce6395de9b1ee59296a4293cf3d0f27e775ede9dba291a28226017774dfea
+description-sha256: 7978c6efd2caca28bd8881f136175ef901f0cc558dd79dce6f65abd761630059
 prompts-sha256: b0d3fb4da0e6c09f8453979d51221df6812e8d508da59c7ed43cba5e2dccb40d
 measured: 2026-08-26
 cli: 2.1.245 (Claude Code)
 model: sonnet
-result: verified 3/3 must-fire, 3/3 must-not-fire
+runs: 3
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs)
 -->
 
 Should fire:
@@ -482,19 +492,10 @@ Should NOT fire:
 - "Refactor this module." Ordinary work, no repeatable procedure in view.
 - "Write a one-off script to rename these files."
 
-**A remark with no referent does not fire this, and should not.** Measured on 2026-08-25 by
-running real `claude -p --model sonnet` sessions: *"That took four attempts to get the
-ordering right, and we hit it last week too."*, with no subject named, produces clarifying
-questions and no skill; naming the subject fires it. That is right rather than a miss,
-because the threshold in section 2 wants a concrete referent for both conditions.
-
-Habit 1 (check before implementing) has no reliable lexical hook in the general case: "let's
-build the ingestion pipeline" contains nothing a `description` can match, so that habit is
-carried by the `UserPromptSubmit` reminder hook and the `CLAUDE.md` stanza rather than by
-routing. The second must-fire prompt is the exception, not a refutation — it voices the check
-out loud, and the description quotes that situation language. It and the misfire-repair prompt
-both fired nothing until the description named the situation in the words a user types;
-`references/routing-gate.md` records what each edit changed.
+**A remark with no referent does not fire this, and should not.** *"That took four attempts
+to get the ordering right, and we hit it last week too."*, with no subject named, fires
+nothing; naming it fires this. `references/routing-gate.md` carries the measurements, what
+each description edit changed, and what one passing run does and does not establish.
 
 ## Troubleshooting
 

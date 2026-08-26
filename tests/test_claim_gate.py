@@ -627,6 +627,245 @@ class ClaimGateTest(unittest.TestCase):
         self.assertFalse(os.path.exists(
             os.path.join(self.state, "claim-gate", "s1.numbers")))
 
+    # ============================================ heredocs (2026-08-26 red team, #1)
+    def test_an_unrelated_heredoc_is_not_read_as_the_commit_message(self):
+        """The reviewer's repro, verbatim in shape: a document written with a heredoc,
+        then a commit whose message carries no figure at all. Capture used to begin at
+        the first `<<` and never stop, so the DOCUMENT BODY was judged as the commit
+        message and the commit was denied on the benchmark numbers inside it.
+
+        The figures are chosen to survive every other Tier-1 rule -- not round, not
+        powers of two, no unit after them -- so the only thing that can make this pass
+        is the heredoc being bounded by its own delimiter.
+        """
+        self.write_transcript(self.a_test_run(443))
+        cmd = ("cat > notes/log.md <<'EOF'\n"
+               "Benchmark: 4823 requests, buffer 6197 slots\n"
+               "EOF\n"
+               'git commit -m "add note"')
+        self.assert_silent(self.run_hook(self.pre_payload(cmd)))
+
+    def test_a_heredoc_feeding_git_commit_dash_F_is_read(self):
+        """`git commit -F - <<'MSG'` is the other real form and must still be judged."""
+        self.write_transcript(self.a_test_run(443))
+        cmd = "git commit -F - <<'MSG'\nShip it\n\n1495 tests across 27 files\nMSG"
+        self.assertIn("1495", self.assert_denied(self.run_hook(self.pre_payload(cmd))))
+
+    def test_only_the_commit_heredoc_is_read_when_a_command_has_two(self):
+        """One command, two heredocs: a note and the commit message. Exactly one of them
+        is the claim under test."""
+        self.write_transcript(self.a_test_run(443))
+        cmd = ("cat > notes/log.md <<'DOC'\n"
+               "Benchmark: 4823 requests, buffer 6197 slots\n"
+               "DOC\n"
+               "git commit -F - <<'MSG'\n"
+               "Ship it: 7331 assertions\n"
+               "MSG")
+        reason = self.assert_denied(self.run_hook(self.pre_payload(cmd)))
+        self.assertIn("7331", reason)
+        self.assertNotIn("4823", reason)
+        self.assertNotIn("6197", reason)
+
+    def test_a_dash_m_inside_an_unrelated_heredoc_body_is_not_the_message(self):
+        """Quoted shell inside a document is text, not the command being run."""
+        self.write_transcript(self.a_test_run(443))
+        cmd = ("cat > notes/log.md <<'EOF'\n"
+               'Yesterday I ran git commit -m "9911 assertions" by hand.\n'
+               "EOF\n"
+               'git commit -m "tidy the note"')
+        self.assert_silent(self.run_hook(self.pre_payload(cmd)))
+
+    def test_a_here_string_does_not_open_a_heredoc(self):
+        """`<<<` is a here-STRING with no body; mistaking it for a heredoc swallows the
+        rest of the command."""
+        self.write_transcript(self.a_test_run(443))
+        cmd = ('grep -c x <<<"$BODY"\n'
+               'git commit -m "note 4823 requests"')
+        self.assertIn("4823", self.assert_denied(self.run_hook(self.pre_payload(cmd))))
+
+    # ==================================== the read budget (2026-08-26 red team, #2)
+    def _padded_transcript(self, head_records, pad_bytes):
+        """head_records, then enough filler to push them out of a small read window.
+        Filler carries no figure of its own."""
+        recs = list(head_records)
+        filler = "ok " * 400
+        n = max(1, pad_bytes // len(filler))
+        for i in range(n):
+            recs.append(tool_result("toolu_pad%d" % i, filler))
+        self.write_transcript(recs)
+
+    def test_the_read_budget_is_actually_enforced(self):
+        """MAX_BYTES was dead code on every BSD box: `wc -c < file` prints a leading
+        space, the numeric guard read that as non-numeric and zeroed the size, and the
+        whole transcript was parsed however large it was.
+
+        Here the ONLY support for the figure sits before the window, so an enforced
+        budget must not find it. This asserts the window exists -- the false positive it
+        can cause is the documented cost of bounding the work.
+        """
+        recs = self.a_test_run(443)
+        recs.append(tool_result("toolu_e", "the run produced 8675309 rows\n"))
+        self._padded_transcript(recs, 200000)
+        r = self.run_hook(self.stop_payload("The run produced 8675309 rows."),
+                          CLAIM_GATE_MAX_BYTES=20000)
+        self.assertIn("8675309", self.assert_blocked(r))
+
+    def test_evidence_inside_the_window_is_still_found(self):
+        """The other half of the same rule: a bounded window is not a broken one."""
+        recs = self.a_test_run(443)
+        self._padded_transcript(recs, 200000)
+        recs2 = []
+        with open(self.transcript, encoding="utf-8") as fh:
+            recs2 = [json.loads(l) for l in fh]
+        recs2.append(tool_result("toolu_last", "the run produced 8675309 rows\n"))
+        self.write_transcript(recs2)
+        self.assert_silent(self.run_hook(
+            self.stop_payload("The run produced 8675309 rows."),
+            CLAIM_GATE_MAX_BYTES=20000))
+
+    def test_the_work_does_not_grow_with_the_transcript(self):
+        """Bounded work, measured rather than asserted: with the budget pinned, a
+        transcript 16x larger must not cost 16x more. Unbounded, the same pair was ~9x
+        apart on the machine this was written on (0.33 s at 2 MB, 3.02 s at 32 MB), and
+        a 695 MB session took 33.3 s against a `timeout 10`.
+
+        A RATIO, not a wall-clock ceiling: it cancels how fast the machine is.
+        """
+        import time
+        budget = 1048576
+        elapsed = {}
+        for mb in (2, 32):
+            self._padded_transcript(self.a_test_run(443), mb * 1024 * 1024)
+            p = self.stop_payload("Nothing to see here.", prompt="p-size%d" % mb)
+            t0 = time.time()
+            self.run_hook(p, CLAIM_GATE_MAX_BYTES=budget)
+            elapsed[mb] = time.time() - t0
+        self.assertLess(elapsed[32], elapsed[2] * 4 + 1.0,
+                        "work scaled with the transcript, not with the budget: %r"
+                        % elapsed)
+
+    def test_truncation_does_not_let_tier2_claim_nothing_ran(self):
+        """"Nothing ran in this session" is a statement about what the hook could SEE.
+        With the window cutting off the run, that sentence is not true of the session,
+        and a gate that blocks when it cannot see blocks at random."""
+        self._padded_transcript(self.a_test_run(443), 200000)
+        self.assert_silent(self.run_hook(self.stop_payload("All tests pass."),
+                                         CLAIM_GATE_MAX_BYTES=20000))
+
+    # ================================== tier 2, the CI arm (2026-08-26 red team, #3)
+    def a_ci_run(self):
+        return [
+            user_prompt("check ci"),
+            tool_call("toolu_c", "gh pr checks 129"),
+            tool_result("toolu_c", "All checks were successful\n11 successful checks\n"),
+        ]
+
+    def test_a_ci_green_claim_does_not_go_stale_when_files_change_after(self):
+        """A CI result is pinned to the commit SHA it ran on. Editing the working tree
+        afterwards cannot change what the checks did on that commit, so the staleness
+        question -- which is about the tree in front of you -- does not apply."""
+        recs = self.a_ci_run()
+        recs.append(file_write("toolu_w", "/repo/skill_compounder/installer.py"))
+        recs.append(tool_result("toolu_w", "ok"))
+        self.write_transcript(recs)
+        self.assert_silent(self.run_hook(
+            self.stop_payload("CI green across 11 checks on the pushed commit.")))
+
+    def test_a_local_suite_claim_beside_a_ci_claim_is_still_checked(self):
+        """The exemption covers the CI half of a sentence, not the other half: "all
+        tests pass" IS about the current tree, so the edit still stales it."""
+        recs = self.a_test_run(443) + self.a_ci_run()[1:]
+        recs.append(file_write("toolu_w", "/repo/skill_compounder/installer.py"))
+        recs.append(tool_result("toolu_w", "ok"))
+        self.write_transcript(recs)
+        reason = self.assert_blocked(self.run_hook(
+            self.stop_payload("All tests pass and CI is green.")))
+        self.assertIn("AFTER the last test run", reason)
+
+    def test_a_ci_claim_with_no_ci_query_anywhere_still_blocks(self):
+        """The exemption needs a CI query to have happened. Asserting CI is green with
+        nothing in the session having asked CI anything is the original defect."""
+        self.write_transcript([
+            user_prompt("ship it"),
+            tool_call("toolu_1", "git push"),
+            tool_result("toolu_1", "Everything up-to-date\n"),
+        ])
+        reason = self.assert_blocked(self.run_hook(
+            self.stop_payload("CI is green on the pushed commit.")))
+        self.assertIn("nothing in this session ran a test command", reason)
+
+    # ============================ tier 2, mention versus use (2026-08-26 red team, #3)
+    def test_prose_about_testing_is_not_a_claim_that_a_suite_passed(self):
+        """Both sentences are real, off real closing messages, and both fired Tier 2.
+        Neither asserts that anything passed: one is a generalisation about mocks, the
+        other a conditional about what a passing test would mean."""
+        self.write_transcript([
+            user_prompt("write up the decision"),
+            tool_call("toolu_1", "cat README.md"),
+            tool_result("toolu_1", "prose\n"),
+        ])
+        for i, msg in enumerate((
+                "Mock-based testing creates a false sense of security. When tests pass "
+                "against mocks but fail against real APIs, we have shipped bugs.",
+                "An unmatched baseline would let the discrimination test pass trivially "
+                "by detecting journal formatting instead of your voice.",
+                "The slowdown is worth the guarantee: if the test passes, the code works "
+                "against the actual service.")):
+            self.assert_silent(self.run_hook(
+                self.stop_payload(msg, prompt="p-prose%d" % i)))
+
+    def test_a_determiner_or_a_count_still_makes_it_a_suite_claim(self):
+        """The anchor must not have retired the check it is anchoring."""
+        self.write_transcript([
+            user_prompt("fix it"),
+            tool_call("toolu_1", "grep -rn foo src"),
+            tool_result("toolu_1", "src/a.py:1:foo\n"),
+        ])
+        for i, msg in enumerate(("The tests pass on this tree.",
+                                 "Fixed it, and the whole suite is green.",
+                                 "Tests pass now.")):
+            reason = self.assert_blocked(self.run_hook(
+                self.stop_payload(msg, prompt="p-claim%d" % i)))
+            self.assertIn("nothing in this session ran a test command", reason)
+
+    # =============================== tier 1, named constants (2026-08-26 red team, #3)
+    def test_a_spaced_magnitude_unit_is_not_a_measured_count(self):
+        """`2KB` was already exempt and `512 MB` was not, which is the same figure with
+        a space in it. The list is units only -- see the guard test below."""
+        self.write_transcript(self.a_test_run(443))
+        msg = ("The artefact is 512 MB, the p99 is 250 ms, throughput held at 4823 rps "
+               "and the header is 8447 bytes.")
+        self.assert_silent(self.run_hook(self.stop_payload(msg)))
+
+    def test_a_file_mode_is_not_a_count(self):
+        """A leading zero means octal. The old code stripped the zero and manufactured a
+        count of 644 out of `umask 0644` -- measured on a real closing message."""
+        self.write_transcript(self.a_test_run(443))
+        msg = "The key is saved world-readable (umask 0644) and the dir is 0755."
+        self.assert_silent(self.run_hook(self.stop_payload(msg)))
+
+    def test_round_and_power_of_two_constants_are_not_counts(self):
+        """Budgets, limits, buffer and cache sizes. Same argument the powers-of-ten rule
+        already makes: a real measurement almost never lands on one."""
+        self.write_transcript(self.a_test_run(443))
+        msg = ("Rationale (300 words): the cache holds 4096 entries, the file is 3400 "
+               "lines, the limit is 1024 and the buffer is 8192.")
+        self.assert_silent(self.run_hook(self.stop_payload(msg)))
+
+    def test_the_widening_did_not_retire_tier_1(self):
+        """THE GUARD. Every figure here is the shape the founding defect took, and each
+        one must still be caught after the exemptions above. If a future widening makes
+        this test silent, the widening went too far."""
+        self.write_transcript(self.a_test_run(443))
+        for i, (msg, num) in enumerate((
+                ("The suite is now 1495 tests.", "1495"),
+                ("Measured across 21926 words of prose.", "21926"),
+                ("The scrub touched 1,847 records.", "1847"),
+                ("That is 8675309 rows in the export.", "8675309"))):
+            reason = self.assert_blocked(self.run_hook(
+                self.stop_payload(msg, prompt="p-guard%d" % i)))
+            self.assertIn(num, reason)
+
     # ================================================================ script hygiene
     def test_the_script_parses_and_is_brace_wrapped(self):
         """House rule: the whole body is one brace group, `exit` before the closing `}`,

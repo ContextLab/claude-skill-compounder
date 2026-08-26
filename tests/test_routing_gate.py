@@ -324,5 +324,162 @@ class RedTeamChecklistTest(unittest.TestCase):
             "routing claims shipped for months.")
 
 
+class OneRunIsOneDrawTest(unittest.TestCase):
+    """A gate result is k/N over N runs, never a binary from a single sample.
+
+    WHY. `scripts/probe_routing_claims.py` samples each prompt once, and the pin used to
+    record `verified 3/3 must-fire, 3/3 must-not-fire` from that one draw. But routing
+    here has been measured stochastic: one unchanged description gave 3/3, then 1/3, then
+    2/3, with no edit anywhere between the runs. A binary from n=1 therefore reports a
+    draw as though it were a property, and -- worse for the pin's actual job -- its date
+    cannot separate a real regression from the same variance landing differently.
+
+    Both halves are asserted: the protocol has to STATE a minimum N, and the pin that
+    ships has to MEET the N it states. Neither alone catches the drift.
+    """
+
+    MIN_RUNS_RE = re.compile(r"at least three runs of the\s+whole section")
+
+    def pin(self):
+        pin = rc.parse_skill(SKILL_PATH)["pin"]
+        self.assertIsNotNone(pin, "skill-compounder ships no routing pin")
+        return pin
+
+    def test_the_protocol_states_a_minimum_number_of_runs(self):
+        body = flatten(gate_step()[1])
+        self.assertIn("at least three runs of the whole section", body,
+                      "the gate no longer states a minimum N, so a session runs the "
+                      "probe once and pins the draw it happened to get")
+        self.assertIn("One run is one draw, and a draw is not a verdict", body)
+        self.assertIn("`runs: N`", body,
+                      "the gate does not tell a session to record how many runs it made")
+
+    def test_the_protocol_states_the_measured_reason_the_minimum_exists(self):
+        """A floor with no measurement behind it is a number someone will round down."""
+        self.assertRegex(flatten(gate_step()[1]),
+                         r"gave 3/3, then 1/3, then 2/3")
+
+    def test_the_shipped_pin_records_how_many_runs_it_rests_on(self):
+        pin = self.pin()
+        self.assertIn("runs", pin,
+                      "the shipped pin has no `runs` field, so nothing distinguishes a "
+                      "three-run measurement from a single draw")
+        self.assertRegex(pin["runs"], r"^\d+$")
+
+    def test_the_shipped_pin_meets_the_minimum_the_protocol_states(self):
+        """Derived from the sentence above rather than hardcoded here: raising the floor
+        in the protocol has to move this test with it."""
+        self.assertTrue(self.MIN_RUNS_RE.search(FORGING),
+                        "the protocol's minimum-runs sentence changed shape; re-derive "
+                        "the floor here in the same edit")
+        self.assertGreaterEqual(int(self.pin()["runs"]), 3)
+
+    def test_a_verified_result_counts_draws_and_not_just_prompts(self):
+        """`verified 3/3 must-fire` is the exact string that meant one sample. A result
+        that still reads that way has not been re-measured, whatever `runs` says."""
+        pin = self.pin()
+        runs = int(pin["runs"])
+        result = pin["result"]
+        self.assertTrue(result.startswith("verified"), result)
+        m = re.search(r"(\d+)/(\d+) must-fire draws", result)
+        self.assertIsNotNone(
+            m, "the pin result does not count DRAWS: %r. With runs=%d a clean section "
+               "has %d must-fire draws, not 3." % (result, runs, 3 * runs))
+        self.assertEqual(int(m.group(2)), 3 * runs,
+                         "the denominator is not prompts x runs: %r" % result)
+        self.assertEqual(m.group(1), m.group(2),
+                         "`verified` claims every draw won; this result does not")
+
+    def test_the_reference_says_what_one_passing_run_does_and_does_not_establish(self):
+        ref = (ROOT / "skills" / "skill-compounder" / "references"
+               / "routing-gate.md").read_text()
+        flat = flatten(ref)
+        self.assertIn("It establishes that the router chose this skill on that draw",
+                      flat)
+        self.assertIn("It establishes nothing about the next draw.", flat)
+        for verdict in ("verified", "partial", "unmeasured"):
+            self.assertRegex(flat, r"`%s` [-—]" % verdict,
+                             "routing-gate.md does not define the %r verdict, so the "
+                             "pin format is stated in one place and explained nowhere"
+                             % verdict)
+        self.assertIn("not licence to re-roll", flat,
+                      "nothing warns against re-running until a green appears, which is "
+                      "the same move as pasting a fresh hash into a broken pin")
+
+
+class HandOffNamesAgreeTest(unittest.TestCase):
+    """The authoring hand-off is named in three places; they used to contradict.
+
+    Step 4 said `skill-creator` and `writing-skills` are names "neither of which resolves
+    on a fresh Claude Code install" -- true of the BARE names -- while the frontmatter
+    pointed at an unqualified "writing-skills" as though it did resolve, and a
+    must-not-fire row named `superpowers:writing-skills`. A cold session reading the
+    description learns a name it cannot invoke.
+
+    Established by `ls` on this machine: `writing-skills` exists only under
+    `superpowers`, `skill-creator` only under `compound-engineering`, and
+    `skill-authoring` ships with this package and resolves bare.
+    """
+
+    def description(self):
+        return rc.parse_skill(SKILL_PATH)["description"]
+
+    def test_the_description_qualifies_the_skill_it_hands_off_to(self):
+        desc = self.description()
+        self.assertIn("superpowers:writing-skills", desc)
+        self.assertNotRegex(
+            desc, r"(?<!superpowers:)\bwriting-skills\b",
+            "the description names a bare `writing-skills`, which resolves nowhere")
+
+    def test_the_must_not_fire_row_names_the_same_owner(self):
+        section = rc.parse_skill(SKILL_PATH)["section"]
+        self.assertIn("superpowers:writing-skills", section)
+
+    def test_step_four_says_why_the_bare_names_do_not_work(self):
+        """Not merely that they do not resolve: WHERE they do resolve. A session told
+        only "that name does not work" cannot find the thing it was pointed at."""
+        step = [b for n, b in steps().items() if "skill-authoring" in b]
+        self.assertEqual(len(step), 1, "no single step names the authoring hand-off")
+        body = flatten(step[0])
+        self.assertIn("neither bare name resolves", body)
+        self.assertIn("compound-engineering:skill-creator", body)
+        self.assertIn("superpowers:writing-skills", body)
+        self.assertIn("`skill-authoring`", body,
+                      "the step no longer names the skill that actually ships here")
+
+
+class DraftIsRoutableBeforeItIsInstalledTest(unittest.TestCase):
+    """D is told to run the routing prompts, and nothing had installed the draft.
+
+    A cold red-teamer executing this protocol reported the Trigger precision row
+    "unsatisfiable as written" and improvised by copying the file into
+    `<cwd>/.claude/skills/`. It had to improvise because only `done` (step 8) installs,
+    and `done` runs two steps after D. The protocol now says how, and says who moves the
+    scratch draft to where `done` looks -- which was also unstated.
+    """
+
+    def test_the_checklist_row_says_how_to_make_an_uninstalled_draft_routable(self):
+        m = re.search(r"^\|\*\*Trigger precision\*\*\|(.*)\|$", FORGING, re.M)
+        self.assertIsNotNone(m)
+        row = flatten(m.group(1))
+        self.assertIn(".claude/skills/", row,
+                      "the row tells D to run prompts against a draft nothing has "
+                      "installed, and does not say how to make it routable")
+        self.assertIn("working directory", row,
+                      "a project skill is only visible to a run started in that "
+                      "directory; a row that omits the cwd cannot be followed")
+
+    def test_the_protocol_names_who_moves_the_scratch_draft_into_place(self):
+        """`done` looks in the repository; the draft is in C's scratch directory; B is
+        never told the destination. If nobody is named, nobody does it and `done`
+        reports a forge that shipped nothing."""
+        body = flatten(gate_step()[1])
+        self.assertIn("move the clean draft into place first", body)
+        self.assertIn("never learns the destination", body,
+                      "the protocol does not say WHY the move is A's, so the next "
+                      "session will hand the path to B and lose the isolation")
+        self.assertRegex(body, r"`--skill-dir`")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

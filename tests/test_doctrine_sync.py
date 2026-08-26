@@ -1016,6 +1016,84 @@ class SeedPoolTest(unittest.TestCase):
                 % (word, len(self.table_rows())))
 
 
+class HeldOutIsConstructionNotInstructionTest(unittest.TestCase):
+    """Step 2 makes a claim about the CLI. The CLI has to actually do it.
+
+    The forging protocol's organising claim is that the original project is held-out test
+    data. C and D are denied it by construction; B was denied it only by a sentence in
+    its brief, while being handed `skillforge` and told to call `step`. Step 2 now says
+    the CLI holds those fields back -- which is a claim about a program, and this file's
+    rule for a claim about a program is to run it.
+
+    The two directions are separate failures. A sentence that outran the tool sends B to
+    a command that leaks; a tool that outran the sentence leaves the next author
+    believing the isolation is still a rule they may relax.
+    """
+
+    HELD = ("root", "trigger", "project", "trigger_verbatim")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        state = Path(cls._tmp.name)
+        cls.trigger = "the verbatim thing a user typed, which B must never hold"
+
+        def cli(*args):
+            return subprocess.run(
+                [str(ROOT / "bin" / "skillforge"), *args],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+                     "HOME": str(state), "SKILL_COMPOUNDER_STATE": str(state)})
+
+        cli("start", "held-out", "12", "a summary",
+            "--trigger", cls.trigger, "--trigger-kind", "user-prompt")
+        cls.shown = cli("show", "--name", "held-out")
+        cls.shown_full = cli("show", "--full", "--name", "held-out")
+        cls.rows = cli("ledger", "--json")
+        cls.state = state
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def sentence(self):
+        m = re.search(r"Do \*\*not\*\* hand B the project.*?\n\n", SKILL, re.S)
+        self.assertIsNotNone(
+            m, "the forging protocol no longer tells the orchestrator's dispatcher what "
+               "to withhold, so there is nothing left for this test to check")
+        return flatten(m.group(0))
+
+    def test_the_protocol_claims_the_cli_withholds_them(self):
+        said = self.sentence()
+        self.assertIn("`--full`", said,
+                      "step 2 states the isolation as a rule B is asked to obey, with no "
+                      "mention of the flag that makes it a property of the tool")
+        for field in self.HELD:
+            self.assertIn("`%s`" % field, said,
+                          "step 2 does not name `%s` among the fields the CLI holds "
+                          "back" % field)
+
+    def test_the_cli_actually_withholds_them(self):
+        self.assertEqual(self.shown.returncode, 0, self.shown.stderr)
+        self.assertNotIn(self.trigger, self.shown.stdout)
+        self.assertNotIn(self.trigger, self.rows.stdout)
+        shown = json.loads(self.shown.stdout)
+        for field in self.HELD:
+            self.assertNotIn(field, shown)
+        for line in self.rows.stdout.splitlines():
+            if not line.strip():
+                continue
+            for field in self.HELD:
+                self.assertNotIn(field, json.loads(line))
+
+    def test_the_record_keeps_what_the_view_withholds(self):
+        """`--full` is for A, who owns the test set, and the file is never filtered:
+        `bin/skillreport` reads it directly and E gets the trigger from A by hand."""
+        self.assertIn(self.trigger, json.loads(self.shown_full.stdout)["trigger"])
+        self.assertIn(self.trigger,
+                      (self.state / "ledger.jsonl").read_text(encoding="utf-8"))
+
+
 class SkillBudgetTest(unittest.TestCase):
     """`skill-authoring` states two budgets; the skills that ship have to meet them.
 

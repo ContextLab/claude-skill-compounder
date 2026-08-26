@@ -11,9 +11,9 @@
 #   skillforge done  [--name <forge>] [--skill-dir <dir>] [message...]
 #   skillforge fail  [--name <forge>] <reason...>
 #   skillforge clear [--name <forge> | --all]
-#   skillforge show  [--name <forge> | --all]
+#   skillforge show  [--name <forge> | --all] [--full]
 #   skillforge list
-#   skillforge ledger [--json]
+#   skillforge ledger [--json] [--full]
 #   skillforge install <name> [--skill-dir <dir>]
 #   skillforge origin  --name <skill> --origin <forged|workflow|seeded|adopted|unknown>
 #                      [--skill-dir <dir>] [--trigger <text> --trigger-kind <kind>]
@@ -51,6 +51,11 @@
 #   3. Otherwise the command REFUSES and lists the live names. It does not guess: a
 #      guess means `done` closing the wrong record and the status line naming the wrong
 #      job, which is the whole reason forges are tracked separately.
+#
+# THE HELD-OUT FIELDS. `show` and `ledger` leave out `root`, `trigger`, `project` and
+# `trigger_verbatim` (and the table's project column) and say so. Those four are the forging
+# protocol's held-out test data, and the orchestrator subagent that drives this CLI must
+# not hold them; the record on disk keeps every one of them. `--full` prints them.
 #
 # State is NOT keyed on a session id. The id in $CLAUDE_CODE_SESSION_ID and the
 # .session_id delivered to hooks and the status line are different values for the same
@@ -284,6 +289,45 @@ project_root() {
 
 int_or_zero() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
 
+# ------------------------------------------------------------ the held-out fields
+#
+# THE FORGING PROTOCOL'S ISOLATION IS SUPPOSED TO BE STRUCTURAL, AND FOR ONE STAGE IT
+# WAS NOT. `skills/skill-compounder/SKILL.md` holds the original project out as test
+# data: the builder C and the red-teamer D are denied it by CONSTRUCTION -- a scratch
+# working directory, no path into the project, no CLI -- while the orchestrator B was
+# denied it only by a sentence in its brief. B is handed this script and told to call
+# `step`, and `skillforge show` answered with `root` (the repository path) and
+# `trigger` (the verbatim user utterance), while `ledger --json` answered with
+# `project` and `trigger_verbatim` for every forge on the machine. The two things B
+# must never hold were one command away, in a tool B was told to run.
+#
+# So the read commands hold them back by default and say that they did. Not deleted:
+# the RECORD keeps every field, `skillreport` reads the ledger file directly, and
+# stage E still receives the verbatim trigger from A by hand -- which is its existing
+# path and the only one that ever mattered. What changes is what the CLI VOLUNTEERS.
+#
+# `--full` lifts it, for A, who is the party the test set belongs to. A flag is not a
+# wall and is not meant to be one: nothing can stop an agent that reads the state
+# directory itself. What it stops is the accident -- B running the command it was told
+# to run and having the answer put in front of it -- which is what actually happened.
+#
+# The removal is REPORTED IN THE OUTPUT, never silent, and lists exactly the fields
+# that were present: a reader must be able to tell "this forge recorded no trigger"
+# from "this view is not showing you the trigger". Those are opposite facts and they
+# used to look identical.
+HELD_OUT_FIELDS='["root","trigger","project","trigger_verbatim"]'
+
+redact_prog() {
+  if [ "$FULL_OPT" -eq 1 ]; then printf '%s' '.'; return 0; fi
+  printf '%s' '. as $r
+    | ('"$HELD_OUT_FIELDS"' | map(. as $k | select($r | has($k)))) as $gone
+    | delpaths([$gone[] | [.]])
+    | (if ($gone | length) > 0
+       then . + {held_out: $gone,
+                 held_out_note: "the forging protocol holds these back; skillforge --full shows them"}
+       else . end)'
+}
+
 # ------------------------------------------------------------------- forge identity
 #
 # One id per forge, written into the record by `start` before the slot is published, and
@@ -464,6 +508,7 @@ ledger_line() { # <event> <name> <steps> <summary> [step] [phase] [duration] [ro
     --arg step "${5:-}" --arg phase "${6:-}" --arg duration "${7:-}" --arg rounds "${8:-}" \
     --arg planned "${9:-}" \
     --arg trigger "${TRIGGER_TEXT:-}" --arg tkind "${TRIGGER_KIND:-}" \
+    --arg skill "${SKILL_PRESENT:-}" \
     '{event:$event, name:$name, ts:$ts, steps:$steps, summary:$summary, project:$project}
      + (if $step     == "" then {} else {step:     ($step|tonumber)}     end)
      + (if $phase    == "" then {} else {phase:     $phase}              end)
@@ -471,7 +516,8 @@ ledger_line() { # <event> <name> <steps> <summary> [step] [phase] [duration] [ro
      + (if $rounds   == "" then {} else {rounds:   ($rounds|tonumber)}   end)
      + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)
      + (if $trigger  == "" then {} else {trigger_verbatim: $trigger}     end)
-     + (if $tkind    == "" then {} else {trigger_kind: $tkind}           end)' 2>/dev/null
+     + (if $tkind    == "" then {} else {trigger_kind: $tkind}           end)
+     + (if $skill    == "" then {} else {skill:        $skill}           end)' 2>/dev/null
 }
 
 # A ledger failure must never break a forge, hence the bare returns.
@@ -516,6 +562,22 @@ ledger_append() { # <same arguments as ledger_line>
 # fact about the forge worth counting.
 TRIGGER_KINDS="user-prompt hook-checkpoint review-dispatch agent-decision"
 VERDICT_VALUES="WORKED NO-OP MISFIRED UNKNOWN"
+
+# A CLOSE THAT PRODUCED NO SKILL IS A FACT ABOUT THE FORGE, AND IT USED TO BE SAID ONCE
+# AND THEN LOST. `done` prints "no SKILL.md was found ... nothing was installed" to a
+# terminal that scrolls, and wrote a `done` row byte-for-byte identical to one from a
+# forge that shipped something: the ledger, which is the only durable evidence this
+# protocol produces about itself, could not tell the two apart afterwards.
+#
+# WHY IT IS RECORDED RATHER THAN REFUSED. Not every forge writes a skill -- a fix, a
+# retirement and a red-team round all close legitimately with nothing to install -- so a
+# refusal would break the documented cases. Nor may `done` exit non-zero: a caller reads
+# that as a close that failed and retries, and the close DID happen. The rule this repo
+# actually holds is that a gap must be countable rather than silent, so the row carries
+# `skill: "present"` or `skill: "missing"` and `skillforge ledger --json --full` counts them.
+# Set only by `done`, because only `done` claims to have finished something; absent
+# everywhere else, which is the file's rule for a field the data does not establish.
+SKILL_PRESENT=""
 
 # The commit the forge was standing on, best effort. Omitted rather than faked.
 commit_here() {
@@ -980,6 +1042,9 @@ cmd="${1:-}"; shift 2>/dev/null || true
 NAME_OPT="${SKILLFORGE_NAME:-}"
 ALL_OPT=0
 case "$cmd" in clear|show|list) ALLOW_ALL=1 ;; *) ALLOW_ALL=0 ;; esac
+# --full lifts the HELD-OUT REDACTION on the two read commands. See redact_prog().
+FULL_OPT=0
+case "$cmd" in show|ledger) ALLOW_FULL=1 ;; *) ALLOW_FULL=0 ;; esac
 # --skill-dir is only an option where it means something, for the same reason --all is:
 # a `fail` reason or a `step` phase that happens to contain the word is left alone.
 SKILLDIR_OPT="${SKILLFORGE_SKILL_DIR:-}"
@@ -1018,6 +1083,8 @@ while [ $# -gt 0 ]; do
                       TRIGGER_KIND="${1#--trigger-kind=}"; shift
                     else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --all)     if [ "$ALLOW_ALL" -eq 1 ]; then ALL_OPT=1; shift
+               else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --full)    if [ "$ALLOW_FULL" -eq 1 ]; then FULL_OPT=1; shift
                else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --)        shift; while [ $# -gt 0 ]; do ARGS[${#ARGS[@]}]="$1"; shift; done ;;
     *)         ARGS[${#ARGS[@]}]="$1"; shift ;;
@@ -1225,6 +1292,15 @@ SLOTS
     require_active done quiet
     FILE="$RESOLVED"
     msg="${*:-clean red-team pass}"
+    # Asked BEFORE the close, because close_forge builds the ledger row and the row is
+    # where the answer has to land. It is two `test -f` calls against a cached
+    # project_root, so it costs nothing on the near side of the outcome claim -- which
+    # is where everything expensive belongs anyway (see close_forge).
+    if find_skill_dir "$(field "$FILE" name)" "$FILE"; then
+      SKILL_PRESENT="present"
+    else
+      SKILL_PRESENT="missing"
+    fi
     # `done` fills the bar, but it must not REWIND a forge that ran past its budget:
     # the ledger's rounds-completed count is derived from the step reached. close_forge
     # carries that rule, and decides which of several racing closers writes the row.
@@ -1546,7 +1622,7 @@ SLOTS
       shown=0
       while IFS="$SEP" read -r s_st s_nm s_stt s_pth; do
         [ -n "${s_pth:-}" ] || continue
-        jq -c . "$s_pth" 2>/dev/null && shown=$(( shown + 1 ))
+        jq -c "$(redact_prog)" "$s_pth" 2>/dev/null && shown=$(( shown + 1 ))
       done <<SLOTS
 $(slots)
 SLOTS
@@ -1559,7 +1635,7 @@ SLOTS
     # forge finished when in fact it was never found. `step` and `clear` both die here.
     [ "$rc" -eq 1 ] && [ -n "$NAME_OPT" ] && die "no forge named '$NAME_OPT' (try: skillforge list)"
     if [ "$rc" -eq 0 ]; then
-      cat "$RESOLVED"
+      jq "$(redact_prog)" "$RESOLVED" 2>/dev/null || cat "$RESOLVED"
     elif [ "$rc" -eq 3 ]; then
       # Several are live and no name was given. Print them ALL rather than picking one:
       # `show` is what a caller uses to ask "what is going on", and answering with one
@@ -1567,7 +1643,7 @@ SLOTS
       # per line, so a downstream `jq -re '.status'` still reads every one of them.
       while IFS="$SEP" read -r s_st s_nm s_stt s_pth; do
         [ -n "${s_pth:-}" ] || continue
-        jq -c . "$s_pth" 2>/dev/null
+        jq -c "$(redact_prog)" "$s_pth" 2>/dev/null
       done <<SLOTS
 $(slots)
 SLOTS
@@ -1594,7 +1670,10 @@ SLOTS
 
   ledger)
     if [ "${1:-}" = "--json" ]; then
-      [ -s "$LEDGER" ] && cat "$LEDGER"
+      # Line by line through the same filter, and `-c`, because the contract of
+      # `--json` is one row per line and a reader downstream splits on newlines.
+      # `--full` prints the file exactly as it is on disk.
+      [ -s "$LEDGER" ] && jq -c "$(redact_prog)" "$LEDGER" 2>/dev/null
       exit 0
     fi
     if [ ! -s "$LEDGER" ]; then
@@ -1613,11 +1692,17 @@ SLOTS
     # with no start row (4 of 60 SIGKILL trials), and its eventual `done` is then an
     # orphan. Those are precisely the forges worth seeing -- the ones that crashed -- so
     # an unmatched outcome is now a row, marked, rather than a silence.
-    jq -s -R -r '
+    # The `where` column is the project directory's own name, which is project content
+    # under the same rule as `root`: an orchestrator subagent running `skillforge ledger`
+    # would be reading the held-out set out of a status table. Held back with the rest,
+    # and marked, rather than left as the one uncovered corner of the same surface.
+    jq -s -R -r --argjson full "$FULL_OPT" '
       def rounds_of(s): ((((s // 2) - 2) / 2) | floor) as $r | (if $r < 0 then 0 else $r end);
       # jq 1.6 returns [] for ("" | split("/")), so .[-1] on an absent or empty
       # project yields null, which then interpolates as the literal string "null".
-      def wherefrom: ([ ((. // "") | split("/"))[] | select(length > 0) ] | last // "-");
+      def wherefrom: if $full == 0 then "(held out)"
+                     else ([ ((. // "") | split("/"))[] | select(length > 0) ] | last // "-")
+                     end;
       # `rounds_planned` has been in the JSONL since the overrun was made representable
       # and nothing ever printed it, so a forge that ran six rounds against a three-round
       # budget read as a plain "6 round(s)" -- indistinguishable from one that spent
@@ -1682,7 +1767,7 @@ SLOTS
     ' "$LEDGER"
     ;;
   ""|-h|--help|help)
-    sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,88p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac

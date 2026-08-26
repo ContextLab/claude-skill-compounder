@@ -536,5 +536,193 @@ class LegacyStateTest(ForgeCase):
         self.assertTrue(junk.exists(), "skillforge never deletes what it cannot read")
 
 
+class HeldOutFieldsTest(ForgeCase):
+    """The forging protocol's isolation, made a property of the tool rather than a rule.
+
+    `skills/skill-compounder/SKILL.md` holds the original project out as test data. C and
+    D are denied it by construction -- a scratch directory, no path into the project, no
+    CLI. The orchestrator B was denied it only by a sentence in its brief, while being
+    handed this CLI and told to call `step`: `show` answered with `root` and the verbatim
+    `trigger`, and `ledger --json` with `project` and `trigger_verbatim`, for every forge
+    on the machine. These tests are the construction that replaced the sentence.
+
+    A flag is not a wall and is not meant to be one -- nothing stops an agent that reads
+    the state directory itself. What it stops is the accident: B running the command it
+    was told to run and having the held-out answer put in front of it.
+    """
+
+    HELD = ("root", "trigger", "project", "trigger_verbatim")
+
+    def start(self, name="iso", trigger="the verbatim thing the user typed"):
+        r = self.run_cli("start", name, "12", "a summary",
+                         "--trigger", trigger, "--trigger-kind", "user-prompt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return trigger
+
+    def test_show_holds_back_the_project_path_and_the_verbatim_trigger(self):
+        trigger = self.start()
+        r = self.run_cli("show", "--name", "iso")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(trigger, r.stdout)
+        shown = json.loads(r.stdout)
+        for field in self.HELD:
+            self.assertNotIn(field, shown)
+        # Still a usable answer to "what is going on".
+        self.assertEqual(shown["name"], "iso")
+        self.assertEqual(shown["status"], "active")
+        self.assertEqual(shown["trigger_kind"], "user-prompt",
+                         "the KIND is the measurement this package exists to make and "
+                         "is not project content; holding it back would cost the answer "
+                         "for nothing")
+
+    def test_the_omission_is_named_rather_than_silent(self):
+        """"This forge recorded no trigger" and "this view is not showing you the
+        trigger" are opposite facts, and without the marker they are the same bytes."""
+        self.start()
+        shown = json.loads(self.run_cli("show", "--name", "iso").stdout)
+        self.assertEqual(sorted(shown["held_out"]), ["root", "trigger"])
+        self.assertIn("--full", shown["held_out_note"])
+
+        self.run_cli("start", "no-trigger", "12", "a summary")
+        bare = json.loads(self.run_cli("show", "--name", "no-trigger").stdout)
+        self.assertEqual(bare["held_out"], ["root"],
+                         "a forge that recorded no trigger must not be reported as one "
+                         "whose trigger is being withheld")
+
+    def test_full_lifts_it_for_the_party_the_test_set_belongs_to(self):
+        trigger = self.start()
+        shown = json.loads(self.run_cli("show", "--full", "--name", "iso").stdout)
+        self.assertEqual(shown["trigger"], trigger)
+        self.assertTrue(shown["root"])
+        self.assertNotIn("held_out", shown)
+
+    def test_ledger_json_holds_the_same_fields_back_and_stays_one_row_per_line(self):
+        trigger = self.start()
+        r = self.run_cli("ledger", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(trigger, r.stdout)
+        rows = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
+        self.assertTrue(rows)
+        start = [x for x in rows if x.get("event") == "start"][0]
+        for field in self.HELD:
+            self.assertNotIn(field, start)
+        self.assertEqual(sorted(start["held_out"]), ["project", "trigger_verbatim"])
+
+    def test_the_file_on_disk_is_never_redacted(self):
+        """The record stays complete. `bin/skillreport` reads the file directly and
+        stage E gets the trigger from A by hand; a redaction that reached the file would
+        destroy the only answer there will ever be to the first of the four questions."""
+        trigger = self.start()
+        raw = (self.state / "ledger.jsonl").read_text(encoding="utf-8")
+        self.assertIn(trigger, raw)
+        self.assertIn(trigger, (self.state / "forge" / "iso.forge.json")
+                      .read_text(encoding="utf-8"))
+        full = self.run_cli("ledger", "--json", "--full").stdout
+        self.assertIn(trigger, full)
+
+    def test_the_ledger_table_does_not_print_the_project_directory_name(self):
+        """The table's `where` column is the project directory's own name.
+
+        A redaction with one uncovered corner is worse than none: it teaches a reader
+        that the view is safe when one branch of it is not, and `skillforge ledger` is
+        the branch an orchestrator would reach for to ask "what is running".
+        """
+        self.start()
+        r = self.run_cli("ledger")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("(held out)", r.stdout)
+        full = self.run_cli("ledger", "--full")
+        self.assertNotIn("(held out)", full.stdout)
+        self.assertIn(REPO.name, full.stdout,
+                      "--full no longer names the project the forge ran in, so the flag "
+                      "hides the column instead of lifting the redaction")
+
+    def test_show_all_and_the_ambiguous_answer_are_redacted_too(self):
+        """Two other paths print records, and a redaction with a hole in it is worse
+        than none: it teaches a reader the view is safe when one branch of it is not."""
+        t1 = self.start("aaa", "trigger for aaa")
+        t2 = self.start("bbb", "trigger for bbb")
+        for args in (("show", "--all"), ("show",)):
+            r = self.run_cli(*args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn(t1, r.stdout, args)
+            self.assertNotIn(t2, r.stdout, args)
+            lines = [l for l in r.stdout.splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2, args)
+            for line in lines:
+                self.assertNotIn("root", json.loads(line))
+
+
+class DoneRecordsWhetherASkillExistsTest(ForgeCase):
+    """A close that produced no skill is a fact about the forge, and it used to be lost.
+
+    `done` printed "no SKILL.md was found ... nothing was installed" to a terminal that
+    scrolls, then wrote a `done` row byte-for-byte identical to one from a forge that
+    shipped something. The ledger is the only durable evidence this protocol produces
+    about itself, so afterwards nothing could tell the two apart.
+
+    It is RECORDED rather than REFUSED. A fix, a retirement and a red-team round all
+    close legitimately with nothing to install, so a refusal breaks documented cases; and
+    `done` must not exit non-zero, because a caller reads that as a close that failed and
+    retries one that succeeded. The rule this repository holds is that a gap must be
+    countable rather than silent.
+    """
+
+    def write_skill(self, name):
+        d = self.state / "src" / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            '---\nname: %s\ndescription: "x"\n---\n\nbody\n' % name, encoding="utf-8")
+        return d
+
+    def close(self, name, skill_dir=None):
+        args = ["start", name, "12", "a summary"]
+        if skill_dir:
+            args += ["--skill-dir", str(skill_dir)]
+        self.assertEqual(self.run_cli(*args).returncode, 0)
+        r = self.run_cli("done", "--name", name, "clean red-team pass")
+        rows = [json.loads(l) for l in
+                self.run_cli("ledger", "--json").stdout.splitlines() if l.strip()]
+        row = [x for x in rows if x.get("event") == "done" and x.get("name") == name][0]
+        return r, row
+
+    def test_a_done_with_no_skill_on_disk_is_recorded_as_missing(self):
+        r, row = self.close("produced-nothing")
+        self.assertEqual(r.returncode, 0,
+                         "a close that happened must never report as a close that failed")
+        self.assertEqual(row["skill"], "missing")
+
+    def test_a_done_that_shipped_a_skill_is_recorded_as_present(self):
+        d = self.write_skill("real-one")
+        _r, row = self.close("real-one", skill_dir=d)
+        self.assertEqual(row["skill"], "present")
+
+    def test_the_two_are_countable_apart_from_the_ledger_alone(self):
+        """The whole point: no terminal, no transcript, just the file."""
+        self.write_skill("shipped")
+        self.close("produced-nothing")
+        self.close("shipped", skill_dir=self.state / "src" / "skills" / "shipped")
+        rows = [json.loads(l) for l in
+                (self.state / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+                if l.strip()]
+        missing = [x["name"] for x in rows
+                   if x.get("event") == "done" and x.get("skill") == "missing"]
+        self.assertEqual(missing, ["produced-nothing"])
+
+    def test_no_other_event_claims_to_know(self):
+        """`start` and `fail` do not answer this question, so they must not appear to.
+
+        A field the data does not establish is omitted -- never guessed, never defaulted
+        to something plausible. Only `done` claims to have finished something.
+        """
+        self.run_cli("start", "abandoned", "12", "a summary")
+        self.run_cli("fail", "--name", "abandoned", "gave up")
+        rows = [json.loads(l) for l in
+                self.run_cli("ledger", "--json").stdout.splitlines() if l.strip()]
+        for row in rows:
+            if row.get("event") in ("start", "fail"):
+                self.assertNotIn("skill", row, row)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

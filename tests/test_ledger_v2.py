@@ -145,12 +145,36 @@ class TriggerTest(LedgerV2Case):
 
     def test_the_trigger_survives_on_the_forge_record_for_done_to_read(self):
         """`done` runs later, possibly in another directory. The record is the only
-        thing that still remembers what was said."""
+        thing that still remembers what was said.
+
+        Read back with `--full`, because the default view now holds the trigger out;
+        the point of this test is that the RECORD keeps it, and it does.
+        """
         self.forge("start", "widget", "8", "summary", "--trigger", "a checkpoint fired",
                    "--trigger-kind", "hook-checkpoint", now=T0)
-        shown = json.loads(self.forge("show", "--name", "widget").stdout)
+        shown = json.loads(self.forge("show", "--full", "--name", "widget").stdout)
         self.assertEqual(shown["trigger"], "a checkpoint fired")
         self.assertEqual(shown["trigger_kind"], "hook-checkpoint")
+
+    def test_the_ledger_file_itself_keeps_the_trigger_the_view_holds_back(self):
+        """The redaction is a property of the VIEW, never of the record.
+
+        `bin/skillreport` reads `ledger.jsonl` directly and stage E is handed the
+        verbatim trigger by A, off the forge record entirely. If the redaction ever
+        reached the file, both of those paths would lose the answer to the first of the
+        ledger's four questions -- permanently, because the moment cannot be recovered.
+        """
+        self.forge("start", "widget", "8", "summary",
+                   "--trigger", "the user said: stop the flaky test",
+                   "--trigger-kind", "user-prompt", now=T0)
+        on_disk = [json.loads(l) for l in self.ledger.read_text().splitlines()
+                   if l.strip()]
+        start = [r for r in on_disk if r.get("event") == "start"][0]
+        self.assertEqual(start["trigger_verbatim"], "the user said: stop the flaky test")
+        self.assertIn("project", start)
+        self.assertNotIn("held_out", start,
+                         "the redaction leaked into the file it is only supposed to "
+                         "filter on the way out")
 
     def test_a_missing_trigger_warns_loudly_but_still_forges(self):
         """REFUSING WOULD NOT PRODUCE A TRIGGER, IT WOULD PRODUCE NO ROW.
