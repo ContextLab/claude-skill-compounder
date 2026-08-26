@@ -385,7 +385,7 @@ PINNED = (
 
     ("caps-are-per-skill",
      "Per skill, not globally. A new skill is unguarded until its own test exists, which "
-     "is how a 531-line body shipped.",
+     "is how a 534-line body shipped.",
      "Why Phase 6 exists at all."),
 
     # Found by a cold reviewer given the skill and this suite and asked, neutrally, for
@@ -687,7 +687,7 @@ RATIONALIZATIONS = (
     "near-perfect on their author's fixture and near-useless in the field. Ship the "
     'doctrine, cut the tool.|',
     '|"The existing seed tests already cap body length."|Per skill, not globally. A new '
-    'skill is unguarded until its own test exists, which is how a 531-line body shipped.|',
+    'skill is unguarded until its own test exists, which is how a 534-line body shipped.|',
     '|"My sweep found nothing to collide with."|A sweep without `-L` silently omits every '
     'symlinked skill directory, which is how installers put them there. Diff the two '
     'sweeps (`references/why-these-rules.md`): whatever only the `-L` side prints is what '
@@ -2074,15 +2074,32 @@ class WhyTheseRulesTest(unittest.TestCase):
         # The `<!-- routing-pin` block is machine-readable provenance for the routing
         # claims (tests/test_routing_claims.py), not body prose, and the cited number is
         # a claim about how much prose the file makes a reader absorb.
-        measured = len(strip_routing_pin(body(other.read_text())).strip().splitlines())
+        # The claim is now HISTORY: ai-tell-audit was brought under the ceiling on
+        # 2026-08-26, so pinning it against the current file would assert something
+        # false. It is pinned against the commit the prose itself cites, which makes
+        # this a claim about the system rather than about the sentence -- correcting
+        # the prose must never be what turns this red.
         for path in (REFERENCES / "why-these-rules.md", SKILL_MD):
-            text = path.read_text()
-            m = re.search(r"`ai-tell-audit` ships a\s+(\d+)-line body", text)
+            # Flattened: prose wraps, so a citation can span a line break on disk and a
+            # raw match would fail for a reason that has nothing to do with the claim.
+            text = re.sub(r"\s+", " ", path.read_text())
+            m = re.search(r"`ai-tell-audit` shipped a\s+(\d+)-line body", text)
             self.assertIsNotNone(m, "%s no longer cites the ai-tell-audit body" % path.name)
+            ref = re.search(r"git show ([0-9a-f]{7,40}):skills/ai-tell-audit/SKILL\.md", text)
+            self.assertIsNotNone(ref, "%s cites a line count with no commit to check it "
+                                      "against" % path.name)
+            was = subprocess.run(["git", "show",
+                                  "%s:skills/ai-tell-audit/SKILL.md" % ref.group(1)],
+                                 cwd=str(REPO), capture_output=True, text=True)
+            self.assertEqual(was.returncode, 0,
+                             "%s cites commit %s, which this repository does not have"
+                             % (path.name, ref.group(1)))
+            measured = len(strip_routing_pin(body(was.stdout)).strip().splitlines())
             self.assertEqual(int(m.group(1)), measured,
-                             "%s says %s lines; the file is %d"
-                             % (path.name, m.group(1), measured))
-        self.assertGreater(measured, 500, "the cautionary example is no longer over cap")
+                             "%s says %s lines; commit %s holds %d"
+                             % (path.name, m.group(1), ref.group(1), measured))
+            self.assertGreater(measured, 500,
+                               "the cautionary example was never over the cap")
 
 
 class PinnedRuleTest(unittest.TestCase):

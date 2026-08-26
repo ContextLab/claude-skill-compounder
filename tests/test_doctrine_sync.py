@@ -1035,7 +1035,9 @@ class SkillBudgetTest(unittest.TestCase):
     # may only shrink, and a name on it that is no longer over the ceiling fails below, so
     # a fix cannot leave a stale exemption behind. Do NOT add to it to make a red test
     # green -- split the body into `references/` the way `skill-authoring` does.
-    OVER_BODY_CEILING = {"ai-tell-audit"}
+    # Empty since ai-tell-audit came under the ceiling (543 body lines to 496) by moving
+    # its evidence and its script notes into skills/ai-tell-audit/references/.
+    OVER_BODY_CEILING = set()
 
     AUTHORING = ROOT / "skills" / "skill-authoring" / "SKILL.md"
 

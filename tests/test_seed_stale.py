@@ -172,6 +172,37 @@ class SkillDocumentTest(unittest.TestCase):
     # matches on semantics, so it certified wording rather than behavior. The overlap
     # with `superpowers:systematic-debugging` is real and is reported, not asserted away.
 
+    def test_the_description_does_not_promise_to_interrupt_a_running_procedure(self):
+        """Issue #11. The opener "Use before any other debugging step" was measured false
+        exactly where it mattered. `scripts/probe_synthetic_triggers.py` rigs a stale
+        install and gives a session a task that never names the moment: across three
+        wordings of this description on 2026-08-26 (cli 2.1.245, sonnet) the skill fired
+        in 2 of 21 scored replicates when the moment arose during the work, against 23 of
+        23 when the same world was stated in the prompt. Saying the precedence outright,
+        with the clause "stop a debugging procedure already underway to use it", measured
+        0 of 3: wording did not move it, because `superpowers:systematic-debugging` takes
+        turn 1 and no second Skill call follows. A description that promises a fire it
+        does not deliver is a false claim, so the promise came out and the limit went in."""
+        description = self.description()
+        for promise in ("any other debugging step", "already underway to use it"):
+            self.assertNotIn(promise, description,
+                             "%r claims precedence over a procedure already running, and "
+                             "that fired 2 of 21 times" % promise)
+        self.assertIn("It does not displace debugging already underway.", description,
+                      "the limit belongs where the claim is made, not only in the body")
+
+    def test_the_narrowed_claim_carries_its_measurement_in_the_body(self):
+        """A narrowed claim with no measurement behind it is just a quieter claim. The
+        section names the probe, the date, both arms, and the skill that wins turn 1."""
+        section = self.body.split("## When this is the wrong skill")[1]
+        section = section.split("## Phase 1")[0]
+        for claim in ("does not interrupt one", "probe_synthetic_triggers.py",
+                      "2026-08-26", "2 of 21", "23 of 23",
+                      "superpowers:systematic-debugging"):
+            self.assertIn(claim, section,
+                          "the narrowing must state %r; issue #11 closes on the number"
+                          % claim)
+
     def test_the_skill_does_not_contradict_its_own_trigger(self):
         """R2 found "I added a console.log and nothing prints" routed both ways."""
         self.assertNotIn("not yet tried to fix", self.text,

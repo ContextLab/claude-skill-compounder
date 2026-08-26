@@ -273,9 +273,10 @@ so a stray `__pycache__` or `.pyc` ships with it.
 ## Phase 6: Gate C — ship the test and the ledger
 
 **1. Write the per-skill test.** The caps and the gates are enforced per skill, not
-globally, so a new skill has no guard at all until you write one: `ai-tell-audit` ships a
-534-line body, over the documented 500-line ceiling, because its own test file caps the description
-and not the body.
+globally, so a new skill has no guard at all until you write one: `ai-tell-audit` shipped a
+534-line body, over the documented 500-line ceiling, until 2026-08-26
+(`git show eec5d1b:skills/ai-tell-audit/SKILL.md`), because its own test file capped the
+description and not the body. It was brought under by moving depth into `references/`.
 
 Where it goes, because there is no default: if the skill lives in a repository, the file is
 `tests/test_seed_<name>.py` **relative to that repository's root**, run the way that
@@ -338,7 +339,7 @@ Each of these means stop and go back to a gate:
 |"The frontmatter name is the real name."|The directory is the identity. The frontmatter name is not what gets listed.|
 |"I ran the commands earlier, they worked."|Then you have the output. Paste it. Reports in this loop have described runs that never happened.|
 |"A linter would catch these for the next person."|Three linters here measured near-perfect on their author's fixture and near-useless in the field. Ship the doctrine, cut the tool.|
-|"The existing seed tests already cap body length."|Per skill, not globally. A new skill is unguarded until its own test exists, which is how a 531-line body shipped.|
+|"The existing seed tests already cap body length."|Per skill, not globally. A new skill is unguarded until its own test exists, which is how a 534-line body shipped.|
 |"My sweep found nothing to collide with."|A sweep without `-L` silently omits every symlinked skill directory, which is how installers put them there. Diff the two sweeps (`references/why-these-rules.md`): whatever only the `-L` side prints is what you did not see.|
 
 ## Trigger precision

@@ -77,9 +77,10 @@ author could not imagine. In every case the prose doctrine shipped and the tool 
 ## Why the caps need a per-skill test
 
 The description and body caps are asserted in each skill's own `tests/test_seed_<name>.py`,
-not in one global test. The gap has already bitten: `ai-tell-audit` ships a 534-line body,
-over the documented 500-line ceiling, because its test caps the description and not the body.
-A new skill with no test of its own is not partially guarded. It is unguarded.
+not in one global test. The gap has already bitten: `ai-tell-audit` shipped a 534-line body,
+over the documented 500-line ceiling, until 2026-08-26 (`git show
+eec5d1b:skills/ai-tell-audit/SKILL.md`), because its test capped the description and not the
+body. A new skill with no test of its own is not partially guarded. It is unguarded.
 
 ## Why the precedence rule goes in the description
 

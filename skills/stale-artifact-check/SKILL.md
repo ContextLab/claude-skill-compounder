@@ -1,6 +1,6 @@
 ---
 name: stale-artifact-check
-description: 'Use before any other debugging step, whenever an edit you made appears to have had no observable effect: output identical after a rewrite, a page or asset that renders the same after a rebuild or reload, a print or console.log you added that never prints, the same failure after a fix. Also before trusting a run as evidence about an edit. It answers whether the artifact you ran contains your edit, by requiring an observed canary. Do NOT use once it is confirmed; that is systematic-debugging.'
+description: 'Use when an edit you made appears to have had no observable effect, before any debugging step you take next: output identical after a rewrite, a page or asset that renders the same after a rebuild or reload, a print or console.log you added that never prints, the same failure after a fix. It answers whether the artifact you ran contains your edit, by requiring an observed canary. It does not displace debugging already underway. Do NOT use once it is confirmed; that is systematic-debugging.'
 ---
 
 # Stale artifact check
@@ -21,6 +21,15 @@ A RUN THAT HAS NOT PROVEN IT CONTAINS YOUR EDIT IS NOT EVIDENCE OF ANYTHING
 This is not a debugging procedure and it does not compete with one. It establishes a single
 fact before debugging starts: is the code you observed yours? Once the answer is yes, this
 skill is finished and `systematic-debugging` owns everything after it.
+
+It also does not interrupt one, and the description no longer claims to.
+`scripts/probe_synthetic_triggers.py` rigs a stale install and gives the session a task
+that never names the moment. Measured 2026-08-26, cli 2.1.245, sonnet, across three
+wordings of the description: it fired in 2 of 21 scored replicates when the moment arose
+during the work, and in 23 of 23 when the same world was stated in the prompt.
+`superpowers:systematic-debugging` took turn 1 in every organic replicate, and the clause
+"stop a debugging procedure already underway to use it" moved that by nothing. Once another
+procedure is running nothing routes you here, and the `Red flags` list is what you check.
 
 ## Phase 1: Plant a canary
 
@@ -236,9 +245,9 @@ Each of these means stop and go to Phase 1:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 233779f0a7321f3ef822386c7c79cea2fe17542aa323cce3e50a750a99a69f0e
+description-sha256: f51073daf0b11e2bbcc0f0eddc3697a1e08e1556c0b9e425853d86e78e5059d9
 prompts-sha256: 00cf5239ded765faff0dcf7f92e743a85d890cfc8dcf9fb1a3d12e975d71d48b
-measured: 2026-08-25
+measured: 2026-08-26
 cli: 2.1.245 (Claude Code)
 model: sonnet
 result: verified 3/3 must-fire, 3/3 must-not-fire
@@ -256,14 +265,12 @@ Prompts that must NOT fire this skill:
 - "This test fails with `KeyError` on line 42. Fix it." (A failure to diagnose, with no edit of yours in question.)
 - "Add retry-with-backoff to the HTTP client." (No run, and no claim about one.)
 
-All six were measured on 2026-08-25 by running real `claude -p --model sonnet` sessions in
-an empty directory and checking for an actual `Skill` tool call: the three above fire this
-skill, the three here do not. The opening clause is load-bearing, not decoration. A draft
-reading "Use before debugging logic" lost must-fire 1 to `systematic-debugging`; "before
-any other debugging step" wins it. The console.log prompt is the contested one: with the
-description reading "a print or console.log that never appears", a later probe saw it lost
-to `systematic-debugging`; echoing the user's own words ("you added", "never prints") won
-it back. Re-measure all six after any edit to the description.
+All six were re-measured on 2026-08-26 by running real `claude -p --model sonnet` sessions
+in an empty directory and checking for an actual `Skill` tool call: the three above fire
+this skill, the three here do not. A draft reading "Use before debugging logic" lost
+must-fire 1 to `systematic-debugging`, and a description reading "a print or console.log
+that never appears" lost must-fire 3 to it until it echoed the user's own words ("you
+added", "never prints"). Re-measure all six after any edit to the description.
 
 ## Quick reference
 

@@ -197,8 +197,8 @@ class PinTest(unittest.TestCase):
         path = self.copy_skill("stale-artifact-check")
         before = rc.parse_skill(path)
         self.assertEqual(rc.lint([before]), [])
-        self.mutate(path, "Use before any other debugging step",
-                    "Use before debugging logic")
+        self.mutate(path, "Use when an edit you made appears",
+                    "Use when debugging logic")
         after = rc.parse_skill(path)
         self.assertNotEqual(after["description"], before["description"],
                             "the description on disk did not actually change")
@@ -211,7 +211,7 @@ class PinTest(unittest.TestCase):
         """A message that only reports a hash mismatch invites pasting the new hash in
         and moving on, which re-certifies nothing."""
         path = self.copy_skill("stale-artifact-check")
-        self.mutate(path, "Use before any other debugging step", "Use before X")
+        self.mutate(path, "Use when an edit you made appears", "Use when X")
         message = rc.lint([rc.parse_skill(path)])[0]
         self.assertIn("Re-measure, do not re-hash", message)
         self.assertIn("SKILL_ROUTING_PROBE=1", message)
