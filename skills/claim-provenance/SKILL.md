@@ -26,39 +26,42 @@ RESTATE NOTHING. RE-DERIVE EVERY CLAIM FROM THE THING IT DESCRIBES, OR DELETE IT
 
 - **`stale-artifact-check`** answers a different, earlier question: *did the run I just
   observed contain my edit?* Ours is *does this sentence still match the system?* They
-  compose rather than compete, and the order matters: if your re-derivation in Phase 3
-  runs code you edited this session, a stale artifact makes the re-derivation itself void.
-  Run that skill first, then come back here with an answer you can trust.
+  compose rather than compete, and the order matters: if your re-derivation in Phase 3 runs
+  code you edited this session, a stale artifact voids it. Run that skill first, then come
+  back with an answer you can trust.
 - **`no-silent-stub`** owns a **value a function hands a caller**; this skill owns a
-  **sentence a reader reads**. The one place they touch is real and worth conceding rather
-  than drawing a line through: a test scored against its own input is its territory, and
-  the presence-pinning assertion in Phase 5 is the same shape, an expected value drawn
-  from the same source as the actual. Two things still differ. First, its remedy is to make the code fail loudly,
-  and here nothing can be made to fail: the assertion is correct code doing exactly what it
-  says, and the fix is to re-point it at the system. Second, only here does the assertion
-  **entrench** the error, so that correcting the document turns the suite red. Precedence:
-  writing the assertion now, either skill gets you there; auditing a green suite for
-  assertions that lock a document's claims in place, this one.
+  **sentence a reader reads**. The one place they touch is conceded, not argued away: a test
+  scored against its own input is its territory, and Phase 5's presence-pinning assertion is
+  the same shape, its expected value drawn from the same source as the actual. Two
+  differences remain. First, its remedy is to make the code fail loudly; here nothing can be
+  made to fail, because the assertion is correct code doing what it says, and the fix is to
+  re-point it at the system. Second, only here does the assertion **entrench** the error, so
+  that correcting the document turns the suite red. Precedence: writing the assertion now,
+  either skill serves; auditing a green suite for assertions that lock a document's claims
+  in place, this one.
 - **`ai-tell-audit`** owns the draft you are writing now. Its "Unsourced precision" entry
   and this skill's Phase 4 are **not orthogonal, and the earlier claim here that they were
   was wrong**: for an unsourced number in fresh prose they are the same rule reached from
-  two directions, and its version is the one to use. Two things are left that it
-  does not cover, and they are why a boundary beats a merge: a claim with **no number in
-  it** (a documented behavior), and a claim **already published and being carried forward**,
-  where there is no draft to audit. Precedence, and it lives in the description because the
-  router never reads this line: writing it, `ai-tell-audit`; checking what is already
-  written, here.
-- **`verification-before-completion`** (shipped by the `superpowers` plugin) owns a
-  **completion claim about work you just did**: tests pass, the bug is fixed, the build is
-  green, at the moment of claiming done. This skill never fires on that moment. It fires on
-  a sentence that outlived the session that wrote it. Row 9 below is a completion claim and
-  belongs to that skill; rows 1 through 8 belong to this one.
-  **A commit message is not owned or disowned wholesale**, which is why the description
-  does not name the genre. A completion claim inside one ("544 tests pass") is that skill's.
-  A claim you copied into one out of a document is this skill's Phase 6. The genre never
-  decides; what the sentence is doing decides.
-- **Not a claim at all**: an instruction, a definition, an opinion, a plan. Apply the
-  test at the top of Phase 1 before spending any time here.
+  two directions, and its version is the one to use. Two things are left uncovered, and they
+  are why a boundary beats a merge: a claim with **no number in it** (a documented
+  behavior), and a claim **already published and being carried forward**, with no draft to
+  audit. Precedence, and it lives in the description because the router never reads this
+  line: writing it, `ai-tell-audit`; checking what is already written, here.
+- **`verification-before-completion`** (shipped by the `superpowers` plugin) is written for
+  a **completion claim about work you just did**. This skill fires on a sentence that
+  outlived the session that wrote it. **What is not true is that the other moment is
+  covered**: that skill has been invoked 0 times in the local transcript corpus (source:
+  `Skill` records under `~/.claude/projects`, as of 2026-08-26). Its wording is not the
+  reason: the moment offers a router no user prompt to match, leaving only the assistant's
+  own election. A `Stop`-hook gate for it is in progress and unproven
+  (`notes/2026-08-25-completion-claim-gap.md`). Row 9 below is that unowned moment; rows 1
+  through 8 are this skill's.
+  **A commit message is not owned or disowned wholesale**, which is why the description does
+  not name the genre. A completion claim inside one ("544 tests pass") is that unowned
+  moment. A claim you copied into one out of a document is this skill's Phase 6. The genre
+  never decides; what the sentence is doing decides.
+- **Not a claim at all**: an instruction, a definition, an opinion, a plan. Apply the test
+  at the top of Phase 1 before spending any time here.
 
 ## The nine, and what they have in common
 
@@ -357,7 +360,7 @@ Each of these means stop and go back to Phase 1:
 |"Correcting the doc would break a test, so the doc is probably right."|That is the entrenchment stated as a reason. The assertion is the defect; re-point it at the system.|
 |"Four files agree, so it is established."|One unmeasured claim copied four times. Corroboration is a second derivation, never a second copy.|
 |"I did not write the claim, it was already there."|You are shipping it. A claim in a paragraph you touched is yours now.|
-|"It is a commit message, not documentation."|If it is a completion claim, `verification-before-completion` owns it. If you copied it out of a document, it is Phase 6, and it is now the least-edited prose in the repository.|
+|"It is a commit message, not documentation."|If it is a completion claim, the skill that names that moment has never fired on it (see the boundary section), so verify it yourself. If you copied it out of a document, it is Phase 6, and it is now the least-edited prose in the repository.|
 |"There is no command that produces this number."|Then it is bucket C. Delete it; the sentence usually reads better without.|
 |"I re-derived it, so the document is durable."|Only until the source moves. Give it an as-of date, or ship the command instead of the number.|
 |"The correction is obviously right."|A correction is a claim. Row 5 was a correction contradicted by the second line of the file it was correcting.|

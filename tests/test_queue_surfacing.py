@@ -21,6 +21,7 @@ call that leaves stdin open hangs forever.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -733,12 +734,28 @@ class RedTeamRegressionTest(Base):
 
 
 class WiringTest(Base):
-    """No new hook event, so both install paths stay identical with no installer change."""
+    """The two install paths must wire the same events; see tests/test_plugin.py."""
 
     def test_no_new_hook_event_was_introduced(self):
+        """Every event in hooks.json must be one the installer also wires.
+
+        This used to freeze the event list as a literal, which went red on the next
+        legitimate event (`PostToolUseFailure`) even though the installer had been
+        changed in step -- exactly the case it was meant to wave through. So it now
+        reads the installer's own `OUR_EVENTS` rather than a copy of it, and fails
+        only when the two wirings genuinely disagree. `installer.py` is read as text,
+        not imported, because this file runs without PYTHONPATH.
+        """
+        src = (REPO / "skill_compounder" / "installer.py").read_text()
+        m = re.search(r"^OUR_EVENTS = \(([^)]*)\)", src, re.M)
+        self.assertIsNotNone(m, "installer.py no longer declares OUR_EVENTS as a "
+                                "single-line tuple; this guard needs updating")
+        declared = sorted(re.findall(r'"([^"]+)"', m.group(1)))
+        self.assertTrue(declared, "OUR_EVENTS parsed empty")
         wiring = json.loads((REPO / "hooks" / "hooks.json").read_text())
-        self.assertEqual(sorted(wiring["hooks"]),
-                         ["PostToolUse", "Stop", "UserPromptSubmit"])
+        self.assertEqual(sorted(wiring["hooks"]), declared,
+                         "a new event here needs the installer changed in step, and "
+                         "tests/test_plugin.py asserts the two agree")
 
     def test_the_announcement_rides_the_event_that_is_already_wired(self):
         ups = json.loads((REPO / "hooks" / "hooks.json").read_text())["hooks"]["UserPromptSubmit"]

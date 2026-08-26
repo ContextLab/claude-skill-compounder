@@ -257,24 +257,53 @@ DOCTRINE = (
     ("routing-gate-on-completion",
      "A forge cannot be reported clean while the skill's own must-fire prompts do not "
      "fire it.",
-     (SKILL_PATH,),
+     (SKILL_PATH, "README.md"),
      "Every seed skill passed a full red-team loop on a `## Trigger precision` section "
      "nobody ran; three of the claims were then false. A reviewer agreeing a description "
      "reads well is not a measurement of the router."),
 
     ("must-not-half-is-a-gate",
      "A skill that fires on everything is worse than no skill.",
-     (SKILL_PATH,),
+     (SKILL_PATH, "README.md"),
      "Half a routing gate is not a gate: a skill that wins every prompt displaces the "
      "neighbour that would have handled it, which is the failure `stale-artifact-check` "
      "suffered from the other side."),
 
     ("unmeasured-is-not-verified",
      "A probe that could not run is never a pass.",
-     (SKILL_PATH,),
+     (SKILL_PATH, "README.md"),
      "Without this the gate degrades to nothing the first time there is no auth or no "
      "quota: an unrun probe silently promoted to verified is the exact record this gate "
      "exists to end."),
+
+    ("highest-applicable-level",
+     "A skill belongs at the highest level of the hierarchy to which it applies, and must "
+     "be written generally enough to apply beyond the case that prompted it.",
+     (SKILL_PATH,),
+     "Placement decided by where the file happened to be written is how a procedure that "
+     "generalises ends up locked to one repository."),
+
+    ("specialisation-not-baked-in",
+     "The specialisation comes from the project's or the user's `CLAUDE.md` and the "
+     "constraints already recorded there — never from text baked into the skill.",
+     (SKILL_PATH,),
+     "The other half of the placement rule. Without it, `highest-applicable-level` is "
+     "satisfied by a general skill with one repository's test command hardcoded in it."),
+
+    ("d-infers-the-scenario",
+     "D is given the skill and nothing else, and must infer for itself what situation the "
+     "skill is for.",
+     (SKILL_PATH,),
+     "The inference IS the completeness check: a skill carrying a reference only its "
+     "author can resolve produces an inference that is vague, wrong, or impossible. Hand "
+     "the reviewer a scenario and that signal is gone."),
+
+    ("e-checks-the-framing",
+     "Ask E whether A's framing matches the trigger it came from.",
+     (SKILL_PATH,),
+     "Everything after step 1 inherits A's framing, including E's own question about "
+     "whether the original issue was fixed. Only a verbatim trigger held independently of "
+     "A's account of it can surface a misframing."),
 
     ("concurrent-forges",
      "Concurrent forges are fine — each gets its own record and its own slot in the status "
@@ -406,6 +435,58 @@ class OrphanedConstantTest(unittest.TestCase):
                 )
 
 
+# --------------------------------------------------------------------- counted claims
+# A README sentence may state how many knobs there are. The check that reads those
+# sentences used to carry a `words` map that stopped at "ten", which made a true sentence
+# unwritable the moment a second table pushed the real total to fifteen: the cheap way out
+# was to leave the new rows out of every assertion in this file rather than state a number
+# the map could not hold. So parse the numeral instead of enumerating the ones expected.
+_UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+          "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+          "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+
+
+def count_word(word):
+    """The integer a README numeral denotes, or None if it does not denote one.
+
+    Digits are read too, so *any* count is expressible however large; spelled numbers are
+    read to ninety-nine, which is far past any table this repo will grow. A count this
+    cannot read is a test failure with a message saying so, never a silent pass -- the map
+    it replaces returned None for "fifteen" and compared that None against a row count.
+    """
+    w = word.strip().lower().replace("‑", "-").replace("–", "-")
+    if re.fullmatch(r"\d+", w):
+        return int(w)
+    if w in _UNITS:
+        return _UNITS[w]
+    if w in _TENS:
+        return _TENS[w]
+    if "-" in w:
+        tens, _, units = w.partition("-")
+        if tens in _TENS and units in _UNITS and 1 <= _UNITS[units] <= 9:
+            return _TENS[tens] + _UNITS[units]
+    return None
+
+
+# Every numeral the parser above can read, longest alternative first so that `twenty-one`
+# is not matched as `twenty`. Built from the same two maps, so widening the parser widens
+# the scan and the two cannot drift.
+_NUMERAL = "|".join(
+    sorted((["%s-%s" % (t, u) for t in _TENS for u in _UNITS if 1 <= _UNITS[u] <= 9]
+            + list(_TENS) + list(_UNITS) + [r"\d+"]),
+           key=len, reverse=True))
+COUNTED_CLAIM = re.compile(
+    r"\b(%s)\s+(?:\w+\s+){0,2}?(knobs?|tunables?|environment variables?|variables?)\b"
+    % _NUMERAL, re.I)
+
+# A table of knobs, wherever in the README it sits: the two leading columns are the
+# signature. Anything matching this is checked, so a third table needs no test edit.
+VAR_TABLE = re.compile(r"^\|Variable\|Default\|[^\n]*\n\|(?:-\|)+\n((?:\|[^\n]*\n)+)", re.M)
+
+
 class TuningTableTest(unittest.TestCase):
     """Every knob the hook actually reads has to be findable in the README."""
 
@@ -414,27 +495,78 @@ class TuningTableTest(unittest.TestCase):
         self.assertTrue(found, "no tunable CI_* variables found in the hook")
         return found
 
+    def tables(self):
+        """Every knob table in the README, as (position, rows), rows being (var, default).
+
+        Not just the one under `## Tuning`. The session review documents its knobs beside
+        the disclosure that says it calls an API and is on by default, which is the only
+        place its off switch is any use; merging them into the tuning table would move
+        that switch three screens away from the paragraph a reader needs it in. The
+        document keeps the shape it needs and the test follows it, rather than the five
+        review rows sitting outside every assertion here because one table was all this
+        knew how to read.
+        """
+        out = []
+        for m in VAR_TABLE.finditer(README):
+            rows = re.findall(r"^\|`([^`|]+)`\|([^|]*)\|", m.group(1), re.M)
+            self.assertEqual(
+                len(rows), len(m.group(1).strip().splitlines()),
+                "a README knob table has a row this cannot read: every row must open "
+                "`|`NAME`|` and its default cell must not contain a `|`")
+            out.append((m.start(), rows))
+        self.assertTrue(out, "README has no |Variable|Default| knob table")
+        return out
+
+    def all_rows(self):
+        return [row for _, rows in self.tables() for row in rows]
+
     def table_rows(self):
-        m = re.search(r"\|Variable\|Default\|Set it in\|Meaning\|\n\|-\|-\|-\|-\|\n((?:\|.*\n)+)", README)
-        self.assertIsNotNone(m, "README tuning table is missing or reshaped")
-        return re.findall(r"^\|`([^`]+)`\|", m.group(1), re.M)
+        """Just the names, from every table."""
+        return [var for var, _ in self.all_rows()]
+
+    def section_of(self, pos):
+        """The `##` section containing `pos`, as (start, end)."""
+        starts = [m.start() for m in re.finditer(r"^## ", README, re.M)]
+        lo = max([s for s in starts if s <= pos], default=0)
+        hi = min([s for s in starts if s > pos], default=len(README))
+        return lo, hi
+
+    def tables_near(self, pos):
+        """Rows of every knob table in the same `##` section as `pos`."""
+        lo, hi = self.section_of(pos)
+        return [rows for start, rows in self.tables() if lo <= start < hi]
 
     def test_every_tunable_the_hook_reads_is_documented(self):
         for var in sorted(self.hook_vars() - set(self.table_rows())):
-            self.fail("hooks/compound-improvement.sh reads %s but the README "
-                      "tuning table does not list it" % var)
+            self.fail("hooks/compound-improvement.sh reads %s but no README "
+                      "tuning table lists it" % var)
 
     def test_no_documented_tunable_is_imaginary(self):
         """A row for a variable nothing reads is worse than no row.
 
         Defeated before: this skipped every row whose name did not begin with `CI_`, so a
         row for `STATUSLINE_SPINNER_MS` -- a knob that has never existed -- passed. Every
-        row, checked against everything that ships.
+        row, checked against everything that ships. Defeated a second way, without anyone
+        editing this method: a second table was added and only the first was read, so five
+        `SKILL_COMPOUNDER_REVIEW_*` rows were exempt. `tables()` reads them all now.
         """
         for var in self.table_rows():
-            self.assertIn(var, SCRIPTS,
-                          "README documents %s but nothing in bin/, hooks/ or statusline/ "
-                          "reads it" % var)
+            # Word-boundary, not `in`: a substring test passes a documented
+            # `SKILL_COMPOUNDER_REVIEW_COOLDOWN` against a script that has since renamed it
+            # to `..._COOLDOWN_SECS`, which is the exact drift this is here to catch.
+            self.assertIsNotNone(
+                re.search(r"\b%s\b" % re.escape(var), SCRIPTS),
+                "README documents %s but nothing in bin/, hooks/ or statusline/ "
+                "reads it" % var)
+
+    def test_no_knob_is_documented_in_two_places(self):
+        """One row per knob, across all tables: two rows are two defaults to keep in step,
+        and the one nobody edits is the one a reader finds first."""
+        seen = self.table_rows()
+        for var in sorted(set(seen)):
+            self.assertEqual(seen.count(var), 1,
+                             "%s has %d README rows; a knob gets exactly one"
+                             % (var, seen.count(var)))
 
     def test_documented_defaults_are_the_defaults(self):
         """A row naming the right variable and the wrong number is drift with a citation.
@@ -443,49 +575,133 @@ class TuningTableTest(unittest.TestCase):
         README tuning table. Change both." Nothing checked the numbers: a cold reviewer
         rewrote all three README defaults to values the hook has never used and the suite
         stayed green. Derive each one from the script's own `${VAR:-default}`.
+
+        A default cell that is not a single backticked literal is prose, and prose is only
+        honest where the script has no value to state (`${VAR:-}`). Otherwise a row could
+        put its number beyond reach by describing it in words.
         """
-        m = re.search(r"\|Variable\|Default\|Set it in\|Meaning\|\n\|-\|-\|-\|-\|\n((?:\|.*\n)+)",
-                      README)
-        self.assertIsNotNone(m, "README tuning table is missing or reshaped")
-        rows = re.findall(r"^\|`([^`]+)`\|`([^`]+)`\|", m.group(1), re.M)
-        self.assertTrue(rows, "README tuning table rows no longer carry a `default`")
-        for var, documented in rows:
+        for var, cell in self.all_rows():
             real = re.search(r"\$\{%s:-([^}]*)\}" % re.escape(var), SCRIPTS)
             self.assertIsNotNone(
                 real, "README documents a default for %s but no script defaults it" % var)
+            literal = re.fullmatch(r"`([^`]+)`", cell.strip())
+            if literal is None:
+                self.assertEqual(
+                    real.group(1), "",
+                    "README describes %s's default in prose (%r) but the script defaults "
+                    "it to %r; state a real default as a backticked literal"
+                    % (var, cell.strip(), real.group(1)))
+                continue
             # `$HOME/x` and `~/x` are the same path written two ways; everything else
             # has to match character for character.
             norm = lambda s: s.replace("$HOME", "~").replace("${HOME}", "~")
             self.assertEqual(
-                norm(documented), norm(real.group(1)),
+                norm(literal.group(1)), norm(real.group(1)),
                 "README says %s defaults to %s; the script defaults it to %s"
-                % (var, documented, real.group(1)))
+                % (var, literal.group(1), real.group(1)))
 
     def test_stated_counts_match_the_table(self):
-        rows = self.table_rows()
-        total = re.search(r"All (\w+) are environment variables", README)
+        tables = self.tables()
+        total = re.search(r"All ([\w-]+) are environment variables", README)
         self.assertIsNotNone(total, "README no longer states how many tunables there are")
-        words = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
-                 "nine": 9, "ten": 10}
-        self.assertEqual(words.get(total.group(1)), len(rows),
-                         "README says there are %s tunables; the table lists %d"
-                         % (total.group(1), len(rows)))
-        ci = re.search(r"Only the (\w+) `CI_\*` variables", README)
+        stated = count_word(total.group(1))
+        self.assertIsNotNone(
+            stated, "README states a tunable count as %r, which is not a number "
+            "`count_word` can read" % total.group(1))
+        local = self.tables_near(total.start())
+        self.assertEqual(len(local), 1,
+                         "the sentence stating how many tunables there are is no longer in "
+                         "a section with exactly one knob table, so nothing knows which "
+                         "table it counts")
+        self.assertEqual(stated, len(local[0]),
+                         "README says there are %s tunables; the table in that section "
+                         "lists %d" % (total.group(1), len(local[0])))
+        ci = re.search(r"Only the ([\w-]+) `CI_\*` variables", README)
         self.assertIsNotNone(ci, "README no longer states how many CI_* vars the hook reads")
-        self.assertEqual(words.get(ci.group(1)),
-                         len([r for r in rows if r.startswith("CI_")]),
-                         "README's CI_* count disagrees with its own table")
+        local = self.tables_near(ci.start())
+        self.assertEqual(len(local), 1,
+                         "the CI_* count sentence is no longer in a section with exactly "
+                         "one knob table")
+        self.assertEqual(count_word(ci.group(1)),
+                         len([v for v, _ in local[0] if v.startswith("CI_")]),
+                         "README's CI_* count disagrees with the table beside it")
         # Defeated before: both counts above are pinned to one sentence each, so a THIRD
         # sentence with a different number ("Six knobs actually do anything") contradicted
-        # the table with the suite green. Any counted claim about the knobs has to agree.
-        for word in re.findall(
-                r"\b(three|four|five|six|seven|eight|nine|ten)\s+"
-                r"(?:\w+\s+){0,2}?(knobs|tunables|environment variables|variables)\b",
-                README, re.I):
-            self.assertEqual(
-                words.get(word[0].lower()), len(rows),
-                "README says %s %s; the tuning table lists %d rows"
-                % (word[0], word[1], len(rows)))
+        # the table with the suite green. Any counted claim about the knobs has to agree
+        # with the table in its own section -- and with some real count anywhere else,
+        # which is the weaker half of this and the reason a claim about knobs belongs in
+        # the section whose table it counts.
+        every = [len(rows) for _, rows in tables]
+        for m in COUNTED_CLAIM.finditer(README):
+            stated = count_word(m.group(1))
+            self.assertIsNotNone(stated, "unreadable numeral %r" % m.group(1))
+            local = self.tables_near(m.start())
+            allowed = ([len(rows) for rows in local] if local
+                       else every + [sum(every)])
+            self.assertIn(
+                stated, allowed,
+                "README says %s %s; the knob table(s) it is counting list %s rows"
+                % (m.group(1), m.group(2), " or ".join(str(n) for n in sorted(set(allowed)))))
+
+
+class DerivationCommandTest(unittest.TestCase):
+    """The README hands the reader a command and claims it prints every name any shipped
+    script reads. That is a completeness claim, and unlike a claim about prose it is
+    decidable: run the command the README actually carries -- not a copy retyped here --
+    and compare it against the names the scripts really read.
+
+    This is what stands in for listing every knob in the tables. The tables are explicitly
+    not the whole set; the command is, so the command is what gets checked.
+    """
+
+    # Read by a shipped script, owned by something else: the shell, or a tool the script
+    # shells out to. Everything not on this list is ours and must be findable by the
+    # documented command. The list is short and deliberately hand-maintained, so adopting
+    # a new prefix means editing it in a commit a reviewer can see -- the same reason the
+    # doctrine sentences above are pinned rather than derived.
+    AMBIENT = {"HOME", "PATH", "PWD", "SHELL", "TMPDIR", "RANDOM", "IFS", "LANG", "LC_ALL",
+               "CLAUDE_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"}
+
+    def command(self):
+        i = README.find("prints every")
+        self.assertNotEqual(
+            i, -1, "README no longer offers a command that prints every name a script reads")
+        m = re.search(r"```bash\n(.*?)```", README[i:], re.S)
+        self.assertIsNotNone(m, "the README's derivation command is no longer in a "
+                                "```bash fence right after the sentence promising it")
+        return m.group(1)
+
+    def test_the_documented_command_runs_and_prints_names(self):
+        out = subprocess.run(["bash", "-c", self.command()], cwd=str(ROOT),
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(out.returncode, 0,
+                         "the README's derivation command fails from the repo root: %s"
+                         % out.stderr.strip())
+        self.assertTrue(out.stdout.split(), "the README's derivation command prints nothing")
+
+    def printed(self):
+        out = subprocess.run(["bash", "-c", self.command()], cwd=str(ROOT),
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return set(out.stdout.split())
+
+    def test_the_documented_command_finds_every_knob_a_script_reads(self):
+        """`${VAR:-...}` is a read with a default, which is what a knob is. A name also
+        assigned somewhere in the scripts is a local, not a knob."""
+        read = set(re.findall(r"\$\{([A-Z][A-Z0-9_]{2,}):-", SCRIPTS))
+        assigned = set(re.findall(r"(?<![\w$\"'])([A-Z][A-Z0-9_]{2,})=(?!=)", SCRIPTS))
+        knobs = {n for n in read - assigned if n not in self.AMBIENT}
+        self.assertTrue(knobs, "no knobs found in the shipped scripts at all")
+        for name in sorted(knobs - self.printed()):
+            self.fail("the README says its command prints every name any shipped script "
+                      "reads, but %s is read by a script and the command does not print "
+                      "it" % name)
+
+    def test_the_documented_command_finds_every_documented_knob(self):
+        printed = self.printed()
+        for var in TuningTableTest("test_no_documented_tunable_is_imaginary").table_rows():
+            self.assertIn(var, printed,
+                          "README documents %s in a table but the command it offers as the "
+                          "full list does not print it" % var)
 
 
 class ForgeDiagramTest(unittest.TestCase):
@@ -798,6 +1014,94 @@ class SeedPoolTest(unittest.TestCase):
                 "README says %s skills; the seed-pool table lists %d. State the count "
                 "once, in the pool section, and say what it counts"
                 % (word, len(self.table_rows())))
+
+
+class SkillBudgetTest(unittest.TestCase):
+    """`skill-authoring` states two budgets; the skills that ship have to meet them.
+
+    Both numbers are DERIVED from `skills/skill-authoring/SKILL.md`, never copied here, so
+    raising or lowering a budget there moves this test with it. That is rule 1 of this
+    file: a budget is a setting, and a setting is read off disk.
+
+    Why it is here rather than in a seed-skill test file: `skill-compounder` is the one
+    skill whose budgets nothing checked, and it was over BOTH of them -- 655 description
+    characters and 642 body lines -- while its own sibling documented 500 and 500. A cap
+    stated in one shipped file and violated by another shipped file in the same tree is
+    exactly the drift the rest of this module exists to catch.
+    """
+
+    # Skills that ship over a budget, with the debt written down instead of the guard
+    # switched off. Same shape as `UNVERIFIED` in tests/test_routing_claims.py: the list
+    # may only shrink, and a name on it that is no longer over the ceiling fails below, so
+    # a fix cannot leave a stale exemption behind. Do NOT add to it to make a red test
+    # green -- split the body into `references/` the way `skill-authoring` does.
+    OVER_BODY_CEILING = {"ai-tell-audit"}
+
+    AUTHORING = ROOT / "skills" / "skill-authoring" / "SKILL.md"
+
+    def budgets(self):
+        text = self.AUTHORING.read_text()
+        desc = re.search(r"[Dd]escription at most (\d+) characters", text)
+        front = re.search(r"frontmatter block at most (\d+)", text)
+        body = re.search(r"Hard ceiling: (\d+) body\s+lines", text)
+        for name, m in (("description", desc), ("frontmatter", front), ("body", body)):
+            self.assertIsNotNone(
+                m, "skills/skill-authoring/SKILL.md no longer states the %s budget in a "
+                   "parseable form, so nothing here knows what the ceiling is" % name)
+        return int(desc.group(1)), int(front.group(1)), int(body.group(1))
+
+    def shipped(self):
+        out = []
+        for path in sorted((ROOT / "skills").glob("*/SKILL.md")):
+            raw = path.read_text()
+            parts = raw.split("---\n", 2)
+            self.assertEqual(len(parts), 3, "%s has no frontmatter block" % path.parent.name)
+            out.append((path.parent.name, parts[1], parts[2]))
+        self.assertTrue(out, "no skills ship; this test is vacuous")
+        return out
+
+    def test_every_description_is_inside_the_documented_budget(self):
+        desc_max, front_max, _ = self.budgets()
+        for name, front, _body in self.shipped():
+            meta = __import__("yaml").safe_load(front)
+            self.assertLessEqual(
+                len(meta["description"]), desc_max,
+                "skills/%s description is %d characters against the %d `skill-authoring` "
+                "documents. Padding makes the listing drop it under context pressure, "
+                "which is the failure the budget is for"
+                % (name, len(meta["description"]), desc_max))
+            self.assertLessEqual(
+                len(front), front_max,
+                "skills/%s frontmatter block is %d characters against %d"
+                % (name, len(front), front_max))
+
+    def test_every_body_is_inside_the_documented_ceiling(self):
+        _, _, body_max = self.budgets()
+        for name, _front, body in self.shipped():
+            lines = len(body.strip().splitlines())
+            if name in self.OVER_BODY_CEILING:
+                continue
+            self.assertLessEqual(
+                lines, body_max,
+                "skills/%s has a %d-line body against the hard ceiling of %d that "
+                "skills/skill-authoring/SKILL.md states. The body is a token cost paid on "
+                "every turn after the skill loads; move depth into references/"
+                % (name, lines, body_max))
+
+    def test_the_over_ceiling_list_holds_only_skills_that_are_really_over(self):
+        """A debt ledger that may only shrink. An exemption left behind after the fix is
+        an exemption nobody notices is switched off."""
+        _, _, body_max = self.budgets()
+        sizes = {name: len(body.strip().splitlines())
+                 for name, _f, body in self.shipped()}
+        for name in sorted(self.OVER_BODY_CEILING):
+            self.assertIn(name, sizes,
+                          "OVER_BODY_CEILING names %r, which does not ship" % name)
+            self.assertGreater(
+                sizes[name], body_max,
+                "skills/%s is %d lines, inside the %d-line ceiling, but is still listed in "
+                "OVER_BODY_CEILING. Remove it from the list in the same commit that "
+                "brought it under" % (name, sizes[name], body_max))
 
 
 if __name__ == "__main__":

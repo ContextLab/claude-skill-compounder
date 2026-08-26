@@ -85,6 +85,11 @@ class RaceCase(unittest.TestCase):
     def outcomes(self, state):
         return [r for r in self.ledger(state) if r["event"] in ("done", "fail")]
 
+    def starts(self, state):
+        """The ledger also carries one `horizon` marker and may carry origin/use/verdict
+        rows, so counting "everything that is not an outcome" would count those too."""
+        return [r for r in self.ledger(state) if r["event"] == "start"]
+
     def slots(self, state):
         d = state / "forge"
         if not d.is_dir():
@@ -168,7 +173,7 @@ class ConcurrentCloseTest(RaceCase):
             self.together(state, cmds, cli=cli)
             seen.append(len(self.outcomes(state)))
             if cli is None:
-                self.assertEqual(len(self.ledger(state)) - len(self.outcomes(state)), 1,
+                self.assertEqual(len(self.starts(state)), 1,
                                  "the start record must survive the race untouched")
         return seen
 

@@ -188,8 +188,13 @@ class UnmatchedOutcomeTest(Base):
         # Reproduce the crash by removing the start row the process would not have
         # written, leaving the live slot exactly as a SIGKILL leaves it.
         lines = (self.state / "ledger.jsonl").read_text().splitlines()
-        self.assertEqual(len(lines), 1)
-        (self.state / "ledger.jsonl").write_text("", encoding="utf-8")
+        starts = [l for l in lines if '"event":"start"' in l]
+        self.assertEqual(len(starts), 1)
+        # Only the start row goes. The `horizon` marker stays, because a kill inside
+        # ledger_append can leave it written and the row it was about missing -- which is
+        # the state this reconstructs.
+        (self.state / "ledger.jsonl").write_text(
+            "".join(l + "\n" for l in lines if l not in starts), encoding="utf-8")
         self.forge("step", "6", "still going", SKILLFORGE_NOW=1010)
         self.forge("done", "finished anyway", SKILLFORGE_NOW=1020)
         out = self.forge("ledger").stdout

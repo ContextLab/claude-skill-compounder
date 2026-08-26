@@ -5,6 +5,8 @@
 # line renders the animation from the state it writes (see statusline/).
 #
 #   skillforge start <name> <total-steps> <one-line summary...> [--skill-dir <dir>]
+#                    --trigger "<verbatim text that set this off>"
+#                    --trigger-kind <user-prompt|hook-checkpoint|review-dispatch|agent-decision>
 #   skillforge step  [--name <forge>] <step-number> <what is happening now...>
 #   skillforge done  [--name <forge>] [--skill-dir <dir>] [message...]
 #   skillforge fail  [--name <forge>] <reason...>
@@ -13,6 +15,27 @@
 #   skillforge list
 #   skillforge ledger [--json]
 #   skillforge install <name> [--skill-dir <dir>]
+#   skillforge origin  --name <skill> --origin <forged|workflow|seeded|adopted|unknown>
+#                      [--skill-dir <dir>] [--trigger <text> --trigger-kind <kind>]
+#   skillforge use     --name <skill> [--ok|--failed] [--session <id>] [--cwd <dir>]
+#                      [--entrypoint <cli|sdk-cli|...>] [--harness|--genuine]
+#                      [--tool-use-id <id>] [--recorded live|derived]
+#   skillforge verdict --name <skill> --verdict <WORKED|NO-OP|MISFIRED|UNKNOWN>
+#                      --evidence "<verbatim quote>" [--use-ts <epoch>]
+#                      [--use-session <id>] [--judged-by <who>]
+#   skillforge backfill <file.jsonl | ->
+#
+# THE LEDGER ANSWERS FOUR QUESTIONS: what triggered the build, what was built, when it
+# has been used since, and whether it worked. `--trigger` is the first of those and it
+# is the one nothing else can recover later, so `start` warns loudly without it and
+# records `trigger_kind:"unrecorded"` rather than leaving a silent gap. Set
+# SKILLFORGE_REQUIRE_TRIGGER=1 to make a missing trigger a refusal instead.
+#
+# `origin`, `use` and `verdict` rows are written by `done`, by the installer, by
+# hooks/skill-use.sh and by whatever judges a session; `backfill` is the only door
+# reconstructed history comes through, and everything it writes is permanently marked
+# `backfilled:true` with a `source`. Every reader here selects events by name, so a
+# ledger holding these rows is counted by an older reader exactly as it was before.
 #
 # `done` INSTALLS the skill the forge produced, so that closing the loop is what makes
 # the skill usable. See "installing what was forged" below for how the skill is found
@@ -45,12 +68,64 @@
 #                       'start', the originating repository path, epoch timestamps,
 #                       step counts, outcome and reason. No file contents, no
 #                       transcripts, no credentials.
+#                       It also holds the ledger-v2 rows: `origin` (one per skill: how it
+#                       entered the pool, where its directory is, and the verbatim text
+#                       you passed to --trigger), `use` (one per skill invocation: the
+#                       skill name, your session id, the working directory, whether it
+#                       succeeded, and whether a script or a person drove the session),
+#                       `verdict` (a judgement plus the quote behind it), and one
+#                       `horizon` row saying where the record begins. The trigger text
+#                       and a verdict's evidence are the only free text stored, and both
+#                       are text you passed in yourself.
 # Any other *.json left in forge/ by an older version is read as a forge too, so an
 # upgrade neither loses it nor deletes it behind your back.
 # Nothing is transmitted. This script makes no network calls. Delete ledger.jsonl at
 # any time; skillforge recreates it on the next forge.
 set -uo pipefail
+# ------------------------------------------------------------------------------------
+# THE ENTIRE BODY OF THIS SCRIPT IS ONE BRACE GROUP, AND THE `}` AT THE END OF THE FILE
+# IS WHAT CLOSES IT. It is not style and it is not decoration.
+#
+# bash reads a script LAZILY, by byte offset, and resumes at that offset in whatever the
+# file holds AT THAT MOMENT. Every file in this package is executed by absolute path out
+# of the checkout -- the installer writes those paths into settings.json and symlinks the
+# CLIs into ~/bin -- so one `git pull`, `git checkout` or `sed -i` rewrites the bytes of
+# a run that is already in flight. Measured on GNU bash 5.3.3(1): prepending forty lines
+# to a live 25-line script produced `line 4: non-transferable: command not found` and
+# then a second execution of the body; truncating it produced `unexpected EOF` and
+# exit 2. It cost a real, paid-for `claude -p` dispatch on 2026-08-25.
+#
+# A brace group is a single compound command, so bash must find the matching `}` before
+# it may run any part of it: the file goes through the parser in ONE pass and nothing
+# written to disk afterwards can be executed. A file truncated badly enough to break the
+# parse then runs NOTHING, which is also the answer we want here -- half a run is worse
+# than no run.
+#
+# THE `exit` BEFORE THE CLOSING `}` IS LOAD-BEARING TOO. A brace group protects its body
+# and nothing past it: measured, a wrapped script that fell off its end had bash resume
+# at the offset just past `}`, find prepended text sitting there, and run the whole body
+# a SECOND time. So the group is not sufficient on its own. It is a BARE `exit` and not
+# `exit 0` because the `case` this ends in has arms that exit non-zero on purpose
+# (an unknown subcommand is exit 2, and see the exit-code table above); a bare `exit`
+# reuses `$?` and preserves every one of them, while `exit 0` would silently erase them.
+#
+# Consequences when editing:
+#   - the closing `}` must stay the last line, and `bash -n` is what proves it.
+#   - the last statement inside the group must be an `exit`. tests/test_script_wrapping.py
+#     checks that across every shipped script and reproduces the hazard against a live
+#     process.
+#   - `exit` still exits the script, traps are still global, and functions and variables
+#     defined inside are still global. Nothing about the semantics changes.
+#
+# The incident this came out of, and the reproduction, are in docs/DESIGN.md under
+# "Never edit a script that may still be running".
+# ------------------------------------------------------------------------------------
+{
 
+
+# HOME can be unset (cron, a stripped env, a container). Under `set -u` reading it then
+# aborts the script non-zero before it has printed anything.
+: "${HOME:=/tmp}"
 STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$STATE_ROOT/forge"
 mkdir -p "$DIR" 2>/dev/null || { echo "skillforge: cannot create $DIR" >&2; exit 1; }
@@ -376,26 +451,192 @@ slug_of() {
 ledger_line() { # <event> <name> <steps> <summary> [step] [phase] [duration] [rounds]
   # `rounds` on a start record is the plan; on a done or fail record it is the count
   # actually completed, and `rounds_planned` records what was budgeted alongside it.
+  #
+  # The trigger arrives through two globals rather than as arguments 10 and 11. Only
+  # `start` sets them, and only `start` can: every other command runs in its own process,
+  # where they are empty. Adding two positional parameters instead would have put them
+  # behind seven optional ones at every call site, which is how a caller ends up passing a
+  # duration into `rounds`.
   jq -n -c \
     --arg event "$1" --arg name "$2" --arg summary "${4:-}" \
     --arg project "$(project_root)" \
     --argjson ts "$(now)" --argjson steps "$(int_or_zero "${3:-0}")" \
     --arg step "${5:-}" --arg phase "${6:-}" --arg duration "${7:-}" --arg rounds "${8:-}" \
     --arg planned "${9:-}" \
+    --arg trigger "${TRIGGER_TEXT:-}" --arg tkind "${TRIGGER_KIND:-}" \
     '{event:$event, name:$name, ts:$ts, steps:$steps, summary:$summary, project:$project}
      + (if $step     == "" then {} else {step:     ($step|tonumber)}     end)
      + (if $phase    == "" then {} else {phase:     $phase}              end)
      + (if $duration == "" then {} else {duration: ($duration|tonumber)} end)
      + (if $rounds   == "" then {} else {rounds:   ($rounds|tonumber)}   end)
-     + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)' 2>/dev/null
+     + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)
+     + (if $trigger  == "" then {} else {trigger_verbatim: $trigger}     end)
+     + (if $tkind    == "" then {} else {trigger_kind: $tkind}           end)' 2>/dev/null
 }
 
 # A ledger failure must never break a forge, hence the bare returns.
 ledger_append() { # <same arguments as ledger_line>
   la_line="$(ledger_line "$@")"
   [ -n "$la_line" ] || return 0
+  ledger_ensure_horizon
   printf '%s\n' "$la_line" >> "$LEDGER" 2>/dev/null || return 0
   return 0
+}
+
+# ------------------------------------------------------------------ ledger v2 rows
+#
+# THE FOUR QUESTIONS. A ledger of start/step/done/fail answers "a forge happened" and
+# nothing else. What the record has to answer is: what triggered the build, what was
+# built, when it has been used since, and whether it worked. Three event types carry
+# those, alongside every existing one:
+#
+#   origin   one row per skill: how it entered the pool, where it lives, and the
+#            verbatim thing that set the forge off.
+#   use      one row per invocation, written live by hooks/skill-use.sh.
+#   verdict  one judgement about one use, with the quote it rests on.
+#
+# EVERY READER SELECTS THE EVENTS IT UNDERSTANDS BY NAME, so a file holding these rows
+# is counted by an older `skillforge ledger` or `skillreport` exactly as it was before.
+# That is not a hope, it is the reason `ledger` and `skillreport` filter on
+# `.event == "start"` rather than on "not an outcome": a reader that classified by
+# exclusion would have folded every `use` row into the forge count the day this landed.
+#
+# PROVENANCE IS PART OF THE ROW, NOT OF THE FILE. A row written as the thing happened
+# carries `confidence:"measured"` and `backfilled:false`. A row reconstructed afterwards
+# carries `backfilled:true`, `confidence:"reconstructed"`, a `source` naming the evidence
+# it was read from, and `reconstructed_at`. The two kinds live in one file forever and no
+# reader may present the second as the first. `backfilled` is written EXPLICITLY on live
+# rows rather than left absent: "the key is missing" and "this row is live" are the same
+# bytes only until somebody hand-edits the file, and the whole point of the distinction is
+# that it survives.
+#
+# A FIELD THE DATA DOES NOT ESTABLISH IS OMITTED. Never guessed, never defaulted to
+# something plausible. `trigger_kind:"unrecorded"` is the one exception and it is not a
+# guess: it is the positive statement that a forge ran without recording why, which is a
+# fact about the forge worth counting.
+TRIGGER_KINDS="user-prompt hook-checkpoint review-dispatch agent-decision"
+VERDICT_VALUES="WORKED NO-OP MISFIRED UNKNOWN"
+
+# The commit the forge was standing on, best effort. Omitted rather than faked.
+commit_here() {
+  git -C "$PWD" rev-parse --short HEAD 2>/dev/null || printf ''
+}
+
+# Does the ledger already hold an origin row for this skill?
+# The name goes in through --arg and never through the program text: a skill name is
+# user-supplied, and a name holding a quote or a backslash spliced into a jq program is
+# both a syntax error and, less kindly, a way to make the check answer whatever the name
+# says. A ledger that cannot be read answers "no": a duplicate row is recoverable and a
+# row never written is not.
+ledger_has_origin() { # <name>
+  [ -s "$LEDGER" ] || return 1
+  jq -e -s -R --arg n "$1" '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) ]
+    | map(select(.event == "origin" and .name == $n)) | length > 0' "$LEDGER" >/dev/null 2>&1
+}
+
+# Same question for one recorded invocation, keyed on the tool_use id Claude Code gives
+# it. The hook that writes these already claims each event once, but the two guards catch
+# different failures: the claim marker is per session and ages out after an hour, while
+# this one is the ledger's own memory and never does.
+ledger_has_use_id() { # <tool_use_id>
+  [ -n "${1:-}" ] || return 1
+  [ -s "$LEDGER" ] || return 1
+  jq -e -s -R --arg id "$1" '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) ]
+    | map(select(.event == "use" and .tool_use_id == $id)) | length > 0' "$LEDGER" >/dev/null 2>&1
+}
+
+# THE HORIZON. An empty stretch of ledger means one of two completely different things:
+# nothing happened, or nothing was being recorded yet. The live ledger on the machine
+# this was written on has a 7.4-hour pre-history in which a real forge ran and produced a
+# real skill, and no row of it exists. Read without a horizon, that reads as a negative
+# result -- which is the exact failure this whole exercise is about.
+#
+# So one row states where the record begins:
+#   known_from     the earliest ts in the file at the moment the marker was written, or
+#                  now, if the file was empty.
+#   complete_from  written ONLY when the ledger was empty, because only then is "complete
+#                  from here" a thing we know. Otherwise the field is absent, and its
+#                  absence says the completeness of what came before is unestablished.
+# Written at most once, by whichever ledger write comes first.
+ledger_ensure_horizon() {
+  grep -q '"event":"horizon"' "$LEDGER" 2>/dev/null && return 0
+  lh_now="$(now)"
+  lh_first="$(jq -s -R 'def n: [ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                                 | (.ts // empty) | numbers ];
+                        (n | min) // null' "$LEDGER" 2>/dev/null)"
+  case "${lh_first:-null}" in
+    null|'') lh_first="$lh_now"; lh_complete="$lh_now" ;;
+    *)       lh_complete="" ;;
+  esac
+  lh_line="$(jq -n -c --argjson ts "$lh_now" --argjson known "$lh_first" \
+    --arg complete "$lh_complete" \
+    '{event:"horizon", ts:$ts, known_from:$known,
+      note:"This ledger holds no row before known_from. Whether anything happened before it is UNKNOWN, not none.",
+      confidence:"measured", backfilled:false}
+     + (if $complete == "" then {} else {complete_from:($complete|tonumber)} end)' 2>/dev/null)"
+  [ -n "$lh_line" ] || return 0
+  printf '%s\n' "$lh_line" >> "$LEDGER" 2>/dev/null || return 0
+  return 0
+}
+
+# Append one already-built row. Like ledger_append, a failure here never breaks a caller.
+ledger_raw_append() { # <compact json line>
+  [ -n "${1:-}" ] || return 0
+  ledger_ensure_horizon
+  printf '%s\n' "$1" >> "$LEDGER" 2>/dev/null || return 0
+  return 0
+}
+
+# ONE ORIGIN ROW PER SKILL, EVER. Install runs on every upgrade and `done` runs on every
+# forge, so an origin row that appended unconditionally would grow by one per install and
+# turn "how did this skill get here" into a pile of contradictory answers. The first
+# answer is kept; a later caller that knows better says so with its own event rather than
+# by writing a second origin.
+#
+# `shipped` says whether the skill lives inside this checkout's skills/ or somewhere else
+# entirely. A skill forged into a user's personal directory is the normal case in the
+# field, not an edge case, and a model that could only describe repo-shipped skills would
+# be blind to most of what this package actually builds.
+origin_append() { # <name> <origin> <skill_dir> <trigger> <trigger_kind> <created_at>
+  oa_name="${1:-}"; [ -n "$oa_name" ] || return 0
+  ledger_has_origin "$oa_name" && return 0
+  oa_dir="${3:-}"
+  oa_shipped="false"
+  oa_home="$(app_home)"
+  if [ -n "$oa_home" ]; then
+    case "$oa_dir" in "$oa_home/skills/"*) oa_shipped="true" ;; esac
+  fi
+  oa_line="$(jq -n -c --arg name "$oa_name" --arg origin "${2:-unknown}" \
+    --arg dir "$oa_dir" --argjson shipped "$oa_shipped" \
+    --arg tv "${4:-}" --arg tk "${5:-}" --arg created "${6:-}" \
+    --arg commit "$(commit_here)" --arg project "$(project_root)" \
+    --argjson ts "$(now)" \
+    '{event:"origin", ts:$ts, name:$name, origin:$origin, project:$project,
+      confidence:"measured", backfilled:false}
+     + (if $dir     == "" then {} else {skill_dir:$dir, shipped:$shipped} end)
+     + (if $tv      == "" then {} else {trigger_verbatim:$tv}   end)
+     + (if $tk      == "" then {} else {trigger_kind:$tk}       end)
+     + (if $commit  == "" then {} else {created_commit:$commit} end)
+     + (if $created == "" then {} else {created_at:($created|tonumber)} end)' 2>/dev/null)"
+  ledger_raw_append "$oa_line"
+}
+
+# The origin row a finished forge implies, written from the forge record itself so that
+# the trigger recorded at `start` is what lands in it.
+#
+# THE NAME IS THE DIRECTORY'S, NOT THE FORGE'S -- the same rule install_forged_skill
+# follows, and for the same reason: a session resolves a skill by the directory it sits
+# in, so an origin row under the forge's name would describe a skill nothing can invoke.
+# A forge that produced no SKILL.md at all (a fix, a retirement, a red-team round) gets no
+# origin row: there is no skill to have an origin.
+origin_for_forge() { # <forge name> <record file>
+  of_name="${1:-}"; of_rec="${2:-}"
+  find_skill_dir "$of_name" "$of_rec" || return 0
+  origin_append "$(basename "$FOUND")" forged "$FOUND" \
+    "$(field "$of_rec" trigger)" "$(field "$of_rec" trigger_kind)" \
+    "$(int_or_zero "$(field "$of_rec" started)")"
 }
 
 # Red-team rounds are not stored during a forge, only the step budget and the step
@@ -744,6 +985,11 @@ case "$cmd" in clear|show|list) ALLOW_ALL=1 ;; *) ALLOW_ALL=0 ;; esac
 SKILLDIR_OPT="${SKILLFORGE_SKILL_DIR:-}"
 [ -n "$SKILLDIR_OPT" ] && SKILLDIR_OPT="$(abspath "$SKILLDIR_OPT")"
 case "$cmd" in start|done|install) ALLOW_SKILLDIR=1 ;; *) ALLOW_SKILLDIR=0 ;; esac
+# --trigger / --trigger-kind, on `start` only, for the same reason: a `fail` reason or a
+# `step` phase that happens to contain the word is left alone. Empty means "not recorded",
+# and ledger_line writes nothing for an empty one rather than an empty string.
+TRIGGER_TEXT=""; TRIGGER_KIND=""
+case "$cmd" in start) ALLOW_TRIGGER=1 ;; *) ALLOW_TRIGGER=0 ;; esac
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -757,6 +1003,20 @@ while [ $# -gt 0 ]; do
     --skill-dir=*) if [ "$ALLOW_SKILLDIR" -eq 1 ]; then
                      SKILLDIR_OPT="$(abspath "${1#--skill-dir=}")"; shift
                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --trigger)      if [ "$ALLOW_TRIGGER" -eq 1 ]; then
+                      [ $# -ge 2 ] || die "--trigger requires the verbatim text that set this forge off"
+                      TRIGGER_TEXT="$2"; shift 2
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --trigger=*)    if [ "$ALLOW_TRIGGER" -eq 1 ]; then
+                      TRIGGER_TEXT="${1#--trigger=}"; shift
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --trigger-kind) if [ "$ALLOW_TRIGGER" -eq 1 ]; then
+                      [ $# -ge 2 ] || die "--trigger-kind requires one of: $TRIGGER_KINDS"
+                      TRIGGER_KIND="$2"; shift 2
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --trigger-kind=*) if [ "$ALLOW_TRIGGER" -eq 1 ]; then
+                      TRIGGER_KIND="${1#--trigger-kind=}"; shift
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --all)     if [ "$ALLOW_ALL" -eq 1 ]; then ALL_OPT=1; shift
                else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --)        shift; while [ $# -gt 0 ]; do ARGS[${#ARGS[@]}]="$1"; shift; done ;;
@@ -790,6 +1050,41 @@ case "$cmd" in
     case "$steps" in ?????*) die "total-steps must be between 1 and 9999" ;; esac
     [ "$steps" -lt 1 ] && die "total-steps must be >= 1"
     [ -z "$summary" ] && die "a one-line summary is required — it is what the user sees"
+
+    # WHAT TRIGGERED THIS FORGE IS THE MEASUREMENT THE PROJECT EXISTS TO MAKE: did a human
+    # ask, or did the machinery notice? A forge that does not record it produces a row
+    # that cannot answer the first of the four questions, ever, because the moment passes.
+    #
+    # AND YET A MISSING TRIGGER IS A WARNING, NOT A REFUSAL. Refusing does not produce a
+    # trigger, it produces no forge record at all: every caller written before this flag
+    # existed -- the README's own example, the demo script, the line `setup.py` prints on
+    # a fresh install, and any half-written procedure in a doc -- would exit 2, and the
+    # cheapest way past a CLI that refuses is to stop calling it. That trades a row with
+    # one missing field for no row, no animation and no outcome, which is strictly worse
+    # for all four questions. So the gap is recorded AS a gap: `trigger_kind:"unrecorded"`
+    # is a positive statement that a forge ran without recording why, and it is countable.
+    # SKILLFORGE_REQUIRE_TRIGGER=1 turns it into a refusal for anyone whose callers are
+    # all updated and who wants the rule enforced.
+    if [ -n "$TRIGGER_KIND" ]; then
+      case " $TRIGGER_KINDS " in
+        *" $TRIGGER_KIND "*) : ;;
+        *) die "--trigger-kind must be one of: $TRIGGER_KINDS (got '$TRIGGER_KIND')" ;;
+      esac
+    fi
+    if [ -n "$TRIGGER_TEXT" ] && [ -z "$TRIGGER_KIND" ]; then
+      # The quote alone does not answer the question. "Fix the flaky test" reads the same
+      # whether a person typed it or a checkpoint hook produced it, and which of those it
+      # was is the entire point of recording it.
+      die "--trigger needs --trigger-kind <$(printf '%s' "$TRIGGER_KINDS" | tr ' ' '|')>: the quote says what was asked, the kind says who asked"
+    fi
+    if [ -z "$TRIGGER_TEXT" ]; then
+      if [ "${SKILLFORGE_REQUIRE_TRIGGER:-0}" = "1" ]; then
+        die "SKILLFORGE_REQUIRE_TRIGGER=1 and no --trigger was given. Add: --trigger \"<verbatim text that set this off>\" --trigger-kind <$(printf '%s' "$TRIGGER_KINDS" | tr ' ' '|')>"
+      fi
+      TRIGGER_KIND="unrecorded"
+      echo "skillforge: WARNING — no --trigger given, so this forge will record nothing about why it started, and the ledger will read 'trigger not recorded' for it forever." >&2
+      echo "skillforge:   Add: --trigger \"<verbatim text that set this off>\" --trigger-kind <$(printf '%s' "$TRIGGER_KINDS" | tr ' ' '|')>" >&2
+    fi
 
     # Does a forge by this name already exist? An ACTIVE one is refused: overwriting it
     # is exactly the defect this multi-slot scheme exists to remove, and silently
@@ -837,12 +1132,18 @@ SLOTS
     # directory, and because a skill written outside the two conventional layouts is
     # not findable at close time by any other means. A record from an older version has
     # neither field; find_skill_dir falls back to searching for exactly that reason.
+    # `trigger` and `trigger_kind` are carried on the RECORD as well as on the start row,
+    # because the origin row is written at `done` -- possibly hours later, in another
+    # directory -- and the record is the only thing that still remembers what was said.
     { jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
       --arg id "$(new_forge_id)" --arg root "$(project_root)" --arg sd "$SKILLDIR_OPT" \
+      --arg tg "$TRIGGER_TEXT" --arg tk "$TRIGGER_KIND" \
       '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
         status:"active", started:$now, updated:$now, id:$id}
        + {root:$root}
-       + (if $sd == "" then {} else {skill_dir:$sd} end)' > "$tmp"; } 2>/dev/null \
+       + (if $sd == "" then {} else {skill_dir:$sd} end)
+       + (if $tg == "" then {} else {trigger:$tg} end)
+       + (if $tk == "" then {} else {trigger_kind:$tk} end)' > "$tmp"; } 2>/dev/null \
       || { rm -f "$tmp" 2>/dev/null; die "could not write to $DIR (is it writable?)"; }
 
     if [ -n "$existing" ]; then
@@ -929,6 +1230,11 @@ SLOTS
     # carries that rule, and decides which of several racing closers writes the row.
     if close_forge "$FILE" done done "$msg"; then
       echo "skillforge: '$CLOSED_NAME' complete — $msg"
+      # BEFORE the install, not after: the origin row describes what this forge produced
+      # and why, and it is true whether or not the link into the skills directory
+      # succeeds. Written first also means link_skill finds an origin already there and
+      # does not add an "adopted" one over the top of "forged".
+      origin_for_forge "$(field "$FILE" name)" "$FILE"
       # Closing the loop is what makes the skill usable. Its status is deliberately not
       # this command's: the forge did close, and a non-zero `done` would be read as a
       # close that failed and retried. What went wrong is said out loud instead.
@@ -969,6 +1275,236 @@ SLOTS
       # problems and a caller that branches on the code should be able to tell them apart.
       *) [ "$ins_rc" -gt 0 ] && exit "$ins_rc"; exit 4 ;;
     esac
+    ;;
+
+  use|verdict|origin)
+    # The three ledger-v2 writers. They touch no forge slot and no animation: they only
+    # append one row, so they share nothing with the commands above except the ledger.
+    #
+    # Flags are normalised to --key=value first. Writing the two-form parse out per flag
+    # is where a `[ $# -ge 2 ]` guard gets forgotten, and a missing value then silently
+    # becomes the NEXT flag's name -- recorded, in the ledger, as if it were evidence.
+    NARGS=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --ok|--failed|--harness|--genuine) NARGS[${#NARGS[@]}]="$1"; shift ;;
+        --*=*) NARGS[${#NARGS[@]}]="$1"; shift ;;
+        --*) [ $# -ge 2 ] || die "$1 requires a value"
+             NARGS[${#NARGS[@]}]="$1=$2"; shift 2 ;;
+        *)   die "skillforge $cmd takes flags only; got '$1'" ;;
+      esac
+    done
+    set -- ${NARGS[@]+"${NARGS[@]}"}
+
+    v_name="$NAME_OPT"; v_ok="true"; v_session=""; v_cwd=""; v_ep=""; v_harness=""
+    v_id=""; v_recorded="live"; v_verdict=""; v_evidence=""; v_usets=""; v_usesession=""
+    v_by=""; v_origin=""; v_dir=""; v_created=""; v_trigger=""; v_tkind=""
+    for a in "$@"; do
+      k="${a%%=*}"; v="${a#*=}"
+      case "$k" in
+        --ok)          v_ok="true" ;;
+        --failed)      v_ok="false" ;;
+        --harness)     v_harness="true" ;;
+        --genuine)     v_harness="false" ;;
+        --name|--skill) v_name="$v" ;;
+        --session)     v_session="$v" ;;
+        --cwd)         v_cwd="$v" ;;
+        --entrypoint)  v_ep="$v" ;;
+        --tool-use-id) v_id="$v" ;;
+        --recorded)    v_recorded="$v" ;;
+        --verdict)     v_verdict="$v" ;;
+        --evidence)    v_evidence="$v" ;;
+        --use-ts)      v_usets="$v" ;;
+        --use-session) v_usesession="$v" ;;
+        --judged-by)   v_by="$v" ;;
+        --origin)      v_origin="$v" ;;
+        --skill-dir)   v_dir="$(abspath "$v")" ;;
+        --created-at)  v_created="$v" ;;
+        --trigger)     v_trigger="$v" ;;
+        --trigger-kind) v_tkind="$v" ;;
+        *)             die "unknown option '$k' for skillforge $cmd" ;;
+      esac
+    done
+    [ -n "$v_name" ] || die "usage: skillforge $cmd --name <skill> ..."
+
+    case "$cmd" in
+      origin)
+        case " forged workflow seeded adopted unknown " in
+          *" ${v_origin:-} "*) : ;;
+          *) die "--origin must be one of: forged workflow seeded adopted unknown" ;;
+        esac
+        if [ -n "$v_tkind" ]; then
+          case " $TRIGGER_KINDS unrecorded " in
+            *" $v_tkind "*) : ;;
+            *) die "--trigger-kind must be one of: $TRIGGER_KINDS" ;;
+          esac
+        fi
+        if ledger_has_origin "$v_name"; then
+          echo "skillforge: '$v_name' already has an origin row; nothing was written"
+          exit 0
+        fi
+        origin_append "$v_name" "$v_origin" "$v_dir" "$v_trigger" "$v_tkind" "$v_created"
+        echo "skillforge: recorded origin '$v_origin' for '$v_name'"
+        ;;
+
+      use)
+        # Called by hooks/skill-use.sh on every Skill invocation, and by the backfill
+        # importer for reconstructed ones. It must be cheap and it must never be the
+        # reason a turn fails, so every refusal below is about a row that would be WRONG,
+        # never about one that is merely incomplete.
+        case "$v_recorded" in
+          live|derived) : ;;
+          *) die "--recorded must be live or derived" ;;
+        esac
+        if [ -n "$v_id" ] && ledger_has_use_id "$v_id"; then
+          echo "skillforge: use $v_id is already in the ledger; nothing was written"
+          exit 0
+        fi
+        # WHO DROVE THE SESSION is the genuine/harness question, and the answer is the
+        # transcript's `.entrypoint` ("sdk-cli" means a script did). An explicit
+        # --harness/--genuine wins; otherwise it is derived from the entrypoint; and if
+        # neither is known the field is OMITTED rather than guessed, because "counted"
+        # is the answer that inflates the headline and a silent default is how it got
+        # inflated the first time.
+        if [ -z "$v_harness" ] && [ -n "$v_ep" ]; then
+          if [ "$v_ep" = "sdk-cli" ]; then v_harness="true"; else v_harness="false"; fi
+        fi
+        v_proj=""
+        if [ -n "$v_cwd" ]; then
+          v_proj="$(git -C "$v_cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$v_cwd")"
+        fi
+        u_line="$(jq -n -c --arg name "$v_name" --argjson ok "$v_ok" \
+          --arg session "$v_session" --arg cwd "$v_cwd" --arg project "$v_proj" \
+          --arg ep "$v_ep" --arg harness "$v_harness" --arg id "$v_id" \
+          --arg recorded "$v_recorded" --argjson ts "$(now)" \
+          '{event:"use", ts:$ts, name:$name, ok:$ok, recorded:$recorded,
+            confidence:"measured", backfilled:false}
+           + (if $session == "" then {} else {session:$session} end)
+           + (if $cwd     == "" then {} else {cwd:$cwd}         end)
+           + (if $project == "" then {} else {project:$project} end)
+           + (if $ep      == "" then {} else {entrypoint:$ep}   end)
+           + (if $harness == "" then {} else {harness:($harness|test("true"))} end)
+           + (if $id      == "" then {} else {tool_use_id:$id}  end)' 2>/dev/null)"
+        [ -n "$u_line" ] || die "could not build a use row for '$v_name'"
+        ledger_raw_append "$u_line"
+        ;;
+
+      verdict)
+        case " $VERDICT_VALUES " in
+          *" ${v_verdict:-} "*) : ;;
+          *) die "--verdict must be one of: $VERDICT_VALUES" ;;
+        esac
+        # A VERDICT WITH NO QUOTE IS NOT WRITTEN. WORKED, NO-OP and MISFIRED are claims
+        # about what a skill did, and a claim with no evidence behind it is exactly the
+        # kind of confident-sounding number this ledger exists to stop producing.
+        # UNKNOWN is the honest outcome when there is nothing to quote, so it alone may
+        # be written bare -- that is what makes it first-class rather than a failure.
+        if [ "$v_verdict" != "UNKNOWN" ] && [ -z "$v_evidence" ]; then
+          die "--evidence is required for $v_verdict: a verdict with no verbatim quote behind it is not written (UNKNOWN may be written bare)"
+        fi
+        case "${v_usets:-0}" in ''|*[!0-9]*) v_usets="" ;; esac
+        vd_line="$(jq -n -c --arg name "$v_name" --arg verdict "$v_verdict" \
+          --arg evidence "$v_evidence" --arg by "$v_by" --arg usesession "$v_usesession" \
+          --arg usets "$v_usets" --argjson ts "$(now)" \
+          '{event:"verdict", ts:$ts, name:$name, verdict:$verdict,
+            judged_at:$ts, confidence:"measured", backfilled:false,
+            judgement:"model judgement over recorded evidence, not a measurement"}
+           + (if $evidence   == "" then {} else {evidence:$evidence}       end)
+           + (if $by         == "" then {} else {judged_by:$by}            end)
+           + (if $usesession == "" then {} else {use_session:$usesession}  end)
+           + (if $usets      == "" then {} else {use_ts:($usets|tonumber)} end)' 2>/dev/null)"
+        [ -n "$vd_line" ] || die "could not build a verdict row for '$v_name'"
+        ledger_raw_append "$vd_line"
+        ;;
+    esac
+    exit 0
+    ;;
+
+  backfill)
+    # THE ONLY DOOR RECONSTRUCTED HISTORY COMES THROUGH. Rows arrive as JSON lines and
+    # are appended only after EVERY line has been checked, so a file with one bad row
+    # leaves the ledger untouched instead of half-imported -- there is no undo for an
+    # append, and a partial import cannot be told apart from a complete one afterwards.
+    #
+    # Three rules, none of them negotiable:
+    #   1. Every row carries `backfilled:true`, `confidence:"reconstructed"`, a `source`
+    #      naming the evidence it was read from, and `reconstructed_at`. A row without a
+    #      source is refused: the whole file is refused with it.
+    #   2. No live row is ever rewritten, moved or removed. This only ever appends.
+    #   3. A row that duplicates something already in the ledger is skipped, so the
+    #      import is re-runnable.
+    bf_in="${1:-}"
+    [ -n "$bf_in" ] || die "usage: skillforge backfill <file.jsonl | -> "
+    bf_tmp="$DIR/.backfill.$$.tmp"
+    if [ "$bf_in" = "-" ]; then cat > "$bf_tmp"; else
+      [ -f "$bf_in" ] || die "no such file: $bf_in"
+      cat "$bf_in" > "$bf_tmp" 2>/dev/null || die "could not read $bf_in"
+    fi
+    [ -f "$LEDGER" ] || : > "$LEDGER" 2>/dev/null || true
+    bf_out="$(jq -R -s --rawfile existing "$LEDGER" --argjson now "$(now)" '
+      def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty) ];
+      ($existing | parse) as $old
+      | [ split("\n")[] | select((. | gsub("[[:space:]]"; "")) != "") ] as $lines
+      | [ range(0; ($lines | length))
+          | { n: (. + 1), raw: $lines[.], obj: ($lines[.] | fromjson? // null) } ] as $rows
+      | [ $rows[]
+          | . as $r
+          | (if   ($r.obj | type) != "object" then "line \($r.n): not a JSON object"
+             elif (["origin","use","verdict"] | index($r.obj.event) | not)
+                  then "line \($r.n): event must be origin, use or verdict (got \($r.obj.event | tojson))"
+             elif (($r.obj.name // "") | length) == 0
+                  then "line \($r.n): no name"
+             elif (($r.obj.source // "") | length) == 0
+                  then "line \($r.n): no source. A reconstructed row must name the transcript, note or file it was read from."
+             elif ($r.obj.backfilled == false)
+                  then "line \($r.n): backfilled:false. This entry point only accepts reconstructed rows."
+             else empty end) ] as $errors
+      | if ($errors | length) > 0 then {errors: $errors, append: [], skipped: 0}
+        else
+          (reduce $rows[] as $r ({append: [], skipped: 0, seen: $old};
+             ($r.obj) as $o
+             | (.seen | any(
+                  ($o.event == "origin" and .event == "origin" and .name == $o.name)
+                  or ($o.event == "use" and .event == "use"
+                      and ((($o.tool_use_id // "") != "" and .tool_use_id == $o.tool_use_id)
+                           or (($o.tool_use_id // "") == ""
+                               and .name == $o.name and .ts == $o.ts
+                               and (.session // "") == ($o.session // ""))))
+                  or ($o.event == "verdict" and .event == "verdict"
+                      and .name == $o.name and (.use_ts // null) == ($o.use_ts // null)
+                      and (.use_session // "") == ($o.use_session // ""))
+                )) as $dup
+             | if $dup then .skipped += 1
+               else ($o + {backfilled: true, confidence: "reconstructed"}
+                     + (if ($o.reconstructed_at // null) == null
+                        then {reconstructed_at: $now} else {} end)) as $row
+                    | .append += [$row] | .seen += [$row]
+               end))
+          | {errors: [], append: .append, skipped: .skipped}
+        end' "$bf_tmp" 2>&1)"
+    rm -f "$bf_tmp" 2>/dev/null
+    case "$bf_out" in
+      '{'*) : ;;
+      *) die "could not read $bf_in as JSON lines: $bf_out" ;;
+    esac
+    bf_err="$(printf '%s' "$bf_out" | jq -r '.errors[]?' 2>/dev/null)"
+    if [ -n "$bf_err" ]; then
+      echo "skillforge: nothing was imported. $bf_in has rows this cannot accept:" >&2
+      printf '%s\n' "$bf_err" | sed 's/^/  /' >&2
+      exit 2
+    fi
+    ledger_ensure_horizon
+    bf_n=0
+    while IFS= read -r bf_line; do
+      [ -n "$bf_line" ] || continue
+      printf '%s\n' "$bf_line" >> "$LEDGER" || die "could not append to $LEDGER"
+      bf_n=$(( bf_n + 1 ))
+    done <<BACKFILL
+$(printf '%s' "$bf_out" | jq -c '.append[]?' 2>/dev/null)
+BACKFILL
+    bf_skip="$(printf '%s' "$bf_out" | jq -r '.skipped // 0' 2>/dev/null)"
+    echo "skillforge: backfilled $bf_n row(s) into $LEDGER, skipped $bf_skip already present. Every imported row is marked backfilled:true and confidence:\"reconstructed\"."
+    exit 0
     ;;
 
   clear)
@@ -1146,7 +1682,11 @@ SLOTS
     ' "$LEDGER"
     ;;
   ""|-h|--help|help)
-    sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,83p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac
+exit
+
+# Closes the brace group opened just under `set -uo pipefail`. See the note there.
+}

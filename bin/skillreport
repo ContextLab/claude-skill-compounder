@@ -2,11 +2,23 @@
 # skillreport: did any of this actually pay off?
 #
 #   skillreport [--help]
+#   skillreport skills
+#
+# `skillreport skills` is the four-question view: for every skill the ledger knows about,
+# what triggered its build, what was built and when, how often it has been used since,
+# and whether anyone judged that it worked. It is a SEPARATE view rather than more
+# columns on the table below, and deliberately so: the table is forge-centric, one row per
+# forge, and its denominator is the number that the reuse headline rests on. The four
+# questions are skill-centric -- most skills in the pool were never forged at all, so
+# folding them in would silently change what that headline is a fraction of.
 #
 # Joins the forge ledger written by 'skillforge' against skill invocations recovered
 # from Claude Code transcripts, and prints one table plus the number that matters: the
 # fraction of forged skills that were invoked at least once AFTER the session that
-# forged them. Reuse before or during the forge is not reuse.
+# forged them. Reuse before or during the forge is not reuse, and an invocation made by
+# this package's own probes and tests is not reuse either: those run Claude
+# non-interactively, they call these very skills, and they are counted and reported on
+# their own line rather than folded into the headline.
 #
 # PRIVACY. This script reads three files, all already on your disk, and writes nothing
 # except its own output to the terminal:
@@ -14,16 +26,64 @@
 #       one JSON line per forge: skill name, your one-line summary, the originating
 #       repository path, epoch timestamps, step counts, outcome and reason.
 #   ${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}/*/*.jsonl
-#       your Claude Code transcripts. Only five fields are read out of them: the
-#       invoked skill name, the record timestamp, the working directory, and the
+#       your Claude Code transcripts. Only six fields are read out of them: the
+#       invoked skill name, the record timestamp, the working directory, the session
+#       entrypoint (which says whether a person or a script was driving), and the
 #       tool-use id and error flag that say whether the invocation ran. Prompts,
 #       responses, file contents and tool output are never parsed or printed.
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/*.edits
 #       per-session edit counters written by the reminder hook (an integer each).
+# `skillreport skills` reads the ledger and nothing else. The ledger also holds the
+# ledger-v2 rows: `origin` (one per skill, carrying the verbatim text passed to
+# `skillforge start --trigger`), `use` (one per invocation: skill name, session id,
+# working directory, success flag, and whether a script or a person drove the session)
+# and `verdict` (a judgement plus the quote behind it).
 # There are no network calls anywhere in this script. Nothing leaves the machine.
 # Nothing is uploaded, and no summary is sent anywhere.
 set -uo pipefail
+# ------------------------------------------------------------------------------------
+# THE ENTIRE BODY OF THIS SCRIPT IS ONE BRACE GROUP, AND THE `}` AT THE END OF THE FILE
+# IS WHAT CLOSES IT. It is not style and it is not decoration.
+#
+# bash reads a script LAZILY, by byte offset, and resumes at that offset in whatever the
+# file holds AT THAT MOMENT. Every file in this package is executed by absolute path out
+# of the checkout -- the installer writes those paths into settings.json and symlinks the
+# CLIs into ~/bin -- so one `git pull`, `git checkout` or `sed -i` rewrites the bytes of
+# a run that is already in flight. Measured on GNU bash 5.3.3(1): prepending forty lines
+# to a live 25-line script produced `line 4: non-transferable: command not found` and
+# then a second execution of the body; truncating it produced `unexpected EOF` and
+# exit 2. It cost a real, paid-for `claude -p` dispatch on 2026-08-25.
+#
+# A brace group is a single compound command, so bash must find the matching `}` before
+# it may run any part of it: the file goes through the parser in ONE pass and nothing
+# written to disk afterwards can be executed. A file truncated badly enough to break the
+# parse then runs NOTHING, which is also the answer we want here -- half a run is worse
+# than no run.
+#
+# THE `exit` BEFORE THE CLOSING `}` IS LOAD-BEARING TOO. A brace group protects its body
+# and nothing past it: measured, a wrapped script that fell off its end had bash resume
+# at the offset just past `}`, find prepended text sitting there, and run the whole body
+# a SECOND time. So the group is not sufficient on its own. It is a BARE `exit` and not
+# `exit 0` because a bare `exit` reuses `$?`, so whatever the last command
+# reported is what the caller sees -- exactly as it did before this wrapper existed.
+#
+# Consequences when editing:
+#   - the closing `}` must stay the last line, and `bash -n` is what proves it.
+#   - the last statement inside the group must be an `exit`. tests/test_script_wrapping.py
+#     checks that across every shipped script and reproduces the hazard against a live
+#     process.
+#   - `exit` still exits the script, traps are still global, and functions and variables
+#     defined inside are still global. Nothing about the semantics changes.
+#
+# The incident this came out of, and the reproduction, are in docs/DESIGN.md under
+# "Never edit a script that may still be running".
+# ------------------------------------------------------------------------------------
+{
 
+
+# HOME can be unset (cron, a stripped env, a container). Under `set -u` reading it then
+# aborts the script non-zero before it has printed anything.
+: "${HOME:=/tmp}"
 STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 LEDGER="$STATE_ROOT/ledger.jsonl"
 REMINDERS="$STATE_ROOT/reminders"
@@ -35,16 +95,139 @@ EDIT_EVERY="${CI_EDIT_EVERY:-12}"
 case "$EDIT_EVERY" in ''|*[!0-9]*|???????*) EDIT_EVERY=12 ;; esac
 [ "$EDIT_EVERY" -lt 1 ] && EDIT_EVERY=12
 
+VIEW="table"
 case "${1:-}" in
   -h|--help|help)
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
+  skills) VIEW="skills" ;;
   "") : ;;
   *) echo "skillreport: unknown option '$1' (try: skillreport --help)" >&2; exit 2 ;;
 esac
 
 command -v jq >/dev/null 2>&1 || { echo "skillreport: jq is required" >&2; exit 1; }
+
+# ------------------------------------------------------- the four-question view
+#
+# WHAT TRIGGERED THE BUILD, WHAT WAS BUILT, USED SINCE, AND DID IT WORK. One block per
+# skill, read out of the ledger alone.
+#
+# THE LEDGER AND THE TRANSCRIPTS ARE NOT ADDED TOGETHER, HERE OR ANYWHERE. They are two
+# instruments pointed at the same thing over different intervals: `use` rows begin the
+# day the hook was installed, transcripts go back as far as the transcripts do, and a
+# window that appears in both would be counted twice by anything that summed them. The
+# table view counts transcripts; this view counts rows; each says which.
+#
+# AN ABSENT RECORD IS NEVER A NEGATIVE RESULT, and the horizon row is what makes that
+# statable. A ledger whose first row is Tuesday says nothing whatever about Monday, so
+# the header prints where the record begins and says outright that anything earlier is
+# unknown rather than none.
+#
+# HARNESS AND GENUINE STAY VISIBLY SEPARATE. `harness:true` marks an invocation made by
+# a session a script started -- this package's own probes and end-to-end tests, which on
+# the machine this was written on were 93 of 98 recorded invocations. A row whose
+# `harness` field is absent is neither: the entrypoint could not be read when it was
+# written, so it is counted and labelled "unclassified" rather than quietly folded into
+# the genuine column, which is precisely the move that inflated the headline once already.
+if [ "$VIEW" = "skills" ]; then
+  if [ ! -s "$LEDGER" ]; then
+    echo "no ledger yet ($LEDGER)"
+    echo "Nothing to report. The rows this view reads are written by a forge, by the"
+    echo "installer, and by the Skill hook on every invocation."
+    exit 0
+  fi
+  jq -s -R -r '
+    def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty) ];
+    def day: if . == null then "-" else (. | gmtime | strftime("%Y-%m-%d")) end;
+    def plural($n; $one; $many): if $n == 1 then $one else $many end;
+    parse as $rec
+    | [ $rec[] | select(.event == "origin") ]  as $origins
+    | [ $rec[] | select(.event == "use") ]     as $uses
+    | [ $rec[] | select(.event == "verdict") ] as $verdicts
+    | [ $rec[] | select(.event == "horizon") ] as $horizons
+    | ( [ $origins[].name ] + [ $uses[].name ] + [ $verdicts[].name ]
+        | map(select(. != null)) | unique ) as $names
+    | "SKILLS — what triggered the build, what was built, used since, did it work",
+      "Read from the ledger alone. The default view counts skill invocations recovered",
+      "from transcripts instead; the two are different instruments over different",
+      "intervals and are never added together.",
+      "",
+      (if ($horizons | length) == 0 then
+         "No horizon row, so how far back this ledger is complete is unknown."
+       else ($horizons | sort_by(.ts) | .[0]) as $h
+         | "Ledger horizon: the earliest row is \($h.known_from | day)."
+           + (if ($h.complete_from // null) == null
+              then " Whether anything happened before that is UNKNOWN, not none: this"
+                 + " ledger was already in use when the marker was written."
+              else " The ledger has been complete since \($h.complete_from | day)." end)
+       end),
+      "",
+      (if ($names | length) == 0 then "No skills recorded yet." else empty end),
+      ( $names[]
+        | . as $n
+        | ([ $origins[] | select(.name == $n) ] | sort_by(.ts) | .[0]) as $o
+        | [ $uses[] | select(.name == $n) ] as $u
+        | [ $u[] | select(.harness == true) ] as $harness
+        | [ $u[] | select(.harness == false) ] as $genuine
+        | [ $u[] | select(.harness == null) ] as $unclassified
+        | [ $u[] | select(.ok == false) ] as $failed
+        | [ $verdicts[] | select(.name == $n) ] as $v
+        | $n,
+          (if $o == null then
+             "  origin    NO ORIGIN ROW — this skill has invocations but nothing says where it came from"
+           else
+             "  origin    \($o.origin)"
+             # `has`, not `//`: jq treats false as empty, so `.shipped // null` on a row
+             # carrying `shipped:false` yields null and the "lives outside this checkout"
+             # half of this line never printed for the skills it exists to describe.
+             + (if ($o | has("shipped") | not) then ""
+                elif $o.shipped then ", shipped with this package"
+                else ", lives outside this checkout" end)
+             + (if ($o.backfilled // false) then "  [reconstructed: \($o.source // "source not named")]"
+                else "  (recorded \($o.ts | day))" end)
+           end),
+          (if $o == null then empty
+           elif ($o.skill_dir // "") != "" then "  where     \($o.skill_dir)"
+           else empty end),
+          (if $o == null then empty
+           elif ($o.trigger_verbatim // "") != "" then
+             "  trigger   [\($o.trigger_kind // "kind not recorded")] \"\($o.trigger_verbatim)\""
+           elif ($o.trigger_kind // "") == "unrecorded" then
+             "  trigger   NOT RECORDED — the forge ran without --trigger, and the moment has passed"
+           else
+             "  trigger   not recorded"
+           end),
+          (if ($u | length) == 0 then "  uses      none recorded" else
+          "  uses      \($genuine | length) genuine"
+            + (if ($harness | length) > 0 then ", \($harness | length) harness (a script drove the session)" else "" end)
+            + (if ($unclassified | length) > 0 then ", \($unclassified | length) unclassified (entrypoint unreadable when recorded)" else "" end)
+            + (if ($failed | length) > 0 then ", \($failed | length) failed" else "" end)
+            + (if ($genuine | length) > 0
+               then ", last genuine use \(($genuine | map(.ts) | max) | day)"
+               else "" end)
+          end),
+          (if ($v | length) == 0 then
+             "  verdict   none recorded"
+           else
+             "  verdict   "
+             + ([ $v | group_by(.verdict)[] | "\(length) \(.[0].verdict)" ] | join(", "))
+             + "  (model judgements over quoted evidence, not measurements)"
+           end),
+          ""
+      ),
+      "COVERAGE — how much of the four questions this ledger can actually answer",
+      "  skills with an origin row:      \($origins | length)",
+      "  of those, trigger recorded:     \([ $origins[] | select((.trigger_verbatim // "") != "") ] | length)",
+      "  skills with a recorded use:     \([ $uses[].name ] | unique | length)",
+      "  skills with a verdict:          \([ $verdicts[].name ] | unique | length)",
+      "  rows that were reconstructed:   \([ $rec[] | select(.backfilled == true) ] | length) of \($rec | length)",
+      "",
+      "A skill with no rows here has not been shown to be unused. It has been shown to be",
+      "unrecorded, which is a different claim and the one this ledger is careful to make."
+  ' "$LEDGER"
+  exit 0
+fi
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/skillreport.XXXXXX")" || { echo "skillreport: cannot create a temp dir" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -162,6 +345,61 @@ done < "$TMP/files" | jq -R '
   | (.tool_use_id? // empty) | select(type == "string" and length > 0)
 ' >> "$TMP/errids" 2>/dev/null
 
+# THIS PACKAGE CALLS ITS OWN SKILLS, AND THAT IS NOT USAGE (self-measurement).
+# `scripts/probe_routing_claims.py` spawns one real `claude -p` session per routing
+# prompt, and the end-to-end and hot-reload probes do the same. Each of those sessions
+# really invokes a real skill and really writes a real transcript, so counted naively
+# they are indistinguishable from a person reaching for a skill -- and they dominate.
+# Derived on the machine this was written on (reads transcripts only, paste-able):
+#
+#   find ~/.claude/projects -maxdepth 2 -name '*.jsonl' -exec grep -h '"name":"Skill"' {} + \
+#     | jq -r '(fromjson? // empty) as $r | ($r.message.content // [])
+#              | (if type=="array" then .[] else empty end)
+#              | select(.type? == "tool_use" and .name? == "Skill")
+#              | [(.input.skill // "?"), ($r.entrypoint // "?"), ($r.cwd // "?")] | @tsv' \
+#     | sort | uniq -c | sort -rn
+#
+# 98 invocations of the nine skills this package ships: 93 from probe and test working
+# directories, 5 from real project directories. All 93 inflated the headline, which read
+# "REUSE: 5 of 5 finished forges (100%)" with per-skill USES of 11/11/11/14/8.
+#
+# THE RULE IS WHO DROVE THE SESSION, NOT WHERE IT RAN. Claude Code stamps every record
+# with `.entrypoint`: "cli" for a person at a terminal, "claude-vscode" for the editor,
+# "sdk-cli" for a session started programmatically -- which is what `claude -p` is, and
+# which is how every probe and every end-to-end test in this repo spawns Claude. A skill
+# invoked inside a session a script started was not chosen by anyone, so it is not reuse.
+# On the corpus above the split is exact: all 93 harness invocations carry "sdk-cli" and
+# all 5 genuine ones carry "cli". Subagents inherit the entrypoint of the session that
+# dispatched them (verified: a sidechain transcript under a `cli` session records
+# `"entrypoint":"cli","isSidechain":true`), so delegated work inside a real session still
+# counts -- which a rule keyed on `.isSidechain` would have thrown away instead.
+#
+# A LIST OF TODAY'S TEMP-DIR NAMES WAS THE OBVIOUS FIX AND THE WRONG ONE. `routing-probe-*`,
+# `sac-probe`, `sktest-proj` are the names this week's probes happened to use; the next
+# probe picks a new one and the headline quietly inflates again -- the same defect, one
+# rename later. `.entrypoint` is written by Claude Code itself and survives a rename.
+# It also needs no cooperation from the probe: nothing outside this file changes.
+#
+# WHERE IT RAN IS KEPT AS A LABEL, NEVER AS A FILTER. A system temp root ($TMPDIR, /tmp,
+# /var/tmp, /var/folders and their /private twins) is where the harness works, but a real
+# user scratching in /tmp is a real user, and erasing them would be the same kind of lie
+# pointing the other way. So the temp-root test removes nothing. It only annotates: it
+# splits the excluded bucket into runs that happened in a temp directory (what this
+# package's probes look like) and runs that happened in a real project (someone's own
+# `claude -p` automation, which they are owed a sight of), and it flags counted
+# invocations that happened in a temp directory.
+#
+# Prefixes are matched as whole path segments, not substrings: a project genuinely named
+# /Users/me/tmpfoo is not a temp root. Built with jq rather than as a regex so no path
+# ever has to be regex-escaped.
+TMP_ROOTS="$(jq -n -c --arg t "${TMPDIR:-}" '
+  ["/tmp","/private/tmp","/var/tmp","/private/var/tmp","/var/folders","/private/var/folders"]
+  + (if ($t | length) > 0 then [($t | sub("/+$"; ""))] else [] end)' 2>/dev/null)"
+case "${TMP_ROOTS:-}" in
+  '['*) : ;;
+  *) TMP_ROOTS='["/tmp","/private/tmp","/var/tmp","/private/var/tmp","/var/folders","/private/var/folders"]' ;;
+esac
+
 # A tool_use with NO tool_result anywhere IS counted. The usual reason a result is
 # missing is that the session is still live or was cut off mid-turn, not that the
 # invocation failed -- a failure writes its error result on the very next record.
@@ -169,19 +407,31 @@ done < "$TMP/files" | jq -R '
 # by id, and ids are unique tokens, so matching against the pooled set is the same
 # join as matching within one file -- a resumed session copies its records verbatim,
 # ids included, so the same id can only ever map to the same outcome.
+#
+# Field 4 is the class ("harness" or "counted") and field 5 is the location ("temp" or
+# "proj"). A record with no `.entrypoint` at all -- an older Claude Code wrote it -- is
+# classed "counted": absence of the field is a version fact, not a probe signature, and
+# the failure that matters here is the one that erases a real use without saying so.
 while IFS= read -r f; do
   grep -h '"name":"Skill"' "$f" 2>/dev/null
-done < "$TMP/files" | jq -R -r --slurpfile bad "$TMP/errids" '
+done < "$TMP/files" | jq -R -r --slurpfile bad "$TMP/errids" --argjson roots "$TMP_ROOTS" '
   (fromjson? // empty) as $rec
   | ($rec.timestamp // "") as $iso
   | (($iso | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) // -1) as $ts
   | ($rec.cwd // "unknown") as $cwd
+  | ($rec.entrypoint // "") as $ep
+  | (if $ep == "sdk-cli" then "harness" else "counted" end) as $class
+  # The root is bound to $r first. Written as `startswith(. + "/")` the `.` inside the
+  # argument is $cwd, not the root, so every path compared against itself and every
+  # invocation classed "proj" -- silently, since "proj" is the safe-looking answer.
+  | (if any($roots[]; . as $r | ($cwd == $r) or ($cwd | startswith($r + "/")))
+     then "temp" else "proj" end) as $where
   | ($rec.message.content // [])
   | (if type == "array" then .[] else empty end)
   | select((.type? == "tool_use") and (.name? == "Skill"))
   | (.id? // "") as $tid
   | select(($bad | index($tid)) == null)
-  | [ (.input.skill // "unknown"), $ts, $cwd ] | @tsv
+  | [ (.input.skill // "unknown"), $ts, $cwd, $class, $where ] | @tsv
 ' >> "$TMP/inv.tsv" 2>/dev/null
 
 # --------------------------------------------------------------------- the table
@@ -196,6 +446,11 @@ reused=0
 unclosed=0
 during_total=0
 unparsed_total=0
+harness_total=0
+harness_after_total=0
+harness_temp_total=0
+harness_proj_total=0
+scratch_total=0
 orphans=0
 overruns=0
 
@@ -243,31 +498,54 @@ while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed 
   # arrives here as the two characters \t, -v would turn it back into a tab, and the
   # comparison against the identically-escaped $1 would silently never match. ENVIRON
   # is not unescaped, so both sides stay in the same representation.
+  # The harness test comes FIRST, before the timestamp and window tests. A probe
+  # invocation is not reuse whenever it happened, and letting one fall through into the
+  # `during` bucket would have quietly relabelled it "inside a forge window" -- true, but
+  # a different claim than the one the reader needs. Its window is still reported, as
+  # harness_after: those are the invocations that were inflating USES SINCE.
   counts="$(SR_NAME="$name" awk -F'\t' -v since="$since_ts" -v start="$start_ts" '
     BEGIN { n = ENVIRON["SR_NAME"] }
     {
       bare = $1
       sub(/^[^:]*:/, "", bare)          # accept both "name" and "plugin:name"
       if ($1 != n && bare != n) next
+      if ($4 == "harness") {
+        harness++
+        if ($5 == "temp") h_temp++; else h_proj++
+        if ($2 + 0 >= 0 && $2 + 0 > since + 0) h_after++
+        next
+      }
       if ($2 + 0 < 0) { unparsed++; next }
       if ($2 + 0 > since + 0) {
         after++
+        if ($5 == "temp") scratch++
         if (!seen[$3]++) projects++
       } else if ($2 + 0 >= start + 0) {
         during++
       }
     }
-    END { printf "%d %d %d %d", after + 0, projects + 0, during + 0, unparsed + 0 }
+    END { printf "%d %d %d %d %d %d %d %d %d", after + 0, projects + 0, during + 0, \
+                 unparsed + 0, harness + 0, h_after + 0, h_temp + 0, h_proj + 0, scratch + 0 }
   ' "$TMP/inv.tsv")"
   # Read the four numbers back with a heredoc rather than 'set -- $counts': zsh does
   # not word-split an unquoted expansion, so the positional-parameter trick silently
   # yields one field there and four under bash.
   after=0; projects=0; during=0; unparsed=0
-  IFS=' ' read -r after projects during unparsed <<COUNTS
+  harness=0; h_after=0; h_temp=0; h_proj=0; scratch=0
+  IFS=' ' read -r after projects during unparsed harness h_after h_temp h_proj scratch <<COUNTS
 $counts
 COUNTS
   during_total=$(( during_total + during ))
   unparsed_total=$(( unparsed_total + unparsed ))
+  harness_total=$(( harness_total + harness ))
+  harness_after_total=$(( harness_after_total + h_after ))
+  harness_temp_total=$(( harness_temp_total + h_temp ))
+  harness_proj_total=$(( harness_proj_total + h_proj ))
+  scratch_total=$(( scratch_total + scratch ))
+  # Written to a file rather than accumulated into a string: the per-skill breakdown is
+  # printed after the loop, and the loop body is not a subshell only because forges.tsv
+  # arrives by redirect. A file keeps that true no matter how the loop is later fed.
+  [ "$harness" -gt 0 ] && printf '%s\t%s\n' "$name" "$harness" >> "$TMP/harness.tsv"
   [ "$after" -gt 0 ] && reused=$(( reused + 1 ))
   printf '%-30s %-12s %7s %-12s %12s %9s\n' \
     "$(printf '%.30s' "$name")" \
@@ -305,6 +583,37 @@ echo
 echo "$during_total invocation(s) fell inside a forge window and were not counted as reuse."
 if [ "$unparsed_total" -gt 0 ]; then
   echo "$unparsed_total invocation(s) had no parseable timestamp and were not counted at all."
+fi
+
+# The excluded bucket is printed unconditionally once it is non-empty, and it names both
+# its size and how much of the headline it would have been. A number that is only ever
+# subtracted in silence is how the inflation got in; this line is what stops it coming
+# back unnoticed.
+if [ "$harness_total" -gt 0 ]; then
+  echo
+  echo "EXCLUDED AS PROBE/TEST HARNESS"
+  echo "  $harness_total invocation(s) of these skills came from non-interactive sessions"
+  echo "  (transcript entrypoint \"sdk-cli\": \`claude -p\` and the SDK), so a script chose the"
+  echo "  skill, not a person. This package's own routing probes and end-to-end tests run"
+  echo "  exactly that way against these very skills."
+  echo "  $harness_after_total of them landed after the forge that created the skill and"
+  echo "  would otherwise have been counted as reuse in the table above."
+  echo "  Where they ran: $harness_temp_total in a system temp directory, $harness_proj_total in a project directory."
+  if [ "$harness_proj_total" -gt 0 ]; then
+    echo "  A non-interactive run in a project directory may be your own automation rather"
+    echo "  than this package's harness. It is excluded and shown here, never dropped."
+  fi
+  if [ -s "$TMP/harness.tsv" ]; then
+    echo "  By skill:"
+    sort -t"$(printf '\t')" -k2 -nr "$TMP/harness.tsv" 2>/dev/null \
+      | awk -F'\t' '{ printf "    %-30s %s\n", substr($1, 1, 30), $2 }'
+  fi
+fi
+if [ "$scratch_total" -gt 0 ]; then
+  echo
+  echo "$scratch_total counted invocation(s) ran in a system temp directory from an interactive"
+  echo "session. Working in /tmp is not a probe, so they are in the headline; the location is"
+  echo "flagged here and nowhere subtracted."
 fi
 if [ "$found_any" -eq 0 ]; then
   echo "WARNING: no transcripts found under $TRANSCRIPTS, so every count above is zero"
@@ -345,3 +654,7 @@ else
 fi
 echo "  The numerator covers all time and the denominator only the last 7 days, so read"
 echo "  the conversion as a loose upper bound rather than a rate."
+exit
+
+# Closes the brace group opened just under `set -uo pipefail`. See the note there.
+}

@@ -109,10 +109,57 @@ delays a checkpoint; counting `ls` teaches the user to ignore it. A second branc
 `ai-tell-audit` once per durable-prose file per session, because that skill's description
 names a README but nothing otherwise connects editing one to invoking it.
 
-**With both wirings active every hook fires twice**, so any new hook that counts or
-throttles needs the `claim_once()` guard in `hooks/compound-improvement.sh`. The measured
-double delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a
-rule is in `docs/DESIGN.md`.
+**With both wirings active every hook fires twice**, so anything a hook counts, stamps,
+appends to, or does once must survive being handed the same event twice. That includes
+work a hook *launches* rather than does itself: `hooks/session-review.sh` is not wired to
+either path, but it is started by `hooks/insight-capture.sh`, which is wired to both, so
+one `Stop` starts it twice. Being detached buys it nothing.
+
+The guard is idempotence keyed on something the payload already carries, and each script
+spells it differently. `claim_once()` in `hooks/compound-improvement.sh` claims a
+directory named for the payload's own `tool_use_id` or `prompt_id`, under the session and
+the mode; `hooks/insight-capture.sh` claims on a hash derived from the session id; `hooks/session-review.sh` claims with an atomic `mkdir` under
+`<state>/reviews/.claims/`, behind a global `.lock` directory and a cooldown compared on
+`|NOW - last|`. So the rule is *"be idempotent per event"*, not *"call `claim_once()`"* --
+that function is local to one script and reaches nothing outside it. Two hazards the next
+author will meet: the session id must be sanitised with the **identical** expression in
+every script, or one event becomes two claims under two spellings; and the claim must be
+taken only once the action is really going to happen. Claiming earlier looks tidier and is
+the bug `hooks/session-review.sh` shipped first -- a session the cooldown refused had
+already burned its claim, so it could never be reviewed at all. The measured double
+delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a rule is in
+`docs/DESIGN.md`.
+
+**`hooks/session-review.sh` is a shipped component that spends money, and it is in
+neither wiring.** `settings.json` and `hooks/hooks.json` between them name only
+`compound-improvement.sh` (twice) and `insight-capture.sh`; grep either for
+`session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
+detached, never waited on, and only when that turn's session audit actually wrote a
+record. Look for it there, not in a hooks list. Stage 1 is a single `claude -p` with no
+tools at all -- `--disallowed-tools` over every built-in, `--strict-mcp-config`,
+`--setting-sources ''` -- reading a bounded digest of the transcript and answering
+`VERDICT: NONE` or `VERDICT: CANDIDATE <name>`.
+
+Its gates all fail closed and exit 0 in silence, and each has its own exit code (10-21)
+so a test asserts on the code rather than on prose: off switch, recursion, CI/test
+environment, a state root under a temp directory, no `claude` on `PATH`, bad argv, then
+the lock, the 21-hour cooldown and the per-session claim. `SKILL_COMPOUNDER_DISPATCHED` is
+the recursion barrier that does the work -- a `claude -p` we launch is a real session
+carrying these same hooks, so its own `Stop` would fire this same script; the variable is
+exported into every process the script starts and inherited without limit, and the first
+gate refuses on it. The lock and the pre-call cooldown stamp would each stop it too.
+
+Stage 2, the forge orchestration, is **off by default** (`SKILL_COMPOUNDER_REVIEW_FORGE`),
+and the reason is not the money. A dispatched forge cannot complete the routing gate that
+decides whether it worked: the forged skill's must-fire probes need `claude` calls, and a
+dispatched session was refused at the permission layer when it tried -- `claude --version`
+came back "This command requires approval". A forge that structurally cannot finish its
+own completion gate should not run unattended. When it is switched on, the working
+directory is what contains it: the session is started with `cd` into
+`<state>/reviews/staging/<name>/` under `--permission-mode acceptEdits`, so writes inside
+that directory are auto-approved and everything outside it needs an approval that a
+headless session never gets. `~/.claude/skills` is held out of reach by the permission
+system, not by the prompt.
 
 **`CLAUDE.md` lives at `.claude/CLAUDE.md`, not the repo root.** A root `CLAUDE.md` fails
 `claude plugin validate --strict`, which is what marketplace review runs. The `.claude/`
@@ -126,6 +173,27 @@ from the checkout alone: a skill or CLI *renamed* upstream is invisible to both 
 install and uninstall also read the names the manifest recorded for those directories, and
 install prunes such a link only once it is dead.
 
+**The ledger is append-only, and every reader selects its events BY NAME.** `start` and
+its matching `done` or `fail` are joined into forges; `origin`, `use`, `verdict` and
+`horizon` are invisible to that join. A reader that classified by exclusion -- "anything
+that is not a start is an outcome" -- would have folded every `use` row into the forge
+count the day ledger v2 landed, so `tests/test_ledger_v2.py` pins both readers against a
+mixed ledger. Add an event type freely; never widen a selector to a negation.
+
+**`--trigger` warns, it does not refuse.** Refusing does not produce a trigger, it
+produces no row at all: every caller written before the flag existed would exit non-zero,
+and the cheapest way past a CLI that refuses is to stop calling it. So the gap is recorded
+as a gap -- `trigger_kind:"unrecorded"` -- and counted rather than assumed away.
+`SKILLFORGE_REQUIRE_TRIGGER=1` turns it into a refusal for anyone whose callers are all
+updated.
+
+**Adoption never claims authorship it cannot prove.** Install writes `origin:"adopted"`
+for the skills in this checkout's `skills/`, `origin:"unknown"` for a real directory
+sitting in the installed skills directory -- which may be one we forged for personal use
+or the user's own work, and nothing on disk can tell -- and nothing at all for a symlink
+`_link_is_ours` cannot vouch for. Same four-proof judgement uninstall uses, below: a link
+that proves nothing is reported, not adopted.
+
 **`skills/skill-compounder/SKILL.md` is prose, but it is the primary deliverable**: it
 carries the builder/red-team forging protocol and the retirement protocol.
 Its doctrine is mirrored in `README.md` and in the user's global `~/.claude/CLAUDE.md`
@@ -135,9 +203,21 @@ stanza. Changing the protocol means updating all three.
 
 **No mocks, ever.** Every test writes real files, runs the real shell scripts through
 `subprocess`, and reads results back off disk. Tests pin nondeterminism with environment
-variables the scripts read for exactly that purpose (`SKILLFORGE_NOW`, `CI_NOW`,
-`SKILL_COMPOUNDER_STATE`, `SKILLFORGE_DONE_TTL`). If new behavior is hard to test without a
-mock, add a pin like those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
+variables the scripts read for exactly that purpose. There are **four clocks, not one** --
+`SKILLFORGE_NOW` (`bin/skillforge`), `CI_NOW` (`hooks/compound-improvement.sh`),
+`SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`) and `SKILL_COMPOUNDER_NOW` (the
+installer's backup stamp) -- and session-review refuses `CI_NOW` on purpose, because a
+frozen `CI_NOW` makes its `|NOW - last|` cooldown zero forever and silences the trigger
+permanently with nothing on any surface to say why. Two more redirect what a script reads
+and writes, `SKILL_COMPOUNDER_STATE` and `SKILL_COMPOUNDER_TRANSCRIPTS`; two pin the ages
+the status line expires on, `SKILLFORGE_DONE_TTL` and `SKILLFORGE_FAIL_TTL`; and one lifts
+a refusal, `SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE`, without which `session-review.sh`
+declines to spend money from any state root under a temp directory. A new script needs its
+own clock: pinning someone else's does nothing to it. This list was derived by running
+`grep -rhoE '\b(SKILLFORGE|CI|SKILL_COMPOUNDER)_[A-Z_]+' hooks/ bin/ statusline/
+skill_compounder/ | sort -u` and reading each hit; re-run it rather than trusting the list
+if the two have drifted. If new behavior is hard to test without a mock, add a pin like
+those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 
 **Shell portability traps that cause silent failures** (details and reasoning in
@@ -150,6 +230,15 @@ temp dir, so scripts must not depend on the ambient environment.
   statement for this reason; keep it.
 - A literal `%` inside an *argument* to `printf '%s'` needs no escaping. Doubling it prints
   a visible `%%`.
+- Bash reads a script lazily, by byte offset. Rewrite the file while it is running and bash
+  resumes at its saved offset in whatever the file now holds, executing the middle of
+  unrelated text. This cost us a paid-for review verdict, silently.
+  **Never edit a script that may be running**, and a script blocked on a network call is
+  running for a long time. `hooks/session-review.sh` is wrapped in one brace group so the
+  file must parse in a single pass, and every path through it ends in `exit` so bash never
+  resumes past the closing brace; both halves are required, and neither is decoration.
+  No other script here is wrapped -- `bin/skillcontrib` blocks on `gh` and has the same
+  exposure.
 
 **The red-teamer must never be a fork of either layer** — not of the orchestrator that
 dispatches it, and not of the session that dispatched the orchestrator. This applies to the
@@ -173,9 +262,14 @@ Retiring a skill means `mv` to an archive with a `WHY-ARCHIVED.md`, never `rm -r
 `notes/` is a dated log, not an index of current behaviour: `2026-08-24-origin.md` for
 where the idea came from, `2026-08-25-roadmap-session.md` and
 `2026-08-25-implementation-session.md` for how the seed pool and the plugin path were
-built, and `notes/research/` for the evidence behind the seed-pool selection, the insight
-queue, and the contribution mechanics. Read them for reasoning, not for the current state
-of the code.
+built, `2026-08-25-forging-session.md` for the seed skills being forged through the
+builder/red-team loop, `2026-08-25-issue9-fix-session.md` for the parallel-agent session
+behind issue #9 (auto-install, the routing gate, and the routing probes measured on cli
+2.1.245), `2026-08-25-first-live-review-verdict.md` for the first real session-review
+dispatch and the lazy-parse failure that lost its verdict, and `notes/research/` for the evidence behind the seed-pool selection, the
+insight queue, and the contribution mechanics. `notes/OPEN-THREADS.md` is the one file
+there that tracks current state rather than history. Read the dated ones for reasoning,
+not for the current state of the code.
 
 The two hook constants (12 edits, 20 minutes) are unvalidated. `bin/skillreport` is the
 instrument that would settle them, and it needs real usage across several repositories

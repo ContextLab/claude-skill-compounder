@@ -1,5 +1,5 @@
 {
-  "description": "claude-skill-compounder: the two compounding reminders, plus insight capture on Stop.",
+  "description": "claude-skill-compounder: the two compounding reminders, insight capture and the claim gate on Stop, the claim gate on a git commit, and one ledger row per skill invocation.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -7,6 +7,18 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/compound-improvement.sh\" prompt",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/claim-gate.sh\"",
             "timeout": 10
           }
         ]
@@ -22,6 +34,28 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/skill-use.sh\" ok",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/skill-use.sh\" fail",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -30,6 +64,15 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/insight-capture.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/claim-gate.sh\"",
             "timeout": 10
           }
         ]

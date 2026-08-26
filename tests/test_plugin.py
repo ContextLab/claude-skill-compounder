@@ -109,6 +109,46 @@ class ManifestTest(unittest.TestCase):
                                 for g in spec["hooks"][event] for h in g["hooks"])
             self.assertEqual(s_timeouts, p_timeouts, "%s timeouts must agree" % event)
 
+    def test_the_claim_gate_is_wired_on_both_paths_to_both_of_its_events(self):
+        """The drift check above only proves the two paths AGREE. Two paths that both
+        forgot the commit arm agree perfectly, so the wiring is also named here.
+
+        `Stop` gates the closing message; `PreToolUse`/`Bash` gates a `git commit`
+        message. The commit arm is not redundant with the Stop arm: a commit message
+        never appears in `last_assistant_message`, and both incidents that motivated this
+        gate were commit messages.
+        """
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event, matcher in (("PreToolUse", "Bash"), ("Stop", None)):
+            p_arm = [(m, c) for m, c in plugin.get(event, []) if "claim-gate.sh" in c]
+            s_arm = [(g.get("matcher"), h["command"])
+                     for g in settings.get(event, []) for h in g["hooks"]
+                     if "claim-gate.sh" in h["command"]]
+            self.assertEqual(len(p_arm), 1,
+                             "hooks.json must wire the claim gate to %s exactly once"
+                             % event)
+            self.assertEqual(len(s_arm), 1,
+                             "the installer must wire the claim gate to %s exactly once"
+                             % event)
+            self.assertEqual(p_arm[0][0], matcher,
+                             "hooks.json %s matcher for the claim gate" % event)
+            self.assertEqual(s_arm[0][0], matcher,
+                             "installer %s matcher for the claim gate" % event)
+
+    def test_the_claim_gate_accumulator_arm_is_wired_on_neither_path(self):
+        """Its PostToolUse arm records numbers out of every tool RESULT, an Agent/Task
+        result included -- the subagent testimony the Stop arm excludes from its evidence
+        on purpose. Wiring it on a `*` matcher makes the gate stop catching relayed
+        figures, which is the defect it exists for. If it is ever wired it needs a matcher
+        that excludes Agent and Task; update this test then, do not delete it."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        self.assertEqual([c for _m, c in plugin.get("PostToolUse", [])
+                          if "claim-gate.sh" in c], [])
+        self.assertEqual([h["command"] for g in settings.get("PostToolUse", [])
+                          for h in g["hooks"] if "claim-gate.sh" in h["command"]], [])
+
     @unittest.skipUnless(shutil.which("claude"), "claude CLI not on PATH")
     def test_claude_plugin_validate_strict_passes(self):
         proc = subprocess.run(["claude", "plugin", "validate", str(APP), "--strict"],

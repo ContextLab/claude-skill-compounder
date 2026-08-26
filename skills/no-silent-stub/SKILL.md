@@ -298,7 +298,10 @@ quoted newlines is undecided" is a good report. "Parser done" is not.
 This phase is narrow on purpose. It covers one thing: naming the fake you were about to
 ship, or did ship. Verifying a completion claim in general belongs to
 `superpowers:verification-before-completion`; invoke that for the evidence-before-assertion
-discipline rather than repeating it here.
+discipline rather than repeating it here. Do not read that pointer as cover: it has been
+invoked 0 times in the local transcript corpus (source: `Skill` records under
+`~/.claude/projects`, as of 2026-08-26), so the verification is yours to run
+(`notes/2026-08-25-completion-claim-gap.md`).
 
 ## Neighbours
 
@@ -308,7 +311,7 @@ Two other tools cover adjacent ground, and reaching for the right one saves time
 |-|-|
 |this skill|you are **writing** the code, at the moment the real thing turns out to be unavailable|
 |`pr-review-toolkit:silent-failure-hunter`|you are **reviewing** a diff someone already wrote and want error handling and fallbacks hunted across it. It is an agent, not a skill, so nothing competes for a trigger here|
-|`superpowers:verification-before-completion`|you are about to claim done, and the question is evidence in general rather than a fake in particular|
+|`superpowers:verification-before-completion`|you are about to claim done, and the question is evidence in general rather than a fake in particular. Its trigger is a moment no router sees and it has never fired, so treat it as a checklist to run, not a handoff|
 
 ## Red flags
 

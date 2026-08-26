@@ -36,6 +36,29 @@ early.
 
 ---
 
+## A symlinked skill hot-reloads too, and the lag is not fixed
+
+**Finding.** The reload above is not limited to a file written in place. A *symlink*
+dropped into a watched skills directory mid-session is picked up the same way, and the
+lag is not a constant: in one run the skill answered on the very next `Skill` call, and
+in another it took one further tool call before it did. A first `Unknown skill: <name>`
+is therefore not evidence that the link failed.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-25, by linking a skill
+directory into the live skills directory from inside a running session and calling
+`Skill` straight afterwards. Two runs; one of them was `claim-provenance`, which had
+answered `Unknown skill` earlier the same day, before its symlink existed, and answered
+normally once it did. The in-session record is in
+[../notes/2026-08-25-issue9-fix-session.md](../notes/2026-08-25-issue9-fix-session.md).
+**Remaining limit:** two runs show that the lag varies. They do not bound it.
+
+**What it means.** Anything that installs a skill by symlink into a running session must
+tell its caller to make one more tool call and try again before concluding the install
+failed. One intervening call is the largest delay anyone has actually seen here, which is
+not the same as a ceiling.
+
+---
+
 ## The status line is the only surface that animates
 
 **Finding.** Claude Code re-renders the status line on a timer (`refreshInterval`, minimum
@@ -171,9 +194,9 @@ to list it and then to trigger it. Run at all three scopes: **project**, `--plug
 
 Personal scope was isolated by pointing `CLAUDE_CONFIG_DIR` at a temp directory and handing
 the OAuth token in through `CLAUDE_CODE_OAUTH_TOKEN`. That last part is what the earlier
-attempt was missing: a fresh config directory does not reach the credential the macOS
-Keychain holds, so the CLI answers `Not logged in · Please run /login` no matter what else
-is copied in. With the token in the environment the same subscription works normally, and
+attempt was missing; the entry below on credentials is why a fresh config directory cannot
+authenticate on its own. With the token in the environment the same subscription works
+normally, and
 `<tempdir>/skills/` becomes a personal skill directory nobody else is using. Three skills
 went in there — the two breaks, plus a valid control carrying a nonsense trigger token, so
 that a skill failing to fire could be told apart from the scope failing to load at all.
@@ -191,6 +214,30 @@ the file itself, including the upstream skills validator and any `yaml.safe_load
 build step, is not lenient. And the dangerous failure is the quiet one: a skill can be
 present, named, and listed while its trigger has been replaced, so a project that ships
 skills should assert on the parsed `description`, not on the skill appearing in a list.
+
+---
+
+## A changed `HOME` or `CLAUDE_CONFIG_DIR` costs a CLI run its credentials
+
+**Finding.** `claude -p` answers `Not logged in · Please run /login` when either `HOME` or
+`CLAUDE_CONFIG_DIR` points somewhere fresh. It is not a settings problem, and copying files
+into the new directory does not repair it: on macOS the credential lives in the Keychain,
+which a subscription login reaches only through the ambient environment, or else the token
+has to be handed in through `CLAUDE_CODE_OAUTH_TOKEN`.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-25. Three runs of one
+one-word prompt with `--setting-sources ''`: `HOME` pointed at an empty temp directory,
+`CLAUDE_CONFIG_DIR` pointed at an empty temp directory, and the ambient environment as a
+control. The first two refused; the control answered.
+
+**What it means.** A test harness that isolates itself by moving `HOME` -- the normal way
+to keep a suite off a real config -- has also taken away its ability to call the CLI. A
+suite arranged that way cannot spend money by accident and cannot exercise a real model
+call either; the two goals are in direct conflict, and the environment decides which one
+is had. It follows that anything which does succeed in calling `claude` from inside a hook
+is running on the user's ambient credentials, since those are the only ones present, and
+that a launcher setting either variable "helpfully" turns every dispatched call into
+`Not logged in` with no other symptom.
 
 ---
 
@@ -236,6 +283,77 @@ event by `mkdir` of a directory named for that id works because `mkdir` either s
 fails atomically, so of two racing hook processes exactly one proceeds. Decide in advance
 what an event with no usable id should do; for a reminder, always claiming it is better,
 because a lost reminder costs more than a duplicate one.
+
+---
+
+## `PostToolUse` fires only when the tool succeeded
+
+**Finding.** A tool call that fails does not arrive as `PostToolUse` with an error inside
+it. It arrives as a separate event, `PostToolUseFailure`, matched on the tool name the same
+way. A hook wired only to `PostToolUse` therefore sees a stream of successes and has no way
+to know that anything failed.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-25, observed live in a
+session whose hooks announce themselves. A `Bash` call that died on a shell parse error was
+delivered as `PostToolUseFailure:Bash`, carrying `Tool "Bash" failed. Analyze the error,
+fix the issue, and continue working.`; every `Bash` call that succeeded in the same session
+was delivered as `PostToolUse:Bash`. That much was read off the delivery labels and their
+text rather than a captured payload; the failure event's own field shape was captured on
+2026-08-26 and is recorded in the entry below on failed `Skill` calls. The measured
+`PostToolUse` payload shape is in
+[../notes/research/insight-capture.md](../notes/research/insight-capture.md).
+
+**Open question, not a finding.** Whether a `Skill` invocation made inside a *subagent* is
+delivered to these hooks at all, and if it is, whose `session_id` it carries. A subagent's
+file edits were measured to carry the parent session's id, recorded above, and that result
+must not be extended to skill invocations without measuring them.
+
+**What it means.** Anything that counts tool outcomes has to wire both events. Wiring only
+`PostToolUse` does not merely miss the failures, it records each one as a success, which is
+a wrong number rather than a missing one.
+
+---
+
+## A failed `Skill` invocation is delivered to no hook at all
+
+**Finding.** `Unknown skill: <name>` produces neither `PostToolUse` nor
+`PostToolUseFailure`. A failing `Bash` call in the same session arrives as
+`PostToolUseFailure` normally, so the event itself is working; the skill failure simply
+never reaches the hook layer. The failure is visible only in the transcript, as a
+`tool_result` carrying `is_error: true` and the text
+`<tool_use_error>Unknown skill: …</tool_use_error>`.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-26. One headless
+`claude -p` run under a `--settings` file whose only hooks append every payload they
+receive to a file, wired on `PostToolUse` and on `PostToolUseFailure`, each with a group
+matched on `Skill` and a second group carrying no matcher. The session was told to make
+three calls in order: a real skill, a bogus skill name, and `Bash` with the command
+`for(`. Exactly two payloads were captured. `PostToolUse` for the real skill, with
+`tool_response: {"success":true,"commandName":"claim-provenance"}`, which proves the
+`Skill`-matched success group was live. `PostToolUseFailure` for the Bash call, with
+`tool_name: "Bash"`, no `tool_response` key at all, and instead
+`error: "Exit code 1\n(eval):1: bad pattern: for("` plus `is_interrupt: false` — and since
+no `Skill` matcher can match `Bash`, that delivery proves the matcher-less failure group
+was live too. For the bogus skill: nothing, on either event, from either group.
+**Remaining limits:** two `PostToolUse` groups matched the successful skill call and only
+one delivery arrived, so this run cannot say which of the two produced it. And
+`Unknown skill` is the only `Skill` failure mode that can be provoked on demand, so it is
+the only one measured.
+
+**Also measured, in the same run.** The `PostToolUse` payload for a `Skill` call carries
+exactly these keys: `session_id`, `transcript_path`, `cwd`, `prompt_id`,
+`permission_mode`, `effort`, `hook_event_name`, `tool_name`, `tool_input`,
+`tool_response`, `tool_use_id`, `duration_ms`. There is **no `entrypoint`**, so a hook
+that needs to know whether a person or a script was driving has to read it out of the
+transcript the payload names. The skill's name arrives as `tool_input.skill`.
+Separately, a `hooks.json` declaring `PostToolUseFailure` passes
+`claude plugin validate --strict` on the same version, checked by validating a manifest
+and that hooks file on their own in an otherwise empty directory.
+
+**What it means.** A hook census of skill invocations is a census of *successful* ones.
+An absence of failure rows is not evidence that nothing failed, and any consumer of such
+rows has to say so where the number is read, not only where it is written. The
+transcript's `is_error` flag stays the only dependable count of failures.
 
 ---
 
@@ -301,6 +419,30 @@ and not mapped across every tier.
 skill pool, so anything that depends on a skill firing must not be dispatched to haiku.
 Routing results measured on one tier do not carry to another, and a skill that appears not
 to fire may only be being asked on the wrong model.
+
+## `claude -p` does load project skills; narrowing `--setting-sources` is what removes them
+
+**Finding.** A headless `claude -p` started in a project directory can route that
+project's `.claude/skills/` with no flag at all. Passing `--setting-sources
+user,project,local` explicitly changes nothing. Passing `--setting-sources ''` is what
+takes the pool away. So the flag does not switch project skills on; narrowing it switches
+them off.
+
+**How established.** Claude Code 2.1.245, macOS 25.5.0, 2026-08-25, on sonnet. A throwaway
+project directory holding one control skill (`plimwax-nine`) whose description was the only
+possible match for the prompt, then `claude -p` from that directory with
+`--strict-mcp-config` and every built-in tool except `Skill` disallowed, so the skill
+roster was the only place the name could have come from. Three arms: no flag (named the
+control 3 of 3), `--setting-sources user,project,local` (named it 1 of 1), and
+`--setting-sources ''` (answered NONE 3 of 3). **Remaining limit:** one model tier, one CLI
+build, and a single control skill, so this establishes the direction of the flag and not a
+map of every scope combination.
+
+**What it means.** A headless run is a fair place to probe whether a project-scoped skill
+routes, because by default it loads the pool the interactive session loads. The inverse is
+the half that bites: `--setting-sources ''` is how a dispatched call is given no project or
+personal skills, no plugins, no output styles and no `CLAUDE.md`, so a probe that narrows
+the sources for isolation has silently taken away the skill it meant to measure.
 
 ## A hook reaches the model and the person through different fields
 

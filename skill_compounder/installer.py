@@ -6,9 +6,20 @@ Claude directory rather than a mock.
 
 What gets wired:
 
-* ``hooks.UserPromptSubmit``  -> compound-improvement.sh prompt   (section 1 reminder)
-* ``hooks.PostToolUse``       -> compound-improvement.sh edit     (section 2 reminder)
-* ``hooks.Stop``              -> insight-capture.sh               (skill-candidate queue)
+* ``hooks.UserPromptSubmit``     -> compound-improvement.sh prompt (section 1 reminder)
+* ``hooks.PostToolUse``          -> compound-improvement.sh edit   (section 2 reminder)
+* ``hooks.PostToolUse``          -> skill-use.sh ok                (one `use` row per
+                                                                    skill invocation)
+* ``hooks.PostToolUseFailure``   -> skill-use.sh fail              (the same, for the
+                                                                    invocations that did
+                                                                    not run)
+* ``hooks.PreToolUse``           -> claim-gate.sh (matcher Bash)   (denies a `git commit`
+                                                                    whose message asserts
+                                                                    a figure the session
+                                                                    never produced)
+* ``hooks.Stop``                 -> insight-capture.sh             (skill-candidate queue)
+* ``hooks.Stop``                 -> claim-gate.sh                  (the same check on the
+                                                                    closing message)
 * ``statusLine``              -> statusline.sh                    (forge animation)
 * ``skills/<name>``           -> one symlink per skill in the repo's ``skills/``
 * ``~/.local/bin/<name>``     -> one symlink per executable in the repo's ``bin/``
@@ -32,6 +43,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -40,6 +52,24 @@ from pathlib import Path
 # Markers identify our entries so install is idempotent and uninstall is surgical.
 HOOK_MARKER = "compound-improvement.sh"
 INSIGHT_MARKER = "insight-capture.sh"
+# The end-of-turn claim gate, wired to the two events it acts on. `Stop` gates the closing
+# message; `PreToolUse`/`Bash` gates a `git commit` message, and that second arm is not a
+# nicety -- a commit message never appears in `last_assistant_message`, so a Stop wiring
+# alone cannot see it, and both founding incidents were commit messages.
+# The script also carries a `PostToolUse` accumulator arm, and it is deliberately NOT
+# wired. That arm records every long integer out of a tool RESULT, including an Agent/Task
+# result, and a subagent's report is exactly the testimony the Stop arm cuts out of its
+# evidence on purpose ("the load-bearing exclusion", hooks/claim-gate.sh). Feeding it back
+# in would make the gate stop catching relayed figures, which is the defect it exists for.
+# The script's own header agrees from the other side: the session-wide transcript scan
+# measured 0.22 s, "which is why the PostToolUse accumulator is optional rather than
+# required". If it is ever wired, it needs a matcher that excludes Agent and Task.
+CLAIM_GATE_MARKER = "claim-gate.sh"
+# One `use` row per Skill invocation, which is how the ledger answers "when has it been
+# used since". Wired to two events, not one: `PostToolUse` fires only when the tool
+# succeeded, and a failure arrives as `PostToolUseFailure` (measured, 2.1.245). A
+# success-only wiring would record every failed invocation as a use.
+USE_MARKER = "skill-use.sh"
 # Substring matching against the user's status line command was wrong twice. A bare
 # "statusline.sh" matched their ~/bin/git-statusline.sh; adding the directory component
 # still matched "$HOME/dotfiles/statusline/statusline.sh", a pipeline mentioning our path,
@@ -53,6 +83,14 @@ STATUSLINE_RECORD = "installed-statusline.json"
 # checkout recognise the links a previous one made; see _link_is_ours.
 MANIFEST = "install-manifest.json"
 EDIT_MATCHER = "Write|Edit|Bash"
+# PostToolUse matches on the tool name, so the matcher for skill invocations is literally
+# the tool's name. Verified by dumping the payload of a real `Skill` call on 2.1.245.
+SKILL_MATCHER = "Skill"
+# PreToolUse matches on the tool name as well, so the claim gate's commit arm can only ask
+# for `Bash`. Which Bash commands are commits is decided inside the script, which exits 0
+# on everything else; a matcher cannot express it.
+COMMIT_MATCHER = "Bash"
+LEDGER = "ledger.jsonl"
 BACKUP_PREFIX = ".bak-skill-compounder-"
 MAX_BACKUPS = 10
 
@@ -280,6 +318,24 @@ def _insight_cmd(app_home):
     return '"%s/hooks/insight-capture.sh"' % app_home
 
 
+def _claim_gate_cmd(app_home):
+    return '"%s/hooks/claim-gate.sh"' % app_home
+
+
+def _has_claim_gate(app_home):
+    """A checkout predating the claim gate still installs, minus those two wirings."""
+    return (Path(app_home) / "hooks" / "claim-gate.sh").exists()
+
+
+def _use_cmd(app_home, mode):
+    return '"%s/hooks/skill-use.sh" %s' % (app_home, mode)
+
+
+def _has_use_hook(app_home):
+    """A checkout predating the use hook still installs, minus that one wiring."""
+    return (Path(app_home) / "hooks" / "skill-use.sh").exists()
+
+
 def _hooks_map(settings, strict):
     """The ``hooks`` object, or a clear error naming the key that is wrong.
 
@@ -354,19 +410,67 @@ def _strip_marker(groups, marker):
     return out
 
 
+OUR_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+              "Stop")
+# Two events carry two entries of ours -- PostToolUse the edit checkpoint and the
+# skill-use recorder, Stop the insight capture and the claim gate -- so the markers are a
+# tuple per event. Stripping only the first would leave the second wired to a checkout the
+# user had just removed.
+OUR_EVENT_MARKERS = (("UserPromptSubmit", (HOOK_MARKER,)),
+                     ("PreToolUse", (CLAIM_GATE_MARKER,)),
+                     ("PostToolUse", (HOOK_MARKER, USE_MARKER)),
+                     ("PostToolUseFailure", (USE_MARKER,)),
+                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER)))
+
+
+def preexisting_events(settings, recorded=()):
+    """Which of our event keys are the USER'S, so uninstall puts back what it found.
+
+    "Was the key there before we ran" is the obvious rule and it is wrong on the second
+    install: by then every key we created on the first is there too, so a reinstall
+    recorded our own keys as the user's and uninstall left a row of empty lists behind in
+    their settings. Measured before this rule existed, on a config that started with only
+    a PreToolUse hook of the user's: install, install, uninstall left `UserPromptSubmit`,
+    `PostToolUse`, `PostToolUseFailure` and `Stop` all present and all `[]`.
+
+    A key is the user's if it holds anything that is not ours, or if it holds no entry of
+    ours at all -- which is how an empty list they put there stays theirs. ``recorded`` is
+    what a previous install wrote to the manifest, unioned in and never subtracted: over-
+    preserving leaves an empty key, under-preserving deletes a key of theirs, and only one
+    of those is destructive.
+    """
+    hooks = settings.get("hooks") or {}
+    if not isinstance(hooks, dict):
+        return sorted(set(recorded) & set(OUR_EVENTS))
+    out = set(e for e in recorded if e in OUR_EVENTS)
+    for event, markers in OUR_EVENT_MARKERS:
+        if event not in hooks:
+            continue
+        groups = _event_groups(hooks, event, strict=False)
+        if groups is None:
+            out.add(event)            # a shape we cannot read is not one we created
+            continue
+        remaining = groups
+        for marker in markers:
+            remaining = _strip_marker(remaining, marker)
+        if remaining or len(remaining) == len(groups):
+            out.add(event)
+    return sorted(out)
+
+
 def validate_settings(settings):
     """Every shape check install depends on, run before anything is written."""
     hooks = _hooks_map(settings, strict=True)
-    for event in ("UserPromptSubmit", "PostToolUse", "Stop"):
+    for event in OUR_EVENTS:
         _event_groups(hooks, event, strict=True)
     return settings
 
 
 def merge_hooks(settings, app_home):
-    """Add our two hook entries, replacing any previous copy of them.
+    """Add our hook entries, replacing any previous copy of them.
 
     Other tools' hooks on the same events are preserved: we only ever remove
-    entries whose command contains HOOK_MARKER.
+    entries whose command contains one of our markers.
     """
     hooks = _hooks_map(settings, strict=True)
     settings["hooks"] = hooks
@@ -377,20 +481,60 @@ def merge_hooks(settings, app_home):
                            "timeout": 10}]})
     hooks["UserPromptSubmit"] = ups
 
+    # The claim gate's commit arm. PreToolUse is a *decision* event: this is the only
+    # entry of ours that can deny a tool call, and the only one wired to an event the user
+    # may already be using for permission rules of their own, so the marker strip matters
+    # here as much as the append does.
+    if _has_claim_gate(app_home):
+        pre = _strip_marker(_event_groups(hooks, "PreToolUse", True), CLAIM_GATE_MARKER)
+        pre.append({"matcher": COMMIT_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _claim_gate_cmd(app_home),
+                               "timeout": 10}]})
+        hooks["PreToolUse"] = pre
+
     ptu = _strip_marker(_event_groups(hooks, "PostToolUse", True), HOOK_MARKER)
+    ptu = _strip_marker(ptu, USE_MARKER)
     ptu.append({"matcher": EDIT_MATCHER,
                 "hooks": [{"type": "command",
                            "command": _hook_cmd(app_home, "edit"),
                            "timeout": 10}]})
+    if _has_use_hook(app_home):
+        ptu.append({"matcher": SKILL_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _use_cmd(app_home, "ok"),
+                               "timeout": 10}]})
     hooks["PostToolUse"] = ptu
 
-    # Stop carries .last_assistant_message, which is where insight capture reads from.
-    # Only wired when the script is present, so a checkout predating it still installs.
+    # The failure twin. Wiring only the success event does not merely miss failures, it
+    # records each one as a success, which is a wrong number rather than a missing one.
+    if _has_use_hook(app_home):
+        ptf = _strip_marker(_event_groups(hooks, "PostToolUseFailure", True), USE_MARKER)
+        ptf.append({"matcher": SKILL_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _use_cmd(app_home, "fail"),
+                               "timeout": 10}]})
+        hooks["PostToolUseFailure"] = ptf
+
+    # Stop carries .last_assistant_message, which is where both of our Stop hooks read
+    # from: insight capture, and the claim gate. Each is wired only when its own script is
+    # present, so a checkout predating either still installs. Both markers are stripped
+    # before either is appended, so an entry of ours from an older checkout is never left
+    # sitting beside a fresh one.
+    stop = _strip_marker(_event_groups(hooks, "Stop", True), INSIGHT_MARKER)
+    stop = _strip_marker(stop, CLAIM_GATE_MARKER)
+    wired_stop = False
     if (Path(app_home) / "hooks" / "insight-capture.sh").exists():
-        stop = _strip_marker(_event_groups(hooks, "Stop", True), INSIGHT_MARKER)
         stop.append({"hooks": [{"type": "command",
                                 "command": _insight_cmd(app_home),
                                 "timeout": 10}]})
+        wired_stop = True
+    if _has_claim_gate(app_home):
+        stop.append({"hooks": [{"type": "command",
+                                "command": _claim_gate_cmd(app_home),
+                                "timeout": 10}]})
+        wired_stop = True
+    if wired_stop:
         hooks["Stop"] = stop
     return settings
 
@@ -413,16 +557,16 @@ def remove_hooks(settings, preexisting=()):
     if not settings.get("hooks"):
         return "nothing to remove"
     unreadable = []
-    for event, marker in (("UserPromptSubmit", HOOK_MARKER),
-                          ("PostToolUse", HOOK_MARKER),
-                          ("Stop", INSIGHT_MARKER)):
+    for event, markers in OUR_EVENT_MARKERS:
         if event not in hooks:
             continue
         groups = _event_groups(hooks, event, strict=False)
         if groups is None:
             unreadable.append(event)
             continue
-        remaining = _strip_marker(groups, marker)
+        remaining = groups
+        for marker in markers:
+            remaining = _strip_marker(remaining, marker)
         if remaining or event in preexisting:
             hooks[event] = remaining     # an empty list the user put there stays theirs
         else:
@@ -867,6 +1011,123 @@ def _dangling_report(dest_dir, names):
     return out
 
 
+# ------------------------------------------------------------------------ adoption
+#
+# THE LEDGER HAS TO COVER THE SKILLS THAT EXIST, NOT THE ONES A FORGE HAPPENED TO BUILD.
+# Three of nine shipped skills had a forge record; the other six entered the pool as seeds
+# and were invisible to every question the ledger is asked. A skill with no `origin` row
+# cannot be reported on at all, so its uses read as zero -- which is the same shape of
+# false negative this whole package exists to remove.
+#
+# So install writes the missing rows. Two populations, and they are NOT the same claim:
+#
+#   skills/ in this checkout      `origin:"adopted"`. We ship it; how it was authored is
+#                                 not asserted, only that it was already here when the
+#                                 ledger started looking.
+#   a real directory sitting in   `origin:"unknown"`. It is in the user's pool and this
+#   the installed skills dir      package cannot prove what created it. It may well be one
+#                                 we forged there -- a skill forged for personal use lands
+#                                 exactly there and is the normal case in the field, not
+#                                 an edge case -- or it may be the user's own work.
+#                                 "unknown" is the only honest answer, and it is a better
+#                                 record than no record.
+#   a symlink we cannot prove     SKIPPED entirely. A link pointing into somebody else's
+#   we made                       checkout belongs to that project, and writing a row for
+#                                 it would be this package claiming a skill it never
+#                                 touched. `_link_is_ours` is the same four-proof judgement
+#                                 the rest of this file uses; a link that proves nothing is
+#                                 reported, never adopted.
+#
+# The rows are written by `bin/skillforge origin`, not here. One implementation of the row
+# shape, the horizon marker and the "one origin per skill, ever" rule, in the one place
+# that already owns the ledger -- a second, Python-flavoured copy of that logic would be
+# the one that drifts.
+
+def _skillforge_bin(app_home):
+    p = Path(app_home) / "bin" / "skillforge"
+    return str(p) if os.access(str(p), os.X_OK) else None
+
+
+def _origin_rows(state_dir):
+    """How many origin rows the ledger holds, by name. Tolerates a corrupt line."""
+    names = set()
+    try:
+        with open(str(Path(state_dir) / LEDGER), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or '"origin"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("event") == "origin":
+                    names.add(row.get("name"))
+    except OSError:
+        pass
+    return names
+
+
+def _record_origin(forge_bin, state_dir, name, origin, skill_dir):
+    """One `skillforge origin` call. Never raises: a missing row is not a failed install."""
+    env = dict(os.environ)
+    env["SKILL_COMPOUNDER_STATE"] = str(state_dir)
+    try:
+        subprocess.run([forge_bin, "origin", "--name", name, "--origin", origin,
+                        "--skill-dir", str(skill_dir)],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, env=env, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def adopt_origins(app_home, claude_dir, state_dir, manifest=None):
+    """Give every skill in the pool an origin row, if it has none. Idempotent.
+
+    Returns a one-line report. Running it twice writes nothing the second time, because
+    `skillforge origin` refuses to add a second origin row for a name that has one.
+    """
+    forge_bin = _skillforge_bin(app_home)
+    if forge_bin is None:
+        return ("skipped: bin/skillforge is not executable, so no origin rows were "
+                "written (the ledger will show these skills as unknown)")
+    before = _origin_rows(state_dir)
+    shipped = _skill_dirs(app_home)
+    for d in shipped:
+        if d.name not in before:
+            _record_origin(forge_bin, state_dir, d.name, "adopted", d)
+
+    shipped_names = {d.name for d in shipped}
+    manifest = read_manifest(state_dir) if manifest is None else manifest
+    skipped = 0
+    dest = Path(claude_dir) / "skills"
+    try:
+        entries = sorted(dest.iterdir())
+    except OSError:
+        entries = []
+    for p in entries:
+        if p.name in shipped_names or not (p / "SKILL.md").is_file():
+            continue
+        if p.is_symlink():
+            if not _link_is_ours(p, app_home, manifest):
+                skipped += 1          # somebody else's skill; not ours to describe
+                continue
+            # Ours, but pointing outside the checkout -- a skill forged elsewhere.
+            target = _link_target(p) or str(p)
+            if p.name not in before:
+                _record_origin(forge_bin, state_dir, p.name, "unknown", target)
+            continue
+        if p.name not in before:
+            _record_origin(forge_bin, state_dir, p.name, "unknown", p)
+    after = _origin_rows(state_dir)
+    added = len(after - before)
+    note = "%d origin row(s) written, %d skill(s) already recorded" % (added, len(before))
+    if skipped:
+        note += ("; %d installed skill(s) belong to another project (links this package "
+                 "cannot prove it made) and were left out of the ledger" % skipped)
+    return note
+
+
 # ------------------------------------------------------------------- install/uninstall
 
 def install(app_home, claude_dir, bin_dir, state_dir=None):
@@ -878,9 +1139,11 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
     # Everything that can be checked is checked before anything is applied.
     settings = validate_settings(read_settings(settings_path))
     preflight(claude_dir, bin_dir, state_dir, settings_path, app_home)
-    # Which event keys were already there, so uninstall can put back exactly what it found.
-    preexisting = sorted(e for e in ("UserPromptSubmit", "PostToolUse", "Stop")
-                         if e in (settings.get("hooks") or {}))
+    # Which event keys are the user's, so uninstall can put back exactly what it found.
+    # Read together with the manifest: a reinstall must not adopt the keys the first
+    # install created.
+    preexisting = preexisting_events(
+        settings, read_manifest(state_dir).get("preexisting_hook_events") or ())
 
     report = {}
     report["backup"] = backup_settings(settings_path) or "(no existing settings.json)"
@@ -915,6 +1178,9 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
                                "install <name> --skill-dir <where it is now>)")
     write_manifest(state_dir, manifest)
     report["state"] = state_dir
+    # After the manifest is written, because the ownership judgement below reads it: a
+    # link this very install just made is only provably ours once it is recorded.
+    report["ledger"] = adopt_origins(app_home, claude_dir, state_dir, manifest)
 
     stray = (_dangling_report(claude_dir / "skills", [d.name for d in skills])
              + _dangling_report(bin_dir, [f.name for f in clis]))
@@ -1105,6 +1371,13 @@ def link_skill(skill_dir, skills_dir, app_home=None, state_dir=None):
         # The link is live either way; say what was not recorded rather than pretending.
         result["warning"] = "the link was made but not recorded in %s (%s)" % (
             manifest_path(state_dir), exc.strerror or exc)
+    # A skill that becomes live has to be answerable for in the ledger, or its uses read
+    # as zero forever. `skillforge done` writes `origin:"forged"` BEFORE it calls this, so
+    # a forged skill keeps that answer; this only catches a skill linked outside a forge,
+    # where all we honestly know is that it was already authored when we adopted it.
+    forge_bin = _skillforge_bin(app_home)
+    if forge_bin is not None:
+        _record_origin(forge_bin, state_dir, name, "adopted", target)
     return result
 
 

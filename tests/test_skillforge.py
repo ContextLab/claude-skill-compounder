@@ -42,8 +42,15 @@ class ForgeCase(unittest.TestCase):
         return json.loads(r.stdout)
 
     def ledger(self):
+        """Every row in the ledger, including the non-forge ones."""
         r = self.run_cli("ledger", "--json")
         return [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
+
+    def forge_ledger(self):
+        """Only the forge rows. The file also carries one `horizon` marker saying where
+        the record begins, and may carry `origin`, `use` and `verdict` rows."""
+        return [e for e in self.ledger()
+                if e.get("event") in ("start", "step", "done", "fail")]
 
 
 class SkillforgeTest(ForgeCase):
@@ -361,7 +368,7 @@ class ConcurrentForgeTest(ForgeCase):
         self.run_cli("start", "bbb", "12", "two")
         self.run_cli("done", "--name", "aaa", "shipped")
         self.run_cli("fail", "--name", "bbb", "gave up")
-        events = [(e["event"], e["name"]) for e in self.ledger()]
+        events = [(e["event"], e["name"]) for e in self.forge_ledger()]
         self.assertIn(("start", "aaa"), events)
         self.assertIn(("start", "bbb"), events)
         self.assertIn(("done", "aaa"), events)
@@ -394,7 +401,7 @@ class ClosedForgeTest(ForgeCase):
             r = self.run_cli(cmd, msg)
             self.assertEqual(r.returncode, 0, "closing a closed forge must not error")
             self.assertIn("already closed", r.stdout)
-        events = [e["event"] for e in self.ledger()]
+        events = [e["event"] for e in self.forge_ledger()]
         self.assertEqual(events, ["start", "done"],
                          "one start must produce exactly one outcome record")
         self.assertEqual(self.state_json("solo")["status"], "done")

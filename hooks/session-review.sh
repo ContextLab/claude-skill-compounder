@@ -139,6 +139,33 @@
 # fails silently is indistinguishable from one that found nothing.
 set -uo pipefail
 
+# ------------------------------------------------------------------------------------
+# THE ENTIRE BODY OF THIS SCRIPT IS ONE BRACE GROUP, AND THE `}` AT THE END OF THE FILE
+# IS WHAT CLOSES IT. It is not style and it is not decoration.
+#
+# bash reads a script LAZILY, by byte offset, and resumes at that offset in whatever the
+# file contains AT THAT MOMENT. This script blocks for a minute or more inside a `claude
+# -p`, and it lives in a checkout that gets edited, pulled, reinstalled and `git
+# checkout`ed while hooks are running. Rewrite the file during that minute and the next
+# statement after the CLI returns is read from the middle of unrelated text.
+#
+# That is not hypothetical. It is what happened to the first real dispatch this arm ever
+# made -- 2026-08-25, session f0feae4c, $0.222 spent, a well-formed CANDIDATE returned --
+# and the whole verdict was lost. See the block above `finalize_stage1` for the artifacts
+# it left and the reproduction.
+#
+# A brace group is a single compound command, so bash must find the matching `}` before
+# it runs any of it: the file is read into memory in one pass, and nothing that happens
+# to it on disk afterwards can be executed. A truncated file fails to parse and runs
+# NOTHING, which is also the right answer -- half a dispatch is worse than none.
+#
+# Consequences to keep in mind when editing:
+#   - the closing `}` must stay the last line, and `bash -n` is what proves it.
+#   - `exit` still exits the script, traps are still global, and functions and variables
+#     defined inside are still global. Nothing about the semantics changes.
+# ------------------------------------------------------------------------------------
+{
+
 : "${HOME:=/tmp}"
 
 SID="${1:-}"
@@ -379,7 +406,210 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 # Release on every exit path from here down, including a signal. Without this a killed
 # dispatch blocks every later one until REVIEW_LOCK_TTL.
-cleanup() { rmdir "$LOCK" 2>/dev/null; }
+#
+# ------------------------------------------------------------------------------------
+# EVERYTHING THAT HAPPENS AFTER THE MODEL CALL IS DEFINED HERE, ABOVE IT, ON PURPOSE.
+#
+# The first real dispatch this arm ever made -- session f0feae4c on 2026-08-25, sonnet,
+# $0.222, 79.8s, is_error false, num_turns 1 -- came back with a well-formed CANDIDATE
+# and the verdict was LOST. The cooldown was stamped, `.stage1-<sid>.json` held the whole
+# answer and `.stage1-<sid>.err` was empty, the week directory was empty, and neither
+# index.jsonl nor .unread existed. Nothing was announced and the next qualifying session
+# was suppressed for 21 hours. A user would never have learned any of it happened.
+#
+# THE CAUSE, established by reproducing it rather than by reading: the script FILE was
+# rewritten while this script was running. bash reads a script lazily, by byte offset,
+# and resumes at that offset in whatever the file NOW contains -- so a rewrite during the
+# ~80 seconds the CLI is blocked makes the next statement after the CLI returns land in
+# the middle of unrelated text. Replaying the real `.stage1` JSON through this script
+# produces a report, an index line and an announcement every time; prepending 40 lines to
+# the file mid-run instead dies with `line 578: ferable: command not found` -- 578 is
+# `rc=$?` -- and leaves exactly the artifacts above: stamp written, temps present, week
+# directory empty, no index, no announcement. In production this script's stderr is
+# /dev/null, so the whole thing is silent.
+#
+# THE STRUCTURAL FIX is that a function body is parsed once, when the definition is read,
+# and lives in memory afterwards. Defining the entire post-CLI path up here -- ahead of
+# the call that blocks for a minute or more -- means no later state of the file on disk
+# can reach it. That covers the class and not just the editing accident: a truncated
+# file, a `git checkout` under a running hook, an interrupted `sed -i`, an install that
+# relinks the checkout, all land the same way.
+#
+# THE ORDERING FIX is that the raw answer goes to $REPORT FIRST, before a byte of it is
+# parsed, and the index line and the announcement are emitted through ONE idempotent
+# function that the EXIT trap also calls. Once the CLI has returned any output at all,
+# "we paid for this and here is what came back" is on disk before anything that can fail
+# runs. The cooldown is never left stamped with no artifact.
+# ------------------------------------------------------------------------------------
+
+# Set the moment the CLI returns, whatever it returned. Until it is set there is nothing
+# paid for to rescue and the flush below does nothing.
+STAGE1_RETURNED=""
+# Set the moment the index line and the announcement have been written. Both the normal
+# path and the trap go through the same guard, so they are written exactly once.
+STAGE1_FLUSHED=""
+
+# The index line and the announcement. Idempotent, and it never refuses: a dispatch that
+# spent the quota is recorded even if every other thing about it failed.
+#
+# This used to be `|| refuse 19` behind the report write, which short-circuited both of
+# these -- so a dispatch that spent the quota and then failed to write its report left
+# the cooldown stamped, no index line, no announcement, and nothing for anyone to find.
+# That guard was already here on 2026-08-25 and it did NOT save the first live dispatch,
+# because control never reached it at all. Reaching it is what the trap below is for.
+emit_index_and_unread() {
+  [ -n "$STAGE1_FLUSHED" ] && return 0
+  STAGE1_FLUSHED=1
+  ei_verdict="${verdict:-}"
+  [ -z "$ei_verdict" ] && ei_verdict="INTERRUPTED"
+  ei_name="${name:-}"
+  ei_report="${REPORT:-}"
+  ei_index="${INDEX:-$REVIEWS/index.jsonl}"
+  # jq is checked for at gate 14, so this is the path taken. The fallback under it is not
+  # decoration: an index line that depends on a second process succeeding is the same
+  # single point of failure this whole block exists to remove.
+  jq -c -n --arg ts "$TS" --arg week "$WEEK" --arg session "$SID" --arg project "$PROJECT" \
+    --arg verdict "$ei_verdict" --arg name "$ei_name" --arg report "$ei_report" \
+    --arg cost "${cost:-}" --arg model "$REVIEW_MODEL" --arg stage "analysis" \
+    '{ts:$ts, week:$week, session:$session, project:$project, verdict:$verdict,
+      name:$name, report:$report, cost_usd:$cost, model:$model, stage:$stage}' \
+    2>/dev/null >> "$ei_index" \
+    || printf '{"ts":"%s","week":"%s","session":"%s","verdict":"%s","name":"%s","stage":"analysis"}\n' \
+         "$TS" "$WEEK" "$SID_SAFE" "$ei_verdict" "$ei_name" >> "$ei_index" 2>/dev/null
+  # What hooks/compound-improvement.sh surfaces on the first prompt of the next session.
+  # A count and a path, nothing a shell has to parse.
+  ( printf '%s\t%s\t%s\n' "$TS" "$ei_verdict${ei_name:+ $ei_name}" "$ei_report" \
+      >> "$REVIEWS/.unread" ) 2>/dev/null
+  return 0
+}
+
+# The temp files, on every path. They are the evidence while the dispatch is in flight
+# and litter once it is not, and a `rm` that only runs on the happy path is how the first
+# live dispatch was recognised at all.
+drop_temps() {
+  [ -n "${out:-}" ] && rm -f "$out" 2>/dev/null
+  [ -n "${err:-}" ] && rm -f "$err" 2>/dev/null
+  return 0
+}
+
+# Called by the EXIT trap. Does nothing unless the CLI returned and nothing has been
+# recorded yet -- i.e. exactly the window the first live dispatch died in.
+flush_stage1() {
+  [ -n "$STAGE1_RETURNED" ] || return 0
+  emit_index_and_unread
+  drop_temps
+  return 0
+}
+
+# THE WHOLE POST-CLI PATH. Parsed here, run after the model call returns.
+finalize_stage1() {
+  STAGE1_RETURNED=1
+
+  # 1. THE RAW ANSWER, TO THE REPORT LOCATION, BEFORE ANYTHING IS PARSED. Whatever else
+  #    fails from here on, the thing that was paid for is already on disk where the index
+  #    points. It is overwritten by the composed report a few lines below on every normal
+  #    run, so this costs one small write and nothing else.
+  {
+    printf '# Session review (unrefined) — %s\n\n' "$TS"
+    printf -- '- session: `%s`\n' "$SID"
+    printf -- '- exit status: %s\n\n' "$rc"
+    printf 'The CLI returned and this is what it returned, written before a byte of it\n'
+    printf 'was parsed. If you are reading this rather than a composed report, the\n'
+    printf 'refinement below it failed and the raw answer is what survived.\n\n'
+    printf -- '---\n\n```\n'
+    cat "$out" 2>/dev/null
+    printf '\n```\n'
+  } > "$REPORT" 2>/dev/null
+
+  # 2. --output-format json returns either the result object or a stream array containing
+  #    it, depending on what else is loaded. Accept both rather than guessing.
+  result=""
+  cost=""
+  dur=""
+  if [ "$rc" -eq 0 ] && [ -s "$out" ]; then
+    # `result` is multi-line, so it does not go through result_field's `head -1`.
+    result="$(jq -s -r 'map(if type == "array" then .[] else . end)
+                        | map(select(type == "object" and .type == "result"))
+                        | (last // {}) | .result // empty' "$out" 2>/dev/null)"
+    cost="$(result_field "$out" total_cost_usd)"
+    dur="$(result_field "$out" duration_ms)"
+  fi
+
+  # 3. THE VERDICT IS THE FIRST LINE THAT STARTS WITH `VERDICT:`, AND NOTHING ELSE.
+  #    See parse_verdict, which is reachable on its own as `--verdict-of` so a test can
+  #    drive it with real text instead of standing a fake CLI up in front of it.
+  verdict=""
+  name=""
+  parse_verdict "$result"
+  # TWO FAILURES, NOT ONE, BECAUSE THEY MEAN DIFFERENT THINGS AND ONE OF THEM WAS PAID
+  # FOR.
+  #   ERROR    the CLI did not run or produced nothing. No quota was spent, or it was
+  #            spent and lost, and the stderr below is the evidence.
+  #   UNPARSED the CLI ran, returned, and cost what it cost -- the answer just did not
+  #            take the required shape. Reporting that as "THE DISPATCH FAILED. Exit
+  #            status 0." with an empty stderr block, which is what this did first,
+  #            describes a successful paid call as a crash and sends whoever reads it
+  #            looking for a bug in the wrong place.
+  if [ -z "$verdict" ]; then
+    if [ "$rc" -eq 0 ] && [ -n "$result" ]; then verdict="UNPARSED"; else verdict="ERROR"; fi
+  fi
+
+  # 4. A FAILED DISPATCH IS WRITTEN DOWN. A trigger that fails silently is
+  #    indistinguishable from one that ran and found nothing, and the whole point of this
+  #    arm is that its absence must be visible.
+  {
+    printf '# Session review — %s\n\n' "$TS"
+    # `printf -- ` on every one of these. A FORMAT STRING STARTING WITH "- " IS AN
+    # INVALID OPTION TO BASH'S BUILTIN PRINTF and prints nothing; zsh accepts it. This
+    # repo's scripts are smoke-tested under both shells, and the shell that rejects it is
+    # the one in the shebang -- so without the `--` the entire metadata block vanished
+    # from the report while the rest of it wrote normally, silently, because the block's
+    # stderr goes to /dev/null. Caught by reading a real report, not by any test.
+    printf -- '- session: `%s`\n' "$SID"
+    printf -- '- project: `%s`\n' "$PROJECT"
+    printf -- '- transcript: `%s`\n' "$TRANSCRIPT"
+    printf -- '- model: `%s`  digest: %s bytes  cost: $%s  duration: %sms\n' \
+      "$REVIEW_MODEL" "${#digest}" "${cost:-unknown}" "${dur:-unknown}"
+    printf -- '- verdict: **%s%s**\n\n' "$verdict" "${name:+ $name}"
+    printf 'Written by hooks/session-review.sh. The session was not asked and did not\n'
+    printf 'consent; this report exists whether or not anything in that session read a\n'
+    printf 'word of any reminder. Nothing here has been forged or installed.\n\n'
+    printf -- '---\n\n'
+    if [ "$verdict" = "ERROR" ]; then
+      printf 'THE DISPATCH FAILED. The CLI exited %s and produced no usable output.\n\n' "$rc"
+      printf 'stderr:\n\n```\n%s\n```\n\n' "$(tail -c 4000 "$err" 2>/dev/null)"
+      printf 'raw stdout (first 4000 bytes):\n\n```\n%s\n```\n' "$(head -c 4000 "$out" 2>/dev/null)"
+    elif [ "$verdict" = "UNPARSED" ]; then
+      printf 'THE DISPATCH RAN AND WAS PAID FOR. The CLI exited %s and returned an answer,\n' "$rc"
+      printf 'but no line of it began with `VERDICT:`, so there is no verdict to record.\n'
+      printf 'This is not a crash. What came back is reproduced in full below.\n\n'
+      printf -- '---\n\n%s\n' "$result"
+    else
+      printf '%s\n' "$result"
+    fi
+  } > "$REPORT" 2>/dev/null
+  report_rc=$?
+  # THE INDEX AND THE ANNOUNCEMENT ARE WRITTEN EVEN WHEN THE REPORT IS NOT. They are
+  # separate files and separate failure modes; treat them separately. Note that the raw
+  # write in step 1 has already been attempted, so a report location that can be written
+  # at all holds SOMETHING by now.
+  if [ "$report_rc" -ne 0 ]; then
+    verdict="ERROR"
+    REPORT="(the report could not be written to $REPORT)"
+  fi
+
+  emit_index_and_unread
+  drop_temps
+  return 0
+}
+
+# Release the lock, and rescue anything the dispatch paid for and had not yet recorded.
+# The order matters: the flush is the part that must happen even if the shell is on its
+# way out, and a stale lock is cheap by comparison.
+cleanup() {
+  flush_stage1
+  rmdir "$LOCK" 2>/dev/null
+}
 trap cleanup EXIT HUP INT TERM
 
 # --------------------------------------------------------------------- gate 8: cooldown
@@ -577,111 +807,7 @@ env SKILL_COMPOUNDER_DISPATCHED=1 "$CLAUDE_BIN" -p "$prompt" \
   >"$out" 2>"$err" </dev/null
 rc=$?
 
-# --output-format json returns either the result object or a stream array containing it,
-# depending on what else is loaded. Accept both rather than guessing.
-result=""
-cost=""
-dur=""
-if [ "$rc" -eq 0 ] && [ -s "$out" ]; then
-  # `result` is multi-line, so it does not go through result_field's `head -1`.
-  result="$(jq -s -r 'map(if type == "array" then .[] else . end)
-                      | map(select(type == "object" and .type == "result"))
-                      | (last // {}) | .result // empty' "$out" 2>/dev/null)"
-  cost="$(result_field "$out" total_cost_usd)"
-  dur="$(result_field "$out" duration_ms)"
-fi
-
-# THE VERDICT IS THE FIRST LINE THAT STARTS WITH `VERDICT:`, AND NOTHING ELSE.
-#
-# In its own function, and reachable as `session-review.sh --verdict-of` with the model's
-# answer on stdin, so that a test can exercise THIS code against real text instead of
-# standing a fake CLI up in front of it. The break below was found by a reviewer, and a
-# test that could only reach the parser through a stub would not have been evidence of
-# anything.
-#
-# This was `case "$result" in *"VERDICT: NONE"*)` first, and a reviewer broke it in one
-# try: the prompt orders the reviewer to quote the evidence verbatim, the evidence is a
-# transcript digest, and in this repository a transcript contains the literal string
-# "VERDICT: NONE" constantly. A well-formed CANDIDATE whose EVIDENCE block quoted such a
-# line was recorded as NONE -- index and report disagreeing, stage 2 skipped, the
-# announcement wrong -- with nothing anywhere reporting a problem. A substring test over
-# a body that is required to contain quoted text was never going to hold.
-#
-# `grep -m1 '^VERDICT:'` also refuses a verdict indented inside a quote block, which is
-# the other shape the same confusion takes.
-verdict=""
-name=""
-parse_verdict "$result"
-# TWO FAILURES, NOT ONE, BECAUSE THEY MEAN DIFFERENT THINGS AND ONE OF THEM WAS PAID FOR.
-#   ERROR    the CLI did not run or produced nothing. No quota was spent, or it was spent
-#            and lost, and the stderr below is the evidence.
-#   UNPARSED the CLI ran, returned, and cost what it cost -- the answer just did not take
-#            the required shape. Reporting that as "THE DISPATCH FAILED. Exit status 0."
-#            with an empty stderr block, which is what this did first, describes a
-#            successful paid call as a crash and sends whoever reads it looking for a
-#            bug in the wrong place.
-if [ -z "$verdict" ]; then
-  if [ "$rc" -eq 0 ] && [ -n "$result" ]; then verdict="UNPARSED"; else verdict="ERROR"; fi
-fi
-
-# A FAILED DISPATCH IS WRITTEN DOWN. A trigger that fails silently is indistinguishable
-# from one that ran and found nothing, and the whole point of this arm is that its
-# absence must be visible.
-{
-  printf '# Session review — %s\n\n' "$TS"
-  # `printf -- ` on every one of these. A FORMAT STRING STARTING WITH "- " IS AN
-  # INVALID OPTION TO BASH'S BUILTIN PRINTF and prints nothing; zsh accepts it. This
-  # repo's scripts are smoke-tested under both shells, and the shell that rejects it is
-  # the one in the shebang -- so without the `--` the entire metadata block vanished
-  # from the report while the rest of it wrote normally, silently, because the block's
-  # stderr goes to /dev/null. Caught by reading a real report, not by any test.
-  printf -- '- session: `%s`\n' "$SID"
-  printf -- '- project: `%s`\n' "$PROJECT"
-  printf -- '- transcript: `%s`\n' "$TRANSCRIPT"
-  printf -- '- model: `%s`  digest: %s bytes  cost: $%s  duration: %sms\n' \
-    "$REVIEW_MODEL" "${#digest}" "${cost:-unknown}" "${dur:-unknown}"
-  printf -- '- verdict: **%s%s**\n\n' "$verdict" "${name:+ $name}"
-  printf 'Written by hooks/session-review.sh. The session was not asked and did not\n'
-  printf 'consent; this report exists whether or not anything in that session read a\n'
-  printf 'word of any reminder. Nothing here has been forged or installed.\n\n'
-  printf -- '---\n\n'
-  if [ "$verdict" = "ERROR" ]; then
-    printf 'THE DISPATCH FAILED. The CLI exited %s and produced no usable output.\n\n' "$rc"
-    printf 'stderr:\n\n```\n%s\n```\n\n' "$(tail -c 4000 "$err" 2>/dev/null)"
-    printf 'raw stdout (first 4000 bytes):\n\n```\n%s\n```\n' "$(head -c 4000 "$out" 2>/dev/null)"
-  elif [ "$verdict" = "UNPARSED" ]; then
-    printf 'THE DISPATCH RAN AND WAS PAID FOR. The CLI exited %s and returned an answer,\n' "$rc"
-    printf 'but no line of it began with `VERDICT:`, so there is no verdict to record.\n'
-    printf 'This is not a crash. What came back is reproduced in full below.\n\n'
-    printf -- '---\n\n%s\n' "$result"
-  else
-    printf '%s\n' "$result"
-  fi
-} > "$REPORT" 2>/dev/null
-report_rc=$?
-# THE INDEX AND THE ANNOUNCEMENT ARE WRITTEN EVEN WHEN THE REPORT IS NOT.
-# This used to be `|| refuse 19`, which short-circuited both of the writes below -- so a
-# dispatch that spent the quota and then failed to write its report left the cooldown
-# stamped, no index line, no announcement, and nothing at all for anyone to find. That is
-# precisely the silent failure this arm exists to make impossible, reproduced inside the
-# arm itself. They are separate files and separate failure modes; treat them separately.
-if [ "$report_rc" -ne 0 ]; then
-  verdict="ERROR"
-  REPORT="(the report could not be written to $REPORT)"
-fi
-
-rm -f "$out" "$err" 2>/dev/null
-
-jq -c -n --arg ts "$TS" --arg week "$WEEK" --arg session "$SID" --arg project "$PROJECT" \
-  --arg verdict "$verdict" --arg name "$name" --arg report "$REPORT" \
-  --arg cost "${cost:-}" --arg model "$REVIEW_MODEL" --arg stage "analysis" \
-  '{ts:$ts, week:$week, session:$session, project:$project, verdict:$verdict,
-    name:$name, report:$report, cost_usd:$cost, model:$model, stage:$stage}' \
-  2>/dev/null >> "$INDEX"
-
-# What hooks/compound-improvement.sh surfaces on the first prompt of the next session.
-# A count and a path, nothing a shell has to parse.
-( printf '%s\t%s\t%s\n' "$TS" "$verdict${name:+ $name}" "$REPORT" >> "$REVIEWS/.unread" ) 2>/dev/null
+finalize_stage1
 
 [ "$verdict" = "ERROR" ] && exit 21
 [ "$verdict" = "UNPARSED" ] && exit 22
@@ -842,3 +968,6 @@ jq -c -n --arg ts "$TS" --arg week "$WEEK" --arg session "$SID" --arg project "$
 ( printf '%s\tFORGE %s (staged, not installed)\t%s\n' "$TS" "$name" "$STAGE" >> "$REVIEWS/.unread" ) 2>/dev/null
 
 exit 0
+
+# Closes the brace group opened just under `set -uo pipefail`. See the note there.
+}

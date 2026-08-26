@@ -67,6 +67,15 @@ class LedgerTestBase(unittest.TestCase):
             return []
         return [json.loads(l) for l in self.ledger.read_text(encoding="utf-8").splitlines() if l.strip()]
 
+    # The ledger carries more than forge rows: one `horizon` marker saying where the
+    # record begins, plus `origin`, `use` and `verdict` rows. A test about the forge
+    # sequence asks about the forge rows, so it says so rather than asserting that
+    # nothing else may ever be written to the file.
+    FORGE_EVENTS = ("start", "step", "done", "fail")
+
+    def forge_records(self):
+        return [r for r in self.records() if r.get("event") in self.FORGE_EVENTS]
+
     def write_transcript(self, project, session, invocations):
         """Write a real .jsonl transcript. invocations: list of (skill, epoch, cwd)."""
         d = self.transcripts / project
@@ -97,7 +106,7 @@ class LedgerWriteTest(LedgerTestBase):
     def test_start_appends_a_start_record(self):
         r = self.forge("start", "my-skill", "8", "does", "a", "thing", now=T0)
         self.assertEqual(r.returncode, 0, r.stderr)
-        recs = self.records()
+        recs = self.forge_records()
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["event"], "start")
         self.assertEqual(recs[0]["name"], "my-skill")
@@ -153,7 +162,7 @@ class LedgerWriteTest(LedgerTestBase):
     def test_clear_of_an_active_forge_is_recorded_as_abandonment(self):
         self.forge("start", "s", "4", "summary", now=T0)
         self.forge("clear", now=T0 + 30)
-        recs = self.records()
+        recs = self.forge_records()
         self.assertEqual([r["event"] for r in recs], ["start", "fail"])
         self.assertIn("cleared", recs[-1]["phase"])
 
@@ -174,14 +183,19 @@ class LedgerWriteTest(LedgerTestBase):
         self.assertTrue(text.endswith("\n"))
         for line in text.splitlines():
             json.loads(line)  # raises if two appends interleaved
-        self.assertEqual(len(text.splitlines()), 10)
+        forge_lines = [l for l in text.splitlines()
+                       if json.loads(l).get("event") in self.FORGE_EVENTS]
+        self.assertEqual(len(forge_lines), 10)
+        # One horizon row, and exactly one however many forges ran.
+        self.assertEqual(len([l for l in text.splitlines()
+                              if json.loads(l).get("event") == "horizon"]), 1)
 
     def test_ledger_survives_a_full_forge_sequence(self):
         self.forge("start", "a", "8", "first", now=T0)
         self.forge("done", "ok", now=T0 + 100)
         self.forge("start", "b", "6", "second", now=T0 + 200)
         self.forge("fail", "gave up", now=T0 + 300)
-        self.assertEqual([r["event"] for r in self.records()],
+        self.assertEqual([r["event"] for r in self.forge_records()],
                          ["start", "done", "start", "fail"])
 
 
@@ -226,7 +240,10 @@ class LedgerCommandTest(LedgerTestBase):
         r = self.forge("ledger", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         recs = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
-        self.assertEqual([x["event"] for x in recs], ["start", "done"])
+        self.assertEqual([x["event"] for x in recs
+                          if x["event"] in self.FORGE_EVENTS], ["start", "done"])
+        # --json is raw: it prints every row, including the ones the table view ignores.
+        self.assertIn("horizon", [x["event"] for x in recs])
 
     def test_missing_project_renders_as_a_dash_not_the_string_null(self):
         self.ledger.write_text(

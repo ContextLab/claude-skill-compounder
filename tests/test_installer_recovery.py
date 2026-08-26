@@ -316,6 +316,26 @@ class MalformedSettingsTest(Base):
                 self.assertEqual(self.read(), {"model": "opus", "hooks": bad},
                                  "settings must be left exactly as they were")
 
+    def test_a_malformed_pretooluse_key_is_named_by_install_and_survives_uninstall(self):
+        """PreToolUse became one of ours the moment the claim gate was wired there, so it
+        joins the shape checks in both directions.
+
+        Install refuses and names the key -- writing our entry into a shape we cannot read
+        would either throw halfway or silently discard whatever the user had. Uninstall
+        never refuses: a key we cannot read holds no entry of ours anyway, and refusing
+        would trap the user with the package installed and no way out.
+        """
+        self.write_settings({"model": "opus", "hooks": {"PreToolUse": "oops"}})
+        with self.assertRaises(ValueError) as ctx:
+            self.do_install()
+        self.assertIn("hooks.PreToolUse", str(ctx.exception))
+        self.assertEqual(self.read(), {"model": "opus", "hooks": {"PreToolUse": "oops"}},
+                         "settings must be left exactly as they were")
+        rep = self.do_uninstall()
+        self.assertNotIn("errors", rep)
+        self.assertEqual(self.read()["hooks"]["PreToolUse"], "oops",
+                         "uninstall must leave a shape it cannot read alone")
+
     def test_null_hooks_is_treated_as_absent(self):
         self.write_settings({"model": "opus", "hooks": None})
         self.do_install()
@@ -547,10 +567,33 @@ class ColdReviewTest(Base):
             self.assertEqual(code, 0, err.decode("utf-8", "replace"))
             self.assertNotIn(b"NOT INSTALLED", out)
         s = self.read()
-        for event in ("UserPromptSubmit", "PostToolUse", "Stop"):
+        for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
             cmds = [h["command"] for g in s["hooks"][event] for h in g["hooks"]]
             self.assertEqual(len(cmds), len(set(cmds)), "%s duplicated" % event)
         json.loads((self.state / installer.MANIFEST).read_text(encoding="utf-8"))
+
+    def test_a_reinstall_does_not_adopt_the_keys_the_first_install_created(self):
+        """Uninstall after two installs must still leave the config as it found it.
+
+        "Was the key there before we ran" is true of our own keys on the second install,
+        so a reinstall used to record them as the user's and uninstall then left a row of
+        empty lists behind -- the package gone but its shape still in their settings.
+        Measured on the config below before the fix: `UserPromptSubmit`, `PostToolUse`,
+        `PostToolUseFailure` and `Stop` all survived as `[]`.
+        """
+        before = {"model": "opus",
+                  "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                      {"type": "command", "command": "/usr/bin/python3 /other/guard.py"}]}]}}
+        self.write_settings(before)
+        self.do_install()
+        self.do_install()
+        self.do_install()
+        self.do_uninstall()
+        s = self.read()
+        self.assertEqual(s["hooks"], before["hooks"],
+                         "three installs then an uninstall must leave the hooks exactly "
+                         "as they were found")
+        self.assertNotIn("statusLine", s)
 
     def test_an_empty_hook_list_of_the_users_is_left_alone(self):
         self.write_settings({"hooks": {"PostToolUse": [], "PreCompact": []}})

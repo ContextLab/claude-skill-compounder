@@ -11,7 +11,46 @@
 # often for that.
 set -uo pipefail
 
+# ------------------------------------------------------------------------------------
+# THE ENTIRE BODY OF THIS SCRIPT IS ONE BRACE GROUP, AND THE `}` AT THE END OF THE FILE
+# IS WHAT CLOSES IT. It is not style and it is not decoration.
+#
+# bash reads a script LAZILY, by byte offset, and resumes at that offset in whatever the
+# file holds AT THAT MOMENT. Every file in this package is executed by absolute path out
+# of the checkout -- the installer writes those paths into settings.json and symlinks the
+# CLIs -- so one `git pull`, `git checkout` or `sed -i` rewrites the bytes of a run that
+# is already in flight. Measured on GNU bash 5.3.3(1): prepending forty lines to a live
+# 25-line script produced `line 4: non-transferable: command not found` and then a second
+# execution of the body; truncating it produced `unexpected EOF` and exit 2.
+#
+# A brace group is a single compound command, so bash must find the matching `}` before
+# it may run any part of it: the file goes through the parser in ONE pass and nothing
+# written to disk afterwards can be executed. A file truncated badly enough to break the
+# parse then runs NOTHING, which is also the answer we want here -- half a hook is worse
+# than no hook.
+#
+# THE `exit` BEFORE THE CLOSING `}` IS LOAD-BEARING TOO. A brace group protects its body
+# and nothing past it: measured, a wrapped script that fell off its end had bash resume
+# at the offset just past `}`, find prepended text sitting there, and run the whole body
+# a SECOND time. So the group is not sufficient on its own.
+#
+# Consequences when editing:
+#   - the closing `}` must stay the last line, and `bash -n` is what proves it.
+#   - the last statement inside the group must be an `exit`. tests/test_script_wrapping.py
+#     checks that across every shipped script and reproduces the hazard against a live
+#     process.
+#   - `exit` still exits the script, traps are still global, and functions and variables
+#     defined inside are still global. Nothing about the semantics changes.
+#
+# The incident this came out of, and the reproduction, are in docs/DESIGN.md under
+# "Never edit a script that may still be running".
+# ------------------------------------------------------------------------------------
+{
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# `set -u` aborts on an unset HOME, which renders a blank status line and no error. The
+# other shipped scripts carry the same default; tests/test_script_wrapping.py pins it.
+: "${HOME:=/tmp}"
 STATE="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 # The previous status line is saved into state, not into the clone, so a `git pull`
 # never clobbers it and the repo stays free of generated files.
@@ -56,3 +95,8 @@ elif [ -n "$forge" ]; then
 else
   printf '%s' "$base"
 fi
+
+exit
+
+# Closes the brace group opened just under `set -uo pipefail`. See the note there.
+}

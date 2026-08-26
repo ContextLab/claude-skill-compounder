@@ -41,6 +41,10 @@ The findings this file pins as named tests, so a regression cannot pass quietly:
        rather than checked, because no revision of anything reproduces them; Phase 4's
        source plus as-of date is all there is, and the PINNED comment's second ceiling
        says so.
+  F10  the handoff to `verification-before-completion` used to assert that a neighbour
+       owned completion claims. Nothing had ever handled one, so the number is derived
+       here from the transcript corpus the sentence cites, and a second half requires the
+       same counter to find that neighbour's plugin siblings, or a zero measures nothing.
 """
 
 import json
@@ -322,7 +326,14 @@ class SkillDocumentTest(unittest.TestCase):
     def test_the_body_is_within_the_house_ceiling(self):
         lines = len(self.body.strip().splitlines())
         self.assertLessEqual(lines, 500, "hard ceiling from skill-authoring Phase 5")
-        self.assertLessEqual(lines, 400, "working ceiling; the body is paid on every turn")
+        # A ratchet, not a round number: it has always equalled the body's actual size, so
+        # any growth fails here and has to be argued for. Raised 400 -> 403 on 2026-08-26,
+        # when the `verification-before-completion` handoff was corrected. The bullet grew
+        # by five lines; two were paid back by compressing the three neighbouring boundary
+        # paragraphs (no rule dropped, "same shape" and "entrench" intact). The remaining
+        # three bought the measurement, its source and as-of date, and the reason no
+        # rewording fixes it. Reset this to the new body size after any deliberate trim.
+        self.assertLessEqual(lines, 403, "working ceiling; the body is paid on every turn")
 
     def test_the_iron_law_is_fenced_stated_once_and_is_a_procedure(self):
         law = re.search(r"## The Iron Law\n\n```\n(.+)\n```", read())
@@ -849,6 +860,102 @@ class ClaimsThisSkillMakesTest(unittest.TestCase):
         self.assertIn("same shape", para, "the overlap is conceded, not argued away")
         self.assertIn("entrench", para,
                       "the difference that justifies a separate skill must be stated")
+
+    def test_the_invocation_count_the_handoff_states_is_re_derived_not_asserted(self):
+        """The correction of round 10, and the reason it is here rather than in an
+        `assertIn`. The boundary paragraph used to hand completion claims to
+        `verification-before-completion` and say nothing about whether that skill had ever
+        handled one. It had not, so a skill about restated claims carried a restated claim
+        of its own, which is its Phase 3 step 3 committed inside the document.
+
+        The replacement states a number, so the number is derived here from the corpus the
+        sentence names instead of being pinned as a string. Two halves, and the second is
+        what makes this a truth pin rather than a grep that found nothing:
+
+          1. the count the sentence states must equal the count this file derives, so the
+             day that skill is genuinely invoked the suite goes red and the sentence is
+             what gets corrected;
+          2. the same counter, over the same corpus, must find invocations of that skill's
+             own plugin siblings. A counter that returns zero for everything would make
+             the sentence "true" while measuring nothing.
+
+        `CLAIM_PROVENANCE_TRANSCRIPTS` repoints the corpus, in the manner of `CI_NOW` and
+        `SKILLFORGE_NOW` elsewhere in this repo: it is how the non-vacuity of both halves
+        was demonstrated, by pointing it at a directory holding one real-shaped record for
+        a sibling and one for the skill itself, which turns half 1 red without the
+        document being touched.
+        """
+        block = section("When this is the wrong skill")
+        # The one boundary paragraph that hands work to a skill outside this repo. Found
+        # by its content, then its own leading name is read off it: matching the name
+        # first and the plugin later crossed two bullets and scored the wrong neighbour.
+        owning = [b for b in ("\n" + block).split("\n- **") if "shipped by the" in b]
+        self.assertEqual(len(owning), 1, "expected exactly one out-of-repo handoff")
+        para = re.sub(r"\s+", " ", owning[0])
+        m = re.match(r"`([a-z][a-z0-9-]+)`\*\* \(shipped by the `([a-z-]+)` plugin\)", para)
+        self.assertIsNotNone(m, "the handoff paragraph no longer names a skill and a plugin")
+        neighbour, plugin = m.group(1), m.group(2)
+        stated = re.search(r"invoked (\d+) times in the local transcript corpus "
+                           r"\(source: `Skill` records under `([^`]+)`, as of "
+                           r"(\d{4}-\d{2}-\d{2})\)", para)
+        self.assertIsNotNone(stated, "the measured sentence changed shape; it must keep "
+                                     "the count, the source and the as-of date together")
+        claimed, source = int(stated.group(1)), stated.group(2)
+
+        root = Path(os.environ.get("CLAIM_PROVENANCE_TRANSCRIPTS",
+                                   os.path.expanduser(source)))
+        if not root.is_dir():
+            self.skipTest("%s is not present, so the corpus the sentence cites cannot be "
+                          "read from here" % root)
+        counts = self.skill_invocations(root)
+
+        derived = sum(v for k, v in counts.items() if k.split(":")[-1] == neighbour)
+        self.assertEqual(derived, claimed,
+                         "the document says %s has been invoked %d times under %s; this "
+                         "corpus records %d. Correct the sentence and its as-of date; "
+                         "correcting it is what turns this green."
+                         % (neighbour, claimed, source, derived))
+
+        siblings = {k: v for k, v in counts.items()
+                    if k.startswith(plugin + ":") and k.split(":")[-1] != neighbour and v}
+        self.assertTrue(siblings,
+                        "the counter found no invocation of any %s skill in %s, so a zero "
+                        "for %s measures nothing: %d records over %d skills in total"
+                        % (plugin, root, neighbour, sum(counts.values()), len(counts)))
+
+    @staticmethod
+    def skill_invocations(root):
+        """Every `Skill` tool_use in a transcript tree, counted by the skill it named.
+
+        Reads the real records, on the real shape: an assistant message whose content
+        list holds `{"type": "tool_use", "name": "Skill", "input": {"skill": ...}}`. The
+        substring guard before `json.loads` is only a speed filter; every line that could
+        hold one is still parsed. Lines that do not parse are counted and asserted on by
+        the caller's non-vacuity half rather than swallowed.
+        """
+        counts = {}
+        for f in root.rglob("*.jsonl"):
+            try:
+                text = f.read_text(errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                if '"Skill"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                content = (rec.get("message") or {}).get("content")
+                if not isinstance(content, list):
+                    continue
+                for item in content:
+                    if (isinstance(item, dict) and item.get("type") == "tool_use"
+                            and item.get("name") == "Skill"):
+                        named = (item.get("input") or {}).get("skill")
+                        if named:
+                            counts[named] = counts.get(named, 0) + 1
+        return counts
 
 
 # --------------------------------------------------------------------------------

@@ -36,11 +36,17 @@ from. It skips the environment variable that was already exported three hours ag
 says "fix the error" about an error message that it alone recognizes. The skill reads fine
 to the person who wrote it and fails six weeks later for everybody else.
 
-This project addresses the first with hooks that keep asking the question, and the second with an
-adversarial forging protocol: a **builder** agent writes the skill, and a **separate,
-cold** red-team agent tries to execute it with no context and reports where it breaks.
-They loop until the red-team report comes back clean, driven by an **orchestrator** agent
-so the loop does not run in the thread you are talking to.
+This project addresses the first with hooks that keep asking the question, and the second
+with an adversarial forging protocol built on one idea: **the original project is held-out
+test data.** A skill written by the session that needed it is full of references only that
+session can decode, so exactly one agent — the session itself — is allowed to see the
+project, and it spends that privilege judging the result rather than writing it. A
+**builder** writes the skill in a scratch directory with no path into the project. A
+**separate, cold** red-teamer is handed the skill and nothing else, and has to work out
+from the text alone what the skill is even for. They loop until the report comes back
+clean, driven by an **orchestrator** so none of that traffic lands in the thread you are
+talking to, and a final **judge** holds the words that set the forge off and asks whether
+what got built answers them.
 
 ---
 
@@ -54,6 +60,8 @@ so the loop does not run in the thread you are talking to.
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
+|`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
+|`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
 |`bin/skillinsight`|Reads and prunes the candidate queue|
@@ -71,6 +79,77 @@ repo, it is written *through* rather than replaced, so the link survives. Symlin
 `~/.claude/skills` and in the CLI directory are only ever replaced or removed when this
 package can prove it created them; anything else of yours at one of those names is
 reported and left alone.
+
+---
+
+## What runs against the API
+
+**One part of this package calls the Anthropic API through your own `claude` CLI and your
+own account, and it is on by default.** Everything else here is shell and `jq` over files
+already on your disk.
+
+That part is `hooks/session-review.sh`. It is not wired into `settings.json` as a hook:
+`hooks/insight-capture.sh` starts it detached on `Stop`, and only for a session that has
+crossed a mechanical edit threshold — by default 24 file edits across 8 distinct files
+(`INSIGHT_AUDIT_MIN_EDITS`, `INSIGHT_AUDIT_MIN_FILES`). It runs one `claude -p` with no
+tools, no MCP servers and no settings sources, asks whether the session that just ended
+repeated a procedure worth keeping, writes the answer under
+`~/.claude/skill-compounder/reviews/`, and exits. The answer is `VERDICT: NONE` or
+`VERDICT: CANDIDATE <name>`, and `NONE` is the expected one. It forges nothing and
+installs nothing.
+
+**What leaves the machine.** A digest of that one session's transcript: the last 4 MB of
+the file (`SKILL_COMPOUNDER_REVIEW_TAIL_BYTES`), reduced to three kinds of line and then
+cut to the last 60 KB of those (`SKILL_COMPOUNDER_REVIEW_DIGEST_BYTES`). For each `Edit`,
+`Write` or `NotebookEdit`: the file path, the first 140 characters of the text replaced,
+and the first 140 characters of the replacement. For each `Bash` call: the first 160
+characters of the command. For each block of assistant text: its first 400 characters.
+Only non-sidechain assistant records are read, so your own prompts are not copied in
+directly, though assistant text can quote them. If the `Stop` hook wrote a session-audit
+record, that goes too: session id, project directory, edit and file counts, and the list
+of paths touched. Nothing else is read, and nothing goes anywhere but the API endpoint
+your CLI already talks to.
+
+**What it costs.** Two real runs on `sonnet` over a 60 KB digest: $0.19 in 60s, and
+$0.222 in 80s (2026-08-25, CLI 2.1.245). A global 21-hour cooldown bounds how often it
+can happen at all — `604800 / 75600 = 8` dispatches in any seven-day window, so a ceiling
+of $1.52 to $1.78 a week at those two prices. The edit threshold above was measured firing
+on 18 of 126 real transcripts spanning 54 days on one machine, and the cooldown collapses
+those to 13 distinct days: about 1.7 dispatches a week, or $0.32 to $0.38. Your own rate
+depends on how you work. The dispatch is detached and the launch was measured at 3ms, so it adds nothing to
+the wall clock of the session that triggers it.
+
+**Switching it off**, in `~/.claude/settings.json`:
+
+```json
+{"env": {"SKILL_COMPOUNDER_REVIEW": "0"}}
+```
+
+Both hooks check that before doing anything. For cheaper rather than off,
+`SKILL_COMPOUNDER_REVIEW_MODEL=haiku` was measured at $0.099 against the same digest; it
+is not the default because its answer paraphrased the evidence instead of quoting it, and
+a `NONE` you cannot check is not much of a `NONE`.
+
+|Variable|Default|What it changes|
+|-|-|-|
+|`SKILL_COMPOUNDER_REVIEW`|`1`|`0` stops the dispatch entirely, from either hook|
+|`SKILL_COMPOUNDER_REVIEW_MODEL`|`sonnet`|Model the review runs on|
+|`SKILL_COMPOUNDER_REVIEW_COOLDOWN`|`75600`|Seconds between any two dispatches, across all sessions|
+|`SKILL_COMPOUNDER_REVIEW_FORGE`|`0`|`1` lets a `CANDIDATE` verdict go on to the forging protocol|
+|`SKILL_COMPOUNDER_REVIEW_CLAUDE`|whatever `claude` resolves to on `PATH`|Which CLI to dispatch, when the hook's `PATH` does not carry one|
+
+Set these in the top-level `env` block, for the same reason `SKILL_COMPOUNDER_STATE`
+belongs there: both hooks and the dispatched script read them.
+
+The second stage, which would take a `CANDIDATE` and run the full builder/red-team
+protocol on it, is off. It was measured once end to end at $3.02 over 19 minutes, two cold
+red-team rounds, verdict ABANDONED. Switched on, it writes into `reviews/staging/<name>/`
+and never into `~/.claude/skills`, so a forge cannot reach your live config without your
+having seen it.
+
+`skillreport`, `skillinsight`, `skillforge`, the status line,
+`hooks/compound-improvement.sh`, `hooks/insight-capture.sh` and `hooks/skill-use.sh` make
+no network calls.
 
 ---
 
@@ -157,8 +236,11 @@ signed off.
 |`claim-provenance`|A claim that is already written down is checked or carried forward: a count restated from another document, a documented behaviour nobody measured, a test asserting what a document says rather than whether it is true|A green suite proves the sentence is present, not that it is true. It defers to `ai-tell-audit` for how prose reads, and its description says so, so the two do not race for one trigger|
 
 The loudest complaint in the corpus is deliberately **not** here:
-`superpowers:verification-before-completion` already owns that trigger, and two skills
-racing for one trigger is worse than one skill.
+`superpowers:verification-before-completion` occupies that trigger, and two skills racing
+for one trigger is worse than one skill. Occupying is not covering: it has been invoked 0
+times in the local transcript corpus (source: `Skill` records under `~/.claude/projects`,
+as of 2026-08-26), because the moment it names offers a router no user prompt to match
+(`notes/2026-08-25-completion-claim-gap.md`).
 
 ### What the measurement actually showed
 
@@ -195,6 +277,13 @@ than taken from the transcript, which is the only way that failure is visible.
 
 ## The three habits
 
+Two of these are reminders inside the session, and a session can read past a reminder.
+Measured: one long session fired the 12-edit checkpoint at edits 12, 24 and 36,
+disregarded it all three times, and fixed nine defects of one kind in between. Per
+instance the answer it gave — "no, I am just fixing a bug" — was honest. So the second
+habit also has an arm that asks nothing of the session and that the session cannot
+decline.
+
 ### 1. Before implementing, reuse before you build
 
 At the start of a substantive turn, a `UserPromptSubmit` hook reminds the session to check
@@ -210,6 +299,20 @@ heredocs and inline interpreters produces almost no `Write` calls, and the check
 goes quiet in the long autonomous sessions it exists for. Read-only commands are filtered
 out by inspecting the command string, so `ls` never counts toward a checkpoint.
 
+The same question is also asked where no session gets a vote. On `Stop`, once a session
+has crossed 24 edits across 8 files, `hooks/insight-capture.sh` writes a session-audit
+record from counters that `hooks/compound-improvement.sh` already wrote to disk — nothing
+is asked of the session and nothing it said is consulted — and then starts
+`hooks/session-review.sh` detached. That is a separate `claude -p` whose only task is this
+question, reading a digest of the session that just ended. It costs money and it is on by
+default: [What runs against the API](#what-runs-against-the-api).
+
+**That arm analyses and queues. It does not forge.** Its verdict is `NONE` or
+`CANDIDATE <name>`, written to `~/.claude/skill-compounder/reviews/` and reported by
+`hooks/compound-improvement.sh` the next time you are in a session. Turning a `CANDIDATE`
+into a skill is still a decision a person makes: the forging stage is off by default, and
+switched on it writes to a staging directory rather than to `~/.claude/skills`.
+
 <!-- doctrine: both-conditions -->
 **Both must hold, or it gets a note rather than a skill.**
 
@@ -222,20 +325,66 @@ Both want a **concrete referent** rather than a judgement, because both are othe
 loose enough to say yes to nearly any non-trivial work, and a threshold that always
 resolves to yes is worse than none.
 
-When both hold, the session runs the **forging protocol**:
+When both hold, the session runs the **forging protocol**. Every stage is denied something
+the stage before it had, and the denials are the mechanism:
 
 ```
-skillforge start <name> <total-steps> "<one-line summary>"
+skillforge start <name> <total-steps> "<one-line summary>" \
+    --trigger "<the verbatim text that set this forge off>" \
+    --trigger-kind <user-prompt|hook-checkpoint|review-dispatch|agent-decision>
   │
-  └─ orchestrator agent  → runs the loop; the main thread goes back to work
-       ├─ builder agent   → writes SKILL.md (given the transcript, including dead ends)
-       ├─ red-team agent  → FRESH context, tries to execute it cold, reports failures
-       ├─ loop            → findings to the builder; a NEW red-teamer each round
-       └─ cap at 5 rounds → narrow the scope until clean, or abandon it honestly
-                            (10 for a complex or safety-critical skill)
+  ├─ A: this session        → the only agent that sees the project; pre-registers the
+  │                           success criteria and the verbatim trigger, to disk
+  ├─ orchestrator agent (B) → no project content; picks the level, fixes the cap, runs
+       │                      the loop, and hands your thread back
+       ├─ builder agent (C)  → scratch directory, no path into the project; builds a
+       │                       runnable reproduction and runs every command it documents
+       ├─ red-team agent (D) → FRESH context, given the skill and nothing else; infers
+       │                       the scenario from it, then executes what it inferred
+       ├─ loop               → findings back to the builder; a NEW red-teamer each round
+       └─ cap at 5 rounds    → narrow the scope until clean, or abandon it honestly
+                               (10 for a complex or safety-critical skill)
+  ├─ A again                → runs the skill against the real case, scores the criteria
+  │                           it pre-registered, and runs the routing gate
+  └─ E: a fresh judge       → gets the verbatim trigger on its own; does A's framing
+                              match it? Install at B's level, or quarantine
   │
 skillforge done "<outcome>"
 ```
+
+Paste the trigger, do not summarise it: it is the one thing about a forge that nothing can
+recover afterwards, because a quote is what a person actually said or what a hook actually
+emitted, and by the time anyone reads the row the moment is gone. `--trigger-kind` says who
+was asking — `user-prompt` for a human, `hook-checkpoint` for the edit checkpoint,
+`review-dispatch` for a session review, `agent-decision` for the session's own initiative.
+Whether that field drifts from `agent-decision` towards `user-prompt` over months is the
+measurement this package exists to make. A forge started without a trigger still runs and
+records `trigger_kind:"unrecorded"`, so the gap can be counted rather than assumed away;
+`SKILLFORGE_REQUIRE_TRIGGER=1` turns the warning into a refusal.
+
+<!-- doctrine: routing-gate-on-completion -->
+**A forge cannot be reported clean while the skill's own must-fire prompts do not fire
+it.** A reviewer reading the draft's `## Trigger precision` section and agreeing it looks
+right is not that check. Every skill in the seed pool passed a full builder/red-team loop
+that way, and when the prompts were finally run on 2026-08-25 three of the claims were
+false: `stale-artifact-check` lost two of its three must-fire prompts to
+`superpowers:systematic-debugging`, and `session-handoff` and `skill-compounder` each
+listed one that fires nothing at all. So the draft carries at least three prompts that
+must fire it and three that must not, each written as the verbatim utterance a user would
+type, and the session that started the forge runs them before it closes. The red-teamer
+runs them too, as one row of its checklist, but the gate is A's: it is the last thing
+checked before the forge is reported clean. When a must-fire prompt loses, what changes is
+the description, not the prompt and not the verdict.
+
+<!-- doctrine: must-not-half-is-a-gate -->
+**A skill that fires on everything is worse than no skill.** The must-not half is a gate
+in the same way: a skill that answers every prompt displaces the neighbour that would have
+handled it properly. Read which skill the report says fired, not only its PASS column.
+
+<!-- doctrine: unmeasured-is-not-verified -->
+**A probe that could not run is never a pass.** No login, no quota, offline: the skill may
+still ship, but it ships marked unmeasured and says so where the next session will read
+it. What is forbidden is the silent promotion of an unrun probe to a verified one.
 
 <!-- doctrine: orchestrator-runs-the-rounds -->
 **The session that starts a forge does not run it.** One orchestrator subagent runs the
@@ -250,6 +399,24 @@ absent for another, with no rule predicting which
 ([docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md)). So the builder and
 red-teamers dispatch nobody, and orchestrators are never nested.
 
+The orchestrator's first decision is where the skill goes; its second is how many rounds
+the loop gets. Both are settled before the builder is dispatched, and the cap is already
+encoded in the `<total-steps>` passed to `skillforge start`, so no command can re-budget a
+forge once it is running.
+
+**A skill belongs at the highest level of the hierarchy to which it applies, and must be
+written generally enough to apply beyond the case that prompted it.** The hierarchy is
+general, then user, then project: a project skill has to work beyond the specific task, a
+user skill beyond the specific project, a general skill beyond both. Use runs the other
+way, which is what makes the rule cheap — a general skill can still be applied to one
+project, so placing it high costs nothing.
+
+**The specialisation comes from the project's or the user's `CLAUDE.md` and the constraints
+already recorded there — never from text baked into the skill.** A skill that hardcodes one
+repository's test command has made that repository's particulars everyone's; the same skill
+saying "run the project's suite" reads the particular out of the `CLAUDE.md` that already
+states it.
+
 <!-- doctrine: close-ownership -->
 **You own `start`, `done` and `fail`; the orchestrator owns everything between.** It
 reports its outcome rather than closing the record itself, so a forge whose orchestrator
@@ -260,10 +427,15 @@ discarded silently at exit 0.
 **The red-teamer must never be a fork of either layer** — not of the orchestrator that
 dispatches it, and not of the session that dispatched the orchestrator. A forked
 reviewer already knows what the skill was *meant* to say, so it cannot detect the
-ambiguity that will bite a cold session six weeks later. Its checklist: cold-start
-executability, trigger precision (3 prompts that should fire, 3 that should not), every
-asserted command actually run, unhappy paths, overlap with existing skills, and scope
-creep.
+ambiguity that will bite a cold session six weeks later.
+
+**D is given the skill and nothing else, and must infer for itself what situation the skill
+is for.** That inference is the completeness check, and it is the first row of the
+checklist: a skill whose scenario cannot be reconstructed from its own text has a hanging
+reference in it. The rest of the rows are cold-start executability, trigger precision (3
+prompts that should fire, 3 that should not, run rather than read), every asserted command
+actually run, portability — does an example need a project the reviewer cannot see? —
+unhappy paths, overlap with existing skills, and scope creep.
 
 <!-- doctrine: no-leading-prompt -->
 **Never hand a reviewer a list of what not to flag.** Scoping a brief that way reads as
@@ -271,6 +443,16 @@ instruction about what the answer should be, and the review narrows to match. Me
 this repo's own documentation: the same file, reviewed by one agent given a "do not flag
 these" list and by one given only the principle, produced **1 finding and 4** — and the
 unprimed reviewer defended two passages the primed brief would have condemned.
+
+**Ask E whether A's framing matches the trigger it came from.** A's one-paragraph framing
+is what B and C are allowed to see, so everything downstream inherits it — including E's
+own question about whether the original problem got solved, which E would otherwise learn
+only from A. The verbatim trigger, handed to E separately and off the forge record, is what
+catches a misframing; nothing else in the pipeline can. A "no" there is a failure however
+good the skill is, and the skill is quarantined, not installed: A, B, C and D each append a
+signed section to the report, nobody may rewrite anyone else's, and contradictions are kept
+and flagged rather than reconciled, because a merged narrative hides the most informative
+thing a failed forge produces.
 
 ### 3. When a skill misfires: fix, document, or retire
 
@@ -319,9 +501,22 @@ second.
 ```bash
 skillforge start demo 4 "checking that the animation renders"
 skillforge step 2 "red-team round 1"
-skillforge done "clean"
+skillforge done "clean"                     # closes the record AND installs the skill
+skillforge install demo [--skill-dir DIR]   # the retry path when that install did not happen
 skillforge clear     # escape hatch if a forge is ever left open
 ```
+
+Closing a forge installs the skill. A skill that has been written but not linked into
+`~/.claude/skills/` cannot be invoked by anything, so `done` looks for
+`skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` under the repository the
+forge started in, links what it finds, and prints one line saying what happened either
+way. Three cases it does not treat as a plain success: a forge that produced no SKILL.md
+at all (a fix, a retirement, a red-team round), a skill already sitting under a repo's own
+`.claude/skills/`, which is live for that project and would have its scope widened by a
+personal link, and a name already taken by something this package cannot prove it wrote.
+`done` still exits 0 in all of them, because the forge did close; `skillforge install`
+exits non-zero, because there the install is the request. `SKILLFORGE_NO_INSTALL=1` skips
+the step entirely.
 
 ---
 
@@ -342,8 +537,12 @@ them, and subagents never emit any.
 Review the queue in one batch, once a week, not once a turn:
 
 ```bash
-skillinsight list          # what is queued
+skillinsight list          # one line per candidate, this week by default
+skillinsight pending       # what is queued and undeclined right now
 skillinsight review        # emit the batch, with the reviewing instructions
+skillinsight decline <hash> [--why <why>]   # judged and declined; the record is kept
+skillinsight snooze [<days>] | --clear      # stop announcing the queue without judging it
+skillinsight reviews [--show <n>] [--all]   # the automatic session reviews, newest first
 skillinsight stats
 skillinsight prune --older-than 8   # archives old week files, never deletes them
 ```
@@ -373,13 +572,52 @@ skillreport
 ```
 
 One table: what was forged, how many red-team rounds it cost, and how often it has been
-invoked **since** the session that created it. The last column is the one that matters. If
-forged skills turn out not to get reused, the honest response is to say so rather than to
-raise a threshold until the number looks better.
+invoked **since** the session that created it. The last column is the one that matters,
+and it counts genuine reuse only.
 
-Everything stays on your machine. `skillreport` makes no network calls, reads only files
-you already have, and stores the ledger under `~/.claude/skill-compounder/`. Delete it
-whenever you like.
+A `Skill` call whose result came back `"is_error":true` — `Unknown skill`, usually — is a
+failure and not a reuse; before those were excluded, one uninstalled skill took the
+headline from 80% to 100%. Invocations made by this package's own routing probes and
+end-to-end tests are excluded too, recognised by the session entrypoint that says a script
+rather than a person was driving: on the transcripts this was measured against, 93 of 98
+recorded invocations of these skills came from probe and test working directories.
+Excluded traffic is reported on its own line rather than dropped, as are invocations that
+fall inside a forge window, and a forge that never closed stays out of the denominator
+altogether.
+
+### What the ledger records
+
+`ledger.jsonl` is built to answer four questions, and to say so when it cannot:
+
+|Question|Row|
+|-|-|
+|What triggered the build|`start` and `origin`, carrying `--trigger` verbatim plus its kind|
+|What was built|`origin`: one row per skill, with its directory and whether we ship it|
+|Used since|`use`: one row per invocation, written live by the `Skill` hook|
+|Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it|
+
+A single `horizon` row records where the record begins, because a ledger holding nothing
+before Tuesday says nothing whatever about Monday. A row reconstructed after the fact
+carries `backfilled:true`, `confidence:"reconstructed"` and a `source` naming the evidence
+it was read from, and stays distinguishable from a live row forever.
+
+`skillreport skills` prints all four per skill, with probe and test traffic kept on its
+own line instead of mixed into the count of genuine use. The default table above is
+unchanged: it counts invocations recovered from transcripts, this view counts ledger rows,
+and the two are never added together.
+
+So run it against your own ledger rather than trusting a percentage quoted here. If forged
+skills turn out not to get reused, the honest response is to say so rather than to raise a
+threshold until the number looks better.
+
+Apart from the session review described above, everything stays on your machine.
+`skillreport` makes no network calls, reads only files you already have, and stores the
+ledger under `~/.claude/skill-compounder/`. Delete it whenever you like. Per skill
+invocation the ledger holds the skill name, your session id, the working directory, the
+repository that directory sits in, whether the call succeeded, and whether a script or a
+person was driving the session. A trigger and a verdict's quoted evidence are the only
+free text in the file, and both are text you passed in yourself. Nothing is transmitted,
+and `SKILL_COMPOUNDER_USE_LOG=0` stops invocations being recorded at all.
 
 ---
 
@@ -389,7 +627,7 @@ A skill that survived the red-team loop locally and then actually got used again
 more than a proposal. The `contribute-skill` skill proposes it upstream:
 
 ```
-skillcontrib preflight skills/<name>      # frontmatter and size limits
+skillcontrib preflight skills/<name>      # frontmatter parses, name matches the directory
 skillcontrib dedup <name>                 # every PR in any state, not just open ones
 skillcontrib whoami                       # maintainers branch directly, others fork
 ```
@@ -408,9 +646,20 @@ The bar is both a clean red-team result and evidence of local reuse. See
 
 ## Tuning
 
-Noisy reminders are a tuning problem. All ten are environment variables, but they are not
-all read by the same component, so they do not all go in the same place in
-`~/.claude/settings.json`:
+Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
+automatic session review has its own, in
+[What runs against the API](#what-runs-against-the-api).
+All fifteen are environment variables, and they are not the whole set — this prints every
+name any shipped script reads:
+
+```bash
+grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE)(_[A-Z0-9_]+)?' \
+  hooks/*.sh bin/* statusline/*.sh | sort -u
+```
+
+Most of what that prints is an internal budget or a clock pin the test suite freezes. The
+eleven below are not all read by the same component, so they do not all go in the same
+place in `~/.claude/settings.json`:
 
 |Variable|Default|Set it in|Meaning|
 |-|-|-|-|
@@ -422,10 +671,17 @@ all read by the same component, so they do not all go in the same place in
 |`CI_QUEUE_NUDGE`|`1`|the hook entries|Set to `0` to stop announcing the pending skill-candidate queue|
 |`CI_QUEUE_NUDGE_MIN`|`259200`|the hook entries|Seconds that must pass before the queue may be announced again|
 |`CI_QUEUE_NUDGE_MAX`|`1209600`|the hook entries|Seconds after which an unchanged queue is announced anyway|
+|`SKILL_COMPOUNDER_USE_LOG`|`1`|the hook entries|Set to `0` to stop recording skill invocations in the ledger|
+|`CLAIM_GATE`|`1`|the hook entries|Set to `0` to switch the end-of-turn claim gate off entirely|
+|`CLAIM_GATE_COMMIT`|`1`|the hook entries|Set to `0` to keep the gate on the closing message but stop it denying a `git commit`|
+|`CLAIM_GATE_MIN_DIGITS`|`3`|the hook entries|Smallest integer width the gate will flag as an unsupported figure|
+|`CLAIM_GATE_MAX_SESSION`|`10`|the hook entries|Blocks plus denials the gate may spend in one session|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
-Only the eight `CI_*` variables are read by the hook. `STATUSLINE_BASE_TTL` is read by
+Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
+`SKILL_COMPOUNDER_USE_LOG` is read by `hooks/skill-use.sh`, which is a hook entry too.
+`STATUSLINE_BASE_TTL` is read by
 `statusline/statusline.sh`, so setting it on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it
 belongs in the session-wide `env` block. Set it anywhere narrower and they disagree about

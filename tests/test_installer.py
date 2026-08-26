@@ -116,6 +116,85 @@ class InstallerTest(unittest.TestCase):
         stop_hooks = [h for g in s["hooks"].get("Stop", []) for h in g["hooks"]
                       if "insight-capture" in h["command"]]
         self.assertEqual(len(stop_hooks), 1, "reinstall must not duplicate the Stop hook")
+        # Both claim-gate arms. Stop now holds two entries of ours, so a strip that
+        # handled only the first marker would duplicate this one on every reinstall.
+        for event in ("PreToolUse", "Stop"):
+            gate = [h for g in s["hooks"][event] for h in g["hooks"]
+                    if "claim-gate.sh" in h["command"]]
+            self.assertEqual(len(gate), 1,
+                             "reinstall duplicated the claim gate on %s" % event)
+
+    def test_claim_gate_is_wired_to_both_of_its_events(self):
+        """Two arms, two events, and the commit arm is the one that cannot be dropped.
+
+        A commit message never appears in `last_assistant_message`, so a Stop-only wiring
+        would miss both incidents that motivated the gate. Asserted per event rather than
+        "claim-gate.sh appears somewhere", which a half-wiring would pass.
+        """
+        self.do_install()
+        s = self.read()
+        pre = s["hooks"]["PreToolUse"]
+        gate = [(g.get("matcher"), h["command"]) for g in pre for h in g["hooks"]
+                if "claim-gate.sh" in h["command"]]
+        self.assertEqual(len(gate), 1, "the commit arm must be wired exactly once")
+        self.assertEqual(gate[0][0], "Bash",
+                         "the commit arm must match Bash; the gate decides what is a commit")
+        stop_gate = [h for g in s["hooks"]["Stop"] for h in g["hooks"]
+                     if "claim-gate.sh" in h["command"]]
+        self.assertEqual(len(stop_gate), 1, "the Stop arm must be wired exactly once")
+        self.assertEqual(stop_gate[0]["timeout"], 10)
+        # The Stop arm carries no matcher: Stop has nothing to match on, and a matcher
+        # there is silently ignored rather than rejected.
+        for g in s["hooks"]["Stop"]:
+            if any("claim-gate.sh" in h["command"] for h in g["hooks"]):
+                self.assertIsNone(g.get("matcher"))
+
+    def test_claim_gate_accumulator_arm_is_not_wired(self):
+        """The PostToolUse arm is deliberately left out, and this pins that decision.
+
+        It records numbers out of every tool RESULT, an Agent/Task result included, which
+        is precisely the subagent testimony the Stop arm excludes from its evidence on
+        purpose. Wiring it on a `*` matcher would make the gate stop catching relayed
+        figures -- the defect it exists for. If it is ever wired it needs a matcher that
+        excludes Agent and Task, and this test should be updated to assert that, not
+        deleted.
+        """
+        self.do_install()
+        s = self.read()
+        for g in s["hooks"].get("PostToolUse", []):
+            for h in g["hooks"]:
+                self.assertNotIn("claim-gate.sh", h["command"],
+                                 "the accumulator arm must not be wired on a matcher that "
+                                 "admits Agent/Task results as evidence")
+
+    def test_claim_gate_is_removed_from_both_events(self):
+        self.do_install()
+        self.do_uninstall()
+        s = self.read()
+        for event in ("PreToolUse", "Stop"):
+            self.assertFalse(any("claim-gate.sh" in h["command"]
+                                 for g in s.get("hooks", {}).get(event, [])
+                                 for h in g["hooks"]),
+                             "the claim gate survived uninstall on %s" % event)
+        self.assertNotIn("PreToolUse", s.get("hooks", {}),
+                         "an event key we created must not be left behind empty")
+
+    def test_a_foreign_pretooluse_hook_survives_install_and_uninstall(self):
+        """PreToolUse is the event a user is most likely to already be using: it is where
+        permission rules live. Ours must land beside theirs and leave with only itself."""
+        self.write_settings({"hooks": {"PreToolUse": [{"matcher": "Bash",
+                                                       "hooks": FOREIGN_HOOK["hooks"]}]}})
+        self.do_install()
+        s = self.read()
+        cmds = [h["command"] for g in s["hooks"]["PreToolUse"] for h in g["hooks"]]
+        self.assertTrue(any("other/tool.py" in c for c in cmds))
+        self.assertTrue(any("claim-gate.sh" in c for c in cmds))
+        self.do_uninstall()
+        s = self.read()
+        cmds = [h["command"] for g in s["hooks"]["PreToolUse"] for h in g["hooks"]]
+        self.assertEqual([c for c in cmds if "other/tool.py" in c], cmds,
+                         "uninstall must leave another tool's PreToolUse hook exactly as "
+                         "it found it")
 
     def test_stop_hook_is_wired_and_removed(self):
         self.do_install()

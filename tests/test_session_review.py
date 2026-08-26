@@ -9,9 +9,17 @@ WHAT IS AND IS NOT ASSERTED HERE, stated plainly so nobody mistakes the coverage
 
 Everything up to the model call is exercised for real: every gate, the claim/lock/cooldown
 state machine, the digest, the read surface, and the recursion barrier. The model call
-itself is NOT exercised, and no stub stands in for it -- a fake ``claude`` on PATH would
-turn "the dispatch works" into "our fake works", which is the failure this repo bans
-mocks to avoid.
+itself is NOT exercised and nothing here pretends otherwise -- a fake ``claude`` that
+invented an answer would turn "the dispatch works" into "our fake works", which is the
+failure this repo bans mocks to avoid.
+
+What ``PaidForPathTest`` does is different and is the reason it exists. It replays the
+VERBATIM stdout of the one real stage-1 call this arm has ever made (2026-08-25, $0.2221734,
+recorded in ``RECORDED_STAGE1`` below) through ``SKILL_COMPOUNDER_REVIEW_CLAUDE``, the
+same variable ``DigestTest`` already points at ``/bin/cat``. It asserts nothing about the
+CLI. It asserts what this script does with an answer the CLI has already returned, which
+is where the first live dispatch threw $0.22 away, and pinning that needs a real recorded
+response rather than a real call on every ``./run_tests.sh``.
 
 The end-to-end run was performed by hand against the real CLI on 2026-08-25 (CLI 2.1.245,
 macOS 25.5.0) and its numbers are the ones quoted in hooks/session-review.sh:
@@ -928,6 +936,214 @@ class SourceContractTest(unittest.TestCase):
                     if bad in s and f"printf -- {quote}" not in s:
                         self.fail(f"{script.name}:{n} printf format starts with '-' "
                                   f"and needs `printf -- `: {s}")
+
+
+# The verbatim stdout of the ONE real stage-1 call this arm has ever made: 2026-08-25,
+# session f0feae4c, sonnet, one turn, 79.8s, is_error false, $0.2221734 of the user's
+# quota. It is a RECORDING of a real response, not an invented one -- the same kind of
+# pin as SKILLFORGE_NOW or CI_NOW, and the only alternative is spending $0.22 on every
+# ./run_tests.sh. Nothing here asserts that the CLI works; every assertion below is about
+# what this script does with what the CLI already returned.
+#
+# It was recovered by hand from ~/.claude/skill-compounder/reviews/.stage1-f0feae4c-*.json
+# after the bug in PaidForPathTest lost it. The verdict text is in
+# notes/2026-08-25-first-live-review-verdict.md.
+RECORDED_STAGE1 = '{"is_error":false,"duration_api_ms":81416,"num_turns":1,"stop_reason":"end_turn","session_id":"891bb922-5379-402a-a51b-f6e08847bc3f","total_cost_usd":0.22217340000000002,"usage":{"input_tokens":2,"cache_creation_input_tokens":31686,"cache_read_input_tokens":15022,"output_tokens":7279,"output_tokens_details":{"thinking_tokens":6855},"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":31686,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":7279,"cache_read_input_tokens":15022,"cache_creation_input_tokens":31686,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":31686},"type":"message"}],"speed":"standard"},"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":19541,"outputTokens":18,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.019631,"contextWindow":200000,"maxOutputTokens":32000,"canonicalModel":"claude-haiku-4-5","provider":"firstParty"},"claude-sonnet-5":{"inputTokens":2,"outputTokens":7279,"cacheReadInputTokens":15022,"cacheCreationInputTokens":31686,"webSearchRequests":0,"costUSD":0.2025424,"contextWindow":1000000,"maxOutputTokens":64000,"canonicalModel":"claude-sonnet-5","provider":"firstParty"}},"permission_denials":[],"terminal_reason":"completed","fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required","subagent_stats":{"spawned":0,"requested":{"background":0,"foreground":0,"unset":0},"started_in_background":0,"max_depth":0,"spawned_by_subagents":0,"completed":0,"failed":0,"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,"concurrency_limit":0,"budget":0},"by_type":{}},"subtype":"success","api_error_status":null,"result":"VERDICT: CANDIDATE orchestrator-sendmessage-delivery-unreliable\\nDEAD END: The session trusted `SendMessage` to deliver a dispatched orchestrator\'s or subagent\'s result, and when it didn\'t arrive the orchestrator sat stalled until someone manually dug through raw task-output files to find the answer that was already sitting there.\\nSECOND OCCURRENCE: \\"The claim-provenance builder reported to me directly — it couldn\'t reach its own orchestrator via `SendMessage`, which is the message-delivery failure this repo has now measured twice.\\"\\nWHY TRANSFERABLE: Any workflow that dispatches orchestrator/subagent chains and waits on `SendMessage` for results should instead poll the task-output files directly, since this session hit silent delivery failure more than once and named it as such.\\nEVIDENCE:\\nThat\'s a stalled orchestrator — it returned control while reporting itself as waiting, which is the failure mode I documented earlier.\\none probe had two children run to completion with neither result delivered, and the answers had to be read out of the task output files.\\nThe claim-provenance builder reported to me directly — it couldn\'t reach its own orchestrator via `SendMessage`, which is the message-delivery failure this repo has now measured twice.","ttft_ms":76937,"ttft_stream_ms":1814,"time_to_request_ms":23,"type":"result","duration_ms":79817,"uuid":"4b9a36e2-3e63-4c91-8e4c-79f98c1f2746","queued_turn_count":0}\n'
+
+class PaidForPathTest(SessionReviewBase):
+    """Once the CLI has returned anything at all, the answer reaches disk.
+
+    THE DEFECT THESE PIN. On 2026-08-25 the first live dispatch spent $0.2221734, got back
+    a well-formed CANDIDATE, and lost it: cooldown stamped, `.stage1-<sid>.json` and
+    `.stage1-<sid>.err` still on disk, the week directory empty, no index.jsonl, no
+    .unread. The script file had been rewritten while the script was blocked inside the
+    80-second CLI call, and bash -- which reads a script lazily, by byte offset -- resumed
+    after the call in the middle of unrelated text and died. Its stderr is /dev/null in
+    production, so it was silent. The guard already in the source saying the index and the
+    announcement are written even when the report is not did not help, because control
+    never reached it.
+
+    SKILL_COMPOUNDER_REVIEW_CLAUDE points at a script that replays the recorded response
+    above. DigestTest already uses that variable the same way, pointed at /bin/cat.
+    """
+
+    def replay_cli(self, delay=0):
+        """A CLI stand-in that replays the recorded real response, optionally slowly."""
+        binder = Path(self.tmp) / "bin"
+        binder.mkdir(exist_ok=True)
+        recorded = Path(self.tmp) / "recorded.json"
+        recorded.write_text(RECORDED_STAGE1)
+        sh = binder / "replay-claude"
+        sh.write_text("#!/bin/sh\n"
+                      + (f"/bin/sleep {delay}\n" if delay else "")
+                      + f'cat "{recorded}"\n')
+        sh.chmod(0o755)
+        return str(sh)
+
+    def live_env(self, delay=0, **extra):
+        e = self.env(SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE="1",
+                     SKILL_COMPOUNDER_REVIEW_CLAUDE=self.replay_cli(delay))
+        e.update(extra)
+        return e
+
+    def reviews(self):
+        return self.state / "reviews"
+
+    def index_lines(self):
+        f = self.reviews() / "index.jsonl"
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+
+    def assert_no_temps(self, sid):
+        leftovers = sorted(p.name for p in self.reviews().glob(".stage1-*"))
+        self.assertEqual(leftovers, [],
+                         f"the dispatch left its temp files behind: {leftovers}")
+
+    # ------------------------------------------------------------------ (a) the happy path
+    def test_a_candidate_answer_yields_a_report_an_index_line_and_an_announcement(self):
+        r = self.run_review(self.live_env(), sid="paid-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        report = self.reviews() / "2026-W35" / "paid-1.md"
+        self.assertTrue(report.exists(),
+                        "the cooldown was stamped and no report was written: "
+                        f"{sorted(p.name for p in (self.reviews() / '2026-W35').iterdir())}")
+        text = report.read_text()
+        self.assertIn("VERDICT: CANDIDATE orchestrator-sendmessage-delivery-unreliable", text)
+        self.assertIn("verdict: **CANDIDATE orchestrator-sendmessage-delivery-unreliable**", text)
+
+        lines = self.index_lines()
+        self.assertEqual(len(lines), 1, f"expected exactly one index line, got {lines}")
+        self.assertEqual(lines[0]["verdict"], "CANDIDATE")
+        self.assertEqual(lines[0]["name"], "orchestrator-sendmessage-delivery-unreliable")
+        self.assertEqual(lines[0]["cost_usd"], "0.22217340000000002",
+                         "the cost of a paid call is part of the record")
+        self.assertEqual(lines[0]["report"], str(report))
+
+        unread = (self.reviews() / ".unread").read_text()
+        self.assertIn("CANDIDATE orchestrator-sendmessage-delivery-unreliable", unread)
+        self.assertIn(str(report), unread)
+
+        self.assert_no_temps("paid-1")
+
+    # ------------------------------------------- (b) the report fails, the record does not
+    def test_the_index_and_announcement_survive_a_report_that_cannot_be_written(self):
+        """A report that cannot be written must not take the record down with it.
+
+        The week directory is made unwritable, which is the one failure that reaches the
+        report and nothing else. The dispatch was still paid for, so it is still recorded
+        and still announced -- as an ERROR, naming the location it could not write to.
+        """
+        week = self.reviews() / "2026-W35"
+        week.mkdir(parents=True)
+        week.chmod(0o500)
+        self.addCleanup(week.chmod, 0o700)
+
+        r = self.run_review(self.live_env(), sid="paid-2")
+        self.assertFalse((week / "paid-2.md").exists(),
+                         "the premise of this test is that the report cannot be written")
+
+        lines = self.index_lines()
+        self.assertEqual(len(lines), 1, f"expected exactly one index line, got {lines}")
+        self.assertEqual(lines[0]["verdict"], "ERROR")
+        self.assertIn("could not be written", lines[0]["report"])
+
+        self.assertIn("ERROR", (self.reviews() / ".unread").read_text())
+        self.assertEqual(r.returncode, 21)
+        self.assert_no_temps("paid-2")
+
+    # ------------------------------------- (c) the diagnosed failure, pinned so it cannot return
+    def test_rewriting_the_script_while_it_runs_loses_nothing(self):
+        """THE 2026-08-25 DEFECT, reproduced and pinned.
+
+        A copy of the real script is started against a CLI stand-in that takes five
+        seconds, and the copy is rewritten on disk two seconds in -- exactly what happened
+        to the live dispatch, whose file was under active editing while it ran. Before the
+        fix this died with `line 578: ferable: command not found` (578 was `rc=$?`) and
+        left the cooldown stamped, both temp files present, the week directory empty, and
+        no index or announcement at all.
+
+        The fix is structural: the whole script body is one brace group, so bash parses
+        the file in a single pass and no later state of it on disk is ever executed.
+        """
+        script = Path(self.tmp) / "session-review-copy.sh"
+        shutil.copy2(REVIEW, script)
+        original = script.read_text()
+
+        proc = subprocess.Popen(
+            [str(script), "paid-3", self.tmp, str(self.transcript), self.tmp, ""],
+            env=self.live_env(delay=5), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, text=True,
+        )
+        time.sleep(2)
+        # A rewrite that shifts every byte offset, which is what any real edit does.
+        script.write_text("# an agent edited this file while it was running\n" * 40 + original)
+        out, err = proc.communicate(timeout=90)
+
+        report = self.reviews() / "2026-W35" / "paid-3.md"
+        self.assertTrue(report.exists(),
+                        f"the paid-for answer was lost. rc={proc.returncode} stderr={err[:400]}")
+        self.assertIn("orchestrator-sendmessage-delivery-unreliable", report.read_text())
+
+        lines = self.index_lines()
+        self.assertEqual(len(lines), 1, f"expected exactly one index line, got {lines}")
+        self.assertEqual(lines[0]["verdict"], "CANDIDATE")
+
+        self.assertIn("CANDIDATE", (self.reviews() / ".unread").read_text())
+        self.assert_no_temps("paid-3")
+
+    # ------------------------------------------------------------- (d) temp files, every path
+    def test_the_temp_files_are_removed_when_the_answer_is_unusable(self):
+        """`.stage1-<sid>.json` and `.err` are in-flight evidence and litter afterwards.
+
+        They are what made the lost dispatch recognisable at all, which is precisely why
+        their presence must mean "a dispatch is running", not "a dispatch once ran".
+        """
+        garbage = Path(self.tmp) / "bin" / "garbage-claude"
+        garbage.parent.mkdir(exist_ok=True)
+        garbage.write_text("#!/bin/sh\nprintf 'not json at all\\n'\n")
+        garbage.chmod(0o755)
+        env = self.env(SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE="1",
+                       SKILL_COMPOUNDER_REVIEW_CLAUDE=str(garbage))
+        r = self.run_review(env, sid="paid-4")
+        self.assertEqual(r.returncode, 21, "unusable output is an ERROR, and it is recorded")
+        self.assertEqual(self.index_lines()[0]["verdict"], "ERROR")
+        self.assert_no_temps("paid-4")
+
+
+class BraceGroupTest(unittest.TestCase):
+    """The structural half of the fix, asserted on the source.
+
+    Losing it is silent: the script keeps working until the day something rewrites the
+    file mid-dispatch, and then it loses a paid-for answer with its stderr on /dev/null.
+    """
+
+    def test_the_whole_script_body_is_one_brace_group(self):
+        lines = REVIEW.read_text().splitlines()
+        opener = [n for n, l in enumerate(lines) if l == "{"]
+        self.assertTrue(opener, "hooks/session-review.sh must open a brace group at column 1")
+        self.assertEqual(lines[-1], "}",
+                         "the brace group must be closed by the last line of the file")
+        pipefail = [n for n, l in enumerate(lines) if l.startswith("set -uo pipefail")]
+        self.assertTrue(pipefail)
+        self.assertLess(pipefail[0], opener[0],
+                        "`set` runs before the group, so it must precede the `{`")
+        # Everything that matters has to be INSIDE, or bash reads it lazily again.
+        body = [n for n, l in enumerate(lines)
+                if l.startswith("env SKILL_COMPOUNDER_DISPATCHED=1")
+                or l.startswith("finalize_stage1")]
+        self.assertTrue(body, "the model call and its finaliser should both be present")
+        for n in body:
+            self.assertGreater(n, opener[0], f"line {n + 1} is outside the brace group")
+
+    def test_the_script_still_parses_under_both_shells(self):
+        for shell in ("bash", "zsh"):
+            with self.subTest(shell=shell):
+                r = subprocess.run([shell, "-n", str(REVIEW)], capture_output=True,
+                                   text=True, stdin=subprocess.DEVNULL, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+
 
 
 if __name__ == "__main__":

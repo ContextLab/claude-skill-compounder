@@ -289,6 +289,95 @@ silently shifts every field after an empty one, and a skill name may contain a t
 (`tests/test_ledger.py` pins this). Both the CLI's slot index and the renderer's field parse
 use US (`0x1f`), which is not IFS whitespace and which `start` refuses inside a name.
 
+**Bash reads a script lazily, by byte offset.** It does not parse the file up front, so
+rewriting the file while it runs makes bash resume at its saved offset in whatever the file
+now holds, and carry on executing in the middle of unrelated text. This is the one entry
+here that is not a difference between shells -- every bash does it -- and the only one that
+can destroy work already paid for. The reproduction, the incident it cost us, and the shape
+of the fix are the section below.
+
+---
+
+## Never edit a script that may still be running
+
+`hooks/session-review.sh` spends sixty to ninety seconds blocked inside a single `claude -p`
+call. For that whole window the file on disk is being read, a few bytes at a time, by a live
+process. Changing it then does not take effect on the next run. It corrupts the run in
+flight.
+
+That is not a worry, it is a bill. On 2026-08-25 at 21:29 this arm made the first real
+dispatch it had ever made. The call succeeded and was charged -- one turn on sonnet, 79.8s,
+`is_error: false`, $0.2221734 -- and came back with a well-formed candidate. The script was
+rewritten on disk while the call was blocked; its mtime is 21:50 and it was uncommitted at
+the time. Bash resumed after the call at the offset it had saved, landed inside text that
+had not been there when it started, and died. Because the cooldown stamp is written before
+the dispatch and this arm's stderr goes to `/dev/null` in production, nothing was indexed,
+nothing was announced, no report was composed, and the next qualifying session would have
+been suppressed for twenty-one hours. Not one byte of it reached a person. The answer was
+recovered by hand out of a staging temp file, and it and the full account are in
+[../notes/2026-08-25-first-live-review-verdict.md](../notes/2026-08-25-first-live-review-verdict.md).
+
+**How the shell half was established.** GNU bash 5.3.3(1) on macOS 25.5.0, 2026-08-25,
+against Claude Code 2.1.245. Write a twenty-five line script that echoes, sleeps three
+seconds, and echoes again; start it; have a second process prepend forty lines of unrelated
+prose one second in. Unprotected, the run printed its first line, then
+`line 4: non-transferable: command not found`, then executed its own body a second time --
+bash had resumed at the byte offset the sleep left it at and found different text sitting
+there. Swapping the prepend for a two-line truncation instead gave
+``line 4: unexpected EOF while looking for matching `"' `` and exit status 2. The probe is
+four lines of shell and runs in ten seconds. Re-run it rather than trusting this paragraph.
+
+**Why the body is wrapped in one brace group.** A brace group is a single compound command,
+so bash has to find the matching `}` before it may run any part of it, which forces the
+whole file through the parser in one pass. Re-running the probe against a wrapped copy gives
+a clean run under the prepend and a clean run under the truncation. A file truncated badly
+enough to break the parse then executes *nothing*, which is also the outcome we want: half a
+dispatch is worse than no dispatch. The wrapper reads like syntax that does nothing, and an
+author who tidies it away re-opens precisely this failure -- which is why the closing brace
+is commented and points back at the note just under `set -uo pipefail`, and why `bash -n` is
+what proves the brace still closes the file.
+
+**The `exit` before the closing brace is load-bearing too.** A brace group protects its body
+and nothing past it. Measured with the same probe: wrapped but with no terminating `exit`,
+the body ran correctly to completion, and then bash resumed at the offset just past `}`,
+found the prepended text now occupying it, and ran the whole body *again*. So the group is
+not sufficient on its own; the script must also never fall off its end. Every path through
+`hooks/session-review.sh` ends in `exit`, and the last statement inside the group is
+`exit 0`. Nothing mechanical checks that, so it is written down here.
+
+**The standing rule that follows.** Never edit a script that may be running, and count any
+script that blocks on a network call as running for a long time. In this package that is not
+a rare alignment: every one of these files is executed out of the checkout itself. The hook
+and status line entries the installer writes name an absolute path into it, and the CLIs in
+`bin/` are symlinked to it, so a `git pull`, a `git checkout`, or one `sed -i` rewrites the
+exact bytes a live process is part-way through reading. Stop the process first, or copy the script elsewhere and
+edit the copy.
+
+**What was exposed, ranked by window times rate.** Every shipped script now carries both
+halves, and `tests/test_script_wrapping.py` enforces it: `REQUIRE_WRAPPED` names the
+scripts that must be wrapped, the `KNOWN_UNWRAPPED` ratchet is empty, and a new shipped
+script that is neither wrapped nor listed fails the suite. The ranking is kept because it
+is the reason the rule exists and the guide for anything added later. Timings are wall
+clock on this machine, 2026-08-25.
+
+- `bin/skillcontrib` is the worst of the rest. It blocks on a series of `gh` calls against
+  the network, so its window is seconds and set by someone else's latency, and it is run
+  from inside this checkout by an agent while other agents may be editing. Same shape as the
+  incident, same severity, and the reason it was wrapped first.
+- `statusline/skillforge-status.sh` has the highest collision *probability* and the lowest
+  cost. Measured at 26ms a run, re-run once a second forever, it occupies roughly 2.6% of
+  wall clock; a rewrite of the checkout will eventually land inside one. The damage is a
+  garbled status line that heals on the next render.
+- `statusline/statusline.sh` is 58 lines, but on a cache miss it blocks on the user's own
+  base status line command, so its window is whatever that costs and not what its length
+  suggests.
+- `hooks/insight-capture.sh` (176ms on a 380KB transcript) and `hooks/compound-improvement.sh`
+  (120ms) have short windows, but they fire on Stop and on every qualifying tool call, and a
+  hook that executes garbage prints it on the channel Claude Code parses. The rule that hooks
+  must never break a turn is not enforceable through a file being rewritten underneath one.
+- `bin/skillforge`, `bin/skillreport` and `bin/skillinsight` are short-lived and local-only.
+  They are exposed only in the narrow sense that a `git pull` can land inside one invocation.
+
 ---
 
 ## Why the red-teamer must be a fresh agent
@@ -374,8 +463,28 @@ Left alone, `CI_EDIT_EVERY=12` silently becomes 6 and every insight is queued tw
 The answer is idempotence rather than a rule telling people not to do it. `claim_once()`
 claims an event by creating a directory named for the payload's `.prompt_id` or
 `.tool_use_id`. An event with no usable id is always claimed, because losing reminders is
-worse than an occasional duplicate. Any new hook in this repo that counts or throttles
-needs that guard.
+worse than an occasional duplicate.
+
+What every counting hook here needs is that *property*, not that function. `claim_once()`
+reaches only inside the script it lives in, and the other two arms had to arrive at it
+independently: insight capture keys its record on a hash of the session id, and the review
+dispatcher takes an atomic `mkdir` claim in its own state directory. The dispatcher is the
+case worth remembering, because it looks exempt and is not — nothing wires it to an event
+at all, and it is still delivered twice, since the hook that launches it is itself on both
+paths. Detachment is not isolation.
+
+The order of those guards is load-bearing and was wrong first. A claim taken before the
+throttle is consulted is spent whether or not the work happens, so a session the cooldown
+turned away could never be revisited. Claim last, once the work is certainly going ahead.
+
+### Counting an outcome means wiring two events
+
+A tool that fails is delivered as `PostToolUseFailure`, never as `PostToolUse`
+([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#posttooluse-fires-only-when-the-tool-succeeded)).
+Anything here that tallies what a session did has to subscribe to both, or it reports each
+failure as a success — a wrong number rather than a gap. That is not hypothetical: a failed
+`Unknown skill: …` invocation was being counted as skill reuse in `bin/skillreport`. The
+same trap is waiting for the live invocation ledger, which matches on `Skill`.
 
 ### `CLAUDE.md` lives at `.claude/CLAUDE.md`
 
@@ -524,6 +633,29 @@ And two smaller ones: `write_manifest` had the fixed-temp-name race `write_setti
 just been fixed for, and an empty hook list of the user's (`"PostToolUse": []`) was deleted
 by uninstall, so install records which event keys already existed and uninstall puts back
 exactly what it found.
+
+---
+
+## Why `hooks/skill-use.sh` wires an event that never arrives
+
+The platform side of this is in
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md): a skill call that does not run is not
+handed to any hook we can register. What follows is why this package wires the failure arm
+regardless.
+
+**A dead branch here costs nothing and a missing one costs a wrong number.** The arm is
+four lines; if the platform ever starts delivering those events, the recorder is already
+correct on the day it happens, with no release of ours in between. The opposite mistake is
+not symmetric. A recorder listening only for success writes `ok:true` for everything it
+ever sees, which is the defect `skillreport` already had to have fixed once, when a single
+uninstalled skill carried its headline from 80% to 100%. A wrong number is worse than an
+absent one because nobody goes looking for the source of a plausible figure.
+
+**So the two instruments stay separate rather than being reconciled.** `skillreport skills`
+reads ledger rows, which are a live census of invocations that ran. The default table reads
+transcripts, which is the only place a refused call leaves a trace at all. Adding the two
+would produce a total that is neither, so nothing in `bin/skillreport` adds them, and the
+view says on its own first screen which one it is showing.
 
 ---
 
