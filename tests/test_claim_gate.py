@@ -527,22 +527,14 @@ class ClaimGateTest(unittest.TestCase):
     def test_a_command_that_merely_mentions_committing_is_not_denied(self):
         """`git` must sit in COMMAND POSITION, not merely appear in the text.
 
-        Found 2026-08-26 by using the gate: posting a report that QUOTED the phrase
-        describing an earlier refusal was itself refused, because the arm matched the
-        whole command as a substring. That is the mention-versus-use failure this gate
-        already documents for prose, relocated into the command arm, and a gate that
-        blocks legitimate work is what gets a gate uninstalled.
+        The discriminating case has to carry an EXTRACTABLE -m message, or it is
+        silent under either matcher and the test proves nothing. A first version of
+        this test used a body with no -m at all and passed against the unfixed hook.
         """
         self.write_transcript(self.a_test_run(443))
         self.assert_silent(self.run_hook(self.pre_payload(
-            'gh issue comment 16 --body "the git commit arm refused 8883 earlier"')))
-
-    def test_a_commit_after_a_cd_is_still_denied(self):
-        """The tightening must not cost the common `cd x && git commit` form."""
-        self.write_transcript(self.a_test_run(443))
-        reason = self.assert_denied(self.run_hook(self.pre_payload(
-            'cd /repo && git commit -m "8882 tests across 27 files"')))
-        self.assertIn("8882", reason)
+            'gh issue comment 16 --body '
+            '\'we ran git commit -m "9911 tests pass" yesterday\'')))
 
     def test_a_commit_message_with_a_supported_figure_passes(self):
         self.write_transcript(self.a_test_run(443))

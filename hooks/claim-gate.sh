@@ -304,7 +304,18 @@ elif [ "$event" = "PreToolUse" ]; then
   [ "$(jqr '.tool_name // empty')" = "Bash" ] || exit 0
   cmd="$(jqr '.tool_input.command // empty')"
   [ -z "$cmd" ] && exit 0
-  case "$cmd" in *"git "*commit*) : ;; *) exit 0 ;; esac
+  # `git` must sit in COMMAND POSITION -- start of the command, or after `&&`, `||`,
+  # `;`, `|`, `(` or a newline -- not merely somewhere in the text. A plain substring
+  # match treats any command that MENTIONS committing as one, which is the
+  # mention-versus-use failure this gate already documents for prose. Measured
+  # 2026-08-26: an issue-comment command whose body quoted the phrase was refused as
+  # though it were a commit, blocking legitimate work -- and the refusal silently ate
+  # the edit that was meant to fix it, which is why the regression test matters.
+  # RESIDUAL LIMIT, inherent: a commit-shaped fragment sitting in command position
+  # INSIDE a quoted string still matches. Telling a command from text quoted inside a
+  # command needs a shell parser, not a regex. Escape hatches: CLAIM_GATE_COMMIT=0,
+  # and the existing relent-after-repeated-denial rule.
+  printf '%s' "$cmd" | grep -qE '(^|[;&|(]|&&|\|\|)[[:space:]]*git([[:space:]]+-[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)' || exit 0
   printf '%s' "$cmd" > "$TMP/cmd.txt" 2>/dev/null || exit 0
   # Extract the message from the two forms this repo and most sessions actually use:
   #   git commit -m "..."  /  -m '...'   (also --message=)
