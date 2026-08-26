@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -790,26 +791,42 @@ def _manifest_names(manifest, dest_dir):
 
 
 def _unlink_all(sources, dest_dir, app_home, manifest):
-    """Report per name. A name that was never there is absent, not "not ours"."""
+    """Report per name. A name that was never there is absent, not "not ours".
+
+    A name in the manifest that this version does not ship is reported SEPARATELY. It is
+    almost always a skill someone forged locally with `skillforge done`, and listing it
+    among the shipped ones told its author their own work had been swept up as part of
+    the package -- with no hint that the source is still on disk and re-linkable.
+    """
     names = [src.name for src in sources]
     extra = [n for n in _manifest_names(manifest, dest_dir) if n not in names]
     buckets = {"removed": [], "kept": [], "absent": [], "failed": []}
+    forged = []
     for name in names + extra:
         dst = Path(dest_dir) / name
         try:
-            buckets[_unlink_if_ours(dst, app_home, manifest)].append(name)
+            outcome = _unlink_if_ours(dst, app_home, manifest)
         except OSError as exc:
             buckets["failed"].append("%s (%s)" % (name, exc.strerror or exc))
             continue
+        if outcome == "removed" and name in extra:
+            forged.append(name)
+        else:
+            buckets[outcome].append(name)
         manifest.get("links", {}).pop(os.path.normpath(os.path.abspath(str(dst))), None)
     parts = []
     if buckets["removed"]:
         parts.append("removed: " + ", ".join(buckets["removed"]))
+    if forged:
+        parts.append("also unlinked, not shipped by this package — forged locally, or "
+                     "renamed upstream: " + ", ".join(forged)
+                     + " (the skill itself is untouched; re-link one with: skillforge "
+                       "install <name> --skill-dir <where it is>)")
     if buckets["kept"]:
         parts.append("left in place (not ours): " + ", ".join(buckets["kept"]))
     if buckets["failed"]:
         parts.append("OURS BUT NOT REMOVED: " + ", ".join(buckets["failed"]))
-    if buckets["absent"] and not buckets["removed"] and not buckets["kept"]:
+    if buckets["absent"] and not buckets["removed"] and not buckets["kept"] and not forged:
         parts.append("nothing to remove")
     return "; ".join(parts) or "(none found)", buckets["failed"]
 
@@ -889,8 +906,13 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
                               app_home, manifest)
                + _prune_retired(bin_dir, [f.name for f in clis], app_home, manifest))
     if retired:
-        report["retired"] = ("dead links from an earlier version, removed: "
-                             + ", ".join(retired))
+        # NOT "from an earlier version": a link forged with `skillforge done` whose
+        # source moved lands here too, and telling its owner it was a leftover from an
+        # upgrade sends them looking in the wrong place for something they still want.
+        report["retired"] = ("links of ours that had stopped pointing at anything, "
+                             "removed: " + ", ".join(retired)
+                             + " (a skill you forged is restored with: skillforge "
+                               "install <name> --skill-dir <where it is now>)")
     write_manifest(state_dir, manifest)
     report["state"] = state_dir
 
@@ -953,3 +975,187 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
     if problems:
         report["errors"] = "this uninstall is incomplete: " + ", ".join(problems)
     return report
+
+
+# ------------------------------------------------------- installing one forged skill
+#
+# The installer above runs when someone installs the package. A skill forged DURING a
+# session appears long after that, and until it is linked it does not exist as far as
+# the session is concerned: `Skill(claim-provenance)` answered `Unknown skill` for a
+# skill that had just passed a ten-round red-team loop, and the usage report showed it
+# with 0 uses -- which reads as "nobody used it" when the truth is that nobody could.
+#
+# `skillforge done` calls link_skill() so that closing a forge is what makes the skill
+# live. It is a separate entry point rather than a re-run of install() because a forge
+# closes over a SINGLE skill that may live anywhere -- a personal directory, someone
+# else's repository -- while install() is about this package's own checkout.
+#
+# What it must not do is decide that a name is free because something is merely sitting
+# at it. Ownership is _link_is_ours and nothing else: the same four proofs of authorship
+# install() uses, so there is one judgement in this codebase and not two.
+
+def _default_app_home():
+    """The checkout this module is running from."""
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def _declared_skill_name(skill_dir):
+    """The `name:` in a SKILL.md's frontmatter, or None.
+
+    A directory called `aliased` whose frontmatter says `name: actual` installs under one
+    name and announces itself under another, and which of the two a session can invoke is
+    not something this function decides -- it only reports that the two disagree, which is
+    always an authoring mistake worth surfacing at install time.
+    """
+    try:
+        with open(str(Path(skill_dir) / "SKILL.md"), encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+            if first.strip() != "---":
+                return None
+            for _ in range(40):
+                line = fh.readline()
+                if not line or line.strip() == "---":
+                    return None
+                if line.startswith("name:"):
+                    return line.split(":", 1)[1].strip().strip("'\"") or None
+    except OSError:
+        return None
+    return None
+
+
+def link_skill(skill_dir, skills_dir, app_home=None, state_dir=None):
+    """Make one already-authored skill live: ``<skills_dir>/<name>`` -> ``skill_dir``.
+
+    Returns a dict with ``status`` in:
+
+    ``linked``          the link was created just now.
+    ``already-linked``  the exact link was already there. Closing a forge twice, or
+                        forging a name that is already installed, lands here.
+    ``already-there``   the skill already lives inside skills_dir under its own name.
+    ``refused``         something we cannot prove we created holds that name. Nothing
+                        was touched, and the caller has to say so out loud.
+    ``failed``          the link could not be written (a read-only directory, say).
+
+    Never raises for a collision -- a collision is an outcome to report, not a crash.
+    Raises InstallError only when the caller pointed at something that is not a skill.
+    """
+    src = Path(skill_dir)
+    if not (src / "SKILL.md").is_file():
+        raise InstallError("%s holds no SKILL.md, so there is no skill to install there"
+                           % src)
+    name = src.name
+    dest_dir = Path(skills_dir)
+    dst = dest_dir / name
+    state_dir = str(state_dir or DEFAULT_STATE)
+    app_home = str(Path(app_home).resolve()) if app_home else _default_app_home()
+
+    target = os.path.normpath(os.path.abspath(str(src)))
+    result = {"name": name, "dest": str(dst), "target": target, "skills_dir": str(dest_dir)}
+    declared = _declared_skill_name(src)
+    if declared and declared != name:
+        result["declared_name"] = declared
+
+    if os.path.normpath(os.path.abspath(str(dst))) == target:
+        result["status"] = "already-there"
+        result["message"] = "%s already lives in %s" % (name, dest_dir)
+        return result
+
+    manifest = read_manifest(state_dir)
+    # Distinguished BEFORE the call: _symlink_force reports "linked" for a link it just
+    # made and for one that was already exactly right, and a caller that says "installed"
+    # on every second `done` is telling the user something happened when nothing did.
+    was_there = dst.is_symlink() and _link_target(dst) == target
+    # A link of OURS pointing somewhere else is legitimately replaced -- a second
+    # checkout, a moved repository -- but replacing it is a thing that HAPPENED, and a
+    # report that mentions only the new target hides which skill just stopped being the
+    # one that answers to this name.
+    displaced = None
+    if dst.is_symlink() and not was_there and _link_is_ours(dst, app_home, manifest):
+        displaced = _link_target(dst)
+
+    try:
+        outcome = _symlink_force(src, dst, app_home, manifest)
+    except OSError as exc:
+        result["status"] = "failed"
+        result["message"] = "%s could not be created (%s)" % (dst, exc.strerror or exc)
+        return result
+
+    if outcome != "linked":
+        result["status"] = "refused"
+        result["message"] = (
+            "%s is already taken by something this package did not create (%s). "
+            "Nothing was changed." % (dst, outcome.replace("skipped ", "").strip("()")))
+        return result
+
+    result["status"] = "already-linked" if was_there else "linked"
+    result["message"] = "%s -> %s" % (dst, target)
+    if displaced:
+        result["displaced"] = displaced
+    # Recorded for the same reason install() records its links: it is proof #1 of
+    # authorship, so a later uninstall removes this link instead of leaving it dangling,
+    # and a re-forge from a moved checkout still recognises it as ours.
+    manifest.setdefault("links", {})[os.path.normpath(os.path.abspath(str(dst)))] = target
+    # read_manifest seeds an empty string, which setdefault would happily keep; a real
+    # app_home already there came from an install and is the authoritative one.
+    if not manifest.get("app_home"):
+        manifest["app_home"] = app_home
+    try:
+        write_manifest(state_dir, manifest)
+    except OSError as exc:
+        # The link is live either way; say what was not recorded rather than pretending.
+        result["warning"] = "the link was made but not recorded in %s (%s)" % (
+            manifest_path(state_dir), exc.strerror or exc)
+    return result
+
+
+_LINK_EXIT = {"linked": 0, "already-linked": 0, "already-there": 0,
+              "refused": 3, "failed": 4, "error": 5}
+
+
+def _main(argv):
+    """`python3 installer.py link-skill --skill-dir P --skills-dir D [...]`.
+
+    Exists so that `skillforge` -- shell and jq everywhere else -- can reuse the
+    ownership judgement above instead of reimplementing four proofs in bash, where the
+    second implementation would inevitably be the weaker one. Always prints one JSON
+    object, so the shell side never has to parse prose.
+    """
+    if not argv or argv[0] != "link-skill":
+        sys.stderr.write("usage: installer.py link-skill --skill-dir <dir> "
+                         "--skills-dir <dir> [--app-home <dir>] [--state-dir <dir>]\n")
+        return 2
+    opts = {}
+    rest = argv[1:]
+    while rest:
+        key = rest.pop(0)
+        if not key.startswith("--"):
+            sys.stderr.write("installer.py: unexpected argument %r\n" % key)
+            return 2
+        if "=" in key:
+            key, value = key.split("=", 1)
+        elif rest:
+            value = rest.pop(0)
+        else:
+            sys.stderr.write("installer.py: %s needs a value\n" % key)
+            return 2
+        opts[key[2:].replace("-", "_")] = value
+    missing = [k for k in ("skill_dir", "skills_dir") if not opts.get(k)]
+    if missing:
+        sys.stderr.write("installer.py: missing --%s\n" % ", --".join(missing))
+        return 2
+    try:
+        out = link_skill(opts["skill_dir"], opts["skills_dir"],
+                         app_home=opts.get("app_home") or None,
+                         state_dir=opts.get("state_dir") or None)
+    except InstallError as exc:
+        out = {"status": "error", "message": str(exc), "name": Path(opts["skill_dir"]).name,
+               "dest": str(Path(opts["skills_dir"]) / Path(opts["skill_dir"]).name)}
+    except OSError as exc:
+        out = {"status": "error", "message": str(exc), "name": Path(opts["skill_dir"]).name,
+               "dest": str(Path(opts["skills_dir"]) / Path(opts["skill_dir"]).name)}
+    sys.stdout.write(json.dumps(out) + "\n")
+    return _LINK_EXIT.get(out["status"], 5)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

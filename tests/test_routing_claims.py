@@ -82,16 +82,9 @@ import probe_routing_claims as probe  # noqa: E402
 # failure. Do not add a name to buy a green suite; a new unverified section is the
 # thing this file exists to stop.
 UNVERIFIED = {
-    # Pinned, never run.
-    "ai-tell-audit": "unmeasured",
-    "claim-provenance": "unmeasured",
-    "destructive-op-preflight": "unmeasured",
-    "no-silent-stub": "unmeasured",
-    "skill-authoring": "unmeasured",
-    # Pinned; only the fragment their prose quotes as NOT firing was actually run, so
-    # the six listed claims are still unverified.
-    "session-handoff": "partial",
-    "skill-compounder": "partial",
+    # Empty since 2026-08-25, when skill-compounder's six claims were measured for real
+    # (3/3 must-fire, 3/3 must-not-fire) and its pin promoted to verified. Keep it that
+    # way: a new entry here is the debt this file exists to stop.
 }
 
 # Measured false on 2026-08-25 by running them. Both have since been removed from the
@@ -282,9 +275,12 @@ class PinTest(unittest.TestCase):
         self.assertTrue(any("no `cli` version" in f for f in findings), findings)
 
     def test_a_date_and_a_verdict_must_travel_together(self):
+        # Built synthetically rather than from a shipped unmeasured pin: the last
+        # shipped fixture (ai-tell-audit) got measured for real on 2026-08-25, and the
+        # rule must outlive every skill graduating out of UNVERIFIED.
         c = copy.deepcopy(claims_for("ai-tell-audit"))
-        self.assertEqual(c["pin"]["measured"], "never")
-        c["pin"] = dict(c["pin"], result="verified 3/3 must-fire, 3/3 must-not-fire")
+        c["pin"] = dict(c["pin"], measured="never",
+                        result="verified 3/3 must-fire, 3/3 must-not-fire")
         findings = rc.lint([c])
         self.assertTrue(any("travel together" in f for f in findings), findings)
 

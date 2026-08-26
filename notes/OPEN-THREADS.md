@@ -32,6 +32,25 @@ A red test in this list is not evidence of a defect.
   `docs/DESIGN.md`, which keeps this package's own design rationale. Guarded by
   `tests/test_docs_split.py`, proven by breaking it five ways.
 
+## In flight — commit and push when both are green
+
+Two fixes dispatched for items previously left open in this file. When both report and
+`./run_tests.sh` is green on the resulting tree, commit and push. Do not commit a tree
+either agent is still editing, and do not read a suite run started before they finish as a
+verdict.
+
+- **The concurrent `done` race.** Two simultaneous `skillforge done` calls both wrote an
+  outcome row, 40/40 trials, inflating the only evidence anyone has about whether forging
+  pays off. Previously left unfixed for a good reason: a lock held across a write can leave
+  a forge nobody can close, which is worse. The brief points at the `ln`-claim pattern the
+  slot allocator already uses -- atomic, nothing held, loser exits -- and requires the
+  design to state what happens if a process dies at each step.
+- **Personal-scope skill loading.** The frontmatter findings in
+  `docs/CLAUDE-CODE-BEHAVIOR.md` are measured for project and `--plugin-dir` scope only;
+  `~/.claude/skills/` was never tested because `CLAUDE_CONFIG_DIR` broke auth. If it cannot
+  be isolated safely the answer is "could not determine" and the file's existing
+  "not measured" wording stays exactly as it is.
+
 ## Known tree-state dependency — do not "fix" it
 
 `tests/test_seed_claim_provenance.py::test_the_measured_sweep_figures_are_re_derived_not_restated`

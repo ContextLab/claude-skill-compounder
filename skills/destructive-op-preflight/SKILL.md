@@ -1,6 +1,6 @@
 ---
 name: destructive-op-preflight
-description: "Use when the next command could destroy work that nothing can bring back: it discards uncommitted or untracked changes, drops commits that were never pushed, overwrites what a remote already has, or removes files no version control is tracking. Also use when a safety flag has just refused an operation. Do NOT use for reversible work: ordinary edits, commits, non-force pushes, creating branches, dry runs that only print what would happen, or history edits the reflog can undo."
+description: "Use when the next step could destroy work nothing can bring back: wiping the tree for a clean slate, discarding uncommitted or untracked changes, deleting generated or scaffolding files, dropping local commits never pushed to sync a branch with its remote, or overwriting what the remote already has. Also when a safety flag just refused. Do NOT use for reversible work: ordinary edits, commits, non-force pushes, dry runs that print what would happen, or history edits the reflog can undo."
 ---
 
 # Destructive-op preflight
@@ -363,12 +363,12 @@ Each of these is a thought, not an observation. If you notice one, you are in Ph
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 5ed8cdc4d1fc8c6608ac4072db2e8bcbdf25bfe929910fe4af1921bff54df49d
+description-sha256: 4623be42daf9bb82bc68ebfe3c99ba88fdefcdb4092998f38395159267ef224c
 prompts-sha256: 5a42fa5841d8fc005fd7c133ff9c09cd1e120367bd928b6f5e83d9b5c7347d83
-measured: never
-cli: n/a
-model: n/a
-result: unmeasured
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 MUST fire:

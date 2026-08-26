@@ -1,6 +1,6 @@
 ---
 name: no-silent-stub
-description: "Use when about to hand back a value you did not actually compute, or a no-op import shim: a hardcoded result, an empty collection standing in for logic, an `except: pass`, a mock on a live path, a TODO that returns, a test scored against its own input, or a fallback a caller cannot tell from a real answer, because a key, dependency, or service is out of reach. Do NOT use for documented default parameters, typed-optional returns the caller must check, or test doubles a project chose on purpose."
+description: "Use when about to hand back a value you did not compute or asked to fake completeness: 'just make the tests pass' without the key they need, 'for the branches you can't do yet return an empty list', 'show something reasonable' when the service is down; a hardcoded result, `except: pass`, a mock on a live path, or a fallback a caller cannot tell from a real answer. Do NOT use for documented defaults, typed-optional returns the caller must check, or test doubles a project chose on purpose."
 ---
 
 # Fail loudly, never plausibly
@@ -342,12 +342,12 @@ Each of these thoughts means stop and return to phase 2:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 9b66f6c5bd2ddc0b6366bacab8cb4629cc4363bdd08d42c853ea16b7071a2d48
+description-sha256: 58ede0d8fd9018ab58902a856c2cb4e080711134974068087680f6dd49db4152
 prompts-sha256: 3481a41b8b015b69a99f8d99ca42118f2a8f3da63e3001ff912b57a6d273cb67
-measured: never
-cli: n/a
-model: n/a
-result: unmeasured
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 The must-not prompts are deliberately adversarial rather than restatements of the

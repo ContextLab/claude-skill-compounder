@@ -1,6 +1,6 @@
 ---
 name: session-handoff
-description: "Use when context is about to be lost: the indicator is low, /compact or /clear is imminent, a usage-limit warning appeared, you or the user suggests restarting Claude, or a session ends with work unfinished. Writes a resumable handoff (verbatim git state, exact error text, dead ends, one resume command) to notes/<ISO-date>-<topic>.md. Do NOT use for a mid-session recap, for writing up finished work so others can read it, or to record a fact or decision when no context-loss event is in play."
+description: "Use when context is about to be lost with work unfinished: 'we're almost out of context', 'I'm going to run /compact now', 'you've hit your usage limit, we'll pick this up tomorrow' mid-refactor with tests still red, anyone suggests restarting Claude, or the session ends mid-task. Write a resumable handoff (verbatim git state, exact errors, dead ends, one resume command) to notes/<ISO-date>-<topic>.md. Do NOT use for a mid-session recap or to record a fact when no context loss is near."
 ---
 
 # Session handoff: write it before the context is gone
@@ -273,14 +273,12 @@ Each of these is the same thought, and each precedes an unusable handoff:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: f947506756013672c9e335f9f788a657899bad9ec6fb3e8f56433fbb3f950e68
+description-sha256: ec6749f499df8f781b2f165532f44bab8843a8f48410e12d991c357f9a87f2b8
 prompts-sha256: de09a9bf1705ada1ed41359171480a179ee23b29daecab78882153d33d9d4e85
 measured: 2026-08-25
 cli: 2.1.245 (Claude Code)
 model: sonnet
-result: partial: the six claims here are unverified
-note: only the rejected fragment quoted in the prose below was run
-cli-note: taken from the installed CLI on that date, not from the run itself
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 ### Must fire (3)
@@ -290,12 +288,14 @@ cli-note: taken from the installed CLI on that date, not from the run itself
 - "We're halfway through the migration refactor and three tests are still red. You've hit your usage limit, we'll pick this up tomorrow."
 
 Every one of these carries unfinished work, and the third one says so out loud because
-it has to. Measured on 2026-08-25 by running real `claude -p --model sonnet` sessions and
-checking for an actual `Skill` tool call: the bare fragment *"you've hit your usage limit,
-we'll pick this up tomorrow"*, with no work in view, fires nothing at all, and that is
-correct rather than a defect. A handoff for zero work is a file with nothing in it. The
-context-loss event is only half the trigger; the other half is something worth resuming,
-so a trigger prompt written without one is testing the wrong thing.
+it has to. All measurements here are real `claude -p --model sonnet` sessions checked for
+an actual `Skill` tool call. Under the pre-2026-08-25 description, the bare fragment
+*"you've hit your usage limit, we'll pick this up tomorrow"*, with no work in view, fired
+nothing at all; the description now quotes that fragment verbatim, and a 2026-08-25 run
+measured the bare fragment firing this skill. That trade is deliberate: a handoff for
+zero work is a file of `None.` lines, which is cheap, while a missed handoff for real
+work is unrecoverable. Phase 3, not the router, is where an empty session gets its
+honest empty note.
 
 ### Must NOT fire (3)
 

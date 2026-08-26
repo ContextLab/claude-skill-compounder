@@ -166,13 +166,24 @@ fallback description derived from the body (in the measured case, the H1 heading
 fires. Nothing is printed anywhere.
 
 **How established.** Measured on 2.1.245 by writing each broken skill and asking a session
-to list and then to trigger it. **Scope limit:** the measurement covers **project** skills
-and `--plugin-dir` **plugin** skills, both of which fired in the lenient case. A
-**personal** skill in `~/.claude/skills/` was **not** tested. Isolating one requires
-`CLAUDE_CONFIG_DIR`, which broke authentication, and writing a deliberately broken skill
-into a real config to find out is not a test worth running. Debug output shows a single
-loader for managed, user and project scopes, so the behavior probably carries. Probably is
-not measured, and this file records what was run.
+to list it and then to trigger it. Run at all three scopes: **project**, `--plugin-dir`
+**plugin**, and, on 2026-08-25, **personal**.
+
+Personal scope was isolated by pointing `CLAUDE_CONFIG_DIR` at a temp directory and handing
+the OAuth token in through `CLAUDE_CODE_OAUTH_TOKEN`. That last part is what the earlier
+attempt was missing: a fresh config directory does not reach the credential the macOS
+Keychain holds, so the CLI answers `Not logged in · Please run /login` no matter what else
+is copied in. With the token in the environment the same subscription works normally, and
+`<tempdir>/skills/` becomes a personal skill directory nobody else is using. Three skills
+went in there — the two breaks, plus a valid control carrying a nonsense trigger token, so
+that a skill failing to fire could be told apart from the scope failing to load at all.
+
+The three scopes agreed. Listed verbatim, the unquoted-colon skill returned its whole
+description; the tab-indented one returned only its H1. Asked about the trigger token, the
+control fired, the unquoted-colon skill fired, and the tab-indented one did not fire on
+either of two attempts, the second of which named the skill's own topic and still produced
+no `Skill` call. **Remaining limit:** every run used `--model sonnet` (see the model-tier
+entry below), and one CLI build.
 
 **What it means.** Write strict YAML regardless of what the loader tolerates: quote every
 frontmatter value that could contain a colon, or use a block scalar. Anything that parses

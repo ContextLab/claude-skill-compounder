@@ -1,6 +1,6 @@
 ---
 name: ai-tell-audit
-description: "Use when about to publish durable prose other people will read (a README, a GitHub issue or comment, a PR description, release notes, a changelog, a docs page, an announcement, a commit message body of several lines) AND the request is about how the prose reads. A request to fix grammar, typos, spelling or house style in one of those genres is copy-editing and does NOT fire; the request decides, not the file. NOT for chat replies, NOT for code comments, NOT for scratch notes."
+description: "Use when asked to write, draft, or review durable prose other people will read (a README, a GitHub issue or comment, a PR description, release notes, a changelog, a docs page, an announcement, a commit message body of several lines): 'write the release notes', 'draft a comment on the issue', 'get this README ready to ship' all fire. A request to fix typos or grammar is copy-editing and does NOT fire; the request decides, not the file. NOT for chat replies, code comments, or scratch notes."
 ---
 
 # AI Tell Audit
@@ -185,7 +185,10 @@ not depend on judging whether the draft reads badly.
 **A document you did not draft.** Step 1 asks whether you are about to publish, and most
 of what this skill is handed is somebody else's file. The condition is the publication,
 not the authorship: a review before merge, a PR you are about to open, a docs page you
-were asked to get ready all fire, because a draft is being prepared for readers. What
+were asked to get ready all fire, because a draft is being prepared for readers. So does
+a request to compose one of the genres from scratch ("write the release notes", "draft a
+comment on the issue"): the draft you produce is about to be published, so the pass runs
+on it before it is handed back. What
 does not fire is being asked to judge the document or its author. Editing prose to
 prepare it and rendering a verdict on who wrote it are different acts, and only the first
 one is here.
@@ -523,17 +526,17 @@ number and make the claim without it.
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: ac9911bf107c5432ceaead0c1439d96d6566dc84c85b7e089f9f538c64fc96f4
-prompts-sha256: 43b70b6d0ce526554ec7c74afe628f206ef750f96d2a22b6b8a477cd19fec69a
-measured: never
-cli: n/a
-model: n/a
-result: unmeasured
+description-sha256: fdf97d8626d3ff2a867e05e81704ada0e8514577b5a284eab6c00c83acfea289
+prompts-sha256: 7a6241737c1f04075950f822beb9cd0bd5f5df8427f55aae406f8f535db4a0b0
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 Must fire:
 
-1. "Write the release notes for v2.1 and I'll ship them today."
+1. "Draft the release notes for v2.1, they go out to users today."
 2. "Draft a comment on issue #40 explaining why we rejected the approach."
 3. "Rewrite this README section so it doesn't sound machine-written."
 

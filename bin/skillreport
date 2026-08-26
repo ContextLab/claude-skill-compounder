@@ -14,8 +14,9 @@
 #       one JSON line per forge: skill name, your one-line summary, the originating
 #       repository path, epoch timestamps, step counts, outcome and reason.
 #   ${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}/*/*.jsonl
-#       your Claude Code transcripts. Only three fields are read out of them: the
-#       invoked skill name, the record timestamp, and the working directory. Prompts,
+#       your Claude Code transcripts. Only five fields are read out of them: the
+#       invoked skill name, the record timestamp, the working directory, and the
+#       tool-use id and error flag that say whether the invocation ran. Prompts,
 #       responses, file contents and tool output are never parsed or printed.
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/*.edits
 #       per-session edit counters written by the reminder hook (an integer each).
@@ -36,7 +37,7 @@ case "$EDIT_EVERY" in ''|*[!0-9]*|???????*) EDIT_EVERY=12 ;; esac
 
 case "${1:-}" in
   -h|--help|help)
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -137,9 +138,40 @@ fi
 find "$TRANSCRIPTS" -maxdepth 2 -type f -name '*.jsonl' 2>/dev/null > "$TMP/files"
 found_any=0
 [ -s "$TMP/files" ] && found_any=1
+
+# AN ATTEMPT IS NOT A USE (issue #9). Every tool_use has an id, and its result comes
+# back in a later user record as a tool_result with the matching .tool_use_id; a failed
+# invocation carries "is_error":true there (verified shape: {"type":"tool_result",
+# "content":"<tool_use_error>Unknown skill: ...</tool_use_error>","is_error":true,
+# "tool_use_id":"toolu_..."}). Counting the tool_use alone counted those failures as
+# reuse: one uninstalled skill moved the headline from 80% to 100%. So the failed ids
+# are collected first, and the invocation pass below drops any tool_use whose id is in
+# the set. A successful result has no is_error key at all, so absence from the set is
+# the success condition. The grep prefilter is compact-JSON stable the same way the
+# Skill one is, and jq re-checks the shape so a prose line mentioning the substring is
+# discarded. Emitted without -r: each id is a quoted JSON string, which is what
+# --slurpfile needs, and an empty file slurps to [] rather than an error.
+: > "$TMP/errids"
+while IFS= read -r f; do
+  grep -h '"is_error":true' "$f" 2>/dev/null
+done < "$TMP/files" | jq -R '
+  (fromjson? // empty) as $rec
+  | ($rec.message.content // [])
+  | (if type == "array" then .[] else empty end)
+  | select((.type? == "tool_result") and (.is_error? == true))
+  | (.tool_use_id? // empty) | select(type == "string" and length > 0)
+' >> "$TMP/errids" 2>/dev/null
+
+# A tool_use with NO tool_result anywhere IS counted. The usual reason a result is
+# missing is that the session is still live or was cut off mid-turn, not that the
+# invocation failed -- a failure writes its error result on the very next record.
+# Refusing to count those would under-report exactly the freshest usage. The join is
+# by id, and ids are unique tokens, so matching against the pooled set is the same
+# join as matching within one file -- a resumed session copies its records verbatim,
+# ids included, so the same id can only ever map to the same outcome.
 while IFS= read -r f; do
   grep -h '"name":"Skill"' "$f" 2>/dev/null
-done < "$TMP/files" | jq -R -r '
+done < "$TMP/files" | jq -R -r --slurpfile bad "$TMP/errids" '
   (fromjson? // empty) as $rec
   | ($rec.timestamp // "") as $iso
   | (($iso | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?) // -1) as $ts
@@ -147,6 +179,8 @@ done < "$TMP/files" | jq -R -r '
   | ($rec.message.content // [])
   | (if type == "array" then .[] else empty end)
   | select((.type? == "tool_use") and (.name? == "Skill"))
+  | (.id? // "") as $tid
+  | select(($bad | index($tid)) == null)
   | [ (.input.skill // "unknown"), $ts, $cwd ] | @tsv
 ' >> "$TMP/inv.tsv" 2>/dev/null
 

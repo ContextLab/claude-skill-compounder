@@ -75,13 +75,15 @@ BLOCK_KEYS = [
 
 # Commands the prose gives outside a fenced block. Each is RUN by a test here, as shipped.
 INLINE_COMMANDS = [
-    'rm -f "/tmp/claims-$(echo README.md | tr / -).tsv"',
+    'rm -f "/tmp/claims-$(echo "$PWD"/README.md | tr / -).tsv"',
 ]
 
 # The document's only placeholder is a real filename, because `<the file>` inside `$( )`
-# is a redirect, not a placeholder. Round 3 shipped two commands that exited 127 for
-# exactly that reason, and the test that "covered" them string-replaced the placeholder
-# before running and asserted the shipped text was merely PRESENT. That is this skill's
+# is a redirect, not a placeholder. Round 3 shipped two commands broken for exactly that
+# reason -- measured 2026-08-25: bash 5.3 refuses the line with a nonzero exit, zsh 5.9
+# is a parse error exiting 1, and macOS /bin/bash 3.2 substitutes nothing, exits 0, and
+# appends to `/tmp/claims-.tsv` -- and the test that "covered" them string-replaced the
+# placeholder before running and asserted the shipped text was merely PRESENT. That is this skill's
 # own failure mode #3, in this skill's own suite. Every command is now run verbatim.
 PLACEHOLDER = "README.md"
 
@@ -821,16 +823,27 @@ class ClaimsThisSkillMakesTest(unittest.TestCase):
                                     "%r" % clash)
 
     def test_the_no_silent_stub_overlap_is_conceded_rather_than_denied(self):
-        """The parent skill's description already covers `a test scored against its own
-        input`, which is the same shape as a presence-pinning assertion. Verify the
-        quoted phrase is really in that neighbour's description, and that this skill's
-        boundary paragraph names both what is shared and what differs."""
+        """The neighbour really covers `a test scored against its own input`, which is
+        the same shape as a presence-pinning assertion. The clause used to sit in the
+        neighbour's frontmatter description; a routing repair trimmed it from there on
+        2026-08-25 (routing verified 6/6), and its home is now the body's self-scoring
+        row, whose signature draws the actual straight from the expected. So the check
+        is against the neighbour's real text, description or body: the concession must
+        not drift from what the neighbour actually covers. Then this skill's boundary
+        paragraph must name both what is shared and what differs."""
         neighbour = (REPO / "skills" / "no-silent-stub" / "SKILL.md").read_text()
         front = neighbour.split("---\n", 2)[1]
         desc = json.loads(re.search(r"^description: (.*)$", front, re.M).group(1))
-        self.assertIn("a test scored against its own input", desc,
-                      "the overlap this skill concedes must be a real clause of the "
-                      "neighbour's description, not a paraphrase of it")
+        covered_in_description = "a test scored against its own input" in desc
+        # The body's self-scoring shape: an `actual` assigned from the expected value,
+        # matched on the semantics rather than the row's title, so a reworded row still
+        # counts and a deleted one does not.
+        covered_in_body = re.search(r"actual\s*=[^|\n]*expected", neighbour) is not None
+        self.assertTrue(covered_in_description or covered_in_body,
+                        "the overlap this skill concedes (a test scored against its own "
+                        "input) must be something the neighbour's own text still covers, "
+                        "in its description or in its self-scoring taxonomy row; if the "
+                        "neighbour dropped it, the concession here has drifted")
         block = section("When this is the wrong skill")
         para = [p for p in block.split("- **") if p.startswith("`no-silent-stub`")][0]
         self.assertIn("same shape", para, "the overlap is conceded, not argued away")
@@ -1009,8 +1022,11 @@ class ShippedCommandsTest(unittest.TestCase):
                              % (script, check.stderr))
 
     def test_no_angle_bracket_placeholder_sits_where_the_shell_reads_it(self):
-        """`<the file>` in command position is a redirect from a file called `the`: it
-        exits 127 inside `$( )`, or silently reads the wrong file outside it. Inside double
+        """`<the file>` in command position is a redirect from a file called `the`.
+        Measured 2026-08-25: inside `$( )` bash 5.3 refuses the line with a nonzero
+        exit, zsh 5.9 is a parse error exiting 1, and macOS /bin/bash 3.2 substitutes
+        nothing, exits 0, and appends to `/tmp/claims-.tsv`; outside `$( )` it silently
+        reads the wrong file. Inside double
         quotes it is ordinary data, which is why `"<claim>"` is fine and `-- <the file>` is
         not. Double-quoted spans are removed before the check rather than reasoned about."""
         for script in fenced("bash") + INLINE_COMMANDS:
@@ -1020,13 +1036,39 @@ class ShippedCommandsTest(unittest.TestCase):
 
     def test_b2_no_fixed_inventory_path_survives_anywhere(self):
         """Phase 1 forbids a fixed path; a line copied forward from an earlier draft still
-        used one, so the documented cleanup deleted nothing. That is Phase 6, here."""
+        used one, so the documented cleanup deleted nothing. That is Phase 6, here.
+
+        Two kinds of mention are now legitimate and only two. The shipped RECIPE, which
+        must be exactly one path and must derive from `$PWD` (the measured collision fix:
+        a relative-path name collides across repos and concurrent sessions). And the
+        prose's `/tmp/claims-.tsv`, which is not a recipe but the documented bash-3.2
+        failure artifact of the broken-placeholder line -- recognized here by DERIVING it
+        from the shipped recipe (the substitution yielding nothing), never whitelisted as
+        a literal, so a new fixed-path recipe still fails this test."""
         self.assertNotIn("/tmp/claims-inventory.tsv", read(),
                          "a fixed inventory path contradicts Phase 1 and strands the file")
         paths = set(re.findall(r'/tmp/claims-(?:\$\([^)]*\)|[^"`\s])*[^"`\s]', read()))
-        self.assertEqual(paths, {"/tmp/claims-$(echo README.md | tr / -).tsv"},
-                         "every mention of the inventory must name the same path: %r"
-                         % (paths,))
+        recipes = {p for p in paths if "$(" in p}
+        self.assertEqual(recipes,
+                         {'/tmp/claims-$(echo "$PWD"/README.md | tr / -).tsv'},
+                         "every shipped recipe must name the same $PWD-derived path: %r"
+                         % (recipes,))
+        # The one fixed path the prose may mention is the failure artifact: the recipe
+        # with its substitution collapsed to the empty string, which is what bash 3.2
+        # produces from the broken placeholder. Anything else fixed is a shipped recipe
+        # in disguise and fails.
+        artifact = re.sub(r"\$\([^)]*\)", "", next(iter(recipes)))
+        fixed = {p for p in paths if "$(" not in p}
+        self.assertLessEqual(fixed, {artifact},
+                             "the only fixed path the prose may mention is the measured "
+                             "failure artifact %r, got %r" % (artifact, fixed))
+        # And no fixed path may sit anywhere executable: every path inside a fenced
+        # block or an inline command the suite runs must be the $PWD recipe.
+        for script in fenced("bash") + INLINE_COMMANDS:
+            for p in re.findall(r'/tmp/claims-(?:\$\([^)]*\)|[^"`\s])*[^"`\s]', script):
+                self.assertIn("$(", p,
+                              "a fixed inventory path shipped as a runnable command:\n%s"
+                              % script)
 
     def sweep_fixture(self):
         """A real repository with one modified tracked file and one untracked file."""
@@ -1134,9 +1176,16 @@ class ShippedCommandsTest(unittest.TestCase):
         self.assertIn("auditing a document that was already there", phase1)
 
     def test_the_inventory_line_appends_and_the_cleanup_removes_it(self):
-        # Run the shipped text verbatim, in the path it actually names. Nothing is
-        # substituted, because substituting is what hid a 127 for a whole round.
-        inv = Path("/tmp/claims-%s.tsv" % PLACEHOLDER)
+        # Run the shipped text verbatim, in a controlled temp cwd. Nothing is
+        # substituted, because substituting is what hid a broken shipped line for a
+        # whole round. The recipe embeds `$PWD` in the filename (the collision fix),
+        # so the expected path is DERIVED with the recipe's own transformation --
+        # `$PWD` as the same shell in the same cwd reports it, `/` turned to `-` --
+        # not typed in as a constant.
+        pwd = run("pwd", self.dir).stdout.strip()
+        self.assertTrue(pwd, "the fixture shell must report its own cwd")
+        inv = Path("/tmp/claims-%s.tsv"
+                   % ("%s/%s" % (pwd, PLACEHOLDER)).replace("/", "-"))
         self.addCleanup(lambda: inv.exists() and inv.unlink())
         if inv.exists():
             inv.unlink()

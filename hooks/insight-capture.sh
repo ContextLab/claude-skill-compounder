@@ -62,6 +62,8 @@
 #   INSIGHT_AUDIT_MAX_PATHS  paths listed inline in the record (default 40)
 #   INSIGHT_NOW / CI_NOW pin the clock, so the ISO-week filename is deterministic
 #   INSIGHT_DEBUG_DUMP   append the raw stdin payload to this path for inspection
+#   SKILL_COMPOUNDER_REVIEW=0  do not dispatch the automatic session review (see
+#                        hooks/session-review.sh for every other gate)
 set -uo pipefail
 
 TAIL_BYTES="${INSIGHT_TAIL_BYTES:-262144}"
@@ -224,6 +226,49 @@ queue_record() {
   return 2
 }
 
+# --------------------------------------------------------- the automatic dispatch
+# Starts hooks/session-review.sh DETACHED and does not wait for it. That script is a
+# single-purpose `claude -p` that asks the compounding question about the session that
+# just ended -- in a process where that question is the ONLY question, which is the one
+# thing the main-thread reminder could never be. Read its header for the gates, the
+# throttle, the cost and the four recursion barriers; none of that logic lives here,
+# because a hook on the turn's critical path must do as close to nothing as possible.
+#
+# MEASURED: this launch costs the parent hook 3ms, and the parent turn's wall clock is
+# unchanged (4.88s dispatching against a 6.04s baseline on the same prompt, CLI 2.1.245,
+# 2026-08-25). The redirections are what make that true: a child left holding the hook's
+# inherited stdout pipe keeps the reader blocked until the child exits, which is how a
+# detached hook stalls a session anyway.
+#
+# It is fired only when the session audit actually wrote a record this turn. That gate
+# was measured firing on 18 of 126 real transcripts over 54 days -- 2.3 sessions a week
+# -- and session-review.sh's own 21-hour cooldown takes that to 1.7 dispatches a week
+# with a hard ceiling of 8 (604800 / 75600 = 8, not the 7 this said first).
+#
+# It is offered on every Stop of a session the audit has already recorded, not only on
+# the Stop that recorded it, so a session the cooldown refuses is retried later instead
+# of being discarded. The dispatcher's own per-session claim is what keeps that to one
+# review per session.
+#
+# Every failure here is silent and costs the turn nothing: no script, no dispatch.
+dispatch_review() {
+  [ -n "$AUDIT_WROTE" ] || return 0
+  [ "${SKILL_COMPOUNDER_REVIEW:-1}" = "0" ] && return 0
+  # Refuse from inside a session we ourselves dispatched, before spending even a fork on
+  # it. session-review.sh checks this again as its own second gate; both checks are
+  # cheap and neither is sufficient on its own, because this one is skipped entirely
+  # when the audit does not write.
+  [ -n "${SKILL_COMPOUNDER_DISPATCHED:-}" ] && return 0
+  dr_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || return 0
+  dr_sh="$dr_dir/session-review.sh"
+  [ -x "$dr_sh" ] || return 0
+  dr_tp="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null)"
+  [ -n "$dr_tp" ] || return 0
+  nohup "$dr_sh" "$sid" "$cwd" "$dr_tp" "$project" "$AUDIT_WROTE" \
+    >/dev/null 2>&1 </dev/null &
+  return 0
+}
+
 # ------------------------------------------------------------- the session audit
 # THE ONE ARM THAT ASKS THE SESSION NOTHING. See the header for why it exists.
 #
@@ -246,6 +291,16 @@ queue_record() {
 # Failure is silent and total: any unreadable or absent piece of state means no audit,
 # and the two reminder arms are unaffected.
 session_audit() {
+  # A SESSION WE STARTED IS NOT A SESSION WORTH AUDITING. A stage-2 forge dispatched by
+  # hooks/session-review.sh is a long, many-edit, many-file session, so it crosses this
+  # threshold every time -- and the record it would write describes our own machinery
+  # working, not the user's. Observed on the first real forge run: the dispatched
+  # session's own UserPromptSubmit and Stop hooks fired normally against the same state
+  # root, which is correct in every other respect and is self-pollution here.
+  #
+  # Keyed on the same flag as the recursion barrier, because it is the same fact: this
+  # process exists because we made it.
+  [ -n "${SKILL_COMPOUNDER_DISPATCHED:-}" ] && return 0
   case "$AUDIT_MIN_EDITS" in ''|*[!0-9]*) return 0 ;; esac
   [ "$AUDIT_MIN_EDITS" -eq 0 ] && return 0
   case "$AUDIT_MIN_FILES" in ''|*[!0-9]*) return 0 ;; esac
@@ -270,6 +325,14 @@ session_audit() {
   # back to $DIR itself when .claims cannot be made. Checking only the preferred one
   # would re-audit every turn in that degraded case.
   if [ -n "$sa_h" ] && { [ -d "$CLAIMS/$sa_h" ] || [ -d "$DIR/$sa_h" ]; }; then
+    # Audited already, so no second record -- but this session is still RE-OFFERED to
+    # the dispatcher on every later Stop. That is what makes a session refused by the
+    # review cooldown deferred rather than dropped: qualifying sessions cluster, and
+    # offering each one exactly once meant the trigger always reviewed the first session
+    # of a 21-hour window and silently discarded every later one. hooks/session-review.sh
+    # takes its own per-session claim once it actually dispatches, so re-offering costs a
+    # fork and a handful of file tests, never a second review.
+    AUDIT_WROTE="$sa_h"
     return 0
   fi
 
@@ -378,11 +441,19 @@ session_audit() {
 
   sa_json="$(printf '%s' "$sa_text" | jq -Rs . 2>/dev/null)"
   [ -z "$sa_json" ] && return 0
-  queue_record "session-audit" "$sa_key" "$sa_json" quiet
+  if queue_record "session-audit" "$sa_key" "$sa_json" quiet; then
+    # Only when a record was actually appended. A session already audited, or one whose
+    # queue is unwritable, must not trigger a dispatch: the dispatch rides on the audit
+    # gate, and re-firing it on every later Stop of the same session is exactly the
+    # per-session Claude invocation that would get this switched off.
+    AUDIT_WROTE="$sa_h"
+  fi
   return 0
 }
 
+AUDIT_WROTE=""
 session_audit
+dispatch_review
 
 # ------------------------------------------------------------------ the text
 # Never test emptiness with ${text//[[:space:]]/}. On bash 3.2, which is what

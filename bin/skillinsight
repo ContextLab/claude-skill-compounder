@@ -40,7 +40,9 @@
 # Declining is visible; disregarding is what leaves the record standing.
 set -uo pipefail
 
-DIR="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/insights"
+STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+DIR="$STATE_ROOT/insights"
+REVIEWS="$STATE_ROOT/reviews"
 
 command -v jq >/dev/null 2>&1 || { echo "skillinsight: jq is required" >&2; exit 1; }
 
@@ -66,6 +68,9 @@ skillinsight: review the captured skill-candidate queue.
                                             and the one record most worth reading first
   skillinsight snooze  [<days>] | --clear   stop announcing the queue for a while
                                             without judging anything in it
+  skillinsight reviews [--show <n>] [--all]  the automatic session reviews written by
+                                            hooks/session-review.sh, newest first;
+                                            --show <n> prints the nth newest in full
   skillinsight stats                        queue size, weeks covered, duplicates skipped
   skillinsight prune   --older-than <weeks>  archive week files older than the cutoff
   skillinsight --help
@@ -632,6 +637,72 @@ $fs
 SOURCES_EOF
     echo "current week:    $(week_of "$now")"
     echo "queue directory: $DIR"
+    ;;
+
+  reviews)
+    # The read surface for hooks/session-review.sh. That script dispatches a separate,
+    # single-purpose session AFTER a session has ended, so whatever it finds lands in a
+    # session nobody is in. This is where a person or a later session reads it.
+    #
+    # It reports the NONE verdicts too, and it says so plainly. "Nothing here clears the
+    # bar" is the expected answer, and a listing that showed only the hits would make a
+    # trigger that mostly finds nothing look like a trigger that mostly does not run.
+    wants_help "$@" && { usage; exit 0; }
+    show=""
+    all=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --show) shift; show="${1:-}" ;;
+        --show=*) show="${1#--show=}" ;;
+        --all) all=1 ;;
+        *) die "unexpected argument '$1'" ;;
+      esac
+      shift
+    done
+    idx="$REVIEWS/index.jsonl"
+    if [ ! -f "$idx" ]; then
+      echo "skillinsight: no automatic session reviews yet."
+      echo "              hooks/session-review.sh writes them when a long session ends;"
+      echo "              it is throttled to one dispatch per 21h. Expected: $REVIEWS"
+      exit 0
+    fi
+    # -R with `fromjson?` rather than a stream read: a half-written final line -- the
+    # dispatcher appends from another process -- makes plain jq abort and lose every
+    # record before it.
+    if [ -n "$show" ]; then
+      case "$show" in ''|*[!0-9]*) die "--show takes a whole number" ;; esac
+      [ "$show" -lt 1 ] && die "--show counts from 1 (1 = newest)"
+      rpt="$(jq -R -r '(fromjson? // empty) | select(type=="object") | .report // empty' "$idx" \
+             2>/dev/null | tail -r 2>/dev/null | sed -n "${show}p")"
+      # tail -r is BSD. GNU has tac. Reversing in awk needs neither, so use that when
+      # the first two are absent rather than silently printing the OLDEST review.
+      if [ -z "$rpt" ]; then
+        rpt="$(jq -R -r '(fromjson? // empty) | select(type=="object") | .report // empty' "$idx" \
+               2>/dev/null | awk '{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}' | sed -n "${show}p")"
+      fi
+      [ -z "$rpt" ] && die "no review number $show"
+      [ -f "$rpt" ] || die "the report file is gone: $rpt"
+      cat "$rpt"
+      exit 0
+    fi
+    lim=20
+    [ "$all" -eq 1 ] && lim=100000
+    total="$(jq -R -r '(fromjson? // empty) | select(type=="object") | .ts // empty' "$idx" 2>/dev/null | grep -c '[^[:space:]]' | tr -d ' ')"
+    case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    echo "automatic session reviews: $total"
+    echo
+    jq -R -r '(fromjson? // empty) | select(type=="object")
+      | [(.ts // "?"), (.verdict // "?"), (.name // ""), (.stage // ""), (.cost_usd // ""), (.project // "")]
+      | @tsv' "$idx" 2>/dev/null \
+      | awk '{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}' \
+      | head -n "$lim" \
+      | awk -F'\t' '{n=NR; printf "  %2d  %s  %-9s %-34s %-8s $%s\n", n, $1, $2, ($3==""?"-":$3), ($4==""?"-":$4), ($5==""?"?":$5); printf "      %s\n", $6}'
+    echo
+    echo "  skillinsight reviews --show 1    print the newest report in full"
+    echo "  reports:                         $REVIEWS"
+    echo
+    echo "NONE is the expected verdict. A CANDIDATE is a proposal a person still decides on;"
+    echo "nothing in here has been forged or installed."
     ;;
 
   prune)

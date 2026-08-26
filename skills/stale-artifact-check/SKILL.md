@@ -1,6 +1,6 @@
 ---
 name: stale-artifact-check
-description: 'Use before any other debugging step, whenever an edit you made appears to have had no observable effect: output identical after a rewrite, a page or asset that renders the same after a rebuild or reload, a print or console.log that never appears, the same failure after a fix. Also before trusting a run as evidence about an edit. It answers whether the artifact you ran contains your edit, by requiring an observed canary. Do NOT use once it is confirmed; that is systematic-debugging.'
+description: 'Use before any other debugging step, whenever an edit you made appears to have had no observable effect: output identical after a rewrite, a page or asset that renders the same after a rebuild or reload, a print or console.log you added that never prints, the same failure after a fix. Also before trusting a run as evidence about an edit. It answers whether the artifact you ran contains your edit, by requiring an observed canary. Do NOT use once it is confirmed; that is systematic-debugging.'
 ---
 
 # Stale artifact check
@@ -236,13 +236,12 @@ Each of these means stop and go to Phase 1:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 38995fb5736a6bcbafca8e98fed808ff2ee12cc405ac1de5334ae5cdaaedffaf
+description-sha256: 233779f0a7321f3ef822386c7c79cea2fe17542aa323cce3e50a750a99a69f0e
 prompts-sha256: 00cf5239ded765faff0dcf7f92e743a85d890cfc8dcf9fb1a3d12e975d71d48b
 measured: 2026-08-25
 cli: 2.1.245 (Claude Code)
 model: sonnet
 result: verified 3/3 must-fire, 3/3 must-not-fire
-note: cli version recorded from the CLI installed on the measurement date, not captured by the run
 -->
 
 Prompts that MUST fire this skill:
@@ -259,10 +258,12 @@ Prompts that must NOT fire this skill:
 
 All six were measured on 2026-08-25 by running real `claude -p --model sonnet` sessions in
 an empty directory and checking for an actual `Skill` tool call: the three above fire this
-skill, the three here route elsewhere (two to `systematic-debugging`, one to
-`brainstorming`). The opening clause is load-bearing, not decoration. A draft reading "Use
-before debugging logic" lost must-fire 1 to `systematic-debugging`; "before any other
-debugging step" wins it. Re-measure all six after any edit to the description.
+skill, the three here do not. The opening clause is load-bearing, not decoration. A draft
+reading "Use before debugging logic" lost must-fire 1 to `systematic-debugging`; "before
+any other debugging step" wins it. The console.log prompt is the contested one: with the
+description reading "a print or console.log that never appears", a later probe saw it lost
+to `systematic-debugging`; echoing the user's own words ("you added", "never prints") won
+it back. Re-measure all six after any edit to the description.
 
 ## Quick reference
 

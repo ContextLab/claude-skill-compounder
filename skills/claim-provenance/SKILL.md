@@ -1,6 +1,6 @@
 ---
 name: claim-provenance
-description: "Use when a claim already written down is checked or carried forward: a count or behavior restated from a document, a behavior nobody measured, or a test asserting what a document says rather than whether it is true, which beats `no-silent-stub`. Do NOT use for prose being drafted (`ai-tell-audit`), for a completion claim just made (`verification-before-completion`), for a value a function returns (`no-silent-stub`), or a run that may not contain your edit (`stale-artifact-check`)."
+description: "Use when a claim already written down is checked or carried forward: checking every count and version in a README or doc still matches the repo before a push, a docs test green while the document it asserts is out of date, or a stated behavior nobody measured. Do NOT use for prose being drafted (`ai-tell-audit`), for a completion claim just made (`verification-before-completion`), for a value a function returns (`no-silent-stub`), or a run that may not contain your edit (`stale-artifact-check`)."
 ---
 
 # Claim provenance
@@ -31,9 +31,9 @@ RESTATE NOTHING. RE-DERIVE EVERY CLAIM FROM THE THING IT DESCRIBES, OR DELETE IT
   Run that skill first, then come back here with an answer you can trust.
 - **`no-silent-stub`** owns a **value a function hands a caller**; this skill owns a
   **sentence a reader reads**. The one place they touch is real and worth conceding rather
-  than drawing a line through: its "self-scoring check" row and the presence-pinning
-  assertion in Phase 5 are the same shape, an expected value drawn from the same source as
-  the actual. Two things still differ. First, its remedy is to make the code fail loudly,
+  than drawing a line through: a test scored against its own input is its territory, and
+  the presence-pinning assertion in Phase 5 is the same shape, an expected value drawn
+  from the same source as the actual. Two things still differ. First, its remedy is to make the code fail loudly,
   and here nothing can be made to fail: the assertion is correct code doing exactly what it
   says, and the fix is to re-point it at the system. Second, only here does the assertion
   **entrench** the error, so that correcting the document turns the suite red. Precedence:
@@ -42,8 +42,7 @@ RESTATE NOTHING. RE-DERIVE EVERY CLAIM FROM THE THING IT DESCRIBES, OR DELETE IT
 - **`ai-tell-audit`** owns the draft you are writing now. Its "Unsourced precision" entry
   and this skill's Phase 4 are **not orthogonal, and the earlier claim here that they were
   was wrong**: for an unsourced number in fresh prose they are the same rule reached from
-  two directions, and its version is the one to use. Round 3 caught this file's bucket C
-  example being that entry's "After" line, copied verbatim. Two things are left that it
+  two directions, and its version is the one to use. Two things are left that it
   does not cover, and they are why a boundary beats a merge: a claim with **no number in
   it** (a documented behavior), and a claim **already published and being carried forward**,
   where there is no draft to audit. Precedence, and it lives in the description because the
@@ -78,7 +77,12 @@ One day's work in one repository. Every row shipped under a green suite.
 |9. A commit message|"544 tests pass"|the tree it described failed one|
 
 **Source, as of 2026-08-25:** all nine were found in this repository, in its working
-tree, its git history, and the forge ledger at `~/.claude/skill-compounder/ledger.jsonl`.
+tree, its git history, and the forge ledger at `~/.claude/skill-compounder/ledger.jsonl`,
+except row 9, whose commit was never merged into any branch. `git log --all` does not
+list it; it survives only as an unreachable object: `git show 204acb0` prints it, with
+"544 tests pass" in its body, and `git fsck --unreachable --no-reflogs` lists it (plain
+`--unreachable` can omit it while a reflog entry still reaches it; both measured
+2026-08-25, and a `git gc` prune can end even that).
 For you they are bucket B, because you cannot re-derive them from where you sit, and the
 line you are reading is the source and the as-of date that Phase 4 requires of a bucket B
 claim. A table of evidence that skipped its own Phase 4 would be the tenth row.
@@ -90,8 +94,10 @@ Not one of these is a defect in code. Every one is a defect in a stated reason.
 
 Do this on the document you are auditing, and on any paragraph you edited. Substitute your
 document for `README.md` in every command below. The placeholder is a real filename on
-purpose: `<the file>` inside `$( )` is a redirect, not a placeholder, and the line exits
-127 without running.
+purpose: a literal `<the file>` inside `$( )` is a syntax error at the `|`. bash 5.3 and
+zsh 5.9 refuse the line with a nonzero exit; macOS's `/bin/bash` 3.2 reports the error,
+substitutes nothing, exits 0, and appends your inventory to `/tmp/claims-.tsv`, a path
+shared with every audit that made the same mistake (all three measured 2026-08-25).
 
 **The test for whether a sentence is a claim**, applied one sentence at a time:
 
@@ -126,13 +132,17 @@ indistinguishable from a clean bill of health, which is this skill's own subject
 second line is there because a brand-new untracked file is a place claims live and
 `git diff` never mentions it. The trailing `/dev/null` keeps `grep` off your terminal when
 nothing is untracked. Neither is scoped to markdown, because a test assertion and a commit
-message are claims too.
+message are claims too. The first line sweeps your whole change on purpose; auditing one
+document on a dirty tree, scope it with a pathspec, `git diff HEAD -U0 -- README.md`,
+because unscoped it returns every hunk in the repository (79,617 bytes on this one while
+fifteen files were modified: `git diff HEAD -U0 | wc -c`, as of 2026-08-25) and the
+claims you are auditing drown in hunks that are not yours.
 
 **Both of those read a change, and the commoner case here is a document nobody changed
 today.** On an unmodified tracked file they print nothing, and nothing is exactly what a
 clean bill of health looks like. Measured on this repository, as of 2026-08-25: the diff
-sweep over `skills/ai-tell-audit/SKILL.md` matched 0 lines while the same pattern over the
-whole file matched 121. So when the document is not part of your diff, sweep the file:
+sweep over `skills/contribute-skill/SKILL.md` matched 0 lines while the same pattern over the
+whole file matched 103. So when the document is not part of your diff, sweep the file:
 
 ```bash
 grep -nEi '[0-9]|\b(none|all|every|only|never|always|cannot)\b' README.md
@@ -147,12 +157,14 @@ written in plain words, which is the shape that cost the most above, so none end
 phase.
 
 Write the inventory down outside the repository, one line per claim. Name it after the
-document's **path**, not a fixed path and not its basename: `a/SKILL.md` and `b/SKILL.md`
-share a basename, and `SKILL.md` is what this skill audits most often, so a second audit
-would append to the first one's list.
+document's **path**, not a fixed path and not its basename, and make the path absolute:
+`a/SKILL.md` and `b/SKILL.md` share a basename, `SKILL.md` is what this skill audits most
+often, and every repository has a `README.md`, so a name built from the relative path
+alone lets a second audit, in this checkout or a concurrent session's other one, append
+to the first one's list. `$PWD` is what makes the name yours.
 
 ```bash
-printf '%s\t%s\t%s\n' "<claim>" "<bucket>" "<command or source>" >> "/tmp/claims-$(echo README.md | tr / -).tsv"
+printf '%s\t%s\t%s\n' "<claim>" "<bucket>" "<command or source>" >> "/tmp/claims-$(echo "$PWD"/README.md | tr / -).tsv"
 ```
 
 ## Phase 2: Sort by re-derivability
@@ -231,7 +243,7 @@ Do not scope that to markdown. The copy that outlives a fix is the one in a test
 docstring or a fixture, where nobody thinks to look for prose.
 
 **Then delete the inventory**, on the way out of a pass that succeeded and not only one
-that failed: `rm -f "/tmp/claims-$(echo README.md | tr / -).tsv"`. A list of
+that failed: `rm -f "/tmp/claims-$(echo "$PWD"/README.md | tr / -).tsv"`. A list of
 claims left at a predictable path is a document making claims of its own, and the next
 session has no way to tell which pass it belongs to.
 
@@ -317,8 +329,8 @@ HEAD --` resets the index and the working tree together. It also destroys uncomm
 work that has nothing to do with this pass, so if anything else in the file is unsaved,
 that is `destructive-op-preflight`'s subject and it runs before you type this.
 
-Then delete the Phase 1 inventory (`rm -f "/tmp/claims-$(echo README.md | tr / -).tsv"`), or it
-becomes a stale artifact making claims of its own. Never leave a partial pass unannounced.
+Then delete the Phase 1 inventory (`rm -f "/tmp/claims-$(echo "$PWD"/README.md | tr / -).tsv"`),
+or it becomes a stale artifact making claims of its own. Never leave a partial pass unannounced.
 
 ## Red flags
 
@@ -352,13 +364,19 @@ Each of these means stop and go back to Phase 1:
 
 ## Trigger precision
 
+The rule the prompts below exercise: Use when a claim already written down is checked or
+carried forward: a count or behavior restated from a document, a behavior nobody
+measured, or a test asserting what a document says rather than whether it is true, which
+beats `no-silent-stub`. The description restates this in the router's vocabulary, because
+the router reads nothing else; the pin records that wording's measurement.
+
 <!-- routing-pin
-description-sha256: 6ec366b3667788e75428c9fc6c67673a91c0284f656b80592f701f633d5fcef4
+description-sha256: 9d480e2d11caf9fb99a3746bdaca048b40dbb5a110b3e5f8554fee1981ce3f91
 prompts-sha256: 1e763f03fd8b977bc88c973a2df89bb6b533a07eca5b34669bd7c3e304f70744
-measured: never
-cli: n/a
-model: n/a
-result: unmeasured
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 Prompts that MUST fire this skill:

@@ -1,6 +1,6 @@
 ---
 name: skill-compounder
-description: "Use when deciding whether a repeatable procedure has earned becoming a skill, when starting a major implementation (to check for an existing skill first), or when a skill you invoked misfired and needs fixing, documenting, or retiring. Runs a builder plus cold red-team subagent loop to a clean report. Do NOT use to author a skill you have already decided on (that is writing-skills), for a one-off script, or for ordinary refactoring."
+description: "Use when a skill you just used or invoked misfired — it told you the wrong thing (to run from the wrong directory, an outdated command), fired when it should not have, or otherwise led you astray — so it needs fixing, documenting, or retiring; when deciding whether a repeatable procedure has earned becoming a skill; or when asking, before implementing something new, whether an existing skill already covers it ('is there already something for this?'). Runs a builder plus cold red-team subagent loop to a clean report. Do NOT use to author a skill you have already decided on (that is writing-skills), for a one-off script, or for ordinary refactoring."
 ---
 
 # Compounding: turn hard-won procedures into permanent capability
@@ -77,9 +77,10 @@ skillforge start <name> <total-steps> "<one-line summary>"
 **Decide the round cap here, before you start**, because `<total-steps>` encodes it and
 `skillforge` cannot be told later. Budget `<total-steps>` as `2 + 2 × (planned red-team
 rounds)`: one step to dispatch the builder, one for its draft, then a review step and a
-revision step per planned round. The frontmatter check in step 3 does **not** get its own
-number — it is part of accepting the draft, and the budget has no slot for it. So 12 for the usual 5-round cap, or 22 if you have raised
-it to 10 (step 6 says when that is justified; say why in the announcement). Dispatching the
+revision step per planned round. The two gates — the frontmatter check in step 3 and the
+routing probe in step 4 — do **not** get their own numbers. They are part of accepting the
+draft and part of closing the forge, and the budget has no slot for either. So 12 for the usual 5-round cap, or 22 if you have raised
+it to 10 (step 7 says when that is justified; say why in the announcement). Dispatching the
 orchestrator is **not** a step — the numbering starts at the builder, because
 the ledger and `skillreport` both invert this budget to recover round counts — planned
 rounds as `(steps - 2) / 2`, and completed rounds the same way from the step actually
@@ -100,7 +101,7 @@ written, not a state slot, not a ledger row.
 So, when you pass it:
 
 - **Read it as the cap, not as a bookkeeping nuisance.** `<total-steps>` encodes the round
-  cap you chose at step 0, so overrunning it means you are past the cap, and step 6
+  cap you chose at step 0, so overrunning it means you are past the cap, and step 7
   applies: narrow the scope until it is clean, or abandon it.
 - **Do not free the name by closing the forge first.** That records an outcome for work
   that has not finished, which is worse than the overrun.
@@ -187,12 +188,13 @@ Hand it:
   it out: `step 1` when the builder is dispatched, `step 2` when its draft lands and has
   passed the frontmatter check, then `step 3`/`step 4` for the first review and revision,
   `step 5`/`step 6` for the second, and so on. Note the collision this invites: protocol
-  step 3 is the frontmatter check, but `skillforge step 3` is the first red-team review.
+  steps 3 and 4 are the two gates, but `skillforge step 3` is the first red-team review
+  and `skillforge step 4` its revision.
   They are different numbers in different sequences, which is why you spell the animation
   one out instead of saying "the step numbers". An orchestrator that instead calls `skillforge step 2..5` after the pasted
   section headings stalls the bar and makes `(step - 2) / 2` record one round where five
   happened.
-- steps 2 to 6 below, **pasted in full** rather than referenced. Do not tell it to "follow
+- steps 2 to 7 below, **pasted in full** rather than referenced. Do not tell it to "follow
   skill-compounder": it would read step 1, try to hand off again, and nest a second
   orchestrator into the band where `Agent` may not exist. They are its instructions rather
   than yours, minus the closing calls, which stay with you (see below).
@@ -299,7 +301,101 @@ why the forge has to run the check itself.
 org-gated — absent in this session. Treat them as a bonus if you have them, never as the
 plan.
 
-**4. Red-team agent.** Dispatch a **separate, fresh** subagent. Never the builder.
+**4. Prove it can actually fire, before it counts as finished.** Step 3's sibling, and for
+the same reason: a skill that reads well can still never run. Step 3 catches the skill
+Claude Code cannot load. This one catches the skill Claude Code loads and never reaches.
+
+<!-- doctrine: routing-gate-on-completion -->
+**A forge cannot be reported clean while the skill's own must-fire prompts do not fire
+it.** A reviewer reading the `## Trigger precision` section and agreeing it looks right is
+not this check and never was. Every skill in this package's seed pool passed a full
+builder/red-team loop that way, and when the prompts were finally run on 2026-08-25, three
+claims were false: `stale-artifact-check` lost two of its three must-fire prompts to
+`superpowers:systematic-debugging` — including its own verbatim example, to the very skill
+its prose carves out as the thing it hands off to — and `session-handoff` and
+`skill-compounder` each listed a must-fire prompt that fires nothing at all. Read, agreed,
+never run, shipped for months.
+
+So the draft needs its `## Trigger precision` section *before* this step: at least three
+prompts that must fire it and three that must not, each written as the verbatim utterance
+a user would type, because a paraphrase cannot be run. Then run them.
+
+```bash
+SKILL_ROUTING_PROBE=1 python3 scripts/probe_routing_claims.py <skill>
+```
+
+That is for a skill living in a `claude-skill-compounder` checkout's `skills/` directory —
+the script reads only that tree. For a skill forged anywhere else (`~/.claude/skills/<name>/`,
+or a repo's own `.claude/skills/`), run each prompt yourself in an empty directory and look
+for a `Skill` tool call naming the skill:
+
+```bash
+claude -p --model sonnet --max-turns 3 --output-format stream-json --verbose "<prompt>" \
+  | grep -o '"name":"Skill","input":{[^}]*}'
+```
+
+A non-zero exit is not a failed measurement: `--max-turns` exhaustion and a denied
+permission both exit 1, and both happen *after* the routing decision, which is taken in the
+first assistant turn.
+
+**`--model sonnet`, never haiku.** Personal and project skill descriptions were measured
+absent from the router on haiku, so a haiku probe proves nothing about routing. The probe
+script hardcodes the model for that reason, and a hand-run has to pass it.
+
+**When a must-fire prompt loses, the description is what changes.** Not the prompt, and not
+the verdict. Routing is brutally sensitive to the description's opening clause, so this is
+usually a small edit with a large effect: changing `"Use before debugging logic"` to
+`"Use before any other debugging step"` flipped a losing prompt to a winning one. Four
+words. Edit and re-run until the prompts win. Retiring a claim is allowed, but only when
+the prompt describes a trigger this skill should not own *and* the skill that beat it is
+the right owner — and the floor of three must-fire prompts that actually fire is not
+negotiable. A skill that cannot be made to fire on its own claimed triggers has not earned
+shipping: narrow it or abandon it under step 7.
+
+<!-- doctrine: must-not-half-is-a-gate -->
+**A skill that fires on everything is worse than no skill.** The must-not half is a gate in
+exactly the same way, because a skill that answers every prompt displaces the neighbour that
+would have handled it properly and teaches the session to distrust skill dispatch. Read what
+the report says *fired*, not just its PASS column: a must-not-fire prompt is clean only when
+this skill stays out of it and the neighbour the section names actually wins it.
+
+**Re-run it after the last description edit.** A red-team round that touches the
+`description` invalidates the previous run — four words did it above — so the measurement
+you close on must be the one taken against the text you ship. In this repository the pin
+under `## Trigger precision` enforces exactly that: `python3 scripts/routing_claims.py lint`
+fails until the recorded sha256 of the description and of the prompt list match what is on
+disk, and the repair is to measure again, never to paste a fresh hash in.
+
+**What it costs, honestly.** Six prompts per skill, one `claude -p --model sonnet
+--max-turns 3` session each, 30–90s apiece, six run in parallel: about 6 calls and 1–3
+minutes for one skill, per pass. Budget two or three passes across a forge — one on the
+draft, one after the description settles — so roughly 12–18 calls and under 10 minutes.
+Probing the whole eight-skill seed pool is ~48 calls and ~15 minutes. That is a real
+increase in what every forge costs, and it buys the one claim a forge previously could not
+make.
+
+<!-- doctrine: unmeasured-is-not-verified -->
+**A probe that could not run is never a pass.** No login, no quota, offline, a sandbox with
+no network: the skill may still ship, but it ships marked unmeasured and says so where the
+next session will read it. Concretely — the pin records `measured: never`, `model: n/a`,
+`cli: n/a`, `result: unmeasured`; the close message names it, as in `skillforge done
+"shipped unmeasured: no claude auth in this environment"`; and for a skill in this
+repository the name goes into `UNVERIFIED` in `tests/test_routing_claims.py`, a debt ledger
+that may only shrink. What is forbidden is the silent promotion. An unrun probe counted as
+verified leaves a skill that may never fire carrying a record that says it does, which is
+the exact state this gate exists to end.
+
+**The gate proves a claim at a moment; it cannot keep it true.** A routing claim can go
+false with no change to the skill and no commit anywhere near it. `stale-artifact-check`
+lost its prompts to a skill in a *different package*, so installing a plugin, or an upstream
+editing its own description, is enough. That is why the pin records a date and a CLI
+version, and why re-running the probe is the only detection there is. Measured while writing
+this step: the same `"Use before debugging logic"` wording that lost must-fire 1 in the full
+installed router on 2026-08-25 *wins* that prompt in a router holding only it and
+`systematic-debugging`. One run each, so the number is not the point — the point is that the
+verdict moved with the environment rather than with the sentence.
+
+**5. Red-team agent.** Dispatch a **separate, fresh** subagent. Never the builder.
 
 <!-- doctrine: no-forked-reviewer -->
 **The red-teamer must never be a fork of either layer** — not of the orchestrator that
@@ -333,18 +429,18 @@ Required eval checklist:
 |Check|What it catches|
 |-|-|
 |**Cold start**|Can step 1 be executed with no prior context and no clarifying question?|
-|**Trigger precision**|Propose 3 prompts that SHOULD fire the `description` and 3 that should NOT. Does it discriminate?|
+|**Trigger precision**|**Run** the section's 3 must-fire and 3 must-not-fire prompts through real `claude -p --model sonnet` sessions, per step 4. Proposing prompts and judging them by reading is what shipped three false claims here; a row with no observed `Skill` call behind it is a finding.|
 |**Verified claims**|Actually run every command, path, and API call the skill asserts. Unverified claims are defects.|
 |**Unhappy path**|What does a session do when a step fails partway through?|
 |**Overlap**|Does an existing skill already cover this? If so, that is a blocking finding.|
 |**Scope**|Is it doing more than one thing? Split or narrow.|
 
-**5. Loop.** Feed findings back to the builder via `SendMessage` so it keeps its context.
+**6. Loop.** Feed findings back to the builder via `SendMessage` so it keeps its context.
 <!-- doctrine: fresh-reviewer-each-round -->
 **Spawn a new red-teamer each round; the whole test depends on the reader being
 genuinely cold.** Repeat until the report comes back clean.
 
-**6. Cap at 5 rounds, or 10 for a skill that is complex or genuinely important.** The cap
+**7. Cap at 5 rounds, or 10 for a skill that is complex or genuinely important.** The cap
 is chosen at step 0, before `skillforge start`, because the step budget encodes it — raise
 it deliberately and say why in the announcement, rather than discovering at round 6 that
 you would like more. A safety-critical skill, one with a scanner or a validator, or one
@@ -454,28 +550,45 @@ automatically.
 
 ## 4. Hot-reloading
 
-Skills are hot-reloaded. Writing `~/.claude/skills/<name>/SKILL.md` makes it available to
-**this** session and to other already-running sessions, with no restart.
+A skill is usable the moment it is linked into the skills directory Claude Code reads.
+`skillforge done` does that linking, so **closing the forge is what makes the skill live**.
+Nobody has to remember an install step, and the skill is usable in the session that forged
+it — which is the whole reason to forge it there.
 
-- There is a lag of roughly one tool round-trip. If `Skill` returns `Unknown skill: <name>`
-  right after you create it, make any other tool call and retry. Do not conclude it failed.
+- `done` looks for the skill under `<repo>/skills/<name>/` and `<repo>/.claude/skills/<name>/`,
+  or wherever `skillforge start ... --skill-dir <dir>` said it would be, and prints what it
+  installed and where. **Read that line.** If it says anything else — a name already taken,
+  a directory it could not write, no `SKILL.md` found — the skill is *not* live and the
+  message says what to do about it. `skillforge install <name> --skill-dir <dir>` is the
+  retry, and the repair for a forge closed before any of this existed.
+- The name that answers is the skill **directory's** name, not the forge's. When the two
+  differ, `done` says so and names the one that works.
+- A name held by something this package cannot prove it created is refused, never
+  overwritten. Nothing of yours is replaced to make room for a forge.
+- **Lag.** Measured on Claude Code 2.1.245 (2026-08-25): a symlink appearing in a watched
+  skills directory mid-session was invocable on the very next `Skill` call in one run, and
+  one tool call later in another. If `Skill` returns `Unknown skill: <name>` right after
+  `done`, make any other tool call and retry. Do not conclude it failed.
+- A skill written to `<repo>/.claude/skills/` stays project-scoped: `done` leaves it there
+  and says so, rather than widening a scope its author chose. It is loaded for that
+  repository only — and **not** by `claude -p` at all unless that run passes
+  `--setting-sources user,project,local` (measured, same date). `skillforge install <name>
+  --skill-dir <dir>` makes it available everywhere.
 - Fallback: `cat` the SKILL.md and follow it by path. The content works regardless of
   registry state.
 - Consequence: finish and red-team a skill **during** the session that discovered the need
-  for it. The benefit propagates immediately, and deferring to "next session" throws that
-  benefit away.
+  for it. The benefit propagates in that session because `done` installs it; deferring to
+  "next session" throws that benefit away.
 
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 9c6016f91d31ec94812df4edc9791993046f649d43985821fcc9c0b349f6b4fd
+description-sha256: 95babe5cea684ff5c4c54bf57d8672b97996516253064a861f402516f0ec0061
 prompts-sha256: b0d3fb4da0e6c09f8453979d51221df6812e8d508da59c7ed43cba5e2dccb40d
 measured: 2026-08-25
 cli: 2.1.245 (Claude Code)
 model: sonnet
-result: partial: the six claims here are unverified
-note: only the rejected fragment quoted in the prose below was run
-cli-note: taken from the installed CLI on that date, not from the run itself
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 Should fire:
@@ -499,10 +612,20 @@ it. That is the right behaviour rather than a miss, because the threshold in sec
 a concrete referent for both conditions, and a prompt that supplies neither cannot be
 assessed against it. The trigger prompt above therefore names one.
 
-Habit 1 (check before implementing) has no reliable lexical hook: "let's build the
-ingestion pipeline" contains nothing a `description` can match. That habit is carried by
-the `UserPromptSubmit` reminder hook and the `CLAUDE.md` stanza, not by this trigger. If
-those are not installed, habit 1 will not fire on its own.
+Habit 1 (check before implementing) has no reliable lexical hook in the general case:
+"let's build the ingestion pipeline" contains nothing a `description` can match, so the
+habit itself is carried by the `UserPromptSubmit` reminder hook and the `CLAUDE.md`
+stanza, and a bare implementation request will not fire this skill if those are not
+installed. The second must-fire prompt above is the exception, not a refutation: it
+voices the check out loud — "is there already something for it?" — and the description
+quotes that situation language, which is what wins it. Measured on 2026-08-25: the same
+prompt fired nothing while the description said only "when starting a major
+implementation (to check for an existing skill first)"; quoting the question a user
+actually types flipped it, so the claim was kept and the description strengthened rather
+than the prompt rewritten. The misfire-repair prompt won the same way on the same date —
+it fired nothing until the description named the situation as a user reports it ("told
+you the wrong thing", "to run from the wrong directory") instead of only the abstract
+"a skill you invoked misfired".
 
 ## Troubleshooting
 

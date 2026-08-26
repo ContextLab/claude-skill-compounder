@@ -4,14 +4,19 @@
 # The session calls this at each transition of the builder/red-team loop; the status
 # line renders the animation from the state it writes (see statusline/).
 #
-#   skillforge start <name> <total-steps> <one-line summary...>
+#   skillforge start <name> <total-steps> <one-line summary...> [--skill-dir <dir>]
 #   skillforge step  [--name <forge>] <step-number> <what is happening now...>
-#   skillforge done  [--name <forge>] [message...]
+#   skillforge done  [--name <forge>] [--skill-dir <dir>] [message...]
 #   skillforge fail  [--name <forge>] <reason...>
 #   skillforge clear [--name <forge> | --all]
 #   skillforge show  [--name <forge> | --all]
 #   skillforge list
 #   skillforge ledger [--json]
+#   skillforge install <name> [--skill-dir <dir>]
+#
+# `done` INSTALLS the skill the forge produced, so that closing the loop is what makes
+# the skill usable. See "installing what was forged" below for how the skill is found
+# and what happens when the name is taken.
 #
 # SEVERAL FORGES CAN RUN AT ONCE. Each one gets its own file under forge/, named after
 # the forge, so `start` never destroys another forge's record. Which forge a command
@@ -29,9 +34,12 @@
 # session, so a session-keyed file written here would never be found by the renderer.
 # A forge name is visible to both sides, which is why it is the key.
 #
-# PRIVACY. Two kinds of file are written, both under
-# ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}, both local, both plain text:
+# PRIVACY. Three kinds of file are written, all under
+# ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}, all local, all plain text:
 #   forge/<name>.forge.json  one in-progress forge (name, summary, step, phase, times).
+#   forge/.outcome.<id>.claim  a copy of the record that closed one forge, left behind so
+#                       that a second 'done' cannot append a second outcome row for it.
+#                       Same contents as the forge file. Reaped an hour later.
 #   ledger.jsonl        one JSON line per start/done/fail, appended forever. Each line
 #                       holds the skill name, the one-line summary you passed to
 #                       'start', the originating repository path, epoch timestamps,
@@ -140,9 +148,47 @@ update() { # <file> <jq args...>
 # AGE, NOT EXISTENCE, IS THE TEST. A temp file younger than an hour may belong to a
 # writer that is still running, and deleting it would corrupt a concurrent start. No
 # write survives sixty minutes.
+# `! -name '*.json'` is not belt and braces, it is the whole safety of this function. A
+# forge may legitimately be NAMED `build.tmp`, whose slot file is `build.tmp.forge.json`,
+# and that matches `*.tmp.*`: an hour into a long forge the next `start` deleted the live
+# slot, the animation stopped, and `done --name build.tmp` answered "no forge named
+# build.tmp". Every temp this script writes ends in `.tmp` or `.tmp.<pid>` and a slot
+# always ends in `.json`, so the two sets are separable -- but only if the separation is
+# stated.
 reap_temps() {
-  find "$DIR" -maxdepth 1 -type f \( -name '.start.*.tmp' -o -name '*.tmp.*' \) \
+  find "$DIR" -maxdepth 1 -type f ! -name '*.json' \
+       \( -name '.start.*.tmp' -o -name '*.tmp.*' \) \
        -mmin +60 -exec rm -f {} + 2>/dev/null || true
+}
+
+# Spent outcome claims. One is left behind by every forge that is closed out (see
+# close_forge), so the directory would otherwise grow by one small file per forge forever.
+#
+# A CLAIM WHOSE FORGE IS STILL ACTIVE IS NOT SPENT, whatever its age. That combination is
+# the fingerprint of a closer killed between winning the claim and publishing the closed
+# record, and the claim is then the only thing standing between that forge and a second
+# outcome row. Reaping it by age alone would hand the duplicate back after an hour. Ages
+# out on the same hour as every other temp file, and for the same reason: no write
+# survives sixty minutes.
+reap_claims() {
+  rc_old="$(find "$DIR" -maxdepth 1 -type f -name '.outcome.*.claim' -mmin +60 2>/dev/null)"
+  [ -n "$rc_old" ] || return 0
+  rc_live=" "
+  while IFS="$SEP" read -r rc_st rc_nm rc_stt rc_pth; do
+    [ -n "${rc_pth:-}" ] || continue
+    [ "$rc_stt" = "active" ] || continue
+    rc_live="$rc_live$(forge_id "$rc_pth") "
+  done <<SLOTS
+$(slots)
+SLOTS
+  printf '%s\n' "$rc_old" | while IFS= read -r rc_f; do
+    [ -n "$rc_f" ] || continue
+    rc_id="${rc_f##*/}"; rc_id="${rc_id#.outcome.}"; rc_id="${rc_id%.claim}"
+    # A forge id is filename-safe, so it holds no space and this match cannot straddle
+    # two ids.
+    case "$rc_live" in *" $rc_id "*) continue ;; esac
+    rm -f "$rc_f" 2>/dev/null || true
+  done
 }
 
 # The originating repository, best effort. Outside a checkout (or with no git at all)
@@ -162,6 +208,58 @@ project_root() {
 }
 
 int_or_zero() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
+
+# ------------------------------------------------------------------- forge identity
+#
+# One id per forge, written into the record by `start` before the slot is published, and
+# never reused. It is what an outcome claim is named after (see close_forge), and the
+# claim scheme rests entirely on this never coming round again: a claim path that could
+# be reused would refuse to close the SECOND forge that landed on it, forever.
+#
+# The clock here is the real one, deliberately, and not now(): SKILLFORGE_NOW is pinned
+# to a constant by every test in this repo, and an id that collapses to pid alone under a
+# pin is one bad PATH away from colliding in exactly the situation the tests exist to
+# exercise. Seconds, pid and two draws of $RANDOM.
+new_forge_id() {
+  printf '%s.%s.%s%s' "$(date +%s 2>/dev/null || printf '0')" "$$" \
+                      "${RANDOM:-0}" "${RANDOM:-0}"
+}
+
+# `stat -f` selects a format on BSD and reports on the FILESYSTEM on GNU coreutils
+# (docs/DESIGN.md), so it is unusable here. `ls -i` prints the inode number first on both.
+inode_of() { # <file>
+  i_n="$(ls -di "$1" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+  case "${i_n:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$i_n" ;; esac
+}
+
+# The id of an EXISTING record, as a bounded, filename-safe string.
+#
+# THIS FUNCTION MUST BE INJECTIVE. Two live forges that answer to one id share one claim,
+# so the second cannot be closed at all and the first one's corpse is published over it.
+# Sanitizing an arbitrary field is therefore exactly the wrong move: `tr` is many-to-one,
+# and two foreign records in `alpha!.json` and `alpha@.json` mapped to one claim -- the
+# second forge was destroyed, was unclosable, and left no ledger row. An id that is not
+# ALREADY a safe, bounded filename is not repaired, it is not used. Bounded as well as
+# safe: a claim path longer than NAME_MAX makes `ln` fail with no claim to show for it,
+# both closers take the fall-through below, and the duplicate row is back (reproduced
+# with a 230-character foreign slot filename in the fallback, 2 rows and 0 claims).
+#
+# The fallback identifies a record that carries no id of its own -- one written by an
+# older version of this script, or by hand -- by its slot's INODE and start time. An
+# inode is unique among the files that exist right now, and `start` and `update` both
+# publish by renaming a fresh file into place, so a second forge in the same slot gets a
+# different one. Neither half is enough alone: inode numbers are recycled once a file is
+# deleted, and `started` repeats under a pinned clock -- two successive id-less forges of
+# one name at a pinned clock shared an id and the second was unclosable. The slot
+# filename is deliberately NOT part of it: it is unbounded and not filename-safe, which
+# is what broke both ways above.
+forge_id() { # <record file>
+  f_id="$(field "$1" id)"
+  case "$f_id" in *[!A-Za-z0-9._-]*) f_id="" ;; esac
+  [ "${#f_id}" -le 64 ] || f_id=""
+  [ -n "$f_id" ] || f_id="legacy.$(int_or_zero "$(field "$1" started)").$(inode_of "$1")"
+  printf '%s' "$f_id"
+}
 
 # ------------------------------------------------------------------ slot discovery
 
@@ -269,13 +367,16 @@ slug_of() {
 
 # ------------------------------------------------------------------------- ledger
 
-# One JSON object, one line, one append. jq builds the whole line before the redirect
-# runs, so a single short write reaches the file and concurrent forges cannot interleave
-# half a record. A ledger failure must never break a forge, hence the bare returns.
-ledger_append() { # <event> <name> <steps> <summary> [step] [phase] [duration] [rounds]
+# One JSON object, one line. jq builds the whole line before any redirect runs, so a
+# single short write reaches the file and concurrent forges cannot interleave half a
+# record. Building is separated from appending because an OUTCOME line is built before
+# its claim is taken and appended after (see close_forge): everything expensive -- five
+# forks of jq, a `git rev-parse` -- happens on the near side of the claim, and all that
+# is left on the far side is one builtin append.
+ledger_line() { # <event> <name> <steps> <summary> [step] [phase] [duration] [rounds]
   # `rounds` on a start record is the plan; on a done or fail record it is the count
   # actually completed, and `rounds_planned` records what was budgeted alongside it.
-  line="$(jq -n -c \
+  jq -n -c \
     --arg event "$1" --arg name "$2" --arg summary "${4:-}" \
     --arg project "$(project_root)" \
     --argjson ts "$(now)" --argjson steps "$(int_or_zero "${3:-0}")" \
@@ -286,9 +387,14 @@ ledger_append() { # <event> <name> <steps> <summary> [step] [phase] [duration] [
      + (if $phase    == "" then {} else {phase:     $phase}              end)
      + (if $duration == "" then {} else {duration: ($duration|tonumber)} end)
      + (if $rounds   == "" then {} else {rounds:   ($rounds|tonumber)}   end)
-     + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)' 2>/dev/null)"
-  [ -n "$line" ] || return 0
-  printf '%s\n' "$line" >> "$LEDGER" 2>/dev/null || return 0
+     + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)' 2>/dev/null
+}
+
+# A ledger failure must never break a forge, hence the bare returns.
+ledger_append() { # <same arguments as ledger_line>
+  la_line="$(ledger_line "$@")"
+  [ -n "$la_line" ] || return 0
+  printf '%s\n' "$la_line" >> "$LEDGER" 2>/dev/null || return 0
   return 0
 }
 
@@ -312,17 +418,316 @@ rounds_completed() { # <step reached>
   printf '%s' "$r"
 }
 
-# Close out one slot as an outcome record. Used by done, fail, and by clear when it
-# would otherwise drop an active forge on the floor without a trace.
-ledger_close() { # <file> <event> <phase>
+# The outcome line a CLOSED record implies. Duration is read out of the record's own
+# `finished` rather than taken from a second clock read, so the same record always yields
+# the same line no matter who builds it or when -- which is what lets the line be built
+# before the claim below and still describe the forge exactly.
+ledger_close_line() { # <closed record file> <event>
   l_f="$1"
   l_name="$(field "$l_f" name)"; l_steps="$(int_or_zero "$(field "$l_f" steps)")"
   l_summary="$(field "$l_f" summary)"; l_step="$(int_or_zero "$(field "$l_f" step)")"
   l_started="$(int_or_zero "$(field "$l_f" started)")"
-  l_dur=$(( $(now) - l_started ))
+  l_dur=$(( $(int_or_zero "$(field "$l_f" finished)") - l_started ))
   [ "$l_dur" -lt 0 ] && l_dur=0
-  ledger_append "$2" "$l_name" "$l_steps" "$l_summary" \
-    "$l_step" "$3" "$l_dur" "$(rounds_completed "$l_step")" "$(rounds_planned "$l_steps")"
+  ledger_close_line_out="$(ledger_line "$2" "$l_name" "$l_steps" "$l_summary" \
+    "$l_step" "$(field "$l_f" phase)" "$l_dur" \
+    "$(rounds_completed "$l_step")" "$(rounds_planned "$l_steps")")"
+  printf '%s' "$ledger_close_line_out"
+}
+
+# ------------------------------------------------------------------- outcome claim
+#
+# EXACTLY ONE OUTCOME ROW PER FORGE, WITH NO LOCK ANYWHERE. Two concurrent `done`s both
+# passed require_active -- both read `status: active`, because neither had written yet --
+# and both appended, so the ledger counted one forge twice: 40 of 40 trials. A `fail`
+# racing a `done` and a `clear` racing a `done` did the same, 40 of 40 each. The ledger is
+# the only evidence this protocol produces about itself, so a duplicate row is not a
+# cosmetic defect.
+#
+# The outcome is claimed the way a SLOT is claimed, by `ln` of a fully-written file onto a
+# path that has never been used before: a hard link either appears atomically or fails
+# because the name is taken. Exactly one process links it, the losers exit, and NOTHING IS
+# HELD -- a killed process leaves no lock behind because there was none, which is why this
+# is not a portable-lock scheme wearing a different hat. The claim path is named after the
+# forge's id, which `start` writes into the record before publishing the slot and which is
+# never reused, so a claim can only ever refer to the one forge that created it.
+#
+# The order is: build the closed record, build the ledger line, claim, append, publish.
+# Everything that forks a process happens BEFORE the claim -- the same reasoning that
+# warms project_root() ahead of the slot claim in `start` -- so the interval between
+# winning the claim and having the row on disk is one `printf` builtin.
+#
+# WHAT A KILL AT EACH STEP LEAVES BEHIND:
+#   before the claim      nothing; the forge is untouched and still active. Retry closes it.
+#   after ln, before the  no row, no claim beyond the file itself, slot still active. The
+#   append                next `done` finds the claim taken, heals the slot from the
+#                         claim's own copy of the record, and reports it already closed.
+#                         One outcome is missing from the ledger and the ledger says so:
+#                         that start reads "never closed out". The window is one builtin.
+#   after the append,     the row is on disk and the slot is still active. Same heal: the
+#   before the publish    next `done`, `fail` or `clear` republishes the winner's record
+#                         and appends nothing. No second row, and the forge closes.
+#   after the publish     the forge is closed, the row is written; there is nothing left
+#                         to do and nothing left to go wrong.
+# No path leaves a forge that cannot be closed, because no path leaves anything a later
+# invocation has to wait for.
+#
+# WHICH OF A RACING done AND fail WINS: whichever links the claim first. There is no
+# priority between them, and there deliberately is none -- both are outcomes, both are
+# true reports of what their caller believed, and picking one by kind would mean the
+# ledger recorded the outcome that arrived second. The loser exits 0 saying the forge was
+# already closed out, which is what the caller of a second close is told today.
+
+# Publish a closed record onto a slot -- but only while that slot is still the forge the
+# record belongs to.
+#
+# THE WINNER NEEDS THIS GUARD EXACTLY AS MUCH AS THE HEALER DOES. Left unguarded it was
+# not a theoretical window but an unbounded one: SIGSTOP a closer between the claim and
+# the publish, let another process heal the forge, `start` the same name again, then
+# SIGCONT -- and the 6-step forge that was live was replaced by the 4-step corpse. That
+# second forge then had no outcome row and could never be closed, because its own claim
+# had never been taken. `done` answered "already closed out" forever. A stopped process
+# is the extreme case; a loaded machine is the ordinary one.
+#
+# The check does not make the publish atomic -- a `start` landing between the test and the
+# `mv` still loses -- but it bounds the exposure to two adjacent statements instead of to
+# however long a process can be suspended.
+publish_close() { # <staged record> <slot file> <the id it was staged for>
+  if [ "$(field "$2" status)" = "active" ] && [ "$(forge_id "$2")" = "$3" ]; then
+    mv "$1" "$2" 2>/dev/null || rm -f "$1" 2>/dev/null
+  else
+    rm -f "$1" 2>/dev/null
+  fi
+}
+
+# Returns 0 if this process owns the outcome, 1 if another process does. Sets CLOSED_NAME.
+close_forge() { # <slot file> <status to write> <event> <phase> [keep|drop]
+  cf_f="$1"; cf_status="$2"; cf_event="$3"; cf_phase="$4"; cf_mode="${5:-keep}"
+  # Set BEFORE the early return: a `clear` that removed the slot between require_active
+  # and here sends the caller straight to closed_out, which reads this, and under `set -u`
+  # an unset variable is not a missing word in a sentence, it is `CLOSED_NAME: unbound
+  # variable` on stderr and a non-zero exit from a `done` that did nothing wrong.
+  CLOSED_NAME="${RESOLVED_NAME:-}"
+  [ -f "$cf_f" ] || return 1
+  cf_id="$(forge_id "$cf_f")"
+  cf_claim="$DIR/.outcome.$cf_id.claim"
+  cf_tmp="$cf_f.tmp.$$"
+  # The closed record is written COMPLETE, to a temp file, before anything is claimed --
+  # the same ordering `start` uses, and for the same reason: what appears at a claimed
+  # path is never a placeholder, so the loser below can publish it unread. The whole group
+  # is wrapped because a redirect that cannot open its target is reported by the SHELL.
+  { jq --arg p "$cf_phase" --arg s "$cf_status" --argjson now "$(now)" \
+       '.status = $s | .phase = $p | .updated = $now | .finished = $now
+        | (if $s == "done"
+           then .step = (if .step > .steps then .step else .steps end) else . end)' \
+       "$cf_f" > "$cf_tmp"; } 2>/dev/null \
+    || { rm -f "$cf_tmp" 2>/dev/null; die "could not update $cf_f"; }
+  CLOSED_NAME="$(sfield "$cf_tmp" name)"
+  cf_line="$(ledger_close_line "$cf_tmp" "$cf_event")"
+
+  if ln "$cf_tmp" "$cf_claim" 2>/dev/null; then
+    :
+  elif [ -e "$cf_claim" ]; then
+    # Lost. Someone else's outcome is the one the ledger will carry.
+    rm -f "$cf_tmp" 2>/dev/null
+    # If the winner has not published yet -- or was killed before it could -- finish its
+    # work rather than leaving a forge that shows as running forever. The record comes
+    # from the CLAIM, never from this process, so whichever of the two writes it last
+    # writes the same bytes.
+    cf_heal="$cf_f.tmp.$$.heal"
+    if ln "$cf_claim" "$cf_heal" 2>/dev/null; then
+      publish_close "$cf_heal" "$cf_f" "$cf_id"
+    fi
+    return 1
+  fi
+  # `ln` failed and no claim is there to explain it: the directory has gone read-only, or
+  # the filesystem refused the link. Proceed. The claim exists to stop a duplicate row,
+  # and a claim that cannot be created must never become a reason a forge cannot be
+  # closed -- that is the failure mode a lock would have had.
+  if [ -n "$cf_line" ]; then printf '%s\n' "$cf_line" >> "$LEDGER" 2>/dev/null || true; fi
+  if [ "$cf_mode" = "keep" ]; then
+    publish_close "$cf_tmp" "$cf_f" "$cf_id"
+  else
+    rm -f "$cf_tmp" 2>/dev/null
+  fi
+  return 0
+}
+
+# What a closer prints when another process owned the outcome. Deliberately the same
+# sentence require_active prints for a `done` typed after the forge was closed: to the
+# caller the two are the same situation -- the forge is closed, and this call is not what
+# closed it.
+closed_out() { # <slot file>
+  co_st="$(field "$1" status)"
+  [ -n "$co_st" ] || co_st="cleared"
+  echo "skillforge: '$CLOSED_NAME' was already closed out (status: $co_st); nothing to do"
+  exit 0
+}
+
+# ------------------------------------------------------ installing what was forged
+#
+# A FORGE THAT ENDS WITH AN UNUSABLE SKILL HAS NOT FINISHED. `skills/<name>/SKILL.md`
+# written during a session is invisible to that session until something links it into
+# the directory Claude Code reads, and only the installer ever made those links -- so a
+# skill forged and red-teamed through ten rounds answered `Unknown skill` for the rest
+# of the day, and the usage report showed it with 0 uses. That reads as "nobody
+# bothered", when the truth was that nobody could.
+#
+# THE OWNERSHIP JUDGEMENT IS NOT REIMPLEMENTED HERE. `skill_compounder/installer.py`
+# decides by four independent proofs of authorship whether a link at a destination is
+# one this package made (`_link_is_ours`). A second, shell-flavoured version of that
+# test would be the weaker one, and this package has twice destroyed a user's own
+# skills by being permissive about what counts as ours. `done` shells out to the one
+# implementation. python3 missing is reported, loudly, as a failure to install -- never
+# as a silent skip, because a silent skip leaves the user believing it worked.
+
+# The checkout this script belongs to, following however many symlinks lie between the
+# name that was typed and bin/skillforge. `readlink -f` is GNU-only and `realpath` is
+# not on every macOS, so the loop is hand-rolled.
+APP_HOME_CACHE=""
+app_home() {
+  if [ -z "$APP_HOME_CACHE" ]; then
+    ah_p="$0"; ah_n=0
+    while [ -L "$ah_p" ] && [ "$ah_n" -lt 32 ]; do
+      ah_t="$(readlink "$ah_p")"
+      case "$ah_t" in /*) ah_p="$ah_t" ;; *) ah_p="$(dirname "$ah_p")/$ah_t" ;; esac
+      ah_n=$(( ah_n + 1 ))
+    done
+    APP_HOME_CACHE="$(cd "$(dirname "$ah_p")/.." 2>/dev/null && pwd)"
+  fi
+  printf '%s' "$APP_HOME_CACHE"
+}
+
+abspath() { # <path> -> absolute, with trailing slashes stripped so basename is right
+  ap_p="$1"
+  case "$ap_p" in /*) : ;; *) ap_p="$PWD/$ap_p" ;; esac
+  while :; do case "$ap_p" in ?*/) ap_p="${ap_p%/}" ;; *) break ;; esac; done
+  printf '%s' "$ap_p"
+}
+
+# Where a skill has to land to be visible. In order: an explicit override (tests, and
+# anyone whose layout is unusual), the claude_dir this package was actually installed
+# into, and only then the default location.
+skills_dest() {
+  if [ -n "${SKILLFORGE_SKILLS_DIR:-}" ]; then printf '%s' "$SKILLFORGE_SKILLS_DIR"; return 0; fi
+  sd_c="$(jq -r '.claude_dir // empty' "$STATE_ROOT/install-manifest.json" 2>/dev/null)"
+  [ -n "${sd_c:-}" ] || sd_c="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  printf '%s/skills' "$sd_c"
+}
+
+# WHERE THE SKILL IS. Answered in this order:
+#   1. --skill-dir on this command.
+#   2. --skill-dir recorded by `start`, which is the only way a skill written somewhere
+#      unconventional is findable at all. A record written before this field existed
+#      simply does not have it, and falls through to the search below -- which is why
+#      the search is not conditional on the record.
+#   3. The two conventional layouts, under the repository `start` recorded first, then
+#      under the repository (or plain directory) we are standing in now.
+# Sets FOUND and FOUND_SCOPE: explicit, personal (a repo's skills/), project (a repo's
+# .claude/skills/, which Claude Code already loads for that repo and nowhere else).
+find_skill_dir() { # <name> <record file, or empty>
+  FOUND=""; FOUND_SCOPE=""
+  fs_n="$1"; fs_rec="${2:-}"; fs_root=""
+  if [ -n "$SKILLDIR_OPT" ]; then FOUND="$SKILLDIR_OPT"; FOUND_SCOPE="explicit"; return 0; fi
+  # A name that is not one path component cannot be a directory name under skills/.
+  case "$fs_n" in ''|*/*|.|..) return 1 ;; esac
+  if [ -n "$fs_rec" ] && [ -f "$fs_rec" ]; then
+    fs_d="$(field "$fs_rec" skill_dir)"
+    if [ -n "$fs_d" ]; then FOUND="$fs_d"; FOUND_SCOPE="explicit"; return 0; fi
+    fs_root="$(field "$fs_rec" root)"
+  fi
+  for fs_b in "$fs_root" "$(project_root)" "$PWD"; do
+    [ -n "$fs_b" ] || continue
+    if [ -f "$fs_b/skills/$fs_n/SKILL.md" ]; then
+      FOUND="$fs_b/skills/$fs_n"; FOUND_SCOPE="personal"; return 0
+    fi
+    if [ -f "$fs_b/.claude/skills/$fs_n/SKILL.md" ]; then
+      FOUND="$fs_b/.claude/skills/$fs_n"; FOUND_SCOPE="project"; return 0
+    fi
+  done
+  return 1
+}
+
+# Always prints exactly one line saying what happened, whatever happened. Sets
+# INSTALL_STATUS and returns the installer's exit status, which `install` reports and
+# `done` does not: the forge closed either way, and a `done` that exits non-zero would
+# be read as a close that failed.
+install_forged_skill() { # <name> <record file, or empty>
+  INSTALL_STATUS=""
+  ins_n="$1"; ins_rec="${2:-}"
+  if [ "${SKILLFORGE_NO_INSTALL:-0}" = "1" ]; then INSTALL_STATUS="disabled"; return 0; fi
+  ins_dest="$(skills_dest)"
+  if ! find_skill_dir "$ins_n" "$ins_rec"; then
+    # Not every forge writes a skill: a fix, a retirement or a red-team round does not.
+    # A skill ALREADY sitting at that name in the destination is NOT evidence that this
+    # forge produced one -- it is far more likely to be the user's own, and reporting it
+    # as "already installed" told someone their forge had landed when nothing had.
+    INSTALL_STATUS="not-found"
+    ins_note=""
+    [ -f "$ins_dest/$ins_n/SKILL.md" ] && ins_note=" (something else called '$ins_n' is already at $ins_dest/$ins_n; this forge did not put it there)"
+    echo "skillforge: no SKILL.md was found for '$ins_n', so nothing was installed (looked under skills/ and .claude/skills/ in $(project_root))$ins_note. If the skill is somewhere else: skillforge install '$ins_n' --skill-dir <dir>"
+    return 0
+  fi
+  # A skill under <repo>/.claude/skills/ is ALREADY loaded, for that repository. Linking
+  # it into the personal directory would widen a scope its author chose, in every other
+  # project, without being asked. Say where it is instead. An explicit --skill-dir IS
+  # the author asking, so that path installs.
+  if [ "$FOUND_SCOPE" = "project" ]; then
+    INSTALL_STATUS="project"
+    echo "skillforge: '$(basename "$FOUND")' is a project skill at $FOUND — already live for this project, and not linked into $ins_dest, which would have widened a scope its author chose. To make it available everywhere: skillforge install '$(basename "$FOUND")' --skill-dir '$FOUND'"
+    return 0
+  fi
+  # THE NAME THAT GOES LIVE IS THE DIRECTORY'S, NOT THE FORGE'S. Claude Code resolves a
+  # skill by the directory it sits in, so `--skill-dir .../real-name` under a forge called
+  # `typo-name` installs `real-name` -- and a message that said "installed 'typo-name'"
+  # promised a skill that would answer `Unknown skill` forever. Report what is true, and
+  # say so when the two differ rather than picking one and hoping.
+  ins_base="$(basename "$FOUND")"
+  ins_py="$(app_home)/skill_compounder/installer.py"
+  if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$ins_py" ]; then
+    INSTALL_STATUS="failed"
+    echo "skillforge: NOT INSTALLED — '$ins_base' is written at $FOUND but could not be linked into $ins_dest: this needs python3 and $ins_py. Until then the skill does not exist as far as any session is concerned. Link it by hand with: ln -s '$FOUND' '$ins_dest/$ins_base'" >&2
+    return 4
+  fi
+  ins_out="$(python3 "$ins_py" link-skill --skill-dir "$FOUND" --skills-dir "$ins_dest" \
+             --app-home "$(app_home)" --state-dir "$STATE_ROOT" 2>/dev/null)"
+  ins_rc=$?
+  INSTALL_STATUS="$(printf '%s' "$ins_out" | jq -r '.status // empty' 2>/dev/null)"
+  ins_msg="$(printf '%s' "$ins_out" | jq -r '.message // empty' 2>/dev/null)"
+  ins_warn="$(printf '%s' "$ins_out" | jq -r '.warning // empty' 2>/dev/null)"
+  ins_old="$(printf '%s' "$ins_out" | jq -r '.displaced // empty' 2>/dev/null)"
+  ins_decl="$(printf '%s' "$ins_out" | jq -r '.declared_name // empty' 2>/dev/null)"
+  ins_alias=""
+  [ "$ins_base" = "$ins_n" ] || ins_alias=" — NOTE: the forge is called '$ins_n' but the skill directory is '$ins_base', so '$ins_base' is the name that answers"
+  case "${INSTALL_STATUS:-}" in
+    linked)
+      echo "skillforge: installed '$ins_base' → $ins_dest/$ins_base — no restart; if Skill still says \"Unknown skill\", make one more tool call and retry$ins_alias"
+      if [ -n "${ins_old:-}" ]; then
+        echo "skillforge: that replaced an earlier link of ours, which pointed at $ins_old"
+      fi ;;
+    already-linked|already-there)
+      echo "skillforge: '$ins_base' was already installed at $ins_dest/$ins_base$ins_alias" ;;
+    refused)
+      echo "skillforge: NOT INSTALLED — $ins_msg" >&2
+      echo "skillforge: '$ins_base' is still only at $FOUND, so nothing can invoke it yet. Free that name — move or rename what holds it — then: skillforge install '$ins_base' --skill-dir '$FOUND'" >&2 ;;
+    failed|error)
+      # The name is not the problem here: the directory is read-only, or what was pointed
+      # at is not a skill. Telling the user to free a name they already own sends them to
+      # do something that changes nothing and fails again.
+      echo "skillforge: NOT INSTALLED — $ins_msg" >&2
+      echo "skillforge: '$ins_base' is still only at $FOUND, so nothing can invoke it yet. Fix what that says, then: skillforge install '$ins_base' --skill-dir '$FOUND'" >&2 ;;
+    *)
+      INSTALL_STATUS="failed"
+      echo "skillforge: NOT INSTALLED — could not link '$ins_base' from $FOUND into $ins_dest${ins_out:+ ($ins_out)}" >&2 ;;
+  esac
+  # Reported for every outcome, including the ones that installed cleanly: a directory
+  # and a frontmatter `name:` that disagree is an authoring mistake, and install time is
+  # the last moment anyone looks.
+  if [ -n "${ins_decl:-}" ]; then
+    echo "skillforge: WARNING — $FOUND/SKILL.md declares 'name: $ins_decl' but the directory is '$ins_base'. Make the two agree (see the skill-authoring skill); until then it is not certain which name a session will resolve." >&2
+  fi
+  if [ -n "${ins_warn:-}" ]; then echo "skillforge: $ins_warn" >&2; fi
+  return "$ins_rc"
 }
 
 # --------------------------------------------------------------------- option parse
@@ -334,12 +739,24 @@ cmd="${1:-}"; shift 2>/dev/null || true
 NAME_OPT="${SKILLFORGE_NAME:-}"
 ALL_OPT=0
 case "$cmd" in clear|show|list) ALLOW_ALL=1 ;; *) ALLOW_ALL=0 ;; esac
+# --skill-dir is only an option where it means something, for the same reason --all is:
+# a `fail` reason or a `step` phase that happens to contain the word is left alone.
+SKILLDIR_OPT="${SKILLFORGE_SKILL_DIR:-}"
+[ -n "$SKILLDIR_OPT" ] && SKILLDIR_OPT="$(abspath "$SKILLDIR_OPT")"
+case "$cmd" in start|done|install) ALLOW_SKILLDIR=1 ;; *) ALLOW_SKILLDIR=0 ;; esac
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --name|-n) [ $# -ge 2 ] || die "--name requires a forge name"
                NAME_OPT="$2"; shift 2 ;;
     --name=*)  NAME_OPT="${1#--name=}"; shift ;;
+    --skill-dir)   if [ "$ALLOW_SKILLDIR" -eq 1 ]; then
+                     [ $# -ge 2 ] || die "--skill-dir requires a directory"
+                     SKILLDIR_OPT="$(abspath "$2")"; shift 2
+                   else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --skill-dir=*) if [ "$ALLOW_SKILLDIR" -eq 1 ]; then
+                     SKILLDIR_OPT="$(abspath "${1#--skill-dir=}")"; shift
+                   else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --all)     if [ "$ALLOW_ALL" -eq 1 ]; then ALL_OPT=1; shift
                else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --)        shift; while [ $# -gt 0 ]; do ARGS[${#ARGS[@]}]="$1"; shift; done ;;
@@ -408,9 +825,24 @@ SLOTS
     # The whole group is wrapped, not just jq: a redirect that cannot open its target
     # is reported by the SHELL, so `jq ... > "$tmp" 2>/dev/null` still prints bash's own
     # "Permission denied" above the tidy message below it.
+    # `id` is written HERE, before the slot is claimed, so that every record this script
+    # publishes carries one from the instant it becomes visible. It is what names this
+    # forge's outcome claim; see close_forge.
+    # THE FIRST OBJECT IS FROZEN, AND NEW FIELDS ARE MERGED ONTO IT RATHER THAN ADDED
+    # INSIDE IT. tests/test_forge_close_race.py reconstructs a pre-claim version of this
+    # script by deleting the literal `, id:$id}` that ends that object; a field written
+    # between `updated:$now` and the brace makes its anchor miss, and the whole race
+    # suite quietly becomes a copy of the unmodified script instead of failing.
+    # `root` and `skill_dir` are written HERE because `done` may run from a different
+    # directory, and because a skill written outside the two conventional layouts is
+    # not findable at close time by any other means. A record from an older version has
+    # neither field; find_skill_dir falls back to searching for exactly that reason.
     { jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
+      --arg id "$(new_forge_id)" --arg root "$(project_root)" --arg sd "$SKILLDIR_OPT" \
       '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
-        status:"active", started:$now, updated:$now}' > "$tmp"; } 2>/dev/null \
+        status:"active", started:$now, updated:$now, id:$id}
+       + {root:$root}
+       + (if $sd == "" then {} else {skill_dir:$sd} end)' > "$tmp"; } 2>/dev/null \
       || { rm -f "$tmp" 2>/dev/null; die "could not write to $DIR (is it writable?)"; }
 
     if [ -n "$existing" ]; then
@@ -450,7 +882,7 @@ SLOTS
       done
     fi
     ledger_append start "$name" "$steps" "$summary"
-    reap_temps
+    reap_temps; reap_claims
     echo "skillforge: forging '$name' ($steps steps) — animation live in the status line"
     # Count the OTHER live forges and say so. A session that starts a second forge
     # without noticing is the situation where a bare `skillforge step` stops being
@@ -493,22 +925,50 @@ SLOTS
     FILE="$RESOLVED"
     msg="${*:-clean red-team pass}"
     # `done` fills the bar, but it must not REWIND a forge that ran past its budget:
-    # the ledger's rounds-completed count is derived from the step reached.
-    update "$FILE" --arg p "$msg" --argjson now "$(now)" \
-      '.status="done" | .step=(if .step > .steps then .step else .steps end)
-       | .phase=$p | .updated=$now | .finished=$now'
-    ledger_close "$FILE" done "$msg"
-    echo "skillforge: '$(sfield "$FILE" name)' complete — $msg"
+    # the ledger's rounds-completed count is derived from the step reached. close_forge
+    # carries that rule, and decides which of several racing closers writes the row.
+    if close_forge "$FILE" done done "$msg"; then
+      echo "skillforge: '$CLOSED_NAME' complete — $msg"
+      # Closing the loop is what makes the skill usable. Its status is deliberately not
+      # this command's: the forge did close, and a non-zero `done` would be read as a
+      # close that failed and retried. What went wrong is said out loud instead.
+      # The RAW name, not CLOSED_NAME: sfield folds control characters to spaces so a
+      # name is safe to print, and a forge name is allowed to contain a tab (the index is
+      # US-separated for exactly that reason). Installing off the printable form looked
+      # for a directory nobody had written.
+      install_forged_skill "$(field "$FILE" name)" "$FILE" || true
+    else
+      closed_out "$FILE"
+    fi
     ;;
 
   fail)
     require_active fail quiet
     FILE="$RESOLVED"
     reason="${*:-abandoned}"
-    update "$FILE" --arg p "$reason" --argjson now "$(now)" \
-      '.status="failed" | .phase=$p | .updated=$now | .finished=$now'
-    ledger_close "$FILE" fail "$reason"
-    echo "skillforge: '$(sfield "$FILE" name)' abandoned — $reason"
+    if close_forge "$FILE" failed fail "$reason"; then
+      echo "skillforge: '$CLOSED_NAME' abandoned — $reason"
+    else
+      closed_out "$FILE"
+    fi
+    ;;
+
+  install)
+    # The retry path after a refusal, and the repair path for a forge closed before any
+    # of this existed. Unlike `done`, an install that did not happen exits non-zero:
+    # here the install IS the request.
+    ins_name="${1:-}"
+    [ -z "$ins_name" ] && ins_name="$NAME_OPT"
+    [ -z "$ins_name" ] && [ -n "$SKILLDIR_OPT" ] && ins_name="$(basename "$SKILLDIR_OPT")"
+    [ -z "$ins_name" ] && die "usage: skillforge install <name> [--skill-dir <dir>]"
+    install_forged_skill "$ins_name" ""; ins_rc=$?
+    case "${INSTALL_STATUS:-}" in
+      linked|already-linked|already-there|project|disabled) exit 0 ;;
+      not-found) exit 3 ;;
+      # Whatever the installer said: a refusal (3) and a failure (4) are different
+      # problems and a caller that branches on the code should be able to tell them apart.
+      *) [ "$ins_rc" -gt 0 ] && exit "$ins_rc"; exit 4 ;;
+    esac
     ;;
 
   clear)
@@ -518,12 +978,16 @@ SLOTS
       cleared=0
       while IFS="$SEP" read -r c_st c_nm c_stt c_pth; do
         [ -n "${c_pth:-}" ] || continue
-        [ "$c_stt" = "active" ] && ledger_close "$c_pth" fail "cleared before completing"
+        # `drop`: the slot is about to be deleted, so there is nothing to publish. The
+        # claim still decides the row, so a clear racing a done writes one row, not two.
+        if [ "$c_stt" = "active" ]; then
+          close_forge "$c_pth" failed fail "cleared before completing" drop || :
+        fi
         rm -f "$c_pth"; cleared=$(( cleared + 1 ))
       done <<SLOTS
 $(slots)
 SLOTS
-      reap_temps
+      reap_temps; reap_claims
       echo "skillforge: cleared $cleared forge(s)"
       exit 0
     fi
@@ -531,7 +995,9 @@ SLOTS
     [ "$rc" -eq 3 ] && die "$AMBIG are all live. Say which one: skillforge clear --name <forge>, or clear every one with skillforge clear --all"
     [ "$rc" -eq 1 ] && [ -n "$NAME_OPT" ] && die "no forge named '$NAME_OPT' (try: skillforge list)"
     if [ "$rc" -eq 0 ]; then
-      [ "$(field "$RESOLVED" status)" = "active" ] && ledger_close "$RESOLVED" fail "cleared before completing"
+      if [ "$(field "$RESOLVED" status)" = "active" ]; then
+        close_forge "$RESOLVED" failed fail "cleared before completing" drop || :
+      fi
       rm -f "$RESOLVED"
       echo "skillforge: cleared"
       exit 0
@@ -680,7 +1146,7 @@ SLOTS
     ' "$LEDGER"
     ;;
   ""|-h|--help|help)
-    sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac

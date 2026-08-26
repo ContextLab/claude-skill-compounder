@@ -1,6 +1,6 @@
 ---
 name: skill-authoring
-description: "Use when a SKILL.md's frontmatter is what you write or fix: naming the directory, wording the `Use when` and decline clauses that decide when it fires, and running the parse and trigger gates that catch a skill which loads but never fires. Do NOT use for judging whether a procedure has earned a skill, red-teaming or retiring one (that is skill-compounder), proposing one upstream (that is contribute-skill), a body whose trigger works (that is writing-skills), or ordinary docs and commands."
+description: "Use when a SKILL.md's frontmatter is what you write or fix: naming the directory, wording the description whose `Use when` and decline clauses decide when it fires, fixing an installed skill that never fires, and running the parse and trigger gates. Do NOT use for judging whether a procedure earned a skill, red-teaming or retiring one (that is skill-compounder), proposing one upstream (that is contribute-skill), a body whose trigger works (that is writing-skills), or ordinary docs and commands."
 ---
 
 # Authoring a SKILL.md
@@ -274,7 +274,7 @@ so a stray `__pycache__` or `.pyc` ships with it.
 
 **1. Write the per-skill test.** The caps and the gates are enforced per skill, not
 globally, so a new skill has no guard at all until you write one: `ai-tell-audit` ships a
-531-line body, over the documented 500-line ceiling, because its own test file caps the description
+534-line body, over the documented 500-line ceiling, because its own test file caps the description
 and not the body.
 
 Where it goes, because there is no default: if the skill lives in a repository, the file is
@@ -344,18 +344,18 @@ Each of these means stop and go back to a gate:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 475581b42feeeb01cfee2405b6b4e8a5980c5733cd54763e997844b1fab697d6
-prompts-sha256: 1af1600342f88f4d146c2fea43b8378454a776f7498cd7a9ae6b0d35d9a047b1
-measured: never
-cli: n/a
-model: n/a
-result: unmeasured
+description-sha256: c3824c94371795f78ffa2ded9b282db21e8d9b4b8e0d5cce7ad632894c9a3623
+prompts-sha256: e3500966bcaac0ffe4e9ceffd2d8bf220d31166fab4082d87ae88cbfdcbb9281
+measured: 2026-08-25
+cli: 2.1.245 (Claude Code)
+model: sonnet
+result: verified 3/3 must-fire, 3/3 must-not-fire
 -->
 
 Prompts that MUST fire this skill:
 
-1. "Write a SKILL.md for the release checklist we keep redoing by hand."
-2. "This skill is installed but it never fires. Fix its description."
+1. "Draft the frontmatter for this new SKILL.md: pick the directory name and word the description; the body can wait."
+2. "The deploy-checklist skill is installed but it never fires. Fix its description so the router picks it up."
 3. "Rename the skill directory and rewrite the frontmatter so it stops colliding with stale-artifact-check."
 
 Prompts that must NOT fire this skill:
@@ -363,6 +363,14 @@ Prompts that must NOT fire this skill:
 1. "We have hit this deploy footgun three times now. Does that deserve a skill?" (A threshold judgement, which is `skill-compounder`. This skill starts once the answer is yes.)
 2. "Write the README for this repository."
 3. "Add a slash command that runs the test suite."
+
+A bare "write a SKILL.md for X" request is deliberately not claimed here. Measured on
+2026-08-25, it routes to `writing-skills` where that plugin is installed, and this
+description claims the strictly smaller frontmatter situation on purpose (Phase 1 calls
+that overlap blocking; see `## When this is the wrong skill`). A referent-free "this
+skill never fires" also went unclaimed when measured: with no skill named, the router
+fired nothing, so must-fire 2 names one. Inside the forging loop this skill is not
+routed at all: `skill-compounder` step 2 invokes it by name.
 
 ## Quick reference
 

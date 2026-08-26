@@ -74,6 +74,46 @@ active forge: a bare `step` against a closed record rewinds the bar under a gree
 second `done` appends a second outcome row for one start, which makes the ledger count one
 forge twice while its own join hides the duplicate.
 
+### One outcome row per forge
+
+`done`, `fail` and `clear` all end a forge, and all three read the slot, wrote it, then
+appended a row. Two at once both read `active` — neither had written yet — so both
+appended: 40 of 40 trials for two `done`s, 40 of 40 each for a `fail` and a `clear` racing
+a `done`. `skillreport` reads nothing but the ledger, so a duplicate inflates the only
+measurement this package makes about itself.
+
+A lock is the wrong instrument. Held across a write where a process can be killed at any
+moment, it turns a duplicated row into a forge nobody can close. The outcome is claimed
+instead the way a slot is: `ln` of the fully-written closed record onto
+`forge/.outcome.<id>.claim`. The link appears atomically or fails because the name is
+taken; the winner appends, the losers exit 0; nothing is held. A racing `done` and `fail`
+are settled by whoever links first, deliberately — both are true reports, and choosing by
+kind would record the outcome that arrived second.
+
+The order is stage, build the line, claim, append, publish. Every fork happens before the
+claim — the reasoning that warms `project_root()` ahead of the slot claim — so the gap
+between winning and having the row on disk is one `printf` builtin. Killed before the
+claim: nothing happened. Killed between claim and append: the row is lost and the ledger
+says so, and the next closer heals the slot from the claim's own copy of the record.
+Killed before the publish: same heal, row already written. Killed after: nothing left to
+do. A claim that cannot be created is bypassed, never waited on.
+
+`<id>` must be injective and bounded, and that is not a detail: two forges sharing a claim
+leaves the second unclosable and buries it under the first one's corpse. `tr` sanitizing is
+many-to-one and did exactly that; a claim path over NAME_MAX makes `ln` fail with no claim
+to show and brings the duplicate back. An `id` that is not already a safe, bounded filename
+is replaced, not repaired — by the slot's inode plus its start time, the inode because
+`started` repeats under a pinned clock, the start time because inodes are recycled.
+
+Publishing is guarded on the slot still being that forge, in the winner as much as in the
+healer: unguarded, a closer stopped between claim and publish and resumed after a
+re-`start` replaced a live forge with its corpse.
+
+A claim is reaped after an hour like any temp file — unless the forge it names is still
+active, which is the fingerprint of a closer killed before publishing and the only thing
+stopping a second row. `reap_temps` now excludes `*.json`: a forge named `build.tmp` has a
+slot matching `*.tmp.*`, and was deleted out from under itself an hour in.
+
 ### The status line rotates
 
 A status line is one line wide and a forge segment is about seventy columns, so two do not

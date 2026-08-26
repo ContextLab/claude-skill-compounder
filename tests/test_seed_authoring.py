@@ -392,11 +392,12 @@ PINNED = (
     # edits that leave it green. Every one below was reproduced here before it was pinned.
     ("the-description-itself",
      "Use when a SKILL.md's frontmatter is what you write or fix: naming the directory, "
-     "wording the `Use when` and decline clauses that decide when it fires, and running "
-     "the parse and trigger gates that catch a skill which loads but never fires. Do NOT "
-     "use for judging whether a procedure has earned a skill, red-teaming or retiring one "
-     "(that is skill-compounder), proposing one upstream (that is contribute-skill), a "
-     "body whose trigger works (that is writing-skills), or ordinary docs and commands.",
+     "wording the description whose `Use when` and decline clauses decide when it fires, "
+     "fixing an installed skill that never fires, and running the parse and trigger "
+     "gates. Do NOT use for judging whether a procedure earned a skill, red-teaming or "
+     "retiring one (that is skill-compounder), proposing one upstream (that is "
+     "contribute-skill), a body whose trigger works (that is writing-skills), or "
+     "ordinary docs and commands.",
      "The description IS the skill: it is the only text the router reads, so every other "
      "rule in the file is downstream of it. Pinned whole, and deliberately, because the "
      "three ways to break it are all invisible to a structural test -- swapping which "

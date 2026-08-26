@@ -254,6 +254,28 @@ DOCTRINE = (
      (SKILL_PATH, "README.md"),
      "Retirement can be wrong, so it has to be recoverable."),
 
+    ("routing-gate-on-completion",
+     "A forge cannot be reported clean while the skill's own must-fire prompts do not "
+     "fire it.",
+     (SKILL_PATH,),
+     "Every seed skill passed a full red-team loop on a `## Trigger precision` section "
+     "nobody ran; three of the claims were then false. A reviewer agreeing a description "
+     "reads well is not a measurement of the router."),
+
+    ("must-not-half-is-a-gate",
+     "A skill that fires on everything is worse than no skill.",
+     (SKILL_PATH,),
+     "Half a routing gate is not a gate: a skill that wins every prompt displaces the "
+     "neighbour that would have handled it, which is the failure `stale-artifact-check` "
+     "suffered from the other side."),
+
+    ("unmeasured-is-not-verified",
+     "A probe that could not run is never a pass.",
+     (SKILL_PATH,),
+     "Without this the gate degrades to nothing the first time there is no auth or no "
+     "quota: an unrun probe silently promoted to verified is the exact record this gate "
+     "exists to end."),
+
     ("concurrent-forges",
      "Concurrent forges are fine — each gets its own record and its own slot in the status "
      "line, and starting one never disturbs another.",
