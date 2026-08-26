@@ -237,11 +237,29 @@ DOCTRINE = (
      "After round one the previous reviewer is no longer cold, so reusing it is the fork "
      "problem with extra steps."),
 
-    ("narrow-or-abandon-at-the-cap",
-     "If it is not clean at the cap, do not ship a half-working skill: narrow its scope "
-     "until it is clean, or abandon it.",
+    ("assess-convergence-every-round",
+     "Decide whether the loop is converging at every round, not at the cap.",
      (SKILL_PATH,),
-     "A cap with no consequence is not a cap; without this the loop just runs longer."),
+     "The rule this replaced put the scope decision AT the cap, and a reader followed it "
+     "into a plan that would have narrowed a skill in its final round and shipped the "
+     "result -- changing what the skill was and leaving that change unreviewed, in one "
+     "step. A cap reached is not a decision point; it is the moment the budget for making "
+     "one ran out."),
+
+    ("the-assessment-binds-from-round-three",
+     "The assessment binds from round 3 and not before",
+     (SKILL_PATH,),
+     "A cold reviewer showed the catch-all firing at round 1: with one data point no "
+     "trajectory can match the converging definition, so 'anything else is not converging' "
+     "handed a pressed session permission to abandon after a single round. A rule that "
+     "fires on one round is a licence to quit after one."),
+
+    ("narrowing-restarts-the-review",
+     "A narrowed skill is a new skill for review purposes: the rounds already spent "
+     "certify a skill that no longer exists.",
+     (SKILL_PATH,),
+     "Without this, 'narrow its scope until it is clean' reads as an edit made on the way "
+     "out the door rather than a decision that costs another cold round."),
 
     ("no-silent-workaround",
      "Never silently work around a skill that misfired.",

@@ -111,3 +111,52 @@ That is why the pin carries `runs: N` and a k/N count per prompt:
 that is the same move as pasting a fresh hash into a broken pin: it certifies the draw, not
 the claim. If a prompt splits, the description is what changes — the lever is the same one
 the rest of this file is about — and then the whole section is measured again.
+
+## What the gate costs
+
+One `claude -p` call per prompt per run, so the arithmetic is
+`len(prompts) * runs` and it should be quoted at the N the gate actually demands rather than
+at one run.
+
+- One six-prompt skill at the three-run floor: ~18 calls, ~1.5 minutes.
+- The eight-skill seed pool: 48 prompts, ~144 calls, ~12 minutes at three runs.
+
+Measured 2026-08-26 on CLI 2.1.245, six probes in parallel: a draw takes 8-47s, median 22s.
+Draws where a skill actually fires are slower — median 32s against 16s — so a skill that
+routes well costs more to prove than one that does not.
+
+## The spread that sets the three-run floor
+
+Routing is stochastic, and these are the observations the floor is built on rather than a
+model of why.
+
+- One unchanged description, probed three times: **3/3, then 1/3, then 2/3.**
+- `skill-compounder`'s own six prompts, probed three times in one day with nothing edited
+  between the passes: **9/9, then 8/9, then 9/9.** The pass that lost fired *nothing at all*,
+  so it was not a neighbouring skill winning the prompt.
+
+Three runs is a floor for **detecting** that spread. It is not a confidence interval, and a
+section that scores 6/6 across three runs has had three clean draws, not a measured rate.
+
+## How small a description edit can be and still flip a prompt
+
+Changing `"Use before debugging logic"` to `"Use before any other debugging step"` turned a
+losing must-fire prompt into a winning one. Four words, in the opening clause.
+
+That is the reason the repair for a lost prompt is always the description and never the
+prompt: the prompt is the claim being tested, and rewriting it to match what the router
+already does converts a failed measurement into a tautology.
+
+## Three claims that a full builder/red-team loop certified and the probe falsified
+
+Every seed skill in this package passed a complete forging loop, reviewers included, on a
+`## Trigger precision` section nobody had run. When the prompts were finally executed on
+2026-08-25, three of the claims were false:
+
+- **`stale-artifact-check`** lost two of its three must-fire prompts to
+  `superpowers:systematic-debugging`.
+- **`session-handoff`** listed one must-fire prompt that fires nothing at all.
+- **`skill-compounder`** listed one likewise.
+
+That is the whole argument for the gate being a RUN rather than a read. A reviewer agreeing
+the prompts look right is measuring the same intuition that wrote them.

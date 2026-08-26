@@ -27,11 +27,21 @@ the mapping out when briefing B rather than saying "the step numbering". An orch
 that calls `skillforge step 2..5` against the pasted section headings stalls the bar and
 records one round where five happened.
 
-**Overrunning is fine.** `skillforge step 15 "round 7 review"` records 15 against a 12-step
-budget rather than clamping: the status line draws `15/12 over` with the bar's last cell
-marked `»`, and `rounds` counts what was completed. Read the overrun as what it is — you
-are past the cap, so the narrow-or-abandon rule applies. Do not free the name by closing
-the forge first; that records an outcome for work that has not finished.
+**Overrunning is fine, and for a converging loop it is CORRECT.** `skillforge step 15
+"round 7 review"` records 15 against a 12-step budget rather than clamping: the status line
+draws `15/12 over` with the bar's last cell marked `»`, and `rounds` counts what was
+completed.
+
+**An overrun is not a verdict, and being past the cap triggers nothing.** This sentence used
+to read "you are past the cap, so the narrow-or-abandon rule applies", which was the old
+doctrine and is now wrong — it survived a rewrite of `SKILL.md` and contradicted it, in the
+one file a converging session lands in at exactly the moment it is overrunning. What decides
+narrow-or-abandon is the convergence assessment `SKILL.md` runs at EVERY round, on the round
+record; a loop that is converging is *supposed* to overrun rather than cut to fit the budget,
+and a loop that is not converging was already made to decide, rounds earlier.
+
+Do not free the name by closing the forge first; that records an outcome for work that has
+not finished.
 
 ## Closing: three commands, not interchangeable
 
@@ -100,3 +110,70 @@ Do not write, or read, the ledger as a record of every invocation.
 - **Reminders too frequent or too rare.** Tune `CI_EDIT_EVERY`, `CI_PROMPT_COOLDOWN` and
   `CI_PROMPT_MIN_CHARS` in the hook entries in `settings.json`. Raise the thresholds rather
   than uninstalling.
+
+## What each step number in the budget means
+
+`<total-steps>` is `2 + 2 × (planned D rounds)`:
+
+- **step 1** when B is dispatched;
+- **step 2** when C's draft lands and has passed the parse gate;
+- then **one review step and one revision step per planned round**.
+
+Neither gate gets a number of its own, and dispatching B is not a step. That is not
+arbitrary: the ledger inverts this budget to recover the round count as `(steps - 2) / 2`,
+so an extra number anywhere makes every recorded `rounds` wrong by half of it.
+
+Overrunning is fine and is meant to be visible. Keep stepping past the budget; no command can
+re-budget a live forge, and a forge that ran long should read as one that ran long.
+
+## The held-out fields, and the step numbering B needs spelled out
+
+**The CLI withholds the test set rather than trusting the orchestrator to.** `skillforge show`
+and `skillforge ledger` omit `root`, `trigger`, `project` and `trigger_verbatim` unless you
+pass `--full`, and they name what they left out so nobody reads a redacted record as a
+complete one. The record on disk keeps every field; only the default view is reduced.
+
+**Spell the step numbering out when briefing B**, because the numbers do not coincide with the
+prose headings and an orchestrator that guesses stalls the bar:
+
+- `step 1` on dispatching C;
+- `step 2` when C's draft lands and passes the parse gate;
+- `step 3` and `step 4` for the first D round — review, then revision;
+- two more per round after that.
+
+## What `done` looks for, and what the close row records
+
+`done` looks under `<repo>/skills/<name>/` and `<repo>/.claude/skills/<name>/`, or wherever
+`--skill-dir <dir>` said at `start`. The name that answers is the **directory's**, and a
+destination held by something this package cannot prove it created is refused rather than
+overwritten.
+
+The close row records `skill: present` or `skill: missing` either way, so a forge that shipped
+nothing stays countable after the terminal line has scrolled away.
+
+**Scope follows placement.** A skill written to `<repo>/.claude/skills/` stays project-scoped
+and `done` leaves it there rather than widening a placement its author chose. A headless
+`claude -p` started in that repository sees it; one that narrows `--setting-sources` does not.
+Both measured, in `docs/CLAUDE-CODE-BEHAVIOR.md`.
+
+**The lag, measured.** A skill created mid-session became invocable in that session in 4 of 4
+runs, but 2 of those 4 answered `Unknown skill` on the first `Skill` call and launched on the
+second. A **subagent** dispatched after the install saw it first-try in 4 of 4. So retrying is
+correct in the main thread, and handing the job to a subagent removes the race.
+
+## Why `--trigger` is mandatory in the protocol though the CLI only warns
+
+The ledger asks what set a forge off, what got built, when it has been used since, whether it
+worked, and whether it was applied to the problem that caused it. **The first is the only one
+nothing can reconstruct later.** A trigger is what a person actually said or what a hook
+actually emitted; by the time anyone reads the row, the moment is gone and a summary written
+from memory is not the same artifact.
+
+`--trigger-kind` says who was asking. Whether that field moves towards `user-prompt` over time
+is the measurement this whole package exists to make: a forge started because a human asked is
+a different event from one a hook nagged into existence.
+
+The CLI warns rather than refuses because refusing produces no row at all, and the cheapest
+way past a CLI that refuses is to stop calling it. A gap recorded as `trigger_kind:"unrecorded"`
+is countable; a missing row is not. `SKILLFORGE_REQUIRE_TRIGGER=1` turns the warning into a
+refusal once every caller is updated.

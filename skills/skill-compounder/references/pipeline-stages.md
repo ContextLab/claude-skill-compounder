@@ -255,3 +255,26 @@ informative thing a failed forge produces, and a merged narrative destroys exact
 The report and the skill are archived together, under `~/.claude/skills-archive/<name>/`,
 with the report as that directory's `WHY-ARCHIVED.md`. Same convention as retirement, in
 `skills/skill-compounder/references/retirement.md`; nothing is ever deleted.
+
+## Step 6: feeding findings back without stalling the loop
+
+Feed D's findings to C with `SendMessage`, so C keeps its context and its scratch
+reproduction rather than rebuilding both. **Do not block waiting on the reply.** Messages from
+a *resumed background* builder have been seen looping back to the sender instead of arriving,
+stalling the loop until somebody relayed them by hand.
+
+Poll for an artifact instead — the same grep-able marker file the quiesce check already needs,
+so this costs nothing extra. That marker is also what tells you C is idle, which is the
+precondition for letting any reviewer, gate or acceptance test read the draft.
+
+## Why a reviewer is never handed a list of what not to flag
+
+Observed once here, a single A/B on one file. One agent was given a "do not flag these" list
+alongside the file; another was given only the principle. They produced **1 finding and 4**,
+and the neutral reviewer *defended* two of the passages the biased brief would have had it
+condemn.
+
+n = 1, so this is an illustration rather than a rate. It is enough to settle the direction:
+telling a reviewer what the answer should not be gets a reviewer that agrees. Constraining
+METHOD is fine and is not the same act — "run every command you are about to assert" tells it
+how to look, not what to conclude.

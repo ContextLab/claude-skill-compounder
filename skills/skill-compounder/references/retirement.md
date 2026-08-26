@@ -54,3 +54,17 @@ A quarantined skill is not installed and does not fire. It is kept because the n
 to hit the same trigger needs to know the attempt was made and why it failed — otherwise the
 same forge is run again from scratch, which is the failure this whole package exists to
 prevent.
+
+## Why the link is the wrong thing to move
+
+Most skills here are symlinks into a checkout. Two things follow, and both have bitten:
+
+- `mv ~/.claude/skills/<name> <archive>/` moves the **link**. The real directory stays where
+  it is, and the next `install.sh` walks `skills/` and resurrects it. The retirement reads as
+  successful and is undone by the next install.
+- Writing `WHY-ARCHIVED.md` into the moved directory writes **into the live source**, because
+  the moved link still resolves there. The explanation of the retirement lands in the thing
+  being retired, where the next install will happily ship it.
+
+So: `realpath` first, move the resolved directory, then drop the dangling link. The sequence
+below does that in the right order.

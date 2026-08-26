@@ -74,12 +74,9 @@ skillforge start <name> <total-steps> "<one-line summary>" \
 ```
 
 **`--trigger` is not optional in this protocol, even though the CLI only warns.** It is the one
-of the ledger's four questions nothing can recover afterwards — a quote is what a person said
-or what a hook emitted, and by the time anyone reads the row the moment is gone — and it
-carries that quote to stage E, on disk, through a compaction of this thread. Paste it; do not
-summarise. `--trigger-kind` says who was asking, and whether that field moves towards
-`user-prompt` over time is the measurement this whole package exists to make; what a missing one
-records, and how to make it a refusal, is in `references/forge-animation.md`.
+ledger question nothing can recover afterwards, and it carries the quote to stage E on disk,
+through a compaction of this thread. Paste it; do not summarise. `--trigger-kind` says who was
+asking (`references/forge-animation.md`).
 
 <!-- doctrine: concurrent-forges -->
 **Just start it.** Concurrent forges are fine — each gets its own record and its own slot in
@@ -89,13 +86,10 @@ it with `skillforge done --name <forge>`. While more than one is live, `skillfor
 and `fail` refuse to guess which you mean, so pass `--name <forge>` on every call after `start`.
 
 **Decide the round cap here**, because `<total-steps>` encodes it and `skillforge` cannot be
-told later. Budget it as `2 + 2 × (planned D rounds)`: step 1 when B is dispatched, step 2
-when C's draft lands and has passed the parse gate, then a review step and a revision step
-per planned round — **12** for the usual 5-round cap, **22** at 10. Neither gate gets a
-number of its own, and dispatching B is not a step, because the ledger inverts this budget
-to recover round counts as `(steps - 2) / 2`. Overrunning is fine and visible: keep stepping
-past the budget rather than re-budgeting, which no command can do. The closing commands, the
-overrun display, and how `rounds` is derived are in `references/forge-animation.md`.
+told later: budget `2 + 2 × (planned D rounds)`, so **12** at the usual 5-round cap and **22**
+at 10. Overrunning is fine and visible — keep stepping past the budget rather than
+re-budgeting, which no command can do. What each step number means, how `rounds` is inverted
+back out of it, and the overrun display are in `references/forge-animation.md`.
 
 **1. A: pre-register, in writing, before anything is dispatched.** This is what makes
 goalpost-moving impossible, and goalpost-moving is the recurring failure this pipeline is
@@ -128,28 +122,22 @@ not the reason — the agents already run in the background. The cost is that ev
 every revision brief passes through your context, filling the thread the user is talking to
 with review traffic they did not ask to read; the findings are not what anyone needed to keep.
 
-**B is the orchestrator, not a fourth agent.** It decides scope, sets the cap, dispatches C
-and D, and confirms every fix by running it rather than trusting the report that claims it —
-builders in this loop have reported fixes that were not made and figures that did not
-reproduce. A subagent dispatched by the main session can itself dispatch subagents (probed
-three times, it had `Agent` every time) so B drives the animation while it works; one level
-further down, availability is inconsistent with no rule predicting which way. So **use exactly
-one orchestrator layer, and never nest orchestrators**; C and D dispatch nobody
-(`docs/CLAUDE-CODE-BEHAVIOR.md`). Invoking this skill from *inside* a subagent already puts B in
-that inconsistent band: run the rounds yourself from step 3, keeping the announcement and close.
+**B is the orchestrator, not a fourth agent.** It decides scope, dispatches C and D, and
+confirms every fix by running it rather than trusting the report — builders here have reported
+fixes that were not made. A subagent can itself dispatch subagents, but one level further down
+availability is inconsistent, so **use exactly one orchestrator layer and never nest them**; C
+and D dispatch nobody (`docs/CLAUDE-CODE-BEHAVIOR.md`). Invoking this skill from *inside* a
+subagent already puts B in that inconsistent band: run the rounds yourself from step 3.
 
 Do **not** hand B the project, the repository path, or the verbatim trigger; those are the test
-set — and the CLI B drives holds them back rather than trusting it: `skillforge show` and
-`skillforge ledger` omit `root`, `trigger`, `project` and `trigger_verbatim` without `--full`,
-naming what they left out. Hand it: A's framing and the generalised transcript, **dead ends
-included**; the round cap; the `skillforge step` numbering **spelled out** (`step 1` on
-dispatching C, `step 2` when its draft passes the parse gate, `step 3`/`step 4` for the first D
-round, and so on — the headings are prose sections and do not coincide); steps 3 to 7 **pasted in
-full** rather than referenced, so it does not read step 2 and nest a second orchestrator; and one
-abort condition: **if it has no `Agent` tool it stops and says so immediately** — it must never
-write the skill itself or review its own draft, because an orchestrator that cannot dispatch but
-improvises anyway returns a confident "clean" with no adversarial review behind it, the one
-failure of this protocol invisible from the outside. If it aborts you already hold an open forge:
+set, and the CLI withholds them rather than trusting B to: `skillforge show` and `ledger` omit
+`root`, `trigger`, `project` and `trigger_verbatim` without `--full`, naming what they left out.
+Hand it: A's framing and the generalised transcript, **dead ends included**; the round cap; the
+`skillforge step` numbering **spelled out** (`references/forge-animation.md`); steps 3 to 7
+**pasted in full**, so it does not read step 2 and nest a second orchestrator; and one abort
+condition: **if it has no `Agent` tool it stops and says so immediately.** An orchestrator that
+cannot dispatch but improvises anyway returns a confident "clean" with no adversarial review
+behind it — the one failure of this protocol invisible from the outside. If it aborts you already hold an open forge:
 run the rounds yourself, or `skillforge fail "orchestrator could not dispatch"` and start again.
 
 <!-- doctrine: standard-is-not-project-content -->
@@ -174,13 +162,10 @@ report is slow: an orchestrator that dies mid-loop leaves a forge you can still 
 
 <!-- doctrine: quiesce-before-reading -->
 **Nothing reads a draft while its author is still writing it.** Upward: do not edit B's files,
-commit, or read a test run as a verdict while B works — it is editing that SKILL.md and its tests
-between rounds, so an edit tears both ways and a suite run proves nothing about the tree B will
-leave. Downward, the half that gets forgotten: B confirms C is **idle** before any reviewer, gate
-or acceptance test reads the draft, by something observable — C's end-of-round marker file, plus
-the draft's checksum unchanged across two reads — never by a message claiming so. An acceptance
-tester once read the file while C was still applying fixes and scored a moving target;
-`references/pipeline-stages.md` carries both halves.
+commit, or read a test run as a verdict while B works. Downward, the half that gets forgotten:
+B confirms C is **idle** before any reviewer, gate or acceptance test reads the draft, by
+something observable — never by a message claiming so. An acceptance tester once scored a
+moving target this way; `references/pipeline-stages.md` carries both halves.
 
 **3. B: place the skill at the highest level it applies to, then set the cap.** The hierarchy
 is general > user > project.
@@ -207,29 +192,26 @@ present wherever this skill is. Name it explicitly: an earlier version of this s
 `compound-engineering:skill-creator` and `superpowers:writing-skills`, inside plugins a fresh
 install does not carry — so a cold session followed the instruction and found nothing.
 
-**Isolation is structural, and it is test discipline rather than tidiness.** Hand C a scratch
-working directory and no path into the project — "do not look at the project" is a sentence, and
-sentences get read past, so what C is *given* is the enforcement. A builder that can see the
-held-out case writes to it, and the skill then works there and nowhere else.
+**Isolation is structural, not tidiness.** Hand C a scratch directory and no path into the
+project: "do not look at the project" is a sentence, and sentences get read past, so what C is
+*given* is the enforcement. A builder that can see the held-out case writes to it, and the
+skill then works there and nowhere else.
 <!-- doctrine: boundary-without-the-address -->
 **Where a boundary must still be stated, describe what it encloses and never name what lies
-outside it.** "Read nothing outside your scratch directory" is
-checked exactly the way naming the path is — grep the transcript, expect zero — while a brief
-forbidding a path has handed over the held-out data's address in the act of forbidding it. But C
-is isolated from the *project*, never from *execution*: an agent that cannot run anything writes
-exactly the unverified claims this pipeline exists to prevent, and unverified claims are defects.
-So C must **build a minimal runnable reproduction** from B's brief, in its scratch directory, and
-verify every command it documents against it. If C cannot construct a repro that is a finding,
-not a licence to proceed — the brief was too abstract to be executable, and it goes back to B.
+outside it.** "Read nothing outside your scratch directory" is checked exactly the way naming
+the path is — grep the transcript, expect zero — while a brief forbidding a path has handed over
+the held-out data's address in the act of forbidding it. But C is isolated from the *project*,
+never from *execution*: so C **builds a minimal runnable reproduction** from B's brief and
+verifies every command it documents against it. If C cannot construct a repro that is a finding
+rather than a licence to proceed — the brief was too abstract to be executable.
 
 **Then verify the draft parses, before anyone reviews it.** A skill can pass every review round
-on its content and still ship inert, and nothing built into Claude Code catches it: `claude
-plugin validate --strict` checks the plugin manifest and **does not read SKILL.md frontmatter at
-all** — frontmatter raising `yaml.ScannerError` still gets `✔ Validation passed`, exit 0. Run
-`skill-authoring` Phase 3's Gate A, or the short version in `references/pipeline-stages.md`; do
-not read it and conclude it would pass. The commonest break is an **unquoted `: ` inside the
-description**, which costs the parser that key and leaves the skill installed, named, and unable
-to fire. Three of this repository's four seed skills shipped so.
+on its content and still ship inert, and nothing built in catches it: `claude plugin validate
+--strict` **does not read SKILL.md frontmatter at all** — frontmatter raising `yaml.ScannerError`
+still gets `✔ Validation passed`, exit 0. Run `skill-authoring` Phase 3's Gate A, or the short
+version in `references/pipeline-stages.md`; do not read it and conclude it would pass. The
+commonest break is an **unquoted `: ` in the description**, which costs the parser that key and
+leaves the skill installed, named, and unable to fire.
 
 **5. D: a cold red-teamer, one per round.** Dispatch a **separate, fresh** subagent, never C.
 
@@ -249,12 +231,11 @@ it is how a skill reaches further than the case that prompted it. D then execute
 inferred, using the skill, and reports where the skill fails, misleads, or under-specifies.
 
 <!-- doctrine: no-leading-prompt -->
-**Never hand a reviewer a list of what not to flag.** Same failure as asking it to "confirm the
-deletion", and easier to commit because it feels like helpfulness. Observed once here (a single
-A/B on one file): one agent given a "do not flag these" list and one given only the principle
-produced **1 finding and 4**, and the neutral reviewer *defended* two passages the biased brief
-would have condemned. State the standard; do not enumerate the exceptions. Asking for hard
-verification is fine — "run every command" constrains method, not conclusions. D's checklist:
+**Never hand a reviewer a list of what not to flag.** Same failure as asking it to "confirm
+the deletion", and easier to commit because it feels like helpfulness — the A/B behind that is
+in `references/pipeline-stages.md`. State the standard; do not enumerate the exceptions. Asking
+for hard verification is fine — "run every command" constrains method, not conclusions.
+D's checklist:
 
 |Check|What it catches|
 |-|-|
@@ -267,24 +248,54 @@ verification is fine — "run every command" constrains method, not conclusions.
 |**Overlap**|Does an existing skill already cover this? If so, that is a blocking finding.|
 |**Scope**|Is it doing more than one thing? Split or narrow.|
 
-**6. Loop C and D to the cap.** Feed findings back to C via `SendMessage` so it keeps its
-context and its scratch repro, but **do not block waiting on the reply**: messages from a
-*resumed background* builder have been seen looping back to the sender instead of arriving,
-stalling the loop until relayed by hand. Poll for an artifact rather than a message — the same
-grep-able marker file the quiesce check needs.
+**6. Loop C and D.** Feed findings back to C so it keeps its context and its scratch repro,
+and poll for an artifact rather than block on a reply (`references/pipeline-stages.md`).
 <!-- doctrine: fresh-reviewer-each-round -->
 **Spawn a new red-teamer each round; the whole test depends on the reader being
 genuinely cold.** Repeat until the report comes back clean.
 
-**Cap at 5 rounds, or 10 for a skill that is complex or genuinely important.** B is told the cap
-at step 0, because the step budget encodes it, and the announcement says why when it is raised —
-a safety-critical skill, one carrying a scanner or a validator, one whose failure is silent.
-Where 5 comes from is `references/round-cap.md`: a better guess than 3, still a guess.
+**Cap at 5 rounds, or 10 for a skill that is complex or genuinely important**, chosen at step 0
+because `<total-steps>` encodes it. Where 5 comes from, and when to raise it, are in
+`references/round-cap.md`: a better guess than 3, still a guess.
 
-<!-- doctrine: narrow-or-abandon-at-the-cap -->
-**If it is not clean at the cap, do not ship a half-working skill: narrow its scope
-until it is clean, or abandon it.** Leave notes explaining what blocked it; B reports
-"abandoned" and the reason back to you, and does not call `fail` itself.
+<!-- doctrine: assess-convergence-every-round -->
+**Decide whether the loop is converging at every round, not at the cap.** A cap reached is not
+a decision point, it is the moment the budget for making one ran out — narrowing there changes
+what the skill is *and* leaves that change with no round left to review it. So B appends one
+line per round to `~/.claude/skill-compounder/rounds/<forge>.tsv`, never to `briefs/`:
+
+```
+<n>	blocking=<k>	total=<m>	subsystems=<what they named>	shapes=<the finding shapes>
+```
+
+`blocking` is **B's** call, one test — would shipping with this make the skill do the wrong
+thing for a stranger? — because D is asked for findings, not severities, and a fresh D each
+round cannot share a scale with the last.
+
+<!-- doctrine: the-assessment-binds-from-round-three -->
+**The assessment binds from round 3 and not before**, because every signal below needs three
+points and a rule that fires on one round is a licence to quit after one. *Converging* — a
+falling blocking count over rounds naming **different** subsystems — means continue at full
+scope and overrun the cap rather than cut to fit it. Anything else is *not converging*: the
+count flat or rising across three rounds, one subsystem producing findings whatever gets
+patched, one finding **shape** recurring under different wordings, or a trajectory answering
+to none of these. Then the design is wrong rather than the wording, and the choice is due at
+once: **narrow**, cutting the subsystem the findings keep naming and preferring a skill that
+already owns that question, or **abandon**, with notes on what blocked it. B reports
+"abandoned" and the reason to you, and does not call `fail` itself.
+
+<!-- doctrine: narrowing-restarts-the-review -->
+**A narrowed skill is a new skill for review purposes: the rounds already spent certify a
+skill that no longer exists.** So a narrowed draft **re-enters the loop at step 4**: C cuts
+it, a **new** cold D reviews the result, and B may not report it clean until a D that saw the
+narrowed skill says so. **B writes that cost into the round record before cutting** — narrowing
+without rounds left for it is abandoning with extra steps, and saying so on the record is what
+stops it being decided by whoever is most tired. How to read the record for either verdict, and
+a worked case, are in `references/round-cap.md`.
+
+**Step 7 is a scope cut too**, and B is gone by then, so the rule reads differently there:
+retiring a must-fire claim narrows what the skill owns, so **A** re-runs the routing gate *and*
+dispatches one fresh cold reader against the narrowed trigger contract before closing.
 
 **7. A: run the skill against the real case, and score the pre-registered criteria.** You alone
 have seen both the project and the finished skill, so this is the only place "did it actually
@@ -301,13 +312,11 @@ solve the thing that started this" can be asked. Re-read the step-1 file, not yo
 
 <!-- doctrine: routing-gate-on-completion -->
 **A forge cannot be reported clean while the skill's own must-fire prompts do not fire
-it.** A reviewer reading the `## Trigger precision` section and agreeing it looks right is
-not this check. Every seed skill here passed a full builder/red-team loop that way, and when
-the prompts were run on 2026-08-25 three claims were false: `stale-artifact-check` lost two of
-three must-fire prompts to `superpowers:systematic-debugging`, and `session-handoff` and
-`skill-compounder` each listed one that fires nothing at all. So the draft needs at least
-three prompts that must fire it and three that must not, each the verbatim utterance a user
-would type — a paraphrase cannot be run — and then they get run. Inside a checkout of this:
+it.** A reviewer reading the section and agreeing it looks right is not this check: every seed
+skill here passed a full loop that way and three of their claims turned out false when the
+prompts were finally run (`references/routing-gate.md`). So the draft needs at least three
+prompts that must fire it and three that must not, each the verbatim utterance a user would
+type — a paraphrase cannot be run — and then they get run. Inside a checkout of this:
 
 ```bash
 SKILL_ROUTING_PROBE=1 python3 scripts/probe_routing_claims.py <skill>
@@ -322,32 +331,26 @@ claude -p --model sonnet --max-turns 3 --output-format stream-json --verbose "<p
 ```
 
 **A non-zero exit is not a failed measurement:** `--max-turns` exhaustion and a denied
-permission both exit 1, and both happen after the routing decision, which is taken in the
-first assistant turn. **`--model sonnet`, never haiku** — personal and project skill
-descriptions were measured absent from the router on haiku, so a haiku probe proves nothing.
-Cost is one call per prompt per run, so quote it at the N the gate demands: six prompts over
-three runs is ~18 calls and ~1.5 minutes for one skill; the eight-skill seed pool is 48 calls a
-run, ~144 calls and ~12 minutes at three. Measured 2026-08-26, CLI 2.1.245: 8-47s a draw,
-median 22s, six in parallel; draws where a skill fires are slower — median 32s against 16s.
+permission both exit 1, after the routing decision. **`--model sonnet`, never haiku** —
+personal and project skill descriptions were measured absent from the router on haiku.
 
-**One run is one draw, and a draw is not a verdict.** Routing is stochastic: one unchanged
-description here gave 3/3, then 1/3, then 2/3, and this skill's own six prompts, probed three
-times in one day with nothing edited between, gave 9/9, then 8/9, then 9/9. So the gate is
-**at least three runs of the whole section** — a floor for *detecting* that spread, not a
-score that earns `verified`. The pin records `runs: N` and a k/N per prompt; `partial` names
-any prompt that split, and a prompt at 2/3 has not passed, it has been shown unreliable.
+**One run is one draw, and a draw is not a verdict.** Routing is stochastic — the spreads
+measured here are in `references/routing-gate.md` — so the gate is **at least three runs of
+the whole section**, a floor for *detecting* that spread rather than a score that earns
+`verified`. The pin records `runs: N` and a k/N per prompt; `partial` names any prompt that
+split, and a prompt at 2/3 has not passed, it has been shown unreliable.
 
-**When a must-fire prompt loses, the description is what changes.** Not the prompt and not the
-verdict; routing is brutally sensitive to the opening clause, so this is usually a small edit
-with a large effect — changing `"Use before debugging logic"` to `"Use before any other debugging
-step"` flipped a losing prompt to a winning one. Four words. Retiring a claim is allowed only
-when the prompt names a trigger this skill should not own *and* the skill that beat it is the
-right owner; the floor of three must-fire prompts that actually fire is not negotiable. **Record
-what is ceded, at the moment it is ceded: the must-not-fire half names the neighbour that now
-owns the prompt, and the pin's `result:` says which claim was dropped and to whom.** Territory
-given up silently is given up twice. **Re-run it after the last description edit.** Here `python3
-scripts/routing_claims.py lint` fails until the pinned sha256 of the description and prompt list
-match disk; the repair is to measure again, never to paste a fresh hash in.
+**When a must-fire prompt loses, the description is what changes** — not the prompt and not the
+verdict. Routing is brutally sensitive to the opening clause, so this is usually a small edit
+with a large effect (`references/routing-gate.md`). Retiring a claim is allowed only when the
+prompt names a trigger this skill should not own *and* the skill that beat it is the right
+owner; the floor of three must-fire prompts that actually fire is not negotiable, and retiring
+one is a scope cut that owes the cold read step 6 requires. **Record what is ceded, at the
+moment it is ceded**: the must-not-fire half names the neighbour that now owns
+the prompt, and the pin's `result:` says which claim was dropped and to whom — territory given
+up silently is given up twice. **Re-run the gate after the last description edit.** `python3
+scripts/routing_claims.py lint` fails until the pinned sha256 of the description and prompt
+list match disk; the repair is to measure again, never to paste a fresh hash in.
 
 <!-- doctrine: must-not-half-is-a-gate -->
 **A skill that fires on everything is worse than no skill.** The must-not half is a gate the
@@ -393,12 +396,12 @@ fork/duplicate-check/consent-gated PR flow; do not rebuild any of it. Its bar is
 loop **and used again since it was forged**, so it cannot be met on the day: E records "propose
 upstream" as a recommendation, and a later session invokes `contribute-skill` once it is.
 
-**On failure, quarantine the skill with a report neither agent may rewrite.** Each of A, B, C
-and D **appends a signed section** — who they were, what they were given, what they concluded —
-edited by nobody else; contradictions are kept and flagged, never reconciled, because a merged
-narrative hides disagreement, the most informative thing a failed forge produces. Then archive
-the pair as section 3 archives a retirement: into `~/.claude/skills-archive/`, report as
-`WHY-ARCHIVED.md`, symlinks resolved first, never `rm -rf`.
+**On failure — including a forge abandoned mid-loop, which never reaches E — quarantine the
+skill with a report neither agent may rewrite.** A, B, C and D each **append a signed
+section**, edited by nobody else, and contradictions are kept and flagged rather than
+reconciled: a merged narrative hides disagreement, the most informative thing a failed forge
+produces. Then archive the pair the way section 3 archives a retirement
+(`references/retirement.md`).
 
 ## 3. Fixing, documenting, or retiring a skill that did not work
 
@@ -410,24 +413,21 @@ session. Escalate in order:
    an explicit "Do NOT use this when…" note naming the exact wrong turn taken.
 2. **Substantive issue** (procedure wrong or outdated): fix it, then **re-run the full
    pipeline** on the fix — A re-registers criteria for the repair, and D is cold as ever.
-3. **Retirement** (obsolete, superseded, or unfixable): requires **independent
-   concurrence**.
-   - Write the case: what was attempted, why it cannot be fixed, what supersedes it.
-   - <!-- doctrine: neutral-retirement-question -->
-     **Ask a second fresh agent the neutral question, *"should this be kept, fixed, or
-     retired?"*, never "confirm this deletion".** A leading prompt defeats the check: it
-     tells the reviewer what the answer should be, and it will oblige.
-   - Retire only if it independently reaches "retire." If it says keep or fix, do that.
-   - <!-- doctrine: archive-the-source -->
-     **Archive the source, not the link.** Most skills here are symlinks into a checkout,
-     so `mv ~/.claude/skills/<name> ...` moves the link and leaves the real directory in
-     place, where the next install resurrects it — and writing `WHY-ARCHIVED.md` into the
-     moved directory writes into the live source. Resolve with `realpath` first, move the
-     resolved directory, then drop the dangling link; the exact sequence, the `git`
-     follow-up, and the plugin-cache case (which cannot be archived at all, only disabled
-     or narrowed) are in `references/retirement.md`.
-   - <!-- doctrine: never-rm-rf -->
-     **Never `rm -rf` a skill.** Spurious deletions must be recoverable.
+3. **Retirement** (obsolete, superseded, or unfixable): write the case, then get
+   **independent concurrence**.
+   <!-- doctrine: neutral-retirement-question -->
+   **Ask a second fresh agent the neutral question, *"should this be kept, fixed, or
+   retired?"*, never "confirm this deletion".** A leading prompt defeats the check: it tells
+   the reviewer what the answer should be, and it will oblige. Retire only on an independent
+   "retire"; on keep or fix, do that.
+   <!-- doctrine: archive-the-source -->
+   **Archive the source, not the link.** Most skills here are symlinks, so moving
+   `~/.claude/skills/<name>` moves the link and leaves the source for the next install to
+   resurrect.
+   <!-- doctrine: never-rm-rf -->
+   **Never `rm -rf` a skill.** Spurious deletions must be recoverable. The `realpath`
+   sequence, the `git` follow-up and the plugin-cache case are in
+   `references/retirement.md`.
 
 ## 3.5 Candidates you are not ready to forge yet
 
@@ -445,28 +445,27 @@ queue feeds this same threshold, never bypasses it, and nothing in it is forged 
 
 A skill is usable the moment it is linked into the skills directory Claude Code reads.
 `skillforge done` does that linking, so **closing the forge is what makes the skill live** —
-no install step to remember, and the skill is usable in the session that forged it, which is the
-whole reason to forge it there. Closing also writes the skill's `origin` row: what was built,
-where its directory is, the trigger recorded at `start`, and the commit it was built on —
-written once per skill, ever, so a re-forge gives no second answer to "how did this get here".
+the skill is usable in the session that forged it, which is the whole reason to forge it there.
+Closing also writes the skill's `origin` row, once per skill ever, so a re-forge gives no
+second answer to "how did this get here".
 
-- `done` looks under `<repo>/skills/<name>/` and `<repo>/.claude/skills/<name>/`, or wherever
-  `--skill-dir <dir>` said, and prints what it installed and where. **Read that line.** Anything
-  else — a name taken, a directory it could not write, no `SKILL.md` found — means the skill is
-  *not* live, and `skillforge install <name> --skill-dir <dir>` is the retry. The close row
-  records `skill: present` or `skill: missing` either way, so a forge that shipped nothing stays
-  countable once that line scrolls. The name that answers is the **directory's**, and one held by
-  something this package cannot prove it created is refused.
-- **Lag.** If `Skill` returns `Unknown skill: <name>` right after `done`, make any other tool
-  call and retry rather than concluding it failed. Fallback: `cat` the SKILL.md and follow it
-  by path. A skill written to `<repo>/.claude/skills/` stays project-scoped and `done` leaves it
-  there; a headless `claude -p` run started in that repository sees it, one that narrows its
-  setting sources does not — measured, with the gate's own case, in `docs/CLAUDE-CODE-BEHAVIOR.md`.
-- **Did it get used again?** `skillreport skills` prints all four ledger questions per skill,
-  fed by the `use` row `hooks/skill-use.sh` writes per invocation. A *failed* invocation
-  (`Unknown skill: <name>`) reaches no hook at all on 2.1.245, so it counts successes only.
+- `done` prints what it installed and where. **Read that line.** Anything else — a name taken,
+  a directory it could not write, no `SKILL.md` found — means the skill is *not* live, and
+  `skillforge install <name> --skill-dir <dir>` is the retry.
+- **Lag.** If `Skill` answers `Unknown skill: <name>` right after `done`, make any other tool
+  call and retry rather than concluding it failed; a subagent dispatched after the install sees
+  it with no lag at all. Fallback: `cat` the SKILL.md and follow it by path.
+- **Did it get used again?** `skillreport skills` prints the ledger's questions per skill. A
+  *failed* invocation reaches no hook, so it counts successes only.
+- **Was it used on the problem that caused it?** That is a fifth question and a separate row:
+  `skillforge apply --name <skill> --outcome used|declined --evidence "<verbatim>"`. Until it is
+  answered the forge carries a debt, `skillforge pending` lists it, and a `Stop` hook refuses to
+  end the forging session's turn.
 - Run the pipeline **during** the session that discovered the need for it; deferring to
   "next session" throws the benefit away.
+
+Where `done` looks, what the close row records, the project-scope case and the measured lag are
+in `references/forge-animation.md`.
 
 ## Trigger precision
 
