@@ -55,10 +55,17 @@ THE LIMIT, WHICH IS THE MOST IMPORTANT LINE IN THIS FILE
 
         SKILL_ROUTING_PROBE=1 python3 scripts/probe_routing_claims.py
 
-    ~48 `claude -p --model sonnet --max-turns 3` calls, six in parallel, ~15 minutes,
-    real quota. It is gated so it can never fire from `./run_tests.sh` or CI, and the
-    model is hardcoded because personal and project skill descriptions were measured
-    ABSENT from the router on haiku.
+    Six prompts per section, each submitted `--runs N` times (default 3), one real
+    `claude -p --model sonnet --max-turns 3` call per draw, six at a time. ~48 calls per
+    run over the eight-skill pool, so ~144 at the default. It is gated so it can never
+    fire from `./run_tests.sh` or CI, and the model is hardcoded because personal and
+    project skill descriptions were measured ABSENT from the router on haiku.
+
+    ONE DRAW IS NOT A VERDICT. Routing here is stochastic -- one unchanged description
+    gave 3/3, then 1/3, then 2/3 -- so the probe aggregates k/N per prompt and a section
+    is `verified` only when every prompt won every draw. A prompt that wins some draws
+    and loses others is a `SPLIT`, reported and pinned as `partial`. Re-running until a
+    green appears certifies the draw, not the claim.
 """
 
 import copy
@@ -82,9 +89,17 @@ import probe_routing_claims as probe  # noqa: E402
 # failure. Do not add a name to buy a green suite; a new unverified section is the
 # thing this file exists to stop.
 UNVERIFIED = {
-    # Empty since 2026-08-25, when skill-compounder's six claims were measured for real
-    # (3/3 must-fire, 3/3 must-not-fire) and its pin promoted to verified. Keep it that
-    # way: a new entry here is the debt this file exists to stop.
+    # Emptied 2026-08-25, when skill-compounder's six claims were measured for real and
+    # its pin promoted to verified. Re-entered 2026-08-26: the SAME section, unedited,
+    # was probed three times at --runs 3 in one day and scored 9/9, 8/9, 9/9. "The skill
+    # I just used told me to run it from the wrong directory." fired nothing at all on
+    # one draw, so it stands at 8/9 over nine draws and the pin says `partial`.
+    #
+    # This entry is the debt that verdict creates, not an exemption bought to get a
+    # green suite. It clears when the DESCRIPTION changes and the whole section measures
+    # clean again -- never by re-running until a pass turns up, which is what pinning
+    # the third pass alone would have been.
+    "skill-compounder": "partial",
 }
 
 # Measured false on 2026-08-25 by running them. Both have since been removed from the
@@ -373,18 +388,151 @@ class ProbeGateTest(unittest.TestCase):
         self.assertIn("ABSENT from the router on haiku", probe.__doc__)
 
 
+class DrawAggregationTest(unittest.TestCase):
+    """A verdict is k/N over N draws, and this is where the counting happens.
+
+    WHY IT IS TESTED THIS HARD. Two defects shipped in this repository as guards that
+    never executed -- a `wc -c` value a numeric test read as non-numeric, and a `grep`
+    alternation written in basic-regex syntax where the bar is literal. Both looked
+    correct and did nothing. So the count is not trusted because the report looks
+    plausible: each case below flips a draw DELIBERATELY and asserts the number moves.
+
+    No mocks. `jobs_for`, `won`, `aggregate` and `pin_result` are pure functions called
+    for real; only `run_prompt` spends quota, and none of these touch it.
+    """
+
+    def draws(self, wins, skill="demo", kind="must-fire", prompt="P", error=None):
+        return [{"skill": skill, "kind": kind, "prompt": prompt, "draw": i, "win": w,
+                 "fired": [skill] if w else [], "error": error, "seconds": 1.0}
+                for i, w in enumerate(wins)]
+
+    def one(self, wins, **kw):
+        return probe.aggregate(self.draws(wins, **kw))[0]
+
+    # -- the fan-out is actually N-fold -------------------------------------------
+
+    def test_every_prompt_is_submitted_once_per_run(self):
+        """The bug this catches is a `--runs 3` that samples once and reports 3/3."""
+        claims = [claims_for("skill-compounder")]
+        prompts = probe.prompts_for(claims)
+        self.assertEqual(len(prompts), 6, "the section is not 3 + 3 any more")
+        for runs in (1, 3, 5):
+            jobs = probe.jobs_for(claims, runs)
+            self.assertEqual(len(jobs), len(prompts) * runs,
+                             "runs=%d produced %d jobs, not %d"
+                             % (runs, len(jobs), len(prompts) * runs))
+            for key in prompts:
+                got = sorted(j[3] for j in jobs if j[:3] == key)
+                self.assertEqual(got, list(range(runs)),
+                                 "%r was submitted with draw indices %s, not 0..%d"
+                                 % (key, got, runs - 1))
+
+    def test_a_run_count_below_one_is_refused_rather_than_silently_zero(self):
+        for bad in (0, -1):
+            with self.assertRaises(ValueError):
+                probe.jobs_for([claims_for("skill-compounder")], bad)
+
+    # -- the count moves when a draw is deliberately failed ------------------------
+
+    def test_flipping_one_draw_moves_the_count_and_the_verdict(self):
+        clean = self.one([True, True, True])
+        self.assertEqual((clean["wins"], clean["runs"]), (3, 3))
+        self.assertEqual(probe.verdict(clean), "PASS")
+
+        rows = self.draws([True, True, True])
+        rows[1]["win"] = False
+        split = probe.aggregate(rows)[0]
+        self.assertEqual((split["wins"], split["runs"]), (2, 3),
+                         "flipping a draw did not move the count")
+        self.assertEqual(probe.verdict(split), "SPLIT")
+        self.assertFalse(split["pass"])
+        self.assertTrue(split["split"])
+
+    def test_a_split_is_reported_as_split_and_a_loss_as_fail(self):
+        """`0 < k < N` is information; only `k == 0` is the claim being false."""
+        self.assertEqual(probe.verdict(self.one([True, False, False])), "SPLIT")
+        self.assertEqual(probe.verdict(self.one([False, False, False])), "FAIL")
+        self.assertFalse(self.one([False, False, False])["split"])
+
+    def test_an_errored_draw_is_a_lost_draw_not_a_dropped_one(self):
+        """Dropping it would shrink the denominator and let 2/2 pass as clean."""
+        rows = self.draws([True, True, True])
+        rows[1].update(win=probe.won("demo", "must-fire", [], "timed out"),
+                       error="timed out", fired=[])
+        agg = probe.aggregate(rows)[0]
+        self.assertEqual((agg["wins"], agg["runs"]), (2, 3))
+        self.assertEqual(agg["errors"], ["timed out"])
+
+    def test_draws_are_grouped_by_skill_kind_and_prompt(self):
+        """Two prompts must not collapse into one six-draw row."""
+        rows = self.draws([True] * 3, prompt="P") + self.draws([True, False, True],
+                                                               prompt="Q")
+        agg = probe.aggregate(rows)
+        self.assertEqual([(r["prompt"], r["wins"], r["runs"]) for r in agg],
+                         [("P", 3, 3), ("Q", 2, 3)])
+
+    # -- the pin the report prints follows the count -------------------------------
+
+    def test_verified_requires_every_draw_and_counts_draws_not_prompts(self):
+        rows = (self.draws([True] * 3, prompt="a") + self.draws([True] * 3, prompt="b")
+                + self.draws([True] * 3, prompt="c")
+                + self.draws([True] * 3, kind="must-not-fire", prompt="x")
+                + self.draws([True] * 3, kind="must-not-fire", prompt="y")
+                + self.draws([True] * 3, kind="must-not-fire", prompt="z"))
+        result = probe.pin_result(probe.aggregate(rows), 3)
+        self.assertTrue(result.startswith("verified"), result)
+        self.assertIn("9/9 must-fire draws", result)
+        self.assertIn("9/9 must-not-fire draws", result)
+        # The shape tests/test_routing_gate.py parses out of the shipped pin.
+        m = re.search(r"(\d+)/(\d+) must-fire draws", result)
+        self.assertEqual(int(m.group(2)), 3 * 3)
+
+    def test_one_flipped_draw_downgrades_verified_to_partial_and_names_the_prompt(self):
+        rows = (self.draws([True] * 3, prompt="a") + self.draws([True] * 3, prompt="b")
+                + self.draws([True] * 3, prompt="c")
+                + self.draws([True] * 3, kind="must-not-fire", prompt="x")
+                + self.draws([True] * 3, kind="must-not-fire", prompt="y")
+                + self.draws([True] * 3, kind="must-not-fire", prompt="z"))
+        clean = probe.pin_result(probe.aggregate(rows), 3)
+        # Draws are laid out three per prompt in order a,b,c,x,y,z: index 4 is the
+        # second draw of must-fire prompt "b". Asserted below by the counts it moves,
+        # so an off-by-three here cannot pass quietly.
+        rows[4]["win"] = False
+        partial = probe.pin_result(probe.aggregate(rows), 3)
+        self.assertNotEqual(clean, partial, "the pin did not move with the count")
+        self.assertTrue(partial.startswith("partial"), partial)
+        self.assertIn("8/9 must-fire draws", partial)
+        self.assertIn("'b' 2/3", partial,
+                      "the partial pin does not name WHICH prompt split: %r" % partial)
+
+    def test_the_result_line_survives_the_pin_parser(self):
+        """`result:` is one line of a `key: value` block, and a partial result quotes a
+        prompt that may itself contain a colon. `parse_pin` splits on the FIRST colon,
+        so this has to be checked rather than assumed."""
+        rows = self.draws([True, False, True], prompt="fix it: now")
+        line = probe.pin_result(probe.aggregate(rows), 3)
+        self.assertNotIn("\n", line)
+        pin = rc.parse_pin("%s\nresult: %s\n%s" % (rc.PIN_OPEN, line, rc.PIN_CLOSE))
+        self.assertEqual(pin["result"], line)
+        self.assertEqual(pin["result"].split(":", 1)[0].split()[0], "partial")
+
+
 class LiveProbeTest(unittest.TestCase):
     """The only test in the repository that verifies a routing claim rather than its
     provenance. Gated: it needs auth and real quota."""
 
     @unittest.skipUnless(os.environ.get("SKILL_ROUTING_PROBE") == "1",
-                         "set SKILL_ROUTING_PROBE=1 to spend ~48 real `claude -p` calls")
+                         "set SKILL_ROUTING_PROBE=1 to spend ~48 real `claude -p` calls "
+                         "per run (~144 at the default --runs 3)")
     def test_every_routing_claim_holds_against_a_real_session(self):
         results = probe.probe(rc.all_skills())
         ok = probe.report(results, probe.cli_version())
-        failed = ["%s %s: %r fired %s" % (r["skill"], r["kind"], r["prompt"], r["fired"])
+        failed = ["%s %s %s %d/%d: %r fired %s"
+                  % (r["skill"], probe.verdict(r), r["kind"], r["wins"], r["runs"],
+                     r["prompt"], r["fired"])
                   for r in results if not r["pass"]]
-        self.assertTrue(ok, "routing claims measured FALSE:\n  " + "\n  ".join(failed))
+        self.assertTrue(ok, "routing claims not verified over %d runs (SPLIT is flaky, "
+                            "FAIL is false):\n  " % probe.RUNS + "\n  ".join(failed))
 
 
 if __name__ == "__main__":

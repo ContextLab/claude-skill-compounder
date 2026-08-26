@@ -166,18 +166,65 @@ class DerivedFromTheProbeTest(unittest.TestCase):
         two drift, the hand-run stops measuring the same thing."""
         self.assertIn("--max-turns %s" % probe.MAX_TURNS, self.body())
 
-    def test_the_stated_cost_matches_the_probes_measured_cost(self):
-        """The user is choosing to make every forge more expensive. The number they read
-        in the protocol has to be the number the script recorded, not a recollection."""
+    def test_the_stated_call_count_is_derived_from_the_prompts_that_exist(self):
+        """Re-pointed 2026-08-26. It used to compare the protocol against the probe's
+        DOCSTRING and nothing else, so the two being stale together passed -- and that is
+        exactly what happened: both carried `~48 calls and ~15 minutes`, a single run's
+        cost, for as long as the gate has demanded three. Corroboration by second copy is
+        the defect this repository forged `claim-provenance` to catch, and it was sitting
+        in the test written to prevent it.
+
+        One side is derived from running code now. A call is one prompt in one draw, so
+        one run of a section costs exactly as many calls as it claims prompts, and the
+        gate's cost is that times the floor `probe.MIN_RUNS` sets. Both numbers move on
+        their own if a prompt is added or the floor is raised; neither can be kept alive
+        by a matching sentence somewhere else.
+
+        WHAT THIS STILL CANNOT CHECK: the wall-clock minutes. They depend on API latency
+        on the day -- the same 18 draws took 74s in one pass and 86s in another, hours
+        apart on one machine -- so no assertion here can be both true and useful. The
+        minutes are checked only for PROVENANCE: the docstring has to name the ISO date
+        and the CLI it timed them on, so a reader can see how old they are. A stale
+        minute figure with a fresh date is still undetectable from here; only re-running
+        `scripts/probe_routing_claims.py --json` settles it.
+        """
+        per_run = len(probe.prompts_for(rc.all_skills()))
+        self.assertGreater(per_run, 0, "no skill claims any routing prompt")
+        at_floor = per_run * probe.MIN_RUNS
         doc = flatten(probe.__doc__)
-        m = re.search(r"is ~(\d+) calls and ~(\d+) minutes", doc)
-        self.assertIsNotNone(m, "probe_routing_claims.py no longer records its own cost")
-        calls, minutes = m.groups()
         body = flatten(self.body())
-        self.assertIn("~%s calls and ~%s minutes" % (calls, minutes), body,
-                      "the protocol states a probe cost the script does not")
-        self.assertIn("30-90s", body,
-                      "the protocol drops the per-prompt latency the script measured")
+
+        for where, text in (("the probe docstring", doc), ("the protocol", body)):
+            self.assertIn("%d calls" % at_floor, text,
+                          "%s does not state the cost at the run floor the gate demands: "
+                          "%d prompts x %d runs = %d calls"
+                          % (where, per_run, probe.MIN_RUNS, at_floor))
+
+        one_skill = [c for c in rc.all_skills() if c["name"] == "skill-compounder"]
+        per_skill = len(probe.prompts_for(one_skill)) * probe.MIN_RUNS
+        self.assertIn("%d calls" % per_skill, body,
+                      "the protocol does not state the per-skill cost at the floor "
+                      "(%d prompts x %d runs = %d calls)"
+                      % (per_skill // probe.MIN_RUNS, probe.MIN_RUNS, per_skill))
+
+        self.assertNotIn("~%d calls and ~15 minutes" % per_run, body,
+                         "the protocol is quoting one run's cost again; the gate has "
+                         "demanded %d runs since the day it was written"
+                         % probe.MIN_RUNS)
+
+        cost = re.search(r"COST \(re-measured (\d{4}-\d{2}-\d{2}), CLI ([0-9.]+)\)",
+                         probe.__doc__)
+        self.assertIsNotNone(
+            cost, "the probe docstring's COST heading no longer carries the date and CLI "
+                  "version its timings were measured on, which is the only thing that "
+                  "makes a stale minute figure visible to a reader")
+        seconds = re.search(r"(\d+)-(\d+)s per draw, median (\d+)s", probe.__doc__)
+        self.assertIsNotNone(seconds, "the docstring no longer records per-draw latency")
+        lo, hi, med = (int(g) for g in seconds.groups())
+        self.assertLess(lo, med, "per-draw range does not bracket its own median")
+        self.assertLess(med, hi, "per-draw range does not bracket its own median")
+        self.assertIn("%d-%ds a draw, median %ds" % (lo, hi, med), body,
+                      "the protocol quotes a per-draw latency the script did not measure")
 
     def test_a_non_zero_exit_is_documented_as_not_a_failed_measurement(self):
         """The script says so in a comment because discarding those runs threw away a
@@ -374,21 +421,51 @@ class OneRunIsOneDrawTest(unittest.TestCase):
                         "the floor here in the same edit")
         self.assertGreaterEqual(int(self.pin()["runs"]), 3)
 
-    def test_a_verified_result_counts_draws_and_not_just_prompts(self):
+    def test_the_pin_counts_draws_and_says_which_prompt_is_shaky(self):
         """`verified 3/3 must-fire` is the exact string that meant one sample. A result
-        that still reads that way has not been re-measured, whatever `runs` says."""
+        that still reads that way has not been re-measured, whatever `runs` says.
+
+        Rewritten 2026-08-26. It used to require the shipped result to START with
+        `verified`, which made the only honest pin for a section measured 9/9, 8/9, 9/9
+        on one unedited day unshippable -- a test demanding the verdict the doctrine two
+        paragraphs above calls a re-roll. What is actually checkable is the ARITHMETIC
+        and the DISCLOSURE: the denominator is prompts x runs either way, `verified`
+        means numerator == denominator, and `partial` has to name a prompt and its k/N,
+        because which prompt is flaky is the finding.
+        """
         pin = self.pin()
         runs = int(pin["runs"])
         result = pin["result"]
-        self.assertTrue(result.startswith("verified"), result)
-        m = re.search(r"(\d+)/(\d+) must-fire draws", result)
-        self.assertIsNotNone(
-            m, "the pin result does not count DRAWS: %r. With runs=%d a clean section "
-               "has %d must-fire draws, not 3." % (result, runs, 3 * runs))
-        self.assertEqual(int(m.group(2)), 3 * runs,
-                         "the denominator is not prompts x runs: %r" % result)
-        self.assertEqual(m.group(1), m.group(2),
-                         "`verified` claims every draw won; this result does not")
+        verdict = result.split()[0]
+        self.assertIn(verdict, ("verified", "partial"),
+                      "a measured section is verified or partial: %r" % result)
+        claims = rc.parse_skill(SKILL_PATH)
+        for kind, prompts in (("must-fire", claims["must_fire"]),
+                              ("must-not-fire", claims["must_not_fire"])):
+            m = re.search(r"(\d+)/(\d+) %s draws" % kind, result)
+            self.assertIsNotNone(
+                m, "the pin result does not count %s DRAWS: %r. With runs=%d that is "
+                   "%d draws, not %d." % (kind, result, runs, len(prompts) * runs,
+                                          len(prompts)))
+            wins, total = int(m.group(1)), int(m.group(2))
+            self.assertEqual(total, len(prompts) * runs,
+                             "%s denominator is not prompts x runs (%d x %d): %r"
+                             % (kind, len(prompts), runs, result))
+            self.assertLessEqual(wins, total, "more wins than draws: %r" % result)
+            if verdict == "verified":
+                self.assertEqual(wins, total,
+                                 "`verified` claims every draw won; this result does not")
+        if verdict == "partial":
+            self.assertRegex(
+                result, r"not clean:.*\d+/\d+",
+                "a `partial` pin has to name the prompt that split and its k/N. Without "
+                "it the next session knows the section wobbled and not where, which is "
+                "the whole of the finding: %r" % result)
+            named = [q for q in claims["must_fire"] + claims["must_not_fire"]
+                     if q.strip('"“”') in result]
+            self.assertTrue(
+                named, "the `partial` pin's `not clean:` list quotes no prompt that is "
+                       "actually in the section, so it points at nothing: %r" % result)
 
     def test_the_reference_says_what_one_passing_run_does_and_does_not_establish(self):
         ref = (ROOT / "skills" / "skill-compounder" / "references"
@@ -405,6 +482,32 @@ class OneRunIsOneDrawTest(unittest.TestCase):
         self.assertIn("not licence to re-roll", flat,
                       "nothing warns against re-running until a green appears, which is "
                       "the same move as pasting a fresh hash into a broken pin")
+
+    def test_the_reference_frames_the_minimum_as_variance_detection(self):
+        """Added 2026-08-26, after three N=3 passes of one unedited section on one day
+        scored 9/9, 8/9, 9/9. Three runs did not stabilise that verdict; it made the
+        instability visible. A reader who takes N=3 for the bar that earns `verified`
+        draws the opposite conclusion from the same number -- that a clean pass settles
+        it -- and the third pass here would then have been pinned as a pass.
+
+        Both sentences are wording pins, in the style of PinnedGateSentenceTest: there is
+        no current setting to derive them from, and softening them is the failure. If the
+        doctrine itself changes, change these in the same edit.
+        """
+        flat = flatten((ROOT / "skills" / "skill-compounder" / "references"
+                        / "routing-gate.md").read_text())
+        for text, why in (
+            ("Three runs is the floor for detecting variance, not the threshold that "
+             "earns the word.",
+             "N=3 read as a passing score is how a section that has been seen to lose "
+             "gets pinned `verified` on its next clean pass"),
+            ("A prompt at 2/3 has not passed. It has been shown unreliable.",
+             "a k/N below N is a positive finding about the claim, not a shortfall in "
+             "the sampling to be topped up with more runs"),
+        ):
+            self.assertIn(flatten(text), flat,
+                          "routing-gate.md no longer states %r, word for word.\n"
+                          "  why it is pinned: %s" % (flatten(text), why))
 
 
 class HandOffNamesAgreeTest(unittest.TestCase):

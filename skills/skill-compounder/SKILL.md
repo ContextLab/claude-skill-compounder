@@ -299,13 +299,12 @@ step-1 file — not your memory of it — and:
 <!-- doctrine: routing-gate-on-completion -->
 **A forge cannot be reported clean while the skill's own must-fire prompts do not fire
 it.** A reviewer reading the `## Trigger precision` section and agreeing it looks right is
-not this check and never was. Every skill in this package's seed pool passed a full
-builder/red-team loop that way, and when the prompts were finally run on 2026-08-25, three
-claims were false: `stale-artifact-check` lost two of three must-fire prompts to
-`superpowers:systematic-debugging`, and `session-handoff` and `skill-compounder` each listed
-one that fires nothing at all. So the draft needs at least three prompts that must fire it
-and three that must not, each the verbatim utterance a user would type — a paraphrase cannot
-be run — and then they get run. Inside a `claude-skill-compounder` checkout:
+not this check. Every seed skill here passed a full builder/red-team loop that way, and when
+the prompts were run on 2026-08-25 three claims were false: `stale-artifact-check` lost two of
+three must-fire prompts to `superpowers:systematic-debugging`, and `session-handoff` and
+`skill-compounder` each listed one that fires nothing at all. So the draft needs at least
+three prompts that must fire it and three that must not, each the verbatim utterance a user
+would type — a paraphrase cannot be run — and then they get run. Inside a checkout of this:
 
 ```bash
 SKILL_ROUTING_PROBE=1 python3 scripts/probe_routing_claims.py <skill>
@@ -323,13 +322,17 @@ claude -p --model sonnet --max-turns 3 --output-format stream-json --verbose "<p
 permission both exit 1, and both happen after the routing decision, which is taken in the
 first assistant turn. **`--model sonnet`, never haiku** — personal and project skill
 descriptions were measured absent from the router on haiku, so a haiku probe proves nothing.
-Cost: six prompts, one session each, 30-90s apiece, six in parallel — about 6 calls and 1–3
-minutes per skill per pass; the whole eight-skill seed pool is ~48 calls and ~15 minutes.
+Cost is one call per prompt per run, so quote it at the N the gate demands: six prompts over
+three runs is ~18 calls and ~1.5 minutes for one skill; the eight-skill seed pool is 48 calls a
+run, ~144 calls and ~12 minutes at three. Measured 2026-08-26, CLI 2.1.245: 8-47s a draw,
+median 22s, six in parallel; draws where a skill fires are slower — median 32s against 16s.
 
 **One run is one draw, and a draw is not a verdict.** Routing is stochastic: one unchanged
-description here gave 3/3, then 1/3, then 2/3. So the gate is **at least three runs of the
-whole section**, and the pin records `runs: N` and a k/N count per prompt, not a binary:
-`verified` only when every prompt won every draw, `partial` when any of them split.
+description here gave 3/3, then 1/3, then 2/3, and this skill's own six prompts, probed three
+times in one day with nothing edited between, gave 9/9, then 8/9, then 9/9. So the gate is
+**at least three runs of the whole section** — a floor for *detecting* that spread, not a
+score that earns `verified`. The pin records `runs: N` and a k/N per prompt; `partial` names
+any prompt that split, and a prompt at 2/3 has not passed, it has been shown unreliable.
 
 **When a must-fire prompt loses, the description is what changes.** Not the prompt and not
 the verdict; routing is brutally sensitive to the opening clause, so this is usually a small
@@ -337,28 +340,25 @@ edit with a large effect — changing `"Use before debugging logic"` to `"Use be
 debugging step"` flipped a losing prompt to a winning one. Four words. Retiring a claim is
 allowed only when the prompt names a trigger this skill should not own *and* the skill that
 beat it is the right owner; the floor of three must-fire prompts that actually fire is not
-negotiable. **Re-run it after the last description edit.** In this repository `python3
-scripts/routing_claims.py lint` fails until the recorded sha256 of the description and of the
-prompt list match what is on disk, and the repair is to measure again, never to paste a fresh
-hash in.
+negotiable. **Re-run it after the last description edit.** Here `python3
+scripts/routing_claims.py lint` fails until the pinned sha256 of the description and prompt
+list match disk; the repair is to measure again, never to paste a fresh hash in.
 
 <!-- doctrine: must-not-half-is-a-gate -->
-**A skill that fires on everything is worse than no skill.** The must-not half is a gate in
-exactly the same way, because a skill that answers every prompt displaces the neighbour that
-would have handled it properly and teaches the session to distrust skill dispatch. Read what
-the report says *fired*, not just its PASS column: a must-not-fire prompt is clean only when
-this skill stays out of it and the neighbour the section names actually wins it.
+**A skill that fires on everything is worse than no skill.** The must-not half is a gate the
+same way: one that answers every prompt displaces the neighbour that would have handled it,
+teaching the session to distrust skill dispatch. Read what the report says *fired*, not just
+its PASS column — clean means this skill stays out and the neighbour the section names wins.
 
 <!-- doctrine: unmeasured-is-not-verified -->
 **A probe that could not run is never a pass.** No login, no quota, offline: the skill may
-still ship, but it ships marked unmeasured and says so where the next session will read it —
-the pin records `measured: never`, `model: n/a`, `cli: n/a`, `runs: 0`,
-`result: unmeasured`; the close message names it; and here the name goes into `UNVERIFIED` in
-`tests/test_routing_claims.py`, a debt ledger that may only shrink. What is forbidden is the
-silent promotion. **The gate proves a claim at a moment; it cannot keep it true.** A claim can
-go false with no change to the skill and no commit anywhere near it — `stale-artifact-check`
-lost its prompts to a skill in a *different package* — so the pin records a date and a CLI
-version, and re-running is the only detection there is.
+still ship, but marked unmeasured, where the next session will read it — the pin records
+`measured: never`, `model: n/a`, `cli: n/a`, `runs: 0`, `result: unmeasured`; the close
+message names it; and here the name goes into `UNVERIFIED` in `tests/test_routing_claims.py`,
+a debt ledger that may only shrink. What is forbidden is the silent promotion. **The gate proves a claim at a moment; it cannot keep it true.** A claim can
+go false with no commit anywhere near it — `stale-artifact-check` lost its prompts to a skill
+in a *different package* — or with nothing changed at all, so the pin records a date and a CLI
+version, re-running is the only detection, and a clean gate is a reading, not a property.
 
 **8. E: judge the outcome, and dispose of it.** Dispatch one more fresh agent — never A, B, C or
 any D — and hand it the finished skill, A's step-1 file, A's step-7 verification, and,
@@ -475,8 +475,8 @@ prompts-sha256: b0d3fb4da0e6c09f8453979d51221df6812e8d508da59c7ed43cba5e2dccb40d
 measured: 2026-08-26
 cli: 2.1.245 (Claude Code)
 model: sonnet
-runs: 3
-result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs)
+runs: 9
+result: partial 26/27 must-fire draws, 27/27 must-not-fire draws over 9 runs (three 3-run passes, same description, nothing edited between them); not clean: 'The skill I just used told me to run it from the wrong directory.' 8/9 - one draw in pass 2 fired nothing at all; passes 1 and 3 were 9/9 each
 -->
 
 Should fire:

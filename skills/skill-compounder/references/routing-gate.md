@@ -58,8 +58,16 @@ assessed against it. The shipped must-fire prompt therefore names one.
 
 **Shortening the description invalidates all of this.** On 2026-08-26 the description was cut
 from 655 characters to 491 to bring it inside the 500-character budget `skill-authoring`
-states, and the six prompts were re-run: 3/3 must-fire and 3/3 must-not-fire, sonnet, CLI
-2.1.245. The pin in `SKILL.md` records that run, not the one before it.
+states, and the six prompts were re-run at `--runs 3`: 9/9 must-fire draws and 9/9
+must-not-fire, sonnet, CLI 2.1.245.
+
+**And then that same section, unedited, was probed twice more the same day.** Pass 2 scored
+8/9 must-fire — *"The skill I just used told me to run it from the wrong directory."* fired
+nothing at all on one of its three draws. Pass 3 scored 9/9 again. Nothing was installed,
+edited or committed between the three passes; the description sha256 in the pin is the same
+one for all of them. That prompt is therefore 8/9 over nine draws, and the pin says `partial`
+and names it. Pass 3 coming back clean is not a repair, and pinning it alone would have been
+the re-roll this file forbids two sections down.
 
 ## What the shipped prompt list does not try to catch
 
@@ -82,10 +90,18 @@ a real regression from the same variance coming up differently.
 
 That is why the pin carries `runs: N` and a k/N count per prompt:
 
-- `verified` — every prompt won every draw, over at least three runs. The floor is three
+- `verified` — every prompt won every draw, over at least three runs. **Three runs is the
+  floor for *detecting* variance, not the threshold that earns the word.** It is set there
   because two draws can disagree but cannot say which way, and because the observed spread
-  (3/3, 1/3, 2/3) is wide enough that one draw is close to uninformative. It is a floor,
-  not a target: a prompt that splits earns more runs, not a rounded verdict.
+  (3/3, 1/3, 2/3) is wide enough that one draw is close to uninformative — three is the
+  smallest N that can show a claim wobbling at all, which is a different job from proving
+  it steady. Reaching N=3 clean licenses `verified` for that pass and nothing more; three
+  passes at N=3 on this skill's own section, one unedited day, went 9/9, 8/9, 9/9.
+- **A prompt at 2/3 has not passed. It has been shown unreliable.** A k/N below N is a
+  positive finding about the claim, not a shortfall in the sampling, and it does not expire
+  when a later pass comes back clean: the loss happened, on that description, on that
+  machine. The section is `partial` from then until the *description* changes and the whole
+  section is measured again.
 - `partial` — some prompt won some draws and lost others. This is a real, reportable state
   and the honest one for a flaky claim; it is not a failure to be re-run until it passes.
   Name the prompt and its k/N, because *which* prompt is flaky is the finding.
