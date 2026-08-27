@@ -250,6 +250,19 @@
 #      and it is written on nearly every session. Counting a note as documentation would
 #      let this gate pass every push this repository makes, which is the difference
 #      between a gate and an ornament.
+#      THE NOTES RULE IS ANCHORED TO THE ROOT (`^notes?/`), AND THE ANCHOR IS THE WHOLE
+#      RULE. Unanchored as `(^|/)notes?/` it matched the segment at ANY depth, so
+#      `docs/notes/architecture.md` -- a real `.md` inside `docs/` -- was classified
+#      NEITHER, the push was denied for carrying no documentation, and the reason named
+#      the doc file nowhere, so nothing on any surface said why. That is the one outcome
+#      this gate must never produce, and it is the same defect class the REFSPEC section
+#      below already repaired once. The justification above is about THIS repository's
+#      root-level dated log and reaches no further, so neither may the rule. It cut the
+#      other way too, silently: `src/notes/parser.py` was excluded before rule 3 could
+#      count it as CODE, and undercounting CODE only ever makes the gate more permissive,
+#      which is why that half would never have announced itself. Reproduced by a cold
+#      reviewer on 2026-08-26 against a real repository and a real bare remote; both
+#      directions are pinned in tests/test_doc_gate.py.
 #   2. DOC. `.md`/`.rst`/`.adoc`/`.org`/`.texi`/`.1`, anything under a `doc/`, `docs/`,
 #      `documentation/` or `man/` path segment, and the conventional bare-name files:
 #      README*, CHANGELOG*, CHANGES*, CONTRIBUTING*, HISTORY*, INSTALL*, USAGE*, and the
@@ -756,7 +769,7 @@ g diff -z --name-only "$base" HEAD 2>/dev/null > "$TMP/files.txt" || exit 0
 # ------------------------------------------------------------------- classification
 # See CLASSIFICATION in the header for why the order is NEITHER, DOC, CODE and why
 # `notes/` is where it is.
-NEITHER_RE='(^|/)notes?/|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|Gemfile\.lock|go\.sum|composer\.lock)$|\.(png|jpg|jpeg|gif|svg|ico|pdf|zip|gz|tgz|bz2|xz|woff2?|ttf|otf|eot|mp4|mp3|wav|bin|so|dylib|dll|exe|class|jar|pyc)$|(^|/)\.(gitignore|gitattributes|editorconfig)$|(^|/)LICEN[CS]E([.-][^/]*)?$'
+NEITHER_RE='^notes?/|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|Gemfile\.lock|go\.sum|composer\.lock)$|\.(png|jpg|jpeg|gif|svg|ico|pdf|zip|gz|tgz|bz2|xz|woff2?|ttf|otf|eot|mp4|mp3|wav|bin|so|dylib|dll|exe|class|jar|pyc)$|(^|/)\.(gitignore|gitattributes|editorconfig)$|(^|/)LICEN[CS]E([.-][^/]*)?$'
 DOC_RE='(^|/)(README|CHANGELOG|CHANGES|CONTRIBUTING|HISTORY|INSTALL|USAGE|CLAUDE|AGENTS)([.-][^/]*)?$|\.(md|markdown|rst|adoc|asciidoc|org|texi|1)$|(^|/)(docs?|documentation|man|manpages)/'
 CODE_RE='\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|sh|bash|zsh|fish|rb|go|rs|c|h|cc|cpp|cxx|hpp|hh|java|kt|kts|swift|m|mm|cs|php|pl|pm|lua|r|jl|scala|clj|ex|exs|erl|hs|sql|vim|el|tf|proto|gradle|cmake|bat|ps1)$|\.(json|ya?ml|toml|ini|cfg|conf|properties|env)$|(^|/)(Makefile|makefile|GNUmakefile|Dockerfile|Containerfile|Justfile|justfile|Rakefile|Gemfile|Procfile|CMakeLists\.txt|setup\.py|setup\.cfg)$|(^|/)(bin|hooks|scripts|statusline|src|lib|app|cmd|internal|pkg)/'
 

@@ -177,3 +177,22 @@ The CLI warns rather than refuses because refusing produces no row at all, and t
 way past a CLI that refuses is to stop calling it. A gap recorded as `trigger_kind:"unrecorded"`
 is countable; a missing row is not. `SKILLFORGE_REQUIRE_TRIGGER=1` turns the warning into a
 refusal once every caller is updated.
+
+## What the apply debt demands, and what it does not
+
+`skillforge done` leaves a marker, and until `skillforge apply` answers it the forge is closed
+but not finished. A `Stop` hook reads that marker and blocks the turn — **once per skill per
+session**. It then records that it has named that skill and lets go, so the same session is not
+stopped twice for the same debt however many turns it runs. The block message says so itself.
+It is a flag raised where it cannot be missed, not a wall, and describing it as refusing to end
+the session overstates it in the direction that makes a reader switch it off.
+
+**`declined` is a first-class outcome, not a failure row.** The question the debt asks is
+*"was this used on the problem that caused it?"*, and `no` is a real answer to it — the skill
+turned out to be the wrong tool, the problem dissolved, the session ended somewhere else. What
+the ledger is measuring is how often a forge closes the loop, and a `declined` row is data about
+that; a debt quietly left unanswered is not. Answer it either way and the forge is finished.
+
+The window is `APPLY_GATE_WINDOW`, 86400 seconds by default: a forge closed yesterday is still
+the forge this work asked for, and one closed last month is an archaeology problem rather than a
+turn's. Past the window the marker stops blocking and `skillforge pending` still lists it.

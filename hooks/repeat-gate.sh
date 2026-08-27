@@ -760,6 +760,26 @@ sig="$(printf '%s' "$sig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
 mkdir -p "$DIR/denied/$sid" 2>/dev/null || exit 0
 mkdir "$DIR/denied/$sid/$sig" 2>/dev/null || exit 0
 
+# AND RELEASED AGAIN ON EVERY PATH OUT OF HERE THAT DOES NOT EMIT. `hooks/apply-gate.sh`
+# argues EMIT, AND ONLY THEN CLAIM at length, and this arm CANNOT take that ordering: the
+# claim is what serialises the duplicate delivery both wirings produce, and two refusals
+# racing out for one call is the outcome the paragraph above ranks as worse than a missed
+# one. Releasing gives the same property the sibling's ordering buys -- a refusal nobody
+# saw does not silence the signature for the rest of the session -- without giving up the
+# race.
+#
+# THE WINDOW IS REAL AND WAS MEASURED, not reasoned about. `jq -n --arg r` is an exec, and
+# the ENVIRONMENT counts against the same ARG_MAX as the argument vector; no cap in this
+# file has any say over it. A cold reviewer judged this unreachable because the reason is
+# bounded, which is true of the message and beside the point. It is only reachable with the
+# reason NEAR its cap -- the biggest exec before this point is the store query, whose jq
+# program is about 1.3 KB, and a typical reason is smaller (895 bytes for `gh pr list
+# --state open --limit 20`), so E2BIG reaches the QUERY first and the hook fails open
+# before ever claiming. At the cap the reason measures 2096 bytes and the emit is the
+# larger exec again. tests/test_repeat_gate.py::DenyEmitFailureTest reproduces exactly
+# that, and carries a non-vacuity partner because it asserts on SILENCE.
+release_claim() { rmdir "$DIR/denied/$sid/$sig" 2>/dev/null || :; }
+
 # Swept HERE, and only once the deny is really going to happen. `denied/` and NOT `claims/`:
 # this arm is the only writer of `denied/`, so no other arm can collect it, while `claims/`
 # is written by arms that sweep it themselves and is the larger tree of the two. A deny path
@@ -777,7 +797,7 @@ fix="$(hitr '.fix')"
 fixn="$(hitr '.fixn')"
 tie="$(hitr '.tie')"
 case "$n" in ''|*[!0-9]*) n=0 ;; esac
-[ "$n" -lt 1 ] && exit 0
+[ "$n" -lt 1 ] && { release_claim; exit 0; }
 
 # The error head is verbatim and usually multi-line ("Exit code 127" then the real
 # message). Indenting its continuation lines to the width of the label is the difference
@@ -825,7 +845,15 @@ is the way past it. The full record, and the way to retire it permanently:
   skillrepeat show $sig
   skillrepeat forget $sig"
 
-jq -n --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny", permissionDecisionReason:$r}}' 2>/dev/null || exit 0
+# RENDERED TO A FILE FIRST, so "did the deny actually reach stdout" is a question with an
+# answer. THE SUBSHELL IS NOT DECORATION and `2>/dev/null` on the jq alone is not enough:
+# when the emit dies from a SIGNAL rather than an exit status, the message is printed by
+# the shell that REAPS the child, not by the child, so the child's own redirect cannot
+# catch it -- and a hook may never speak on stderr. `hooks/apply-gate.sh` carries the
+# measured reproduction of that.
+( jq -n --arg r "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny", permissionDecisionReason:$r}}' > "$TMP/deny.json" ) 2>/dev/null
+[ -s "$TMP/deny.json" ] || { release_claim; exit 0; }
+cat "$TMP/deny.json" 2>/dev/null || { release_claim; exit 0; }
 exit 0
 
 }

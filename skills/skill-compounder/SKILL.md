@@ -460,13 +460,13 @@ second answer to "how did this get here".
   *failed* invocation reaches no hook, so it counts successes only.
 - **Was it used on the problem that caused it?** That is a fifth question and a separate row:
   `skillforge apply --name <skill> --outcome used|declined --evidence "<verbatim>"`. Until it is
-  answered the forge carries a debt, `skillforge pending` lists it, and a `Stop` hook refuses to
-  end the forging session's turn.
+  answered the forge carries a debt, `skillforge pending` lists it, and a `Stop` hook blocks the
+  forging session's turn **once per skill, then lets go** — a flag you cannot miss, not a wall.
 - Run the pipeline **during** the session that discovered the need for it; deferring to
   "next session" throws the benefit away.
 
-Where `done` looks, what the close row records, the project-scope case and the measured lag are
-in `references/forge-animation.md`.
+Where `done` looks, what the close row records, the project-scope case, the measured lag, and
+what the apply debt does and does not demand are in `references/forge-animation.md`.
 
 ## Trigger precision
 

@@ -261,6 +261,42 @@ class DocGateTest(unittest.TestCase):
         self.assertIn("hooks/a.sh", reason)
         self.assertNotIn("notes/2026-08-26-session.md", reason)
 
+    def test_a_doc_under_a_nested_notes_directory_still_counts_as_documentation(self):
+        """The `notes/` exclusion is about THIS repository's root-level dated log, and the
+        header says so in as many words. Unanchored, `(^|/)notes?/` matched the segment at
+        any depth, so `docs/notes/architecture.md` -- a real `.md` inside `docs/` -- was
+        classified NEITHER and the push denied for carrying no documentation. That is the
+        one outcome this gate must never produce, and the reason named the doc file
+        nowhere, so nothing on any surface said why. Reproduced 2026-08-26 by a cold
+        reviewer against a real repository and a real bare remote."""
+        self.commit({"bin/tool.sh": "#!/bin/sh\ntrue\n",
+                     "docs/notes/architecture.md": "# Architecture\n"},
+                    "code plus a doc under docs/notes/")
+        self.assert_allowed(self.push())
+
+    def test_code_under_a_nested_notes_directory_is_still_code(self):
+        """The same anchor, in the other direction and with the opposite consequence.
+        `src/notes/parser.py` was excluded before it could be counted as CODE, so a push
+        carrying only that file was silently allowed -- the permissive direction, which is
+        why it would never have announced itself."""
+        self.commit({"src/notes/parser.py": "def parse():\n    return 1\n"},
+                    "code under a nested notes/ directory")
+        reason = self.assert_denied(self.push())
+        self.assertIn("src/notes/parser.py", reason)
+
+    def test_a_root_level_note_beside_a_real_doc_still_leaves_the_doc_counted(self):
+        """Non-vacuity for the anchor: the rule it protects must still fire at the root.
+
+        `README.md` is written with content that DIFFERS from what setUp seeded. Written
+        with the seeded bytes it is not a change, so it never reaches the diff the gate
+        reads, and the test would have passed or failed for a reason unrelated to its
+        name."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n",
+                     "notes/2026-08-26-session.md": "log\n",
+                     "README.md": "# project\n\na sentence setUp did not write\n"},
+                    "code, a note, and a real doc")
+        self.assert_allowed(self.push())
+
     def test_a_shell_script_with_no_extension_under_bin_counts_as_code(self):
         """It has to be caught by PATH, because a deleted file has no shebang left to
         read. This is how `bin/skillforge` is classified."""

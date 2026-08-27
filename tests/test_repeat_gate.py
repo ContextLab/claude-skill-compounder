@@ -1528,5 +1528,137 @@ class CliCostTest(CostTest):
         self.time_cli("stats", 1)
 
 
+# ================================================== the claim taken before the emit
+class DenyEmitFailureTest(GateCase):
+    """The deny arm claims `denied/<session>/<sig>` BEFORE it emits, so an emit that
+    dies silences that signature for the whole session with nothing on any surface.
+
+    A cold reviewer raised this as a latent inconsistency with `hooks/apply-gate.sh`,
+    whose header argues EMIT, AND ONLY THEN CLAIM at length, and judged it unreachable
+    here because the reason is bounded (norm <= 400, err <= 400, cmd <= 500) so E2BIG
+    cannot be reached through the message. That is true of the message and beside the
+    point: `jq -n --arg r` is an exec, and **the environment counts against the same
+    ARG_MAX as the argument vector**, which no cap in this file has any say over. Same
+    route `tests/test_apply_gate.py::EmitFailureTest` takes, for the same reason.
+
+    IT IS ONLY REACHABLE WITH THE REASON NEAR ITS CAP, and that is worth stating because
+    it is why a first attempt at this test proved nothing. The largest exec on the deny
+    path before the emit is the store query, whose jq program is about 1.3 KB; a typical
+    deny reason is smaller (895 bytes measured for `gh pr list --state open --limit 20`),
+    so E2BIG reaches the QUERY first, the hook fails open, and no claim is ever taken.
+    The scenario below therefore drives the reason to its cap -- a command past the
+    400-character normalisation cap, a long error, and a recorded recovery -- which
+    measures 2096 bytes and puts the emit back on the far side of the query.
+
+    THE ORDERING IS NOT SIMPLY INVERTED HERE, and that is the difference from the
+    sibling. This arm's claim is deliberately fail-CLOSED: it serialises the duplicate
+    delivery both wirings produce, and two refusals racing out for one call is worse
+    than one missed. So the claim stays where it is and is RELEASED on every path that
+    exits without emitting -- which buys the same property the sibling's ordering does
+    (the next attempt tries again instead of the signature being gone for the session)
+    without giving up the race.
+
+    NOTHING IS MOCKED: a real environment, a real exec, real files. The window is
+    CALIBRATED at run time because ARG_MAX is per-platform, and by BINARY SEARCH rather
+    than the sibling's linear walk because the gap to straddle here is under a kilobyte.
+    """
+
+    UNIT = 200                      # bytes per padding variable: the search granularity
+    SMALL = 1500                    # > the store query's argv; these execs must still work
+    BIG = 2300                      # > the capped deny reason this scenario builds
+    MAX_UNITS = 100000              # 20 MB of padding before giving up
+
+    def _pad_env(self, units, **extra):
+        e = self.env(**extra)
+        for i in range(units):
+            e["REPEAT_GATE_TEST_PAD%05d" % i] = "x" * self.UNIT
+        return e
+
+    def _execs(self, units, argsize):
+        """Can jq be exec'd with this much environment and an argument this size?"""
+        try:
+            r = subprocess.run(["jq", "-n", "--arg", "r", "R" * argsize, "$r|length"],
+                               capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, env=self._pad_env(units))
+            return r.returncode == 0
+        except OSError:
+            return False            # E2BIG surfaces here, before jq is ever entered
+
+    def _calibrate(self):
+        """The largest padding at which a SMALL exec still works, by binary search."""
+        if not self._execs(0, self.SMALL):
+            self.skipTest("a %d-byte exec fails with no padding at all" % self.SMALL)
+        if self._execs(self.MAX_UNITS, self.SMALL):
+            self.skipTest("no environment size below %d bytes separates a %d-byte exec "
+                          "from a %d-byte one on this platform"
+                          % (self.MAX_UNITS * self.UNIT, self.SMALL, self.BIG))
+        lo, hi = 0, self.MAX_UNITS          # SMALL works at lo, fails at hi
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if self._execs(mid, self.SMALL):
+                lo = mid
+            else:
+                hi = mid
+        if self._execs(lo, self.BIG):
+            self.skipTest("could not straddle ARG_MAX: a %d-byte exec still succeeds at "
+                          "the largest padding a %d-byte one survives"
+                          % (self.BIG, self.SMALL))
+        return lo
+
+    # A command past the 400-character cap, a long error, and a recovery to quote: the
+    # three inputs that put the reason near its ceiling. Measured together: 2096 bytes.
+    LONG_CMD = "gh pr list --state open --search " + ("verylongtoken" * 40)
+    LONG_ERR = "Exit code 1\n" + ("a failure message that goes on and on " * 20)
+    FIX_CMD = "curl -sS https://api.github.com/repos/" + ("x" * 450)
+
+    def _teach_a_big_refusal(self):
+        for s in ("s1", "s2"):
+            self.tick()
+            self.run_hook(self.failure(self.LONG_CMD, s, error=self.LONG_ERR))
+            self.tick()
+            self.run_hook(self.success(self.FIX_CMD, s))
+        self.tick()
+
+    def test_the_scenario_really_does_refuse_and_the_reason_is_near_its_cap(self):
+        """Non-vacuity for the test below, which asserts on SILENCE. Without this, a
+        scenario that simply never refused would satisfy it."""
+        self._teach_a_big_refusal()
+        reason = self.assert_denied(self.run_hook(self.attempt(self.LONG_CMD, "s3")))
+        self.assertGreater(len(reason.encode()), 1500,
+                           "the reason is not near its cap, so this scenario cannot put "
+                           "the emit on the far side of the store query")
+
+    def test_a_deny_that_could_not_be_emitted_does_not_burn_the_claim(self):
+        units = self._calibrate()
+        self._teach_a_big_refusal()
+
+        r = subprocess.run(["bash", HOOK],
+                           input=json.dumps(self.attempt(self.LONG_CMD, "s3")),
+                           capture_output=True, text=True, timeout=180,
+                           env=self._pad_env(units, REPEAT_GATE_NOW=str(self.clock)))
+        # A hook may never break a turn and may never speak on stderr, whatever fails.
+        self.assertEqual(r.returncode, 0, "the hook exited %d" % r.returncode)
+        self.assertEqual(r.stderr, "", "the hook wrote to stderr: %r" % r.stderr)
+        self.assertEqual(r.stdout, "",
+                         "the emit was expected to fail in this environment, got %r"
+                         % r.stdout)
+
+        # THE HOOK REALLY DID REACH THE DENY ARM. Without this the test would also pass
+        # if the hook had failed open at the store query and proved nothing: the session
+        # directory is created on the line above the claim.
+        denied = os.path.join(self.state, "repeats", "denied", "s3")
+        self.assertTrue(os.path.isdir(denied),
+                        "the hook never reached the deny arm; this test proved nothing")
+
+        # And the claim it could not honour is not still standing.
+        left = os.listdir(denied)
+        self.assertEqual(left, [],
+                         "a claim was burnt for a refusal nobody ever saw: %s" % left)
+
+        # The consequence that matters: the next attempt in the SAME session refuses.
+        self.tick()
+        self.assert_denied(self.run_hook(self.attempt(self.LONG_CMD, "s3")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

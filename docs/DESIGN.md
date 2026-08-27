@@ -28,8 +28,24 @@ session that forged it. It is also why the SKILL.md tells sessions not to read t
 ## There are two different session ids
 
 `$CLAUDE_CODE_SESSION_ID` (visible to `Bash`) and the `.session_id` delivered in
-hook / status-line stdin JSON are **different identifiers for the same session**. Observed
-in one session: `32c3cd9e-…` in the environment variable, `f2d5c428-…` in the hook payload.
+hook / status-line stdin JSON were once **different identifiers for the same session**.
+Observed in one session: `32c3cd9e-…` in the environment variable, `f2d5c428-…` in the hook
+payload.
+
+**They are the same value at CLI 2.1.247, re-measured 2026-08-26.** In one session the
+environment variable read `25a4770c-…`, and every claim file `hooks/apply-gate.sh` had
+written from the *payload's* `.session_id` was named `25a4770c-….<prompt>.turn`. A cold
+reviewer raised the divergence as a live hazard for the apply gate and found the same
+equality independently.
+
+**Which means the finding is dated, and the design below is not.** Do not read this section
+as "they are the same now, so a session id is safe to key on": what was measured is one
+version's behaviour, twice, in opposite directions. `bin/skillforge` writes
+`$CLAUDE_CODE_SESSION_ID` into an apply marker and `hooks/apply-gate.sh` compares the
+payload's `.session_id` against it, so **that gate is the one component here that depends on
+the two being equal** — it works today for that reason, and it would go silently dead, with
+nothing on any surface, if they diverged again. That is a known and accepted fragility in a
+component whose failure mode is silence, not a claim that the platform guarantees anything.
 
 **Consequence for the design:** `skillforge` keys its state on the **forge name**, never on a
 session id. Keying it on the environment variable makes the status line look for a filename
@@ -564,7 +580,7 @@ still removable.
 ## Check first, or say exactly what landed
 
 A read-only `~/.local/bin` used to raise `PermissionError` *after* the hooks, the status
-line and all nine skills were live. The user read a traceback and "it failed" while
+line and every skill were live. The user read a traceback and "it failed" while
 actually holding most of an install with `skillforge` missing from PATH.
 
 Everything install needs is now proven writable before anything is applied, by creating and
@@ -801,7 +817,8 @@ differs from the original before you run anything against it.
 its own header argued that a refusal is a different mechanism from a reminder rather than a
 louder one. Issue #19 supplied the measurement that turns that argument into a rule for the
 whole package: the edit checkpoint fired at edits 12, 24 and 36 in one session and was read
-past every time, seven of nine shipped skills never arrived on their own in real work, and
+past every time, seven of the nine skills shipped *at the time of that measurement* never
+arrived on their own in real work, and
 `superpowers:verification-before-completion` — whose description is an excellent statement
 of its own problem — had been invoked zero times in 1,988 transcripts. Wording was never the
 variable. A thread absorbed in one fix answers *"is this recurring?"* honestly with *"no"*,

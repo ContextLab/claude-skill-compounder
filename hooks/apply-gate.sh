@@ -5,8 +5,11 @@
 # WHY THIS IS A HOOK AND NOT A REMINDER. Issue #19 requirement 4 says the loop ends at
 # "and then it solved the thing", and the maintainer's own measurement is that a reminder
 # does not get there. The edit checkpoint in hooks/compound-improvement.sh fired at edits
-# 12, 24 and 36 in one real session and was read past every time; 7 of the 9 skills
-# shipped in this package never arrived on their own in a live session. Refusal is the one
+# 12, 24 and 36 in one real session and was read past every time; and of the 9 skills this
+# package shipped WHEN THAT WAS MEASURED, 7 never arrived on their own in a live session.
+# The count is dated on purpose: it is the size of the population the measurement covered,
+# not an inventory of what ships today, and `ls -d skills/*/ | wc -l` is the inventory.
+# Refusal is the one
 # mechanism in this package that has been observed to steer -- hooks/claim-gate.sh is the
 # production precedent, and this file is modelled on its Stop arm, deliberately, down to
 # the block shape and the per-key claim.

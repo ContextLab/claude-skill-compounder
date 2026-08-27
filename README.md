@@ -729,7 +729,7 @@ place in `~/.claude/settings.json`:
 |`CLAIM_GATE_MIN_DIGITS`|`3`|the hook entries|Smallest integer width the gate will flag as an unsupported figure|
 |`CLAIM_GATE_MAX_SESSION`|`10`|the hook entries|Blocks plus denials the gate may spend in one session|
 |`SKILL_COMPOUNDER_REPEAT_GATE`|`1`|the hook entries|Set to `0` to switch the repeat gate off entirely — it denies nothing and learns nothing|
-|`REPEAT_MIN_SESSIONS`|`2`|the hook entries|Earlier sessions a call must have failed in, the same way, before the next attempt is denied|
+|`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Earlier sessions a call must have failed in, the same way, before the next attempt is denied. **Three components read it** — set it anywhere narrower and they disagree|
 |`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful `Bash`/`Skill` calls — the only ones this hook is delivered — after which an armed failure stops looking for the call that fixed it|
 |`SKILL_COMPOUNDER_DOC_GATE`|`1`|the hook entries|Set to `0` to switch the documentation gate off entirely — `git push` is never denied|
 |`DOC_GATE_MAX_COMMITS`|`100`|the hook entries|Most commits the gate will read ahead of the remote before it gives up and stays silent|
@@ -741,11 +741,24 @@ place in `~/.claude/settings.json`:
 
 Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
 `SKILL_COMPOUNDER_USE_LOG` is read by `hooks/skill-use.sh`, which is a hook entry too.
-The `CLAIM_GATE_*`, `REPEAT_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables are each read by
-exactly one script — `hooks/claim-gate.sh`, `hooks/repeat-gate.sh`, `hooks/doc-gate.sh`,
-`hooks/apply-gate.sh` — so each belongs on that script's own hook entries and nowhere else.
-Each of the four also takes an off switch, and setting one to `0` disables that gate
-completely rather than making it quieter.
+The `CLAIM_GATE_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables, and every `REPEAT_*` one
+**but `REPEAT_MIN_SESSIONS`**, are each read by exactly one script — `hooks/claim-gate.sh`,
+`hooks/doc-gate.sh`, `hooks/apply-gate.sh`, `hooks/repeat-gate.sh` — so each belongs on
+that script's own hook entries and nowhere else. Each of the four gates also takes an off
+switch, and setting one to `0` disables that gate completely rather than making it quieter.
+
+**`REPEAT_MIN_SESSIONS` is the exception, and it is the one to get wrong.** Three
+components read it — `hooks/repeat-gate.sh`, which decides, and `bin/skillrepeat` and
+`bin/skillreport`, which report what it decided:
+
+```bash
+grep -rlF '${REPEAT_MIN_SESSIONS' hooks bin statusline
+```
+
+Set it on the hook entry alone and the two CLIs keep reporting against the default: a
+signature that failed in two sessions is listed as `refuses` while a gate raised to three
+lets it straight through, and nothing says which of the two is lying. It belongs in the
+session-wide `env` block, for the same reason `SKILL_COMPOUNDER_STATE` does.
 `STATUSLINE_BASE_TTL` is read by
 `statusline/statusline.sh`, so setting it on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it

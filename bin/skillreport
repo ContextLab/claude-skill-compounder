@@ -860,7 +860,7 @@ done < "$TMP/files" | jq -R '
 #              | [(.input.skill // "?"), ($r.entrypoint // "?"), ($r.cwd // "?")] | @tsv' \
 #     | sort | uniq -c | sort -rn
 #
-# 98 invocations of the nine skills this package ships: 93 from probe and test working
+# 98 invocations, over the nine skills this package shipped when that was counted: 93 from probe and test working
 # directories, 5 from real project directories. All 93 inflated the headline, which read
 # "REUSE: 5 of 5 finished forges (100%)" with per-skill USES of 11/11/11/14/8.
 #
