@@ -189,7 +189,9 @@ runner reported. One test skipped: `test_routing_claims.py::LiveProbeTest`, opt-
 
 ### Proof the sweep ran this code
 
-Canary `CANARY-1787810688-d7c110de`, planted via `stale-artifact-check` on **the line the
+A canary token minted at epoch 1787810688 (suffix `d7c110de`; the full token is not
+reproduced here, for the reason in the paragraph below), planted via `stale-artifact-check`
+on **the line the
 change actually altered** — the `NEITHER_RE` classifier inside `hooks/doc-gate.sh`'s
 per-file loop, where execution is not in question.
 
@@ -206,6 +208,15 @@ provenance evidence — a stale artifact would have produced neither:
 
 Canary removed, that skill's Phase 4 sweep reports `CLEAN` with no orphans from other
 sessions, and the recorded sweep above is the clean re-run with nothing else changed.
+
+**A fourth catch, by the same test, from this record.** The first version of the paragraph
+above quoted the token in full. `CanaryCleanupTest` then found it *in this file* and failed
+with "documentation placeholders must never read as canaries" — a live canary and a
+citation of a dead one are the same eight hex digits, and nothing but the shape
+distinguishes them. So the token is written here in a form that cannot match
+`CANARY-[0-9]{10}-[0-9a-f]{8}`. This is the case `finish-task` Phase 5 anticipates as *the
+record broke the suite by existing*, and it is why every finish owes a confirming sweep
+after the record is committed rather than treating the recorded sweep as the last word.
 
 ## What `claim-provenance` changed: nothing
 
