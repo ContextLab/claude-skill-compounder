@@ -134,6 +134,24 @@ class DocGateTest(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
 
+    def commit_cacheinfo(self, files, message="change"):
+        """Commit paths straight into the index, bypassing the working tree.
+
+        macOS is case-INSENSITIVE by default, so `self.write("Docs/guide.txt")` into a
+        repo that already holds `docs/` lands in the existing directory and git reports
+        the lowercase path -- a case test written that way passes without ever exercising
+        the case it names. `git update-index --cacheinfo` writes the path as given, and
+        it is the only way to be sure the gate is handed the bytes this test intends."""
+        for rel, text in files.items():
+            r = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=self.repo,
+                               env=self.gitenv, input=text, capture_output=True,
+                               text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, "hash-object failed: %s" % r.stderr)
+            self.git("update-index", "--add", "--cacheinfo",
+                     "100644,%s,%s" % (r.stdout.strip(), rel))
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD").strip()
+
     def commit(self, files, message="change"):
         """Write files and make one real commit ahead of the upstream."""
         for rel, text in files.items():
@@ -296,6 +314,47 @@ class DocGateTest(unittest.TestCase):
                      "README.md": "# project\n\na sentence setUp did not write\n"},
                     "code, a note, and a real doc")
         self.assert_allowed(self.push())
+
+    def test_capitalised_documentation_directories_still_count_as_documentation(self):
+        """`Documentation/` is git's own convention and the kernel's, and `Docs/` and
+        `Doc/` are ordinary. All three were classified as neither, because `DOC_RE` was
+        matched case-sensitively, and the push was denied for carrying no documentation
+        while carrying one. Found by a cold reviewer on 2026-08-27 against a real
+        repository and a real bare remote.
+
+        Written through `git update-index --cacheinfo` so a case-insensitive filesystem
+        cannot fold the path and make this pass for the wrong reason."""
+        for d in ("Documentation", "Docs", "Doc", "Man"):
+            with self.subTest(directory=d):
+                self.setUp()
+                self.commit_cacheinfo({"bin/tool.sh": "#!/bin/sh\ntrue\n",
+                                       "%s/guide.txt" % d: "prose\n"},
+                                      "code plus a doc under %s/" % d)
+                self.assert_allowed(self.push())
+
+    def test_capitalised_and_lowercased_bare_doc_names_still_count(self):
+        """`Readme` and `readme` are as conventional as `README`."""
+        for name in ("Readme.md", "readme.md", "Changelog", "changelog.rst"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.commit_cacheinfo({"bin/tool.sh": "#!/bin/sh\ntrue\n",
+                                       name: "prose\n"}, "code plus %s" % name)
+                self.assert_allowed(self.push())
+
+    def test_an_uppercase_extension_still_counts_as_documentation(self):
+        self.commit_cacheinfo({"bin/tool.sh": "#!/bin/sh\ntrue\n",
+                               "guide.MD": "prose\n"}, "code plus an uppercase .MD")
+        self.assert_allowed(self.push())
+
+    def test_a_capitalised_notes_directory_is_still_a_dated_log(self):
+        """The other direction: NEITHER_RE is matched the same way, so the exclusion the
+        gate depends on cannot be sidestepped by capitalising the directory."""
+        self.commit_cacheinfo({"hooks/a.sh": "#!/bin/sh\necho bye\n",
+                               "Notes/2026-08-26-session.md": "log\n"},
+                              "code plus a capitalised note")
+        reason = self.assert_denied(self.push())
+        self.assertIn("hooks/a.sh", reason)
+        self.assertNotIn("Notes/2026-08-26-session.md", reason)
 
     def test_a_shell_script_with_no_extension_under_bin_counts_as_code(self):
         """It has to be caught by PATH, because a deleted file has no shebang left to

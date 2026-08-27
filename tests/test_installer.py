@@ -49,6 +49,71 @@ class InstallerTest(unittest.TestCase):
     def do_uninstall(self):
         return installer.uninstall(APP_HOME, str(self.claude), str(self.bin), str(self.state))
 
+    def make_checkout_without(self, *scripts):
+        """A real copy of this checkout with named hook scripts removed.
+
+        The installer decides what to wire by asking whether each script EXISTS, so the
+        only honest way to test "a gate whose script this checkout does not carry" is to
+        hand it a checkout that does not carry it."""
+        import shutil
+        dest = Path(self.tmp.name) / "checkout"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(APP_HOME, dest, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+        for name in scripts:
+            (dest / "hooks" / name).unlink()
+        return str(dest)
+
+    def test_a_stale_entry_is_stripped_even_when_nothing_replaces_it(self):
+        """`_strip_marker` returns a NEW list, and the write-back was guarded on there
+        being something to write. So when the strip emptied the list and this checkout
+        wired nothing onto that event, the result was never assigned and the ORIGINAL
+        list -- stale entry still in it -- stayed in settings.json, pointing at a script
+        that is gone. Found by a cold reviewer on 2026-08-27, reproduced on PreToolUse
+        and on Stop.
+
+        The partial case was always handled, because one surviving gate makes the guard
+        true, which is why this needs a checkout carrying NONE of the event's scripts."""
+        gone = "/gone/checkout/hooks"
+        self.write_settings({"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+                            "command": '"%s/claim-gate.sh" # claude-skill-compounder claim-gate'
+                                       % gone}]}],
+            "Stop": [{"hooks": [{"type": "command",
+                      "command": '"%s/apply-gate.sh" # claude-skill-compounder apply-gate'
+                                 % gone}]}],
+        }})
+        home = self.make_checkout_without("claim-gate.sh", "doc-gate.sh", "repeat-gate.sh",
+                                          "apply-gate.sh", "insight-capture.sh")
+        installer.install(home, str(self.claude), str(self.bin), str(self.state))
+        s = self.read()
+        for event in ("PreToolUse", "Stop"):
+            with self.subTest(event=event):
+                cmds = [h["command"] for g in s["hooks"].get(event, []) for h in g["hooks"]]
+                self.assertFalse([c for c in cmds if gone in c],
+                                 "a stale entry pointing at a script that is gone "
+                                 "survived on %s: %r" % (event, cmds))
+
+    def test_a_foreign_entry_survives_that_same_strip(self):
+        """NON-VACUITY, and the failure it guards against is the destructive one: a
+        write-back that simply dropped the event would satisfy the test above."""
+        gone = "/gone/checkout/hooks"
+        self.write_settings({"hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command",
+                 "command": '"%s/claim-gate.sh" # claude-skill-compounder claim-gate' % gone}]},
+                {"matcher": "Bash", "hooks": [{"type": "command",
+                 "command": "/usr/bin/python3 /some/other/tool.py"}]},
+            ],
+        }})
+        home = self.make_checkout_without("claim-gate.sh", "doc-gate.sh", "repeat-gate.sh")
+        installer.install(home, str(self.claude), str(self.bin), str(self.state))
+        cmds = [h["command"] for g in self.read()["hooks"].get("PreToolUse", [])
+                for h in g["hooks"]]
+        self.assertIn("/usr/bin/python3 /some/other/tool.py", cmds,
+                      "another tool's PreToolUse hook was removed: %r" % cmds)
+
     # ------------------------------------------------------------------ basics
 
     def test_install_into_empty_config(self):

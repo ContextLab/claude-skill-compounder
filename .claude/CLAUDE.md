@@ -57,7 +57,12 @@ python3 scripts/setup.py --uninstall --claude-dir /tmp/fake-claude --bin-dir /tm
 `scripts/setup.py`; the real logic is `skill_compounder/installer.py`.
 
 Requires `jq` (hooks, CLIs, status line) and `python3` (installer only). The `gh` tests in
-`test_contribute.py` skip cleanly without `gh` or without auth; nothing else skips.
+`test_contribute.py` skip cleanly without `gh` or without auth. **One test skips on every
+ordinary run** and is the only one that does: `test_routing_claims.py::LiveProbeTest`, which
+is opt-in behind `SKILL_ROUTING_PROBE=1` because it spends ~48 real `claude -p` calls (~144
+at the default `--runs 3`). Derive this by reading the run rather than from this sentence —
+`grep -c '\.\.\. skipped' `, and `grep -rln skipTest tests/` returns fourteen files, most of
+whose guards never fire.
 
 Five CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state, the ledger, and the
 apply debt a closed forge leaves), `skillreport` (ledger joined against transcript

@@ -74,7 +74,8 @@
 #        defect hooks/claim-gate.sh documents under TOKENISATION. Digits welded to letters
 #        (`sha256`, `x86`, `v2`) are NOT masked -- those are names, not quantities.
 #     6. whitespace collapsed, trimmed, capped at 400 characters.
-#   any other tool (NOT REACHABLE under the current matcher -- see WHAT THE WIRING ADMITS):
+#   any other tool -- which under the current matcher means `Skill`, and it LEARNS here but
+#   is never refused; see the stanza above norm_structured:
 #     `jq -Sc .tool_input` -- sorted keys, so a re-ordered payload is the same call -- then
 #     rules 4, 5 and 6. Quoted literals are NOT masked here, because for a structured tool
 #     the strings ARE the call (`{"file_path":"/x/y.py"}` masked to `{<S>}` would collapse
@@ -228,9 +229,12 @@
 # 4. A PreToolUse deny is stdout
 #      {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
 #       "permissionDecisionReason":"<text>"}}
-#    with exit 0. The model treats that text as UNTRUSTED tool output and explicitly
-#    refuses instructions embedded in it, so the reason below is written as a statement of
-#    fact and never as a command to run something.
+#    with exit 0. Whether the model ACTS on that text is not settled: one probe recorded it
+#    refusing an embedded instruction as untrusted tool output, a later one in this same
+#    branch recorded 4/4 sessions running the exact command a reason named, and
+#    docs/CLAUDE-CODE-BEHAVIOR.md reconciles them on COHERENCE rather than grammatical mood.
+#    Neither arm may be quoted alone. The reason below is written as a statement of fact and
+#    never as a command to run something, which is the rule that is safe under either.
 # 5. With settings.json and the plugin manifest both wired, EVERY hook event is delivered
 #    TWICE. Every arm here therefore claims its event by `mkdir` of a directory named for
 #    the payload's own `tool_use_id`, under the sanitised session id -- the identical
@@ -447,15 +451,31 @@ norm_bash() {
     | cut -c1-400
 }
 
-# UNREACHABLE ON THE CURRENT WIRING, and kept deliberately. The matcher admits Bash and
-# Skill only, and a failed `Skill` call reaches no hook at all (HONEST LIMIT above), so no
-# structured `fail` row can be written as things stand. It is kept because widening the
-# matcher is ONE STRING IN TWO FILES -- `REPEAT_MATCHER` in skill_compounder/installer.py
-# and the three matchers in hooks/hooks.json -- and this is what the gate would need the
-# moment it is widened. The code is correct and tested against real payload shapes. What is
-# NOT established is the route to it: `mcp__.*` reaching a real MCP tool is UNMEASURED, and
-# no MCP tool failure has ever been observed arriving at a hook here. Proven code on an
-# unproven route; do not read the tests below it as evidence the path is live.
+# REACHED BY EVERY `Skill` CALL, and this stanza said the opposite until 2026-08-27. The
+# branch in `compute_call` is `if [ "$tool" = "Bash" ]`, and `Skill` is not `Bash`, so every
+# Skill delivery on all three events lands here. A cold reviewer demonstrated a LIVE deny of
+# a Skill call by seeding two `fail` rows under the callkey this function produces. The old
+# text called the branch unreachable on the current wiring, in capitals, and a test in
+# tests/test_repeat_gate.py REQUIRED that sentence to stay in this file -- the two together
+# made a falsehood load-bearing, and the assertion would have passed unchanged if the
+# behaviour it named had been removed, which is the one thing a test must never do. That
+# assertion is now inverted, which is why the phrase itself does not appear here.
+#
+# WHAT WAS TRUE IN IT, and is narrower than it sounded: no `fail` row for a Skill call has
+# been observed, because `Unknown skill: <name>` reaches no hook (HONEST LIMIT above). That
+# measurement covers the only Skill failure mode provokable on demand, so it bounds what has
+# been SEEN and not what can arrive. Any Skill failure that does deliver writes a row here.
+#
+# WHICH IS WHY THE REFUSE ARM IS BASH-ONLY. Both of that arm's escape hatches -- the
+# `*skillrepeat*` guard and `allowlisted_head` -- sit inside `if [ "$tool" = "Bash" ]`, so a
+# refused Skill call had no way past and no way to retire the signature. Learn broadly,
+# refuse narrowly: a Skill failure is still recorded, because it is data `skillreport` wants,
+# and it never denies. Refusing a `Skill` call would also block the one mechanism this whole
+# package exists to promote, on a signature whose provenance is unestablished.
+#
+# An MCP route remains UNMEASURED: `mcp__.*` reaching a real MCP tool has never been
+# observed here, and widening the matcher is ONE STRING IN TWO FILES -- `REPEAT_MATCHER` in
+# skill_compounder/installer.py and the three matchers in hooks/hooks.json.
 norm_structured() {
   printf '%s' "$payload" \
     | jq -Sc '.tool_input // {}' 2>/dev/null \
@@ -478,7 +498,7 @@ compute_call() {
     cmd="$(printf '%s' "$cmd" | cut -c1-500)"
     norm="$(norm_bash "$cmd")"
   else
-    # Not reachable under `Bash|Skill`; see the note on norm_structured above.
+    # Reached by every `Skill` call; see the stanza above norm_structured.
     cmd="$(printf '%s' "$payload" | jq -c '.tool_input // {}' 2>/dev/null | cut -c1-500)"
     norm="$(norm_structured)"
   fi
@@ -674,12 +694,99 @@ allowlisted_head() {
   return 1
 }
 
+# A SECOND ALLOWLIST, AND IT IS A DIFFERENT ARGUMENT FROM THE ONE ABOVE. `allowlisted_head`
+# holds commands whose failure is nobody's bug -- a `cd` into a path that is not there. This
+# one holds TEST AND BUILD RUNNERS, whose failure is the POINT: a red suite means the code
+# is broken, not that the call is, and running it again is exactly what the next session
+# must do. Two sessions of a failing `./run_tests.sh` is the commonest shape there is of
+# "failed the same way twice", and refusing the third session's first run lands squarely on
+# the loop the user's own CLAUDE.md mandates -- "when tests fail repeatedly ... fix the code
+# so the existing tests succeed". Found by a cold reviewer on 2026-08-27, driving the real
+# hook: `./run_tests.sh` red in two sessions denied the third, and `python3 -m pytest tests/`
+# reproduced it identically.
+#
+# THE LIST IS A LOWER BOUND AND CANNOT BE OTHERWISE. There is no way to tell a test runner
+# from any other command by looking at a string, so a project's own wrapper under a name not
+# below is still refusable. That fails in the tolerated direction -- one refusal, once per
+# session, which the next attempt goes through -- and the self-recovery rule closes it for
+# good the moment the suite goes green: the identical call succeeding in an earlier session
+# disarms the signature permanently. Both halves matter; neither alone would be enough.
+#
+# Matched on the HEAD as `allowlisted_head` leaves it -- assignments stepped over, directory
+# stripped -- so `./run_tests.sh`, `/abs/path/run_tests.sh` and `CI=1 pytest` all reach here
+# as their bare basename. The `*test*`/`*spec*` script patterns are what catch a repository's
+# own runner without naming it.
+runner_head() {
+  h="$(printf '%s' "$1" | tr '\n\t' '  ' | squeeze)"
+  while :; do
+    first="${h%% *}"
+    case "$first" in
+      *=*) ;;
+      *) break ;;
+    esac
+    name="${first%%=*}"
+    case "$name" in
+      ''|*[!A-Za-z0-9_]*) break ;;
+    esac
+    [ "$h" = "$first" ] && break
+    h="${h#* }"
+  done
+  h="${h%% *}"
+  h="${h##*/}"
+  # Runners whose whole purpose is to run a suite or a build: unconditional.
+  case "$h" in
+    pytest|tox|nox|nose2|jest|mocha|vitest|karma|ava|rspec|minitest|phpunit)
+      return 0 ;;
+    make|cmake|ctest|ninja|bazel|buck|gradle|gradlew|mvn|ant|sbt|rake|just|dune)
+      return 0 ;;
+    *test*|*tests*|*spec*|*check*|*lint*|*build*)
+      return 0 ;;
+  esac
+  # MULTI-PURPOSE DRIVERS ARE GATED ON THEIR SUBCOMMAND, and that distinction is the point
+  # rather than fussiness. `npm test` failing means the code is broken; `npm install`
+  # failing repeatedly is a broken call and is EXACTLY what this gate exists to catch.
+  # Allowlisting the whole driver would trade away the gate's best cases for its worst one.
+  sub="${1#*"$h"}"; sub="${sub# }"; sub="${sub%% *}"
+  case "$h" in
+    npm|pnpm|yarn|bun|npx|deno)
+      case "$sub" in test|run|build|lint|check|start) return 0 ;; esac ;;
+    go)
+      case "$sub" in test|build|vet) return 0 ;; esac ;;
+    cargo)
+      case "$sub" in test|build|check|clippy|bench) return 0 ;; esac ;;
+    dotnet|swift|stack|mix|rebar3|lein)
+      case "$sub" in test|build) return 0 ;; esac ;;
+  esac
+  # `python -m pytest` / `python3 -m unittest` and the like: the runner is the MODULE, and
+  # the head is only an interpreter. Read the `-m` argument rather than the first word.
+  case "$h" in
+    python|python2|python3|python3.*|ruby|node|perl|php)
+      case " $1 " in
+        *" -m "*)
+          m="${1#* -m }"; m="${m%% *}"; m="${m%%.*}"
+          case "$m" in
+            pytest|unittest|nose2|tox|nox|compileall|build|pip) return 0 ;;
+          esac ;;
+      esac ;;
+  esac
+  return 1
+}
+
+# THE REFUSE ARM IS BASH-ONLY, and the two guards below are why. Both escape hatches --
+# the `*skillrepeat*` reach-for-the-CLI guard and `allowlisted_head` -- live inside this
+# branch, so a refused `Skill` call had neither, no way past the refusal and no way to
+# retire the signature that caused it. The learn arm still records a Skill failure, because
+# that is data `skillreport` wants; only the refusal is withheld. See the stanza above
+# `norm_structured` for the measurement that makes a Skill fail row's provenance uncertain.
 if [ "$tool" = "Bash" ]; then
   bcmd="$(jqr '.tool_input.command // empty')"
   [ -z "$bcmd" ] && exit 0
   # Guard 4: never refuse a command that is reaching for this store's own CLI.
   case "$bcmd" in *skillrepeat*) exit 0 ;; esac
   allowlisted_head "$bcmd" && exit 0
+  runner_head "$bcmd" && exit 0
+else
+  exit 0
 fi
 
 [ -f "$STORE" ] && [ -r "$STORE" ] || exit 0

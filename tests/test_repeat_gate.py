@@ -277,19 +277,38 @@ class SignatureTest(GateCase):
         self.assertEqual(len(self.sigs()), 1, self.sigs())
 
     def test_a_structured_tool_gets_a_signature_too(self):
-        """Not everything is Bash. An MCP tool failing the same way in two sessions is
-        the same defect, and `jq -S` makes key order irrelevant."""
-        a = {"owner": "x", "repo": "y"}
-        b = {"repo": "y", "owner": "x"}
-        self.tick(); self.run_hook(self.failure(a, "s1", tool="mcp__gh__list_prs",
+        """Not everything is Bash. `Skill` is the one non-Bash tool the `Bash|Skill`
+        matcher actually delivers, so it is what this exercises -- the test used to use
+        `mcp__gh__list_prs`, which the matcher never delivers, and so demonstrated the
+        branch on a route that does not exist while the live route went untested."""
+        a = {"skill": "finish-task", "args": "x"}
+        b = {"args": "x", "skill": "finish-task"}      # `jq -S` makes key order irrelevant
+        self.tick(); self.run_hook(self.failure(a, "s1", tool="Skill",
                                                 error="Exit code 1\nnot connected"))
-        self.tick(); self.run_hook(self.failure(b, "s2", tool="mcp__gh__list_prs",
+        self.tick(); self.run_hook(self.failure(b, "s2", tool="Skill",
                                                 error="Exit code 1\nnot connected"))
         self.assertEqual(len(self.sigs()), 1, self.sigs())
+
+    def test_a_skill_call_is_learned_but_never_refused(self):
+        """LEARN BROADLY, REFUSE NARROWLY. Both of the refuse arm's escape hatches -- the
+        `*skillrepeat*` guard and `allowlisted_head` -- sit inside the Bash branch, so a
+        refused `Skill` call had no way past the refusal and no way to retire the signature
+        behind it. A cold reviewer demonstrated a live deny of a Skill call on 2026-08-27
+        by seeding two fail rows under the callkey `norm_structured` produces.
+
+        The rows are still written: a Skill failure is data `skillreport` wants. Only the
+        refusal is withheld."""
+        a = {"skill": "finish-task"}
+        for s in ("s1", "s2"):
+            self.tick()
+            self.run_hook(self.failure(a, s, tool="Skill",
+                                       error="Exit code 1\nnot connected"))
+        self.assertEqual(len(self.sigs()), 1,
+                         "the failure was not learned: %s" % self.sigs())
         self.tick()
-        reason = self.assert_denied(self.run_hook(
-            self.attempt(b, "s3", tool="mcp__gh__list_prs")))
-        self.assertIn("not connected", reason)
+        self.assert_allowed(self.run_hook(self.attempt(a, "s3", tool="Skill")))
+        self.tick()
+        self.assert_allowed(self.run_hook(self.attempt(a, "s4", tool="Skill")))
 
     def test_an_interrupted_call_is_not_a_failure(self):
         """A user pressing stop is not the tool being broken. Recording it would teach
@@ -299,6 +318,76 @@ class SignatureTest(GateCase):
         self.tick()
         self.run_hook(self.failure("gh pr list", "s2", is_interrupt=True))
         self.assertEqual(self.rows(), [])
+
+
+# ============================================== a red suite is not a broken call
+class TestRunnerTest(GateCase):
+    """A test suite that is red across two sessions had its first run in the third
+    session DENIED. The call is not broken -- the code under test is -- and running it
+    is precisely what the third session must do. Found by a cold reviewer on 2026-08-27
+    driving the real hook: `./run_tests.sh` failing the same way in two sessions denied
+    the third, and `python3 -m pytest tests/` reproduced it identically. It lands exactly
+    on the loop the user's own CLAUDE.md mandates: when tests fail repeatedly, fix the
+    code so the existing tests succeed.
+
+    `runner_head` is a SECOND allowlist and a different argument from `allowlisted_head`:
+    that one holds commands whose failure is nobody's bug, this one holds runners whose
+    failure is the point.
+    """
+
+    SUITE_ERR = ("Exit code 1\n"
+                 "FAILED tests/test_thing.py::test_it - AssertionError: 1 != 2")
+
+    def _two_red_sessions(self, cmd):
+        for s in ("s1", "s2"):
+            self.tick()
+            self.run_hook(self.failure(cmd, s, error=self.SUITE_ERR))
+        self.tick()
+
+    def test_a_repositorys_own_runner_script_is_never_refused(self):
+        self._two_red_sessions("./run_tests.sh")
+        self.assert_allowed(self.run_hook(self.attempt("./run_tests.sh", "s3")))
+
+    def test_pytest_through_the_interpreter_is_never_refused(self):
+        """The runner is the MODULE here; the head is only an interpreter."""
+        self._two_red_sessions("python3 -m pytest tests/")
+        self.assert_allowed(self.run_hook(self.attempt("python3 -m pytest tests/", "s3")))
+
+    def test_a_bare_runner_is_never_refused(self):
+        self._two_red_sessions("pytest -q tests/")
+        self.assert_allowed(self.run_hook(self.attempt("pytest -q tests/", "s3")))
+
+    def test_a_runner_under_an_absolute_path_and_an_assignment_is_never_refused(self):
+        """Matched on the head as `allowlisted_head` leaves it: assignments stepped over,
+        directory stripped."""
+        cmd = "CI=1 /opt/proj/run_tests.sh --fast"
+        self._two_red_sessions(cmd)
+        self.assert_allowed(self.run_hook(self.attempt(cmd, "s3")))
+
+    def test_a_multi_purpose_driver_is_gated_on_its_subcommand(self):
+        """`npm test` failing means the code is broken. `npm install` failing in session
+        after session is a broken call and is EXACTLY what this gate is for -- so the
+        driver is allowlisted on its SUBCOMMAND and never wholesale. Both directions in
+        one test, because the pair is the whole point of the distinction."""
+        self._two_red_sessions("npm test")
+        self.assert_allowed(self.run_hook(self.attempt("npm test", "s3")))
+
+        install = "npm install --no-audit"
+        for s in ("t1", "t2"):
+            self.tick()
+            self.run_hook(self.failure(install, s,
+                                       error="Exit code 1\nERR! ENOTFOUND registry"))
+        self.tick()
+        reason = self.assert_denied(self.run_hook(self.attempt(install, "t3")))
+        self.assertIn("npm install", reason)
+
+    def test_a_non_runner_failing_the_same_way_twice_is_still_refused(self):
+        """NON-VACUITY. Every assertion above is on SILENCE, and a gate that refused
+        nothing at all would satisfy all of them."""
+        self._two_red_sessions("gh pr list --state open")
+        reason = self.assert_denied(self.run_hook(
+            self.attempt("gh pr list --state open", "s3")))
+        self.assertIn("gh pr list", reason)
 
 
 # ====================================================== callkey collisions
@@ -1064,8 +1153,13 @@ class WiringTest(unittest.TestCase):
                          "the window is documented as counting a stream it never sees")
         self.assertIn("Bash|Skill", head,
                       "the header never names the wiring it is describing")
-        self.assertIn("UNREACHABLE ON THE CURRENT WIRING", head,
-                      "norm_structured has no production producer and must say so")
+        self.assertNotIn("UNREACHABLE ON THE CURRENT WIRING", head,
+                         "the header claimed norm_structured was unreachable while every "
+                         "`Skill` delivery reaches it; this assertion used to REQUIRE that "
+                         "false sentence, and would have passed unchanged if the behaviour "
+                         "it named had been removed")
+        self.assertIn("REACHED BY EVERY `Skill` CALL", head,
+                      "the header must say which tool actually takes that branch")
         self.assertIn("UNMEASURED", head,
                       "`mcp__.*` reaching a real MCP tool has never been observed")
 

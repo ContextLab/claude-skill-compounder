@@ -554,7 +554,15 @@ def merge_hooks(settings, app_home):
                                "command": _gate_cmd(app_home, "repeat-gate.sh"),
                                "timeout": 10}]})
         _pre_wired = True
-    if _pre_wired or pre:
+    # `or "PreToolUse" in hooks` IS THE WHOLE OF A FIX, and the bug it closes was silent.
+    # `_strip_marker` returns a NEW list, so the strip above only takes effect when this
+    # assignment runs. Guarded on `_pre_wired or pre` alone, a checkout missing every
+    # PreToolUse gate stripped its stale entries into a list nobody wrote back, and the
+    # ORIGINAL list -- stale entry still in it, pointing at a script that is gone --
+    # stayed in settings.json. The partial case always worked, because one surviving gate
+    # makes `_pre_wired` true, which is why it went unnoticed. `remove_hooks` below had
+    # this right all along; these three sites now match it.
+    if _pre_wired or pre or "PreToolUse" in hooks:
         hooks["PreToolUse"] = pre
 
     ptu = _strip_marker(_event_groups(hooks, "PostToolUse", True), HOOK_MARKER)
@@ -600,7 +608,7 @@ def merge_hooks(settings, app_home):
                                "command": _gate_cmd(app_home, "repeat-gate.sh"),
                                "timeout": 10}]})
         _ptf_wired = True
-    if _ptf_wired or ptf:
+    if _ptf_wired or ptf or "PostToolUseFailure" in hooks:
         hooks["PostToolUseFailure"] = ptf
 
     # Stop carries .last_assistant_message, which is where both of our Stop hooks read
@@ -627,7 +635,10 @@ def merge_hooks(settings, app_home):
                                 "command": _gate_cmd(app_home, "apply-gate.sh"),
                                 "timeout": 10}]})
         wired_stop = True
-    if wired_stop:
+    # The same fix, and this site was the worst of the three: it had no `or stop` fallback
+    # at all, so a checkout wiring nothing onto Stop discarded the stripped list whether or
+    # not it had emptied it.
+    if wired_stop or stop or "Stop" in hooks:
         hooks["Stop"] = stop
     return settings
 

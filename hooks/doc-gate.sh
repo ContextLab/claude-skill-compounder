@@ -31,11 +31,18 @@
 #    with exit status 0. The call does not execute and the model reports the reason.
 #    Measured on Claude Code 2.1.245, macOS 25.5.0, 2026-08-25.
 #
-# 2. THE REASON IS UNTRUSTED TEXT TO THE MODEL, AND IT IS RIGHT TO TREAT IT THAT WAY.
+# 2. THE REASON IS TEXT THE MODEL MAY OR MAY NOT ACT ON, AND WHICH IT DOES IS NOT SETTLED.
 #    Measured in the same probe: an instruction embedded in a deny reason was explicitly
 #    refused -- "text that comes back from a blocked tool call isn't a directive I
-#    follow." So the reason below is written as a STATEMENT OF FACT about what the push
-#    contains and what exists to fix it, never as an imperative. That is a constraint on
+#    follow." A LATER measurement in this same branch found the opposite, 4/4 sessions
+#    running the exact command a reason named, and the two are reconciled in
+#    docs/CLAUDE-CODE-BEHAVIOR.md on COHERENCE rather than grammatical mood: a remediation
+#    that plainly follows from the stated block was acted on, a bare imperative unconnected
+#    to it mostly was not. Do not quote the refusal above as settled; it is one arm of a
+#    pair. So the reason below is written as a STATEMENT OF FACT about what the push
+#    contains and what exists to fix it, never as an imperative -- a rule that is safe
+#    under EITHER reading, which is exactly why it survived the second measurement
+#    unchanged. That is a constraint on
 #    the author, not a defect, and it is why the reason says "`claim-provenance` exists
 #    for exactly this" rather than "run claim-provenance".
 #
@@ -272,6 +279,26 @@
 #      `internal/` or `pkg/` -- which is how a shell script with NO extension is caught.
 #      It has to be caught by path, because the file may have been DELETED by these
 #      commits and there is nothing left on disk to read a shebang out of.
+#
+# ALL THREE ARE MATCHED CASE-INSENSITIVELY (`grep -qiE`), and that is a fix rather than a
+# convenience. Case-sensitive, `DOC_RE` did not recognise `Documentation/` -- git's own
+# convention and the kernel's -- nor `Docs/`, `Doc/`, `Readme`, `changelog` or `guide.MD`,
+# so a push carrying one of those and a code file was DENIED for carrying no documentation
+# while carrying one, and the reason named the doc file nowhere. `CODE_RE` was lowercase-only
+# too, but undercounting CODE only fails open, so the whole asymmetry landed on the refusing
+# side. Found by a cold reviewer on 2026-08-27 against a real repository and a real bare
+# remote. `NEITHER_RE` takes the same `-i` so the three cannot disagree: without it
+# `Notes/x.md` would count as documentation while `notes/x.md` did not, and the exclusion
+# the gate depends on could be sidestepped by capitalising a directory.
+#
+# `DOC_GATE_CODE_EXCLUDE` is the ONE exception and stays case-sensitive: it is a regex the
+# user supplies, so the user decides its case, and quietly folding it would be this script
+# overriding a rule someone wrote deliberately.
+#
+# The tests write these paths with `git update-index --cacheinfo` rather than through the
+# working tree, because macOS is case-insensitive by default: `Docs/guide.txt` written into
+# a repo that already holds `docs/` lands in the existing directory, git reports the
+# lowercase path, and the test passes without exercising the case it names.
 #
 # A file matching none of the three counts as neither, and neither triggers the gate nor
 # satisfies it. Undercounting CODE only makes this gate more permissive, which is the
@@ -781,15 +808,15 @@ n_doc=0
 # and deny the push -- the same wrong direction the C-quoting bug took.
 while IFS= read -r -d '' f; do
   [ -z "$f" ] && continue
-  printf '%s' "$f" | LC_ALL=C grep -qE "$NEITHER_RE" 2>/dev/null && continue
-  if printf '%s' "$f" | LC_ALL=C grep -qE "$DOC_RE" 2>/dev/null; then
+  printf '%s' "$f" | LC_ALL=C grep -qiE "$NEITHER_RE" 2>/dev/null && continue
+  if printf '%s' "$f" | LC_ALL=C grep -qiE "$DOC_RE" 2>/dev/null; then
     n_doc=$((n_doc + 1))
     continue
   fi
   if [ -n "$CODE_EXCLUDE" ]; then
     printf '%s' "$f" | LC_ALL=C grep -qE "$CODE_EXCLUDE" 2>/dev/null && continue
   fi
-  printf '%s' "$f" | LC_ALL=C grep -qE "$CODE_RE" 2>/dev/null && printf '%s\n' "$f" 2>/dev/null >> "$TMP/code.txt"
+  printf '%s' "$f" | LC_ALL=C grep -qiE "$CODE_RE" 2>/dev/null && printf '%s\n' "$f" 2>/dev/null >> "$TMP/code.txt"
 done < "$TMP/files.txt"
 
 # One documentation file anywhere in the push is enough. This gate asks whether the
