@@ -301,6 +301,228 @@ class SignatureTest(GateCase):
         self.assertEqual(self.rows(), [])
 
 
+# ====================================================== callkey collisions
+class CallkeyCollisionTest(GateCase):
+    """THE CALLKEY IS A SHAPE, AND A SHAPE THAT IS TOO COARSE REFUSES CALLS THAT NEVER RAN.
+
+    Reproduced against the real hook before the fix, with a pinned clock and a temp state
+    root. Two `python3 -c "import boto3"` failures in sess-1 and sess-2, then a
+    `python3 -c "print(1+1)"` attempt in sess-3 that had never been seen: the gate printed
+    `permissionDecision: deny`, "This exact call has already failed in 2 earlier sessions,
+    the same way each time.", and "the call: `python3 -c <S>`". Same shape for two
+    different scripts: failures on `python3 /Users/x/build.py --jobs 4` denied
+    `python3 /Users/y/deploy.py --jobs 8`. Both are `test_..._is_a_different_call` below,
+    and both FAILED on the code that shipped before rules 2 and 4 of the header existed.
+
+    Every test here has a partner. The two reproductions are paired with a non-vacuity
+    test showing the very same setup still refuses what it should, because a normaliser
+    that simply stopped masking would pass the reproductions and destroy the gate; and the
+    argument-varying `gh` case -- the real case from the issue this gate was built for --
+    is asserted to SURVIVE. The residual collisions are pinned as deliberate: a collision
+    that is named and bounded is fine, one that is undocumented is the defect repeated.
+    """
+
+    BOTO_ERR = "Exit code 1\nModuleNotFoundError: No module named boto3"
+
+    def key_of(self, command, session):
+        """Record one failure and read back the (callkey, shape) the gate computed.
+
+        Straight off the store, so the pins below assert on what the normaliser produced
+        rather than on the deny path's opinion of it.
+        """
+        self.tick()
+        self.run_hook(self.failure(command, session, error=self.BOTO_ERR))
+        fails = [r for r in self.rows() if r["t"] == "fail"]
+        self.assertTrue(fails, "no fail row was written for %r" % command)
+        return fails[-1]["ck"], fails[-1]["norm"]
+
+    def assert_collides(self, a, b, why):
+        cka, na = self.key_of(a, "r1")
+        ckb, nb = self.key_of(b, "r2")
+        self.assertEqual(cka, ckb,
+                         "%s -- expected one callkey, got %r for %r and %r for %r"
+                         % (why, na, a, nb, b))
+        return na
+
+    def assert_distinct(self, a, b, why):
+        cka, na = self.key_of(a, "r1")
+        ckb, nb = self.key_of(b, "r2")
+        self.assertNotEqual(cka, ckb,
+                            "%s -- both landed on %r" % (why, na))
+        return na, nb
+
+    # ------------------------------------------------- reproduction 1: the eval program
+    def test_a_different_eval_program_is_a_different_call(self):
+        """`python3 -c "print(1+1)"` has never failed and must not be refused."""
+        self.teach('python3 -c "import boto3"', ["sess-1", "sess-2"], error=self.BOTO_ERR)
+        self.tick()
+        self.assert_allowed(self.run_hook(
+            self.attempt('python3 -c "print(1+1)"', "sess-3")))
+
+    def test_the_same_eval_program_is_still_refused(self):
+        """Non-vacuity for the test above: the identical program, same two sessions, is
+        refused. Without this, deleting the masking entirely would pass."""
+        self.teach('python3 -c "import boto3"', ["sess-1", "sess-2"], error=self.BOTO_ERR)
+        self.tick()
+        reason = self.assert_denied(self.run_hook(
+            self.attempt('python3 -c "import boto3"', "sess-3")))
+        self.assertIn("<C:import boto3>", reason)
+
+    def test_the_quoting_style_of_an_eval_program_does_not_split_it(self):
+        """`-c 'x'` and `-c "x"` are the same program, and a session that switched quote
+        styles between attempts is still the same session hitting the same call."""
+        self.assert_collides('python3 -c "import boto3"', "python3 -c 'import boto3'",
+                             "quote style is not part of the program")
+
+    def test_a_clustered_eval_flag_keeps_its_program_too(self):
+        """`perl -ne` is the same case as `python3 -c`, which is why the rule matches a
+        short cluster ENDING in c/e/E rather than the two bare flags."""
+        a, b = self.assert_distinct("perl -ne 'print uc'", "perl -ne 'print lc'",
+                                    "two perl one-liners are two calls")
+        self.assertIn("<C:print uc>", a)
+        self.assertIn("<C:print lc>", b)
+
+    # ------------------------------------------------- reproduction 2: the path basename
+    def test_a_different_script_basename_is_a_different_call(self):
+        """`deploy.py` has never failed; only `build.py` has."""
+        self.teach("python3 /Users/x/build.py --jobs 4", ["sess-1", "sess-2"],
+                   error=self.BOTO_ERR)
+        self.tick()
+        self.assert_allowed(self.run_hook(
+            self.attempt("python3 /Users/y/deploy.py --jobs 8", "sess-3")))
+
+    def test_the_same_script_under_a_moved_checkout_is_still_refused(self):
+        """Non-vacuity, and the reason rule 4 masks anything at all: the DIRECTORY is what
+        legitimately varies between machines and checkouts, and a checkout that moved must
+        not look like a new problem."""
+        self.teach("python3 /Users/x/proj/build.py --jobs 4", ["sess-1", "sess-2"],
+                   error=self.BOTO_ERR)
+        self.tick()
+        reason = self.assert_denied(self.run_hook(
+            self.attempt("python3 /Users/y/elsewhere/build.py --jobs 8", "sess-3")))
+        self.assertIn("<P>/build.py", reason)
+
+    def test_a_single_segment_absolute_path_keeps_its_name(self):
+        """`/opt` has no directory part that could vary between machines, so there is
+        nothing to mask and it is left alone rather than reduced to a bare `<P>`."""
+        _, norm = self.key_of("tar -xf /opt", "s1")
+        self.assertIn("/opt", norm)
+        self.assertNotIn("<P>", norm)
+
+    # ------------------------------------------------- the feature that must survive
+    def test_varying_argument_text_still_recognises_one_broken_call(self):
+        """THE REAL CASE FROM ISSUE #19. Two sessions run `gh issue comment` with wholly
+        different body text and different issue numbers; that is two sessions hitting ONE
+        broken call, and the gate must still say so on the third."""
+        self.tick()
+        self.run_hook(self.failure('gh issue comment 19 --body "first draft"', "s1"))
+        self.tick()
+        self.run_hook(self.failure(
+            'gh issue comment 4271 --body "quite another message entirely"', "s2"))
+        self.tick()
+        reason = self.assert_denied(self.run_hook(
+            self.attempt('gh issue comment 3 --body "a third one"', "s3")))
+        self.assertIn("gh issue comment <N> --body <S>", reason)
+
+    def test_an_ordinary_flag_argument_is_still_masked(self):
+        """`--body` and `-m` are not eval-like flags. Rule 2 must not have widened into
+        rule 3 and kept every quoted argument."""
+        self.assert_collides('git commit -m "wip: one thing"',
+                             'git commit -m "and now a completely different message"',
+                             "a commit message is an argument, not a program")
+
+    # ------------------------------------------------- the deny reason's honesty
+    def test_the_deny_reason_does_not_claim_the_call_was_exact(self):
+        """The store cannot support "this exact call": the attempt below differs from
+        what failed, matches only after masking, and is refused on that basis. The reason
+        has to say so."""
+        self.teach("gh pr list --limit 5", ["s1", "s2"])
+        self.tick()
+        reason = self.assert_denied(self.run_hook(
+            self.attempt("gh pr list --limit 9", "s3")))
+        self.assertNotIn("exact", reason)
+        self.assertIn("NORMALISED SHAPE", reason)
+        self.assertIn("the shape:", reason)
+        self.assertIn("gh pr list --limit <N>", reason)
+
+    # ------------------------------------------------- residual collisions, pinned
+    # Each of these is a shape that STILL covers more than one literal command after the
+    # fix. They are asserted to collide, on purpose, so that the header's WHAT STILL
+    # COLLIDES list cannot quietly stop being true and so that a later reader finds them
+    # named rather than reporting them as new. All fail in the same direction: one
+    # refusal, once per session, and the next attempt goes through.
+    def test_residual_a_quoted_program_in_a_positional_slot_still_collides(self):
+        """Rule 2 keys off a FLAG. Finding the program slot of an arbitrary command needs
+        per-program knowledge this script has no business carrying."""
+        norm = self.assert_collides('ssh box "systemctl restart a"',
+                                    'ssh box "rm -rf /tmp/x"',
+                                    "a positional quoted command is not covered")
+        self.assertIn("ssh box <S>", norm)
+
+    def test_residual_two_awk_programs_still_collide(self):
+        """The same residual in its other common costume: awk's program is positional."""
+        self.assert_collides("awk '{print $1}' data.txt", "awk '{print $7}' data.txt",
+                             "awk's program is positional, not flagged")
+
+    def test_residual_nested_quotes_inside_a_kept_program_still_collide(self):
+        """Rule 3 runs over the text rule 2 kept, so two programs identical outside their
+        own string literals share a key."""
+        norm = self.assert_collides("""python3 -c "print('hi')" ""","""python3 -c "print('bye')" """,
+                                    "nested quotes inside a kept program")
+        self.assertIn("<C:print(<S>)>", norm)
+
+    def test_residual_bare_integers_still_collide(self):
+        """Rule 5, and it is wanted: `gh issue view 19` and `gh issue view 4271` are one
+        broken call, which is the same masking seen from the other side."""
+        self.assert_collides("sleep 5", "sleep 9", "bare integers are masked by rule 5")
+
+    def test_residual_a_url_host_is_masked_like_a_directory(self):
+        """Rule 4 cannot tell a URL's host from a directory: both are the part before the
+        last segment."""
+        self.assert_collides("curl -sS https://api.github.com/x",
+                             "curl -sS https://example.com/x",
+                             "a URL host normalises like a directory")
+
+    def test_residual_the_four_hundred_character_cap_still_collides(self):
+        """Rule 6, and rule 2 made it matter more: a KEPT program is text that counts
+        against the 400-character cap, where a masked `<S>` was three characters."""
+        pad = "a" * 400
+        norm = self.assert_collides('python3 -c "%s ONE"' % pad,
+                                    'python3 -c "%s TWO"' % pad,
+                                    "the shape is capped at 400 characters")
+        self.assertEqual(len(norm), 400,
+                         "expected a shape truncated at the cap, got %d chars" % len(norm))
+        self.assertNotIn("ONE", norm)
+
+    # ------------------------------------------------- the two masks differ on purpose
+    def test_the_error_classifier_still_masks_a_whole_path(self):
+        """THE ASYMMETRY, asserted from both sides in one test.
+
+        The call normaliser keeps a basename; the error classifier does not. One command,
+        failing twice with the SAME message about DIFFERENT files, is one signature -- or
+        a random temp basename in an error would give every session its own class and
+        nothing would ever reach the threshold.
+        """
+        self.tick()
+        self.run_hook(self.failure(
+            "python3 /Users/x/proj/build.py", "s1",
+            error="Exit code 1\nFileNotFoundError: /tmp/tmpaaa/one.csv"))
+        self.tick()
+        self.run_hook(self.failure(
+            "python3 /Users/y/other/build.py", "s2",
+            error="Exit code 1\nFileNotFoundError: /tmp/tmpzzz/two.csv"))
+        sigs = {r["sig"] for r in self.rows() if r["t"] == "fail"}
+        self.assertEqual(len(sigs), 1,
+                         "one call and one error class, but the store recorded %r" % sigs)
+        # ...and the call side of the same pair keeps its basename, which is what makes
+        # the asymmetry a choice rather than an accident.
+        norms = {r["norm"] for r in self.rows() if r["t"] == "fail"}
+        self.assertEqual(norms, {"python3 <P>/build.py"})
+        self.tick()
+        self.assert_denied(self.run_hook(
+            self.attempt("python3 /Users/z/third/build.py", "s3")))
+
+
 # ============================================================== recovery capture
 class RecoveryTest(GateCase):
 

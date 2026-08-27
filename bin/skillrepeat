@@ -12,6 +12,16 @@
 #   {"t":"recover", ts, sig, ck, tool, norm, cmd, session, tuid}
 #   {"t":"forget",  ts, sig, session, why}
 #
+# `norm` -- printed as `shape` by `show` and as CALL by `list` -- IS A NORMALISED SHAPE AND
+# NOT A LITERAL COMMAND. hooks/repeat-gate.sh masks ordinary quoted arguments, the directory
+# part of an absolute path and bare numbers before hashing, so ONE ROW CAN COVER MORE THAN
+# ONE COMMAND that was actually run. `cmd` is the one field that is literal, which is why
+# `show` prints it verbatim under each row and why that section is worth reading before
+# acting on a `forget`. The masking rules, and the residual collisions they leave, are
+# in that script's CALLKEY NORMALISATION and WHAT STILL COLLIDES stanzas and are
+# deliberately not restated here: a rule written down twice is a rule that disagrees with
+# itself, the same reason the cost figures are not restated either.
+#
 # WHY `forget` APPENDS AND NEVER REWRITES. The store is the only record of which calls are
 # broken and what fixed them, and it is written by a hook nobody watches. A subcommand
 # that rewrote the file could lose an hour of observations to one bad jq expression, and
@@ -315,6 +325,10 @@ cmd_list() {
   echo "GATE refuses = denied once per session, from >= $MIN_SESSIONS distinct sessions."
   echo "     transient = an earlier session re-ran the identical call and it worked, so"
   echo "                 the gate never refuses this one, whatever the count."
+  echo 'CALL is the normalised SHAPE the gate matches on, not a literal command: quoted'
+  echo '     arguments, the directory part of an absolute path and bare numbers are masked'
+  echo '     out first, so one row can cover more than one command that really ran.'
+  echo "     \`skillrepeat show <sig>\` prints those commands verbatim."
   return 0
 }
 
@@ -351,7 +365,7 @@ cmd_show() {
     printf '%s' "$one" | jq -r '"tool:      " + .tool,
       "sessions:  " + (.sessions|tostring) + " distinct" +
         (if .suppressed > 0 then " (" + (.suppressed|tostring) + " rows suppressed by a forget)" else "" end),
-      "call:      " + .call,
+      "shape:     " + .call,
       "error:     " + .error' 2>/dev/null
     fts="$(printf '%s' "$one" | jq -r '.first' 2>/dev/null)"
     lts="$(printf '%s' "$one" | jq -r '.last' 2>/dev/null)"

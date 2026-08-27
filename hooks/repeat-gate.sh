@@ -47,26 +47,87 @@
 # CALLKEY NORMALISATION, in order, and each concession is deliberate:
 #   Bash:
 #     1. newlines and tabs -> spaces (a heredoc and its one-liner form are the same call).
-#     2. '...' and "..." quoted literals -> <S>. The argument text is where the varying
-#        part of an otherwise identical call lives: `gh issue view 19 --json body` and
-#        `gh issue comment 19 --body "..."` differ only there for most of a session.
-#     3. absolute paths -> <P>. A checkout that moved must not look like a new problem.
-#     4. bare integers -> <N>, TWICE. Once is not enough: a regex that consumes its own
+#     2. THE PROGRAM AFTER AN EVAL-LIKE FLAG IS KEPT, not masked. A quoted literal that
+#        follows `-c`, `-e`, a short cluster ending in one of those (`perl -ne`), or
+#        `--command` / `--eval` / `--execute` / `--expression`, is not an argument to the
+#        command -- it IS the command. `python3 -c "import boto3"` and
+#        `python3 -c "print(1+1)"` share every byte outside that literal, so masking it
+#        left the two indistinguishable and the gate DENIED A CALL THAT HAD NEVER FAILED
+#        while asserting that it had. Reproduced against the real hook before this rule
+#        existed; tests/test_repeat_gate.py::CallkeyCollisionTest is that reproduction.
+#        The kept text is wrapped as <C:...> and rules 3-5 still run inside it, so a
+#        temp path or a loop bound inside the program does not split the key.
+#     3. OTHER '...' and "..." quoted literals -> <S>. The argument text is where the
+#        varying part of an otherwise identical call lives, and collapsing it is the
+#        feature this gate was built for: `gh issue comment 19 --body "first draft"` and
+#        `gh issue comment 4271 --body "quite another message"` are two sessions hitting
+#        ONE broken call, and nothing recognises them as one if the body text is kept.
+#     4. absolute paths -> <P>, KEEPING THE LAST SEGMENT: `/Users/x/proj/build.py`
+#        becomes `<P>/build.py`. The two halves of a path answer different questions. The
+#        directory is what legitimately varies between machines, checkouts and temp runs,
+#        and a checkout that moved must not look like a new problem -- that is why the
+#        rule exists at all. The BASENAME is usually the whole of what distinguishes two
+#        calls: `python3 <P> --jobs <N>` collapsed `build.py` and `deploy.py` onto one
+#        key, which is the same defect as 2 in a second costume.
+#     5. bare integers -> <N>, TWICE. Once is not enough: a regex that consumes its own
 #        trailing delimiter sees only every other number in `1 2 3 4`, which is the exact
 #        defect hooks/claim-gate.sh documents under TOKENISATION. Digits welded to letters
 #        (`sha256`, `x86`, `v2`) are NOT masked -- those are names, not quantities.
-#     5. whitespace collapsed, trimmed, capped at 400 characters.
+#     6. whitespace collapsed, trimmed, capped at 400 characters.
 #   any other tool (NOT REACHABLE under the current matcher -- see WHAT THE WIRING ADMITS):
 #     `jq -Sc .tool_input` -- sorted keys, so a re-ordered payload is the same call -- then
-#     rules 3, 4 and 5. Quoted literals are NOT masked here, because for a structured tool
+#     rules 4, 5 and 6. Quoted literals are NOT masked here, because for a structured tool
 #     the strings ARE the call (`{"file_path":"/x/y.py"}` masked to `{<S>}` would collapse
 #     every Read onto one signature).
 #
-# ERRCLASS: the first TWO non-empty lines of `.error`, masked by rules 3 and 4, collapsed,
-# capped at 200 characters. Not one line, and the deviation is on purpose: every failing
-# Bash call's first line is literally `Exit code <N>` (measured 2026-08-26, see PLATFORM
-# FACTS below), so a one-line class would collapse a missing binary, a syntax error and a
-# permissions refusal into a single class and the split above would buy nothing.
+# WHAT STILL COLLIDES, AND WHY THAT IS ACCEPTABLE. The callkey is a SHAPE and not a
+# command, so more than one literal command still maps to one key. Each of these is pinned
+# by a test in CallkeyCollisionTest as deliberate, so that a future reader finds it named
+# rather than rediscovering it as a defect:
+#   * A QUOTED PROGRAM IN A POSITIONAL SLOT. `ssh box "systemctl restart a"` and
+#     `ssh box "rm -rf /tmp/x"` are both `ssh box <S>`; so are two different `awk '...'`
+#     programs. Rule 2 keys off a FLAG, and finding the program slot of an arbitrary
+#     command needs per-program knowledge this script has no business carrying. Bounded by
+#     what it costs: one wrong refusal, which the next attempt in the session goes through.
+#   * NESTED QUOTES INSIDE A KEPT PROGRAM. `python3 -c "print('hi')"` and
+#     `python3 -c "print('bye')"` are both `python3 -c <C:print(<S>)>`, because rule 3 runs
+#     over the kept text. Two programs identical outside their own string literals.
+#   * BARE INTEGERS. `sleep 5` and `sleep 9` are one key, by rule 5 and on purpose.
+#   * A URL's HOST, which rule 4 masks like any other directory:
+#     `curl https://api.github.com/x` and `curl https://example.com/x` are one key.
+#   * THE 400-CHARACTER CAP, rule 6. Two calls whose shapes agree for 400 characters and
+#     diverge after are one key -- and rule 2 raised the stakes, because a KEPT program is
+#     text that counts against the cap where a masked `<S>` was three characters. Verified
+#     rather than assumed: two `python3 -c` programs sharing a 400-character prefix do
+#     land on one key. A 400-character prefix match is a strong one, and the alternative
+#     -- an unbounded key -- puts the store's size at the mercy of one pasted heredoc.
+#   * THE CRC. Two distinct shapes whose `cksum` CRC-32 *and* byte length both collide.
+# All of them fail in the same direction: a call is refused ONCE, is told what shape
+# matched, and goes through on the next attempt. None can make a call unrunnable.
+#
+# THIS IS WHY THE REFUSAL DOES NOT SAY "this exact call". It used to, and that sentence was
+# false for every shape above. The reason text now names what matched as a SHAPE and says
+# which parts were masked before comparing, so a session reading it can judge a false
+# positive instead of believing the store knows more than it does.
+#
+# ROWS WRITTEN BEFORE THIS NORMALISER simply stop matching: their callkeys were computed
+# under the old rules, so they join nothing and refuse nothing. That is the safe direction
+# -- a stale row over-refusing would be the unsafe one -- and they age out or are cleared
+# with `skillrepeat forget`.
+#
+# ERRCLASS: the first TWO non-empty lines of `.error`, masked by rules 4 and 5 -- but with
+# the WHOLE path masked to <P>, basename included, which is the one place the two masks
+# deliberately differ. A path in a command is usually the thing being run; a path in an
+# error message is the incidental subject of a class that is really "no such file", and
+# `ls: /a/b: No such file` and `ls: /c/d/e: No such file` have to land in one class or a
+# random temp basename gives every session its own. The error class does not need the
+# discriminating power either: it is only ever consulted alongside a callkey that already
+# has it (sig = <callkey>-<errclass>).
+# Two lines and not one, and that deviation is on purpose too: every failing Bash call's
+# first line is literally `Exit code <N>` (measured 2026-08-26, see PLATFORM FACTS below),
+# so a one-line class would collapse a missing binary, a syntax error and a permissions
+# refusal into a single class and the split above would buy nothing.
+# Collapsed and capped at 200 characters.
 #
 # Both parts are hashed with `cksum` -- POSIX, present under the minimal PATH the test
 # harness pins, and deterministic across machines. `md5`/`md5sum`/`shasum` are none of
@@ -239,6 +300,14 @@
 #                                     and the sixth run printed 0.54: a range quoted from
 #                                     too few runs reads as precision the data does not
 #                                     carry, and the next reader is the one who finds out.
+#                                     RE-MEASURED after the eval-flag and basename rules
+#                                     landed in the normaliser, which added two more sed
+#                                     processes per call: ten more runs of that same
+#                                     command printed 0.31-0.31 s and 0.31-0.33 s. Both
+#                                     sit INSIDE the range above, which is kept as the
+#                                     wider of the two rather than narrowed to what these
+#                                     ten happened to print -- narrowing it would be the
+#                                     very trap the paragraph above is about.
 #                                     These are wall times on a laptop doing other work;
 #                                     what actually holds is the assertion, 5 s.
 #                                     The gate is NOT locale-sensitive (bin/skillrepeat's
@@ -326,26 +395,54 @@ cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
 trap cleanup EXIT
 
 # ------------------------------------------------------------------- normalisation
-# Rules 3 and 4 from the header: absolute paths and bare integers. Shared by the call
-# normaliser and the error classifier so the two can never drift apart.
-#
-# The integer rule runs TWICE. `(^|[^A-Za-z0-9_])[0-9]+([^A-Za-z0-9_]|$)` consumes its own
-# trailing delimiter, so in `1 2 3 4` a single pass sees 1 and 3 only. Two passes catch
-# the rest, because what the first pass left is no longer adjacent to an unconsumed
-# neighbour. `<N>` and `<P>` contain no digits, so a placeholder can never be re-masked.
+# Rule 5 from the header: bare integers, and it runs TWICE.
+# `(^|[^A-Za-z0-9_])[0-9]+([^A-Za-z0-9_]|$)` consumes its own trailing delimiter, so in
+# `1 2 3 4` a single pass sees 1 and 3 only. Two passes catch the rest, because what the
+# first pass left is no longer adjacent to an unconsumed neighbour. `<N>`, `<P>` and `<C:`
+# contain no digits, so a placeholder can never be re-masked.
+mask_ints() {
+  sed -E -e 's/(^|[^A-Za-z0-9_])[0-9]+([^A-Za-z0-9_]|$)/\1<N>\2/g' \
+         -e 's/(^|[^A-Za-z0-9_])[0-9]+([^A-Za-z0-9_]|$)/\1<N>\2/g'
+}
+
+# THE ERROR CLASSIFIER's path rule: the WHOLE path, basename included, becomes <P>. The
+# call normaliser's rule below keeps the basename and this one must not, and the header's
+# ERRCLASS stanza is where that asymmetry is argued. In short: a basename in a command is
+# usually what is being run, a basename in an error message is incidental, and the error
+# class is only ever read alongside a callkey that already discriminates.
 mask_common() {
   sed -E -e 's#(^|[^A-Za-z0-9_])/[A-Za-z0-9_.@+-]+(/[A-Za-z0-9_.@+-]+)*#\1<P>#g' \
-    | sed -E -e 's/(^|[^A-Za-z0-9_])[0-9]+([^A-Za-z0-9_]|$)/\1<N>\2/g' \
-             -e 's/(^|[^A-Za-z0-9_])[0-9]+([^A-Za-z0-9_]|$)/\1<N>\2/g'
+    | mask_ints
 }
+
+# THE CALL NORMALISER's path rule, rule 4: the DIRECTORY becomes <P> and the last segment
+# survives, so `/Users/a/proj/build.py` and `/Users/b/other/build.py` are one call while
+# `.../deploy.py` is a different one. The trailing `(/[...]+)` is a separate group from the
+# `*` before it precisely so a backreference can name the last segment; POSIX ERE and BSD
+# sed agree on which segment lands in \3, and the tests read it back rather than assume it.
+# A single-segment absolute path (`/tmp`, `/usr`) has no directory part that could vary
+# between machines, so it is left alone rather than reduced to a bare `<P>`.
+mask_call_paths() {
+  sed -E -e 's#(^|[^A-Za-z0-9_])/[A-Za-z0-9_.@+-]+(/[A-Za-z0-9_.@+-]+)*(/[A-Za-z0-9_.@+-]+)#\1<P>\3#g'
+}
+
+# Rule 2: the flags after which a quoted literal is the COMMAND and not an argument. The
+# short form is a CLUSTER ending in c, e or E so `perl -ne`, `sed -Ee` and `python3 -c`
+# are all caught by one alternative. Over-matching here is the safe direction: it makes a
+# key MORE specific, and a key that is too specific only ever costs a refusal that does not
+# happen. Under-matching is what produced the defect this rule exists for.
+EVAL_FLAGS='-[A-Za-z]*[ceE]|--command|--eval|--execute|--expression'
 
 squeeze() { sed -E -e 's/[[:space:]]+/ /g' -e 's/^ //' -e 's/ $//'; }
 
 norm_bash() {
   printf '%s' "$1" \
     | tr '\n\t' '  ' \
+    | sed -E -e "s/(^|[[:space:]])($EVAL_FLAGS)[[:space:]]+'([^']*)'/\1\2 <C:\3>/g" \
+             -e "s/(^|[[:space:]])($EVAL_FLAGS)[[:space:]]+\"([^\"]*)\"/\1\2 <C:\3>/g" \
     | sed -E -e "s/'[^']*'/<S>/g" -e 's/"[^"]*"/<S>/g' \
-    | mask_common \
+    | mask_call_paths \
+    | mask_ints \
     | squeeze \
     | cut -c1-400
 }
@@ -362,7 +459,8 @@ norm_bash() {
 norm_structured() {
   printf '%s' "$payload" \
     | jq -Sc '.tool_input // {}' 2>/dev/null \
-    | mask_common \
+    | mask_call_paths \
+    | mask_ints \
     | squeeze \
     | cut -c1-400
 }
@@ -701,9 +799,21 @@ fi
 # the model treats text arriving through a blocked tool call as untrusted and explicitly
 # refuses directives embedded in it, so an imperative here is both ignored and misleading
 # about who is asking.
-reason="This exact call has already failed in $n earlier sessions, the same way each time.
+#
+# AND IT SAYS "MATCHES A SHAPE", NOT "THIS EXACT CALL". The store holds callkeys, and a
+# callkey is a normalised shape that more than one literal command can share -- see WHAT
+# STILL COLLIDES in the header for the five ways. "This exact call has already failed" was
+# the sentence here, and against `python3 -c <C:...>`-shaped input it was simply untrue:
+# the gate denied a command that had never run while asserting that it had. Either the key
+# justifies the sentence or the sentence follows the key, and the key is the thing that has
+# to stay coarse for the gate to work at all. So the reason names the shape, says which
+# parts were masked out before comparing, and lets the session judge for itself.
+reason="A call matching this one has already failed in $n earlier sessions, the same way
+each time. The match is on the NORMALISED SHAPE below and not on the literal text: ordinary
+quoted arguments, the directory part of an absolute path, and bare numbers are all masked
+out before comparing, so a call that differs from the failed one only in those matches too.
 
-  the call:  $what
+  the shape: $what
   the error: $err_disp
 
 $fixline
