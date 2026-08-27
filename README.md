@@ -62,11 +62,15 @@ what got built answers them.
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
+|`hooks/repeat-gate.sh`|**Refuses.** Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it denies the third attempt once and says what to do instead. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
+|`hooks/apply-gate.sh`|**Refuses.** After a forge closes, blocks that session's turn until the new skill has been used on the problem that caused it — or the debt is declined on the record. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is cleared with `skillforge apply`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
-|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger|
+|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, and records the *use* that closes a forge (`skillforge apply`)|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
 |`bin/skillinsight`|Reads and prunes the candidate queue|
 |`bin/skillcontrib`|The read-only reconnaissance behind `contribute-skill`: duplicate check, push-access check, preflight|
+|`bin/skillrepeat`|Reads, inspects and clears the repeat gate's store of learned failure signatures|
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
 
 The hook changes are additive: hooks installed by other tools are left alone, and
@@ -697,7 +701,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
-All fifteen are environment variables, and they are not the whole set — this prints every
+All twenty-three are environment variables, and they are not the whole set — this prints every
 name any shipped script reads:
 
 ```bash
@@ -724,11 +728,24 @@ place in `~/.claude/settings.json`:
 |`CLAIM_GATE_COMMIT`|`1`|the hook entries|Set to `0` to keep the gate on the closing message but stop it denying a `git commit`|
 |`CLAIM_GATE_MIN_DIGITS`|`3`|the hook entries|Smallest integer width the gate will flag as an unsupported figure|
 |`CLAIM_GATE_MAX_SESSION`|`10`|the hook entries|Blocks plus denials the gate may spend in one session|
+|`SKILL_COMPOUNDER_REPEAT_GATE`|`1`|the hook entries|Set to `0` to switch the repeat gate off entirely — it denies nothing and learns nothing|
+|`REPEAT_MIN_SESSIONS`|`2`|the hook entries|Earlier sessions a call must have failed in, the same way, before the next attempt is denied|
+|`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful `Bash`/`Skill` calls — the only ones this hook is delivered — after which an armed failure stops looking for the call that fixed it|
+|`SKILL_COMPOUNDER_DOC_GATE`|`1`|the hook entries|Set to `0` to switch the documentation gate off entirely — `git push` is never denied|
+|`DOC_GATE_MAX_COMMITS`|`100`|the hook entries|Most commits the gate will read ahead of the remote before it gives up and stays silent|
+|`DOC_GATE_CODE_EXCLUDE`|*(empty)*|the hook entries|An ERE; a path matching it counts as neither code nor documentation. `^tests?/` is the first knob to reach for if the gate is too loud|
+|`SKILL_COMPOUNDER_APPLY_GATE`|`1`|the hook entries|Set to `0` to switch the apply gate off entirely — a closed forge leaves no debt to answer|
+|`APPLY_GATE_WINDOW`|`86400`|the hook entries|Seconds after a forge closes during which its apply debt still blocks the turn|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
 Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
 `SKILL_COMPOUNDER_USE_LOG` is read by `hooks/skill-use.sh`, which is a hook entry too.
+The `CLAIM_GATE_*`, `REPEAT_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables are each read by
+exactly one script — `hooks/claim-gate.sh`, `hooks/repeat-gate.sh`, `hooks/doc-gate.sh`,
+`hooks/apply-gate.sh` — so each belongs on that script's own hook entries and nowhere else.
+Each of the four also takes an off switch, and setting one to `0` disables that gate
+completely rather than making it quieter.
 `STATUSLINE_BASE_TTL` is read by
 `statusline/statusline.sh`, so setting it on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it

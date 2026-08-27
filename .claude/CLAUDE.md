@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code *configuration* package. It installs every skill under `skills/`, four CLIs,
-a status-line wrapper, and seven hook entries into `~/.claude/`. Those seven span five
+A Claude Code *configuration* package. It installs every skill under `skills/`, five CLIs,
+a status-line wrapper, and twelve hook entries into `~/.claude/`. Those twelve span five
 events (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`) and
-name four of the five scripts in `hooks/`; derive them from
+name seven of the eight scripts in `hooks/` -- every one but `session-review.sh`, which is
+launched rather than wired; derive them from
 `OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
 There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
@@ -58,9 +59,10 @@ python3 scripts/setup.py --uninstall --claude-dir /tmp/fake-claude --bin-dir /tm
 Requires `jq` (hooks, CLIs, status line) and `python3` (installer only). The `gh` tests in
 `test_contribute.py` skip cleanly without `gh` or without auth; nothing else skips.
 
-Four CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state and the ledger),
-`skillreport` (ledger joined against transcript invocations), `skillinsight` (the candidate
-queue), `skillcontrib` (read-only contribution reconnaissance).
+Five CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state, the ledger, and the
+apply debt a closed forge leaves), `skillreport` (ledger joined against transcript
+invocations), `skillinsight` (the candidate queue), `skillcontrib` (read-only contribution
+reconnaissance), `skillrepeat` (the repeat gate's store of learned failure signatures).
 
 ## Architecture
 
@@ -155,8 +157,9 @@ delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a 
 
 **`hooks/session-review.sh` is a shipped component that spends money, and it is in
 neither wiring.** `settings.json` and `hooks/hooks.json` between them name
-`compound-improvement.sh` (twice), `claim-gate.sh` (twice), `skill-use.sh` (twice) and
-`insight-capture.sh`; grep either for
+`repeat-gate.sh` (three times), `compound-improvement.sh` (twice), `claim-gate.sh` (twice),
+`skill-use.sh` (twice), `apply-gate.sh`, `doc-gate.sh` and
+`insight-capture.sh` -- twelve entries over seven scripts; grep either for
 `session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
 detached, never waited on, and only when that turn's session audit actually wrote a
 record. Look for it there, not in a hooks list. Stage 1 is a single `claude -p` with no
@@ -232,12 +235,15 @@ stanza. Changing the protocol means updating all three.
 
 **No mocks, ever.** Every test writes real files, runs the real shell scripts through
 `subprocess`, and reads results back off disk. Tests pin nondeterminism with environment
-variables the scripts read for exactly that purpose. There are **five clocks, not one** --
+variables the scripts read for exactly that purpose. There are **nine clocks, not one** --
 `SKILLFORGE_NOW` (`bin/skillforge`), `CI_NOW` (`hooks/compound-improvement.sh`),
 `INSIGHT_NOW` (`hooks/insight-capture.sh` and `bin/skillinsight`, which fall back to
-`CI_NOW`), `SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`) and
+`CI_NOW`), `SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`),
 `SKILL_COMPOUNDER_NOW` (the
-installer's backup stamp) -- and session-review refuses `CI_NOW` on purpose, because a
+installer's backup stamp), and one apiece for the three refusing gates and the store one
+of them keeps -- `DOC_GATE_NOW` (`hooks/doc-gate.sh`), `REPEAT_GATE_NOW`
+(`hooks/repeat-gate.sh`), `APPLY_GATE_NOW` (`hooks/apply-gate.sh`) and `SKILLREPEAT_NOW`
+(`bin/skillrepeat`) -- and session-review refuses `CI_NOW` on purpose, because a
 frozen `CI_NOW` makes its `|NOW - last|` cooldown zero forever and silences the trigger
 permanently with nothing on any surface to say why. Two more redirect what a script reads
 and writes, `SKILL_COMPOUNDER_STATE` and `SKILL_COMPOUNDER_TRANSCRIPTS`; two pin the ages
@@ -247,9 +253,10 @@ declines to spend money from any state root under a temp directory. A new script
 own clock: pinning someone else's does nothing to it. This list was derived by running
 `grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
 hooks/ bin/ statusline/ skill_compounder/ | sort -u` and reading each hit; re-run it rather
-than trusting the list if the two have drifted. Four of those seven prefixes were missing
-from the command this paragraph used to print, so it could not produce the list it
-introduces; a prefix added to a new script has to be added here too. If new behavior is hard to test without a mock, add a pin like
+than trusting the list if the two have drifted. **Twice now the command has been narrower
+than the list it introduces**: it named three prefixes when seven were in use, and seven
+when fourteen were, so on both occasions it could not produce the list it introduces. A
+prefix added to a new script has to be added here too. If new behavior is hard to test without a mock, add a pin like
 those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 

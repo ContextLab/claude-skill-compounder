@@ -11,6 +11,38 @@ The GitHub issues are the other half of this picture and they do not duplicate i
 what is scoped as work. This file is for what is known and unresolved, including the parts
 nobody has opened an issue for.
 
+## Open: the issue-19 branch is not merged, and carries three deliberate gaps
+
+Branch `issue-19-close-the-gap`, four commits ahead of `origin/main`. Full state, with the
+command behind every figure, is `notes/2026-08-26-toolbox-state.md`. Three things are open
+there **on purpose** and must not be tidied away by someone who has not read why:
+
+1. **Ten stale claims in `README.md` and `.claude/CLAUDE.md`** — "seven hook entries" against
+   twelve, "four CLIs" against five, "five clocks" against nine, "the only component here that
+   refuses" against three. They are the held-out test for a `finish-task` run's Phase 4, scored
+   against a key sealed before the skill existed. Fixing them early destroys the measurement.
+2. **`skillforge apply` for `finish-task` is unrecorded.** The forge loop is open because the
+   application is unfinished; recording `used` early is the false completion claim the package
+   exists to refuse. `skillforge pending` lists it.
+3. **A high-severity repeat-gate defect was found and its fix is unverified** at the time of
+   writing: `norm_bash` collapses every `python3 -c "…"` onto one callkey, so the gate can deny
+   a command that never failed while asserting it has. Reproduced; fix in flight.
+
+## Open: `finish-task` shipped narrowed, and what was cut is not covered
+
+The skill went ten full-scope review rounds without converging (blocking counts
+2,3,1,2,1,1,2,2,3,4) and was **narrowed** rather than shipped half-working: the tree fingerprint
+and the evidence gate built on it were cut, and the question they answered — did the run I am
+publishing on contain my change? — handed to `stale-artifact-check`. It reached clean in three
+rounds after the cut.
+
+What that means for anyone reading the skill: the fingerprint is gone because **a hash computed
+outside a suite cannot enumerate what the suite read**, established by five separate
+counterexamples in five separate rounds (a git-ignored file the suite read, a symlinked
+directory, `.gitattributes` clean filters, an untracked nested git repository, and earlier
+permission-bit and submodule cases). Do not reintroduce one. The reasoning is in
+`~/.claude/skill-compounder/briefs/finish-task.NARROWING.md`.
+
 ## Open: routing verification is a draw, not a verdict
 
 The routing gate was treated as pass/fail until 2026-08-26, and it is not. Three separate
