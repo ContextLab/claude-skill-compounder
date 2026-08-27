@@ -21,8 +21,8 @@ than being discovered in Phase 5.
 
 ## A record on a path the sweep reads
 
-Measured, on a repo whose suite asserts that `docs/index.md` lists every file under `docs/`,
-committing the record at `docs/notes/rec.md` turned the confirming sweep red:
+Measured, on a repo whose suite asserts that `<docs>/index.md` lists every file under `<docs>/`,
+committing the record at `<docs>/notes/rec.md` turned the confirming sweep red:
 
 ```
 AssertionError: 'notes/rec.md' not found in '# index\n- guide.md\n'
@@ -36,11 +36,11 @@ the branch by construction and not a file in the tree at all.
 
 ## Both routes, walked
 
-Swept path: recorded sweep `exit=0`, record committed at `docs/notes/rec.md`, confirming sweep
+Swept path: recorded sweep `exit=0`, record committed at `<docs>/notes/rec.md`, confirming sweep
 `exit=1` with the assertion above, one repair committed by name, confirming sweep `exit=0`,
 nothing edited after it, a further run `exit=0`.
 
-Unswept path: recorded sweep `exit=0`, record committed at `notes/2026-08-26-perim.md`, confirming
+Unswept path: recorded sweep `exit=0`, record committed at `notes/<yyyy-mm-dd>-08-26-perim.md`, confirming
 sweep `exit=0` first time.
 
 Both ended with `git status --porcelain -uall` clean and the record never re-quoted.
@@ -65,7 +65,7 @@ with `git log -1 --format=%B`.
 
 Updating the record to quote the confirming sweep edits a path the sweep may read, which
 invalidates that sweep, which demands another, which must be quoted. Walked mechanically on a repo
-whose docs build hashes `docs/**.md` with the record at `docs/notes/rec.md`: eight iterations, and
+whose docs build hashes `<docs>/**.md` with the record at `<docs>/notes/rec.md`: eight iterations, and
 on every one the value the record quoted differed from the value the next run printed — MISMATCH
 eight times out of eight, no fixed point in sight.
 

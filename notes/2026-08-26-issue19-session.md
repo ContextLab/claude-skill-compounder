@@ -163,3 +163,31 @@ Two patterns worth carrying forward:
 2. **Four of five repeat-gate residuals were stated numbers that did not reproduce.** Figures
    written into a script header decay exactly like figures in a README, and nothing in the
    suite reads them. That is `claim-provenance`'s subject appearing in code comments.
+
+## The apply gate fired on its own author
+
+Recorded verbatim, because this is requirement 4 of issue #19 working on the session that
+built it. `hooks/apply-gate.sh` refused to end this session's turn:
+
+```
+Hold on -- this session forged a skill and the loop is still open.
+
+A forge is not finished when the skill exists. It is finished when the skill has been
+applied to the problem that caused it, or explicitly declined for it. Nothing has
+recorded either outcome yet:
+
+  - finish-task  (forged 1m ago, in this session)
+      it exists because: a task that gets done repeatedly-- e.g., red-teaming using
+      subagents to verify correctness, then re-running all tests and linters, [...]
+```
+
+Three things that matter about it. It named the skill; it quoted **the verbatim trigger the
+forge was started with**, carried on disk from `skillforge start` through everything since;
+and it offered `declined` as a first-class answer rather than demanding success.
+
+**The answer given was neither, yet.** The skill was being applied at that moment — the run
+was inside Phase 1 — and recording `used` before the application finished would have been the
+premature completion claim this package exists to refuse. The gate blocks once per session per
+skill by design, so the correct response was to finish the run and record the outcome with
+evidence from it. That the gate's own author was the first person it caught is the least
+surprising thing in this file.

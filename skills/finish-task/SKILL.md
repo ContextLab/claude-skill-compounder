@@ -107,12 +107,12 @@ is worse than a gap. **Write the printed value down, with its `rung`**: `base` i
 and **every Bash tool call is a fresh shell**, so Phase 2 retypes it literally, never `"$base"`.
 
 **3. Declare where the record will go** — now, so it is not invented at the end: one real path in
-your project's convention (`notes/2026-01-31-what-this-was.md` is the shape, not the answer).
+your project's convention (`notes/<yyyy-mm-dd>-what-this-was.md` is the shape, not the answer).
 **Check that git will accept it, now**, because the directories a "durable note" convention names
 are exactly the ones projects ignore:
 
 ```bash
-git check-ignore -q notes/2026-01-31-what-this-was.md \
+git check-ignore -q notes/<yyyy-mm-dd>-what-this-was.md \
   && echo "IGNORED: plain 'git add' will REFUSE it -- move it, or plan on 'git add -f' in Phase 5" \
   || echo "ok: git will accept it"
 ```
@@ -368,10 +368,10 @@ Write, at the record path you declared in Phase 0:
 branch is.**
 
 ```bash
-git add notes/2026-01-31-what-this-was.md   # your declared path, by name; never -A
+git add notes/<yyyy-mm-dd>-what-this-was.md   # your declared path, by name; never -A
 echo "add exit=$?"                          # 1 means an ignore rule covers it -- see below
 git commit -m "record: <the Phase 0 sentence>"
-git log --name-only --pretty=format: -1 | grep -F notes/2026-01-31-what-this-was.md
+git log --name-only --pretty=format: -1 | grep -F notes/<yyyy-mm-dd>-what-this-was.md
 ```
 
 **Read `git add`'s exit status, and do not read the `git commit` after it.** If an ignore rule covers

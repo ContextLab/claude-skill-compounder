@@ -233,9 +233,25 @@ class ScoreTest(unittest.TestCase):
         self.assertEqual(sorted(rows), SKILL_NAMES)
         self.assertEqual(rows["ai-tell-audit"]["status"], "VERIFIED")
         self.assertEqual(rows["ai-tell-audit"]["quote"], RECORDED_QUOTE)
-        for name in SKILL_NAMES:
-            if name != "ai-tell-audit":
-                self.assertEqual(rows[name]["status"], "NO", name)
+
+        # THE COVERED SET IS DERIVED FROM THE RECORDING, NOT FROM DISK, and the two are
+        # not the same thing. RECORDED_ANSWER is a real answer a real model gave on a real
+        # session; it names the skills that existed when it was recorded and it cannot name
+        # one added afterwards. Asserting `NO` for every skill on disk therefore fails the
+        # day a skill ships -- which it did, on `finish-task` -- and the only ways to make
+        # that green are to fabricate a block into a recording (which stops it being a
+        # recording) or to stop shipping skills. Neither is a test.
+        covered = {l.split(":", 1)[1].strip()
+                   for l in RECORDED_ANSWER.splitlines() if l.startswith("SKILL:")}
+        self.assertIn("ai-tell-audit", covered)
+        for name in sorted(covered - {"ai-tell-audit"}):
+            self.assertEqual(rows[name]["status"], "NO", name)
+
+        # And pin what happens to a skill the recording predates, so it is a stated
+        # behaviour rather than a gap: absent from the answer means UNPARSED, never a
+        # silent NO. A missing verdict must not read as a negative one.
+        for name in sorted(set(SKILL_NAMES) - covered):
+            self.assertEqual(rows[name]["status"], "UNPARSED", name)
         # No transcript was given, so nothing fired.
         self.assertTrue(all(r["fired"] == 0 for r in rows.values()))
 

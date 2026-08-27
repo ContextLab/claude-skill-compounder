@@ -143,9 +143,8 @@ run the rounds yourself, or `skillforge fail "orchestrator could not dispatch"` 
 <!-- doctrine: standard-is-not-project-content -->
 **Isolation withholds the project, never the authoring standard.** Hand B the required sections,
 the caps, and that a routing gate runs six declared prompts — as text, never as a path into this
-repository — because B and C cannot go and read them: a stranger cannot audit a convention they
-were never told. Withholding it cost a forge its gate, a draft with no `## Trigger precision`
-section and nothing to run. `references/pipeline-stages.md` lists what the standard is.
+repository. Withholding it cost a forge its gate: a draft with no `## Trigger precision` section
+and nothing to run (`references/pipeline-stages.md`).
 
 <!-- doctrine: close-ownership -->
 **You own `start`, `done` and `fail`; the orchestrator owns everything between.** You
@@ -332,23 +331,28 @@ claude -p --model sonnet --max-turns 3 --output-format stream-json --verbose "<p
 
 **A non-zero exit is not a failed measurement:** `--max-turns` exhaustion and a denied
 permission both exit 1, after the routing decision. **`--model sonnet`, never haiku** —
-personal and project skill descriptions were measured absent from the router on haiku.
+personal and project skill descriptions were measured absent from the router on haiku. Cost
+is one call per prompt per draw: one six-prompt skill is 18 calls at the floor, and the nine
+pinned skills are 54 prompts, so **162 calls** and ~12 minutes. Measured 2026-08-26, CLI
+2.1.245: 8-47s a draw, median 22s, six in parallel.
 
-**One run is one draw, and a draw is not a verdict.** Routing is stochastic — the spreads
-measured here are in `references/routing-gate.md` — so the gate is **at least three runs of
-the whole section**, a floor for *detecting* that spread rather than a score that earns
-`verified`. The pin records `runs: N` and a k/N per prompt; `partial` names any prompt that
+**One run is one draw, and a draw is not a verdict.** Routing is stochastic: one unchanged
+description here gave 3/3, then 1/3, then 2/3, and this skill's own six prompts, probed three
+times in one day with nothing edited between, gave 9/9, then 8/9, then 9/9. So the gate is
+**at least three runs of the whole section**, a floor for *detecting* that spread rather than
+a score that earns `verified`. The pin records `runs: N` and a k/N per prompt; `partial` names any prompt that
 split, and a prompt at 2/3 has not passed, it has been shown unreliable.
 
-**When a must-fire prompt loses, the description is what changes** — not the prompt and not the
-verdict. Routing is brutally sensitive to the opening clause, so this is usually a small edit
-with a large effect (`references/routing-gate.md`). Retiring a claim is allowed only when the
+**When a must-fire prompt loses, the description is what changes.** Not the prompt and not the
+verdict; routing is brutally sensitive to the opening clause, so this is usually a small edit
+with a large effect — changing `"Use before debugging logic"` to `"Use before any other debugging
+step"` flipped a losing prompt to a winning one. Four words. Retiring a claim is allowed only when the
 prompt names a trigger this skill should not own *and* the skill that beat it is the right
 owner; the floor of three must-fire prompts that actually fire is not negotiable, and retiring
 one is a scope cut that owes the cold read step 6 requires. **Record what is ceded, at the
-moment it is ceded**: the must-not-fire half names the neighbour that now owns
-the prompt, and the pin's `result:` says which claim was dropped and to whom — territory given
-up silently is given up twice. **Re-run the gate after the last description edit.** `python3
+moment it is ceded: the must-not-fire half names the neighbour that now owns
+the prompt, and the pin's `result:` says which claim was dropped and to whom.** Territory given
+up silently is given up twice. **Re-run it after the last description edit.** `python3
 scripts/routing_claims.py lint` fails until the pinned sha256 of the description and prompt
 list match disk; the repair is to measure again, never to paste a fresh hash in.
 
@@ -374,10 +378,9 @@ separately, **the verbatim original trigger on its own**, off the forge record.
 
 <!-- doctrine: e-checks-the-framing -->
 **Ask E whether A's framing matches the trigger it came from.** Everything downstream of step 1
-inherits that framing, so if A framed the problem wrongly every later check certifies the wrong
-thing — including E's own "did this fix the original issue?", which E would otherwise learn only
-from A. Handing E the trigger verbatim is the one place that error can surface. Its three
-questions:
+inherits that framing, so a misframing has every later check certifying the wrong thing —
+including E's own "did this fix the original issue?", which E would otherwise learn only from A.
+Handing E the trigger verbatim is the one place that error can surface. Its three questions:
 
 1. Does A's framing match the verbatim trigger, or has the problem drifted?
 2. Does the skill meet the pre-registered criteria as written?
@@ -386,15 +389,13 @@ questions:
 A "no" to question 1 is a failure however good the skill is, and the note saying so is what
 stops the same misframing being forged again next month.
 
-**On success, install at B's level**, and let `skillforge done` do the linking (section 4).
-General and user levels land in `~/.claude/skills/<name>/`; project level lands in
-`<repo>/.claude/skills/<name>/`, committed, where `done` leaves it rather than widening a
-placement its author chose.
+**On success, install at B's level**, and let `skillforge done` do the linking (section 4):
+general and user land in `~/.claude/skills/<name>/`, project in `<repo>/.claude/skills/<name>/`,
+committed.
 
-**Proposing it upstream is a separate decision, later.** `contribute-skill` owns the
-fork/duplicate-check/consent-gated PR flow; do not rebuild any of it. Its bar is clean from this
-loop **and used again since it was forged**, so it cannot be met on the day: E records "propose
-upstream" as a recommendation, and a later session invokes `contribute-skill` once it is.
+**Proposing it upstream is a separate decision, later.** `contribute-skill` owns that flow; do
+not rebuild any of it. Its bar is clean from this loop **and used again since it was forged**, so
+it cannot be met on the day: E records "propose upstream" as a recommendation.
 
 **On failure — including a forge abandoned mid-loop, which never reaches E — quarantine the
 skill with a report neither agent may rewrite.** A, B, C and D each **append a signed

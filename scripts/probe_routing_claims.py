@@ -45,8 +45,8 @@ COST (re-measured 2026-08-26, CLI 2.1.245)
     a one-run cost survived the move to `--runs 3` in both files at once.
 
     Quote the cost at the N the gate demands, not at one run. One skill is 6 prompts:
-    18 calls at `--runs 3`. The eight-skill seed pool is 48 prompts: 48 calls per run
-    and ~144 calls at three.
+    18 calls at `--runs 3`. The nine pinned skills are 54 prompts: 54 calls per run
+    and 162 calls at three.
 
     Per draw, off the `seconds` field this script writes for every draw into `--json`:
     over the 18 draws of a one-skill `--runs 3` pass, 8-47s per draw, median 22s, and 86s
