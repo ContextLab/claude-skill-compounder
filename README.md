@@ -198,7 +198,7 @@ hooks claim an event once, so the second delivery does nothing.
 
 Everything under `skills/` installs into `~/.claude/skills/`, and not all of it is seed
 pool. `skill-compounder`, `skill-authoring` and `contribute-skill` are the machinery, and
-each has its own row in the table above. The rest is the pool: **six seed skills ship in
+each has its own row in the table above. The rest is the pool: **seven seed skills ship in
 it**, so a fresh install is useful before you have forged anything.
 
 Each one is here on evidence that the failure is common, not on a hunch. For the
@@ -236,6 +236,7 @@ signed off.
 |`no-silent-stub`|You are about to return a value you did not compute|A fake that does not look like a failure looks like a pass. One reported evaluation copied the expected answer into the actual answer column and scored 100%|
 |`ai-tell-audit`|You are about to publish a README, an issue, a PR description or docs|Prose a model drafted carries recognisable tells. The skill knows them and says, per pattern, whether to rewrite it, delete it, or keep it. It never judges who wrote anything, because automated detection scores human writing as machine-written often enough to be unusable|
 |`claim-provenance`|A claim that is already written down is checked or carried forward: a count restated from another document, a documented behaviour nobody measured, a test asserting what a document says rather than whether it is true|A green suite proves the sentence is present, not that it is true. It defers to `ai-tell-audit` for how prose reads, and its description says so, so the two do not race for one trigger|
+|`finish-task`|A unit of work is done and the pre-publish sequence still has to run|Every step between "it works" and "it is published" is skippable with no immediate consequence, at the moment the author most wants to be done. It sequences them and owns none of them: the prose check is `claim-provenance`, the did-the-run-contain-my-change check is `stale-artifact-check`, and the merge-or-PR decision is `superpowers:finishing-a-development-branch`|
 
 The loudest complaint in the corpus is deliberately **not** here:
 `superpowers:verification-before-completion` occupies that trigger, and two skills racing
