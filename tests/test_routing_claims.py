@@ -56,8 +56,8 @@ THE LIMIT, WHICH IS THE MOST IMPORTANT LINE IN THIS FILE
         SKILL_ROUTING_PROBE=1 python3 scripts/probe_routing_claims.py
 
     Six prompts per section, each submitted `--runs N` times (default 3), one real
-    `claude -p --model sonnet --max-turns 3` call per draw, six at a time. ~48 calls per
-    run over the eight-skill pool, so ~144 at the default. It is gated so it can never
+    `claude -p --model sonnet --max-turns 3` call per draw, six at a time. ~54 calls per
+    run over the nine pinned skills, so ~162 at the default. It is gated so it can never
     fire from `./run_tests.sh` or CI, and the model is hardcoded because personal and
     project skill descriptions were measured ABSENT from the router on haiku.
 
@@ -522,8 +522,8 @@ class LiveProbeTest(unittest.TestCase):
     provenance. Gated: it needs auth and real quota."""
 
     @unittest.skipUnless(os.environ.get("SKILL_ROUTING_PROBE") == "1",
-                         "set SKILL_ROUTING_PROBE=1 to spend ~48 real `claude -p` calls "
-                         "per run (~144 at the default --runs 3)")
+                         "set SKILL_ROUTING_PROBE=1 to spend ~54 real `claude -p` calls "
+                         "per run (~162 at the default --runs 3)")
     def test_every_routing_claim_holds_against_a_real_session(self):
         results = probe.probe(rc.all_skills())
         ok = probe.report(results, probe.cli_version())

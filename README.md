@@ -64,7 +64,7 @@ what got built answers them.
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
 |`hooks/repeat-gate.sh`|**Refuses.** Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it denies the third attempt once and says what to do instead. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
-|`hooks/apply-gate.sh`|**Refuses.** After a forge closes, blocks that session's turn until the new skill has been used on the problem that caused it — or the debt is declined on the record. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is cleared with `skillforge apply`|
+|`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, and records the *use* that closes a forge (`skillforge apply`)|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
@@ -742,7 +742,7 @@ place in `~/.claude/settings.json`:
 Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
 `SKILL_COMPOUNDER_USE_LOG` is read by `hooks/skill-use.sh`, which is a hook entry too.
 The `CLAIM_GATE_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables, and every `REPEAT_*` one
-**but `REPEAT_MIN_SESSIONS`**, are each read by exactly one script — `hooks/claim-gate.sh`,
+**but `REPEAT_MIN_SESSIONS` and `REPEAT_GATE_NOW`**, are each read by exactly one script — `hooks/claim-gate.sh`,
 `hooks/doc-gate.sh`, `hooks/apply-gate.sh`, `hooks/repeat-gate.sh` — so each belongs on
 that script's own hook entries and nowhere else. Each of the four gates also takes an off
 switch, and setting one to `0` disables that gate completely rather than making it quieter.
@@ -759,6 +759,10 @@ Set it on the hook entry alone and the two CLIs keep reporting against the defau
 signature that failed in two sessions is listed as `refuses` while a gate raised to three
 lets it straight through, and nothing says which of the two is lying. It belongs in the
 session-wide `env` block, for the same reason `SKILL_COMPOUNDER_STATE` does.
+
+`REPEAT_GATE_NOW` has two readers for a narrower reason: it is a **test clock**, and
+`bin/skillrepeat` falls back to it when `SKILLREPEAT_NOW` is unset so the CLI and the gate
+cannot disagree about what time it is inside one test. Neither belongs in a real config.
 `STATUSLINE_BASE_TTL` is read by
 `statusline/statusline.sh`, so setting it on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it

@@ -878,8 +878,11 @@ difference between a skill that solved its case and one that was never tried. `d
 its ledger contract untouched — every existing reader selects `start`/`done`/`fail` by name
 and must keep answering as it did — and instead writes a **debt**: a marker under
 `<state>/apply-pending/`. `skillforge apply` discharges it with an `apply` row carrying
-verbatim evidence, and the `Stop` hook refuses to end the forging session's turn while the
-debt stands.
+verbatim evidence, and the `Stop` hook blocks the forging session's turn while the debt
+stands — **once per skill per session, and then it lets go**. It is a flag raised where it
+cannot be missed, not a wall: describing it as refusing to end the session overstates it in
+the direction that makes a reader switch it off, which is the one thing a hook must not
+invite.
 
 **Only the forging session is refused, and a marker from another session is shown rather
 than blocked on.** Blocking someone's turn over a forge they did not run is the misfire that

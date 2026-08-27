@@ -287,13 +287,28 @@
 # while carrying one, and the reason named the doc file nowhere. `CODE_RE` was lowercase-only
 # too, but undercounting CODE only fails open, so the whole asymmetry landed on the refusing
 # side. Found by a cold reviewer on 2026-08-27 against a real repository and a real bare
-# remote. `NEITHER_RE` takes the same `-i` so the three cannot disagree: without it
-# `Notes/x.md` would count as documentation while `notes/x.md` did not, and the exclusion
-# the gate depends on could be sidestepped by capitalising a directory.
+# remote.
 #
-# `DOC_GATE_CODE_EXCLUDE` is the ONE exception and stays case-sensitive: it is a regex the
-# user supplies, so the user decides its case, and quietly folding it would be this script
-# overriding a rule someone wrote deliberately.
+# `NEITHER_RE` DOES NOT TAKE THE `-i`, AND THAT ASYMMETRY IS THE POINT. It was given one in
+# the same change, to stop a capitalised directory sidestepping the exclusion -- and a
+# fourth cold reviewer found that this REINTRODUCED the very defect the `^notes?/` anchor
+# had just fixed, one commit earlier, under a different spelling: `Notes/design.md` beside a
+# code file went from allowed to DENIED, with the reason naming no documentation file, which
+# the paragraph above calls the one outcome this gate must never produce.
+#
+# The two directions are not symmetrical and must not be traded off as if they were. A
+# sidestepped exclusion costs a MISSED deny, which this gate tolerates by design. A
+# case-folded exclusion costs a WRONG deny of work that carries documentation, which it does
+# not tolerate at all. And the justification for the notes rule is repo-local in the first
+# place -- this repository's log is `notes/`, lowercase -- so extending it to spellings this
+# repository does not use buys nothing and pays the price the gate is forbidden to pay.
+# `Notes/x.md` therefore counts as documentation while `notes/x.md` does not. That is the
+# inconsistency, it is deliberate, and it errs in the only safe direction.
+#
+# `DOC_GATE_CODE_EXCLUDE` also stays case-sensitive, for a different reason: it is a regex
+# the user supplies, so the user decides its case, and quietly folding it would be this
+# script overriding a rule someone wrote deliberately. It is pinned by a test, because a
+# later "make the four classifiers consistent" refactor would otherwise sail through.
 #
 # The tests write these paths with `git update-index --cacheinfo` rather than through the
 # working tree, because macOS is case-insensitive by default: `Docs/guide.txt` written into
@@ -808,7 +823,7 @@ n_doc=0
 # and deny the push -- the same wrong direction the C-quoting bug took.
 while IFS= read -r -d '' f; do
   [ -z "$f" ] && continue
-  printf '%s' "$f" | LC_ALL=C grep -qiE "$NEITHER_RE" 2>/dev/null && continue
+  printf '%s' "$f" | LC_ALL=C grep -qE "$NEITHER_RE" 2>/dev/null && continue
   if printf '%s' "$f" | LC_ALL=C grep -qiE "$DOC_RE" 2>/dev/null; then
     n_doc=$((n_doc + 1))
     continue

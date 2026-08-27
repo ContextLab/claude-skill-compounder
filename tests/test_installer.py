@@ -95,6 +95,25 @@ class InstallerTest(unittest.TestCase):
                                  "a stale entry pointing at a script that is gone "
                                  "survived on %s: %r" % (event, cmds))
 
+    def test_a_stale_post_tool_use_failure_entry_is_stripped_too(self):
+        """THE THIRD SITE, and it had no test until a cold reviewer reverted each of the
+        three write-backs one at a time and found this one green with the fix removed.
+        The commit that made the change said "the three sites now match it" while the test
+        seeded stale entries on two of them, so the claim outran what was pinned."""
+        gone = "/gone/checkout/hooks"
+        self.write_settings({"hooks": {"PostToolUseFailure": [
+            {"matcher": "Skill", "hooks": [{"type": "command",
+             "command": '"%s/skill-use.sh" fail # claude-skill-compounder skill-use'
+                        % gone}]}]}})
+        home = self.make_checkout_without("skill-use.sh", "repeat-gate.sh")
+        installer.install(home, str(self.claude), str(self.bin), str(self.state))
+        cmds = [h["command"]
+                for g in self.read()["hooks"].get("PostToolUseFailure", [])
+                for h in g["hooks"]]
+        self.assertFalse([c for c in cmds if gone in c],
+                         "a stale PostToolUseFailure entry pointing at a script that is "
+                         "gone survived: %r" % cmds)
+
     def test_a_foreign_entry_survives_that_same_strip(self):
         """NON-VACUITY, and the failure it guards against is the destructive one: a
         write-back that simply dropped the event would satisfy the test above."""

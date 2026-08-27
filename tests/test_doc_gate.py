@@ -346,15 +346,51 @@ class DocGateTest(unittest.TestCase):
                                "guide.MD": "prose\n"}, "code plus an uppercase .MD")
         self.assert_allowed(self.push())
 
-    def test_a_capitalised_notes_directory_is_still_a_dated_log(self):
-        """The other direction: NEITHER_RE is matched the same way, so the exclusion the
-        gate depends on cannot be sidestepped by capitalising the directory."""
+    def test_a_capitalised_notes_directory_counts_as_documentation(self):
+        """THE ASYMMETRY IS DELIBERATE AND THIS TEST EXISTS TO STOP IT BEING TIDIED AWAY.
+
+        `NEITHER_RE` was briefly given the same `-i` as the other two, to stop a
+        capitalised directory sidestepping the exclusion. That REINTRODUCED, one commit
+        later and under a different spelling, the defect the `^notes?/` anchor had just
+        fixed: `Notes/design.md` beside a code file went from allowed to denied, with the
+        reason naming no documentation file. A fourth cold reviewer caught it on
+        2026-08-27 by driving the previous commit's hook and HEAD's side by side.
+
+        The two directions are not symmetrical. A sidestepped exclusion costs a MISSED
+        deny, which this gate tolerates by design; a case-folded one costs a WRONG deny of
+        work that carries documentation, which it does not tolerate at all."""
+        self.commit_cacheinfo({"bin/tool.sh": "#!/bin/sh\ntrue\n",
+                               "Notes/design.md": "prose\n"},
+                              "code plus a doc under a capitalised Notes/")
+        self.assert_allowed(self.push())
+
+    def test_the_lowercase_notes_exclusion_still_holds(self):
+        """The partner. Without it the test above is satisfied by a gate that stopped
+        excluding notes altogether, which would let every push this repository makes go
+        through -- the difference between a gate and an ornament."""
         self.commit_cacheinfo({"hooks/a.sh": "#!/bin/sh\necho bye\n",
-                               "Notes/2026-08-26-session.md": "log\n"},
-                              "code plus a capitalised note")
+                               "notes/2026-08-26-session.md": "log\n"},
+                              "code plus a lowercase note")
         reason = self.assert_denied(self.push())
         self.assertIn("hooks/a.sh", reason)
-        self.assertNotIn("Notes/2026-08-26-session.md", reason)
+        self.assertNotIn("notes/2026-08-26-session.md", reason)
+
+    def test_the_user_supplied_code_exclude_stays_case_sensitive(self):
+        """`DOC_GATE_CODE_EXCLUDE` is a regex the USER wrote, so the user decides its
+        case. Nothing pinned this: mutating its `grep -qE` to `-qiE` left all 77 tests
+        green while flipping a real decision, so a later "make the classifiers
+        consistent" refactor would have sailed straight through."""
+        self.commit_cacheinfo({"Tests/test_a.py": "def test_a():\n    pass\n"},
+                              "code under a capitalised Tests/")
+        reason = self.assert_denied(self.push(DOC_GATE_CODE_EXCLUDE="^tests?/"))
+        self.assertIn("Tests/test_a.py", reason)
+
+    def test_the_code_exclude_does_apply_in_the_case_the_user_wrote(self):
+        """NON-VACUITY: the test above must fail because of the CASE, not because the
+        knob is ignored outright."""
+        self.commit_cacheinfo({"tests/test_a.py": "def test_a():\n    pass\n"},
+                              "code under a lowercase tests/")
+        self.assert_allowed(self.push(DOC_GATE_CODE_EXCLUDE="^tests?/"))
 
     def test_a_shell_script_with_no_extension_under_bin_counts_as_code(self):
         """It has to be caught by PATH, because a deleted file has no shebang left to

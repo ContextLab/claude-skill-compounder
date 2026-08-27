@@ -59,10 +59,13 @@ python3 scripts/setup.py --uninstall --claude-dir /tmp/fake-claude --bin-dir /tm
 Requires `jq` (hooks, CLIs, status line) and `python3` (installer only). The `gh` tests in
 `test_contribute.py` skip cleanly without `gh` or without auth. **One test skips on every
 ordinary run** and is the only one that does: `test_routing_claims.py::LiveProbeTest`, which
-is opt-in behind `SKILL_ROUTING_PROBE=1` because it spends ~48 real `claude -p` calls (~144
-at the default `--runs 3`). Derive this by reading the run rather than from this sentence —
-`grep -c '\.\.\. skipped' `, and `grep -rln skipTest tests/` returns fourteen files, most of
-whose guards never fire.
+is opt-in behind `SKILL_ROUTING_PROBE=1` because it spends ~54 real `claude -p` calls (~162
+at the default `--runs 3`) — nine pinned skills at six prompts each, re-derivable with
+`python3 -c "import sys;sys.path.insert(0,'scripts');import routing_claims as rc;
+print(sum(len(s['must_fire'])+len(s['must_not_fire']) for s in rc.all_skills()))"`. Derive
+the skips by reading the run rather than from this sentence:
+`grep -c '\.\.\. skipped' <the run's output>`. `grep -rln skipTest tests/ | wc -l` returns
+**12** files, most of whose guards never fire.
 
 Five CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state, the ledger, and the
 apply debt a closed forge leaves), `skillreport` (ledger joined against transcript
@@ -318,7 +321,10 @@ dispatch and the lazy-parse failure that lost its verdict,
 completion claim and a hook can — the reasoning `hooks/claim-gate.sh` was built on —
 `2026-08-26-pipeline-and-claim-gate.md` for the A-E pipeline replacing the numbered
 protocol and for the gate landing, `2026-08-26-handoff.md` for the resume state of that
-work, and `notes/research/` for the evidence behind the seed-pool selection, the
+work, `2026-08-26-issue19-plan.md` and `2026-08-26-issue19-session.md` for the three
+refusing gates and the loop that ends in recorded use, `2026-08-26-toolbox-state.md` for a
+review entry point that carries the command behind every figure in it, and
+`notes/research/` for the evidence behind the seed-pool selection, the
 insight queue, and the contribution mechanics. `notes/OPEN-THREADS.md` is the one file
 there that tracks current state rather than history. Read the dated ones for reasoning,
 not for the current state of the code.
