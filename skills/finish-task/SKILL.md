@@ -314,8 +314,8 @@ suite**; **still absent once that skill reports the artifact current means nothi
 part is **finish-task's own step, because the delegation cannot answer it**: the default form `open("CANARY-…","a").write("x")`
 leaves a marker **file**, and that skill's Phase 4 check looks for the file as well as the text while nothing in it deletes one.
 Measured, with the source line already gone and the tree otherwise clean, its check printed `YOUR CANARY IS STILL HERE:
-./CANARY-1788251186-7b0c0e67`, exit 1 — no exit anywhere on its default path. So delete the artifact yourself, by its **exact**
-name — `rm -f ./CANARY-1788251186-7b0c0e67`, with your own token retyped — and **never through a `CANARY-*` glob**, which also
+./CANARY-<epoch>-<token>`, exit 1 — no exit anywhere on its default path. So delete the artifact yourself, by its **exact**
+name — `rm -f ./CANARY-<epoch>-<token>`, with your own token retyped — and **never through a `CANARY-*` glob**, which also
 matches another session's live canary. That command is deliberately *not* a fenced block: no fenced block in this skill deletes
 anything, and this one is meant to be retyped by hand rather than pasted. It is the only file this skill removes, and it needs no
 `destructive-op-preflight` for the reason that skill would give — this run made the file minutes ago, it holds one byte, it is

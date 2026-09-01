@@ -56,8 +56,8 @@ form, and the source line already removed:
 
 ```
 YOUR CANARY IS STILL HERE:
-src/__pycache__/shapes.cpython-39.pyc:2: ...CANARY-1788251186-7b0c0e67...
-./CANARY-1788251186-7b0c0e67
+src/__pycache__/shapes.cpython-39.pyc:2: ...CANARY-<epoch>-<token>...
+./CANARY-<epoch>-<token>
 exit 1
 ```
 
