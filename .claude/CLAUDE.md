@@ -57,15 +57,19 @@ python3 scripts/setup.py --uninstall --claude-dir /tmp/fake-claude --bin-dir /tm
 `scripts/setup.py`; the real logic is `skill_compounder/installer.py`.
 
 Requires `jq` (hooks, CLIs, status line) and `python3` (installer only). The `gh` tests in
-`test_contribute.py` skip cleanly without `gh` or without auth. **One test skips on every
-ordinary run** and is the only one that does: `test_routing_claims.py::LiveProbeTest`, which
+`test_contribute.py` skip cleanly without `gh` or without auth. **Two tests skip on every
+ordinary run** and are the only ones that do. `test_skillreport_rename.py::ItActuallyNeededFixing`
+wants `SKILLREPORT_BIN` aimed at an older `bin/skillreport` to contrast against, and proves
+nothing pointed at the working copy. And `test_routing_claims.py::LiveProbeTest`, which
 is opt-in behind `SKILL_ROUTING_PROBE=1` because it spends 72 real `claude -p` calls (216
 at the default `--runs 3`), twelve pinned skills at six prompts each, re-derivable with
 `python3 -c "import sys;sys.path.insert(0,'scripts');import routing_claims as rc;
 print(sum(len(s['must_fire'])+len(s['must_not_fire']) for s in rc.all_skills()))"`. Derive
 the skips by reading the run rather than from this sentence:
-`grep -c '\.\.\. skipped' <the run's output>`. `grep -rln skipTest tests/ | wc -l` returns
-**12** files, most of whose guards never fire.
+`grep -c '\.\.\. skipped' <the run's output>`. `grep -rln skipTest tests/*.py | wc -l` returns
+**13** files, most of whose guards never fire. The `*.py` is load-bearing: over `tests/`
+the answer depends on which grep you have, because `/usr/bin/grep` counts gitignored
+`__pycache__/*.pyc` as source and the ugrep an agent shell gets does not.
 
 Five CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state, the ledger, and the
 apply debt a closed forge leaves), `skillreport` (ledger joined against transcript

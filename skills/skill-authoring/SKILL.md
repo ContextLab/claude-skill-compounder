@@ -307,7 +307,7 @@ restating constants, it must:
 - assert the skill directory ships no build artifacts.
 
 Use `python3 -B`, or `PYTHONDONTWRITEBYTECODE=1`: without it, discovery or any sibling
-import writes `tests/__pycache__` into the skill directory and the last assertion above then
+import writes a `__pycache__` beside the tests, inside the skill directory, and the last then
 fails on its own side effect, with no route forward. Measured: `python3 -m unittest discover
 -s tests` leaves two artifacts, `-B` leaves none.
 
