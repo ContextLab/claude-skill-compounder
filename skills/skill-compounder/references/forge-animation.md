@@ -43,6 +43,32 @@ and a loop that is not converging was already made to decide, rounds earlier.
 Do not free the name by closing the forge first; that records an outcome for work that has
 not finished.
 
+## A step is also a heartbeat, and briefing B for phase changes alone is not enough
+
+`skillforge list` marks an active forge whose last step is older than `SKILLFORGE_IDLE_SECS`
+(2700 by default, the renderer's own knob). That mark answers "has anything happened
+lately?", which is the only question an outside observer can ask, and it is deliberately not
+a claim that the forge is dead.
+
+**So the mark is only as useful as the stepping cadence, and that is on the brief.** Measured
+on 2026-09-01: an orchestrator briefed to step on PHASE CHANGES dispatched its builder,
+the builder spent 51 minutes constructing runnable reproductions for five findings, and the
+forge crossed the stale threshold while working correctly. The record on disk and the record
+of a forge whose session died were identical from outside, which is exactly the ambiguity the
+mark exists to remove.
+
+Raising the threshold is the wrong repair: it buys quiet by making a real death take longer
+to notice. Brief B to step **whenever a stage runs long**, not only when the stage changes,
+so that silence past the threshold means something. A step costs one append.
+
+Two things follow for anyone reading a marked forge:
+
+- **Check for a completion or failure notification before concluding anything.** A dispatched
+  agent that died reports it. A marked forge with no such report is slow, not dead.
+- **Never close a forge on the strength of the mark alone.** `skillforge fail` writes a
+  reason into the ledger that a later reader will take at face value, and "it looked idle"
+  is not a cause of death.
+
 ## Closing: three commands, not interchangeable
 
 |Command|What the bar does|What the ledger records|

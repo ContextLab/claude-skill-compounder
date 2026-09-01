@@ -1,6 +1,6 @@
 # Open threads
 
-What is actually open, as of **2026-08-26**, on `0c4ee6a`. Written so nothing here depends
+What is actually open, as of **2026-09-01**, on `6b23dd1`. Written so nothing here depends
 on a session remembering it: every entry carries the command or the path that establishes
 it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
 close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
@@ -10,23 +10,6 @@ The GitHub issues are the other half of this picture and they do not duplicate i
 `gh issue list --repo ContextLab/claude-skill-compounder --state open` is the authority on
 what is scoped as work. This file is for what is known and unresolved, including the parts
 nobody has opened an issue for.
-
-## Open: the issue-19 branch is not merged, and carries three deliberate gaps
-
-Branch `issue-19-close-the-gap`, four commits ahead of `origin/main`. Full state, with the
-command behind every figure, is `notes/2026-08-26-toolbox-state.md`. Three things are open
-there **on purpose** and must not be tidied away by someone who has not read why:
-
-1. **Ten stale claims in `README.md` and `.claude/CLAUDE.md`** — "seven hook entries" against
-   twelve, "four CLIs" against five, "five clocks" against nine, "the only component here that
-   refuses" against three. They are the held-out test for a `finish-task` run's Phase 4, scored
-   against a key sealed before the skill existed. Fixing them early destroys the measurement.
-2. **`skillforge apply` for `finish-task` is unrecorded.** The forge loop is open because the
-   application is unfinished; recording `used` early is the false completion claim the package
-   exists to refuse. `skillforge pending` lists it.
-3. **A high-severity repeat-gate defect was found and its fix is unverified** at the time of
-   writing: `norm_bash` collapses every `python3 -c "…"` onto one callkey, so the gate can deny
-   a command that never failed while asserting it has. Reproduced; fix in flight.
 
 ## Open: `finish-task` shipped narrowed, and what was cut is not covered
 
@@ -94,22 +77,6 @@ Two things follow, both open:
    never answered, and it should be closed explicitly rather than by attrition — is the
    ledger meant to census the installed pool, or only what the forge built?
 
-## Open: the session review has still never delivered a report end to end
-
-The 2026-08-25 dispatch was charged, produced a well-formed candidate and lost it to a
-lazy-parse failure. The failure is understood and written up
-(`notes/2026-08-25-first-live-review-verdict.md`, `docs/DESIGN.md` "Never edit a script that
-may still be running"), and `tests/test_session_review.py` now covers the handoff — it
-asserts `index.jsonl` and `.unread` are both written.
-
-What is not established is that it works in production. On disk right now:
-`~/.claude/skill-compounder/reviews/` still holds only the recovered
-`.stage1-*.json`, an empty `2026-W35/`, and a `.last-dispatch` of `1787707752`; there is no
-`index.jsonl` anywhere under it. That is the *pre-fix* state, preserved, not a new failure —
-no qualifying session has dispatched since. Do not read the empty directory as a regression,
-and do not read the green test as a live result. The next real dispatch is the evidence,
-and the 21-hour cooldown means it can be waited for rather than forced.
-
 ## Open: the claim gate's recall is bounded and one arm is unwired
 
 `hooks/claim-gate.sh` ships wired on `Stop` and on `PreToolUse` with matcher `Bash`, in
@@ -156,6 +123,45 @@ until real `claude -p` sessions route to it, so an automatic forge is structural
 finish. Turning it on before that is solved means paying ~$3 a time for forges that cannot
 conclude. The stochastic-routing finding above makes this worse, not better: the gate a
 dispatched forge cannot run is now a gate that needs three passes.
+
+## Open: three installed skills exist in exactly one place, and it is not a repository
+
+`~/.claude/skills` holds 14 skills. Ten are symlinks into this checkout and one
+(`history-surfer`) symlinks into another repository. **Three are real directories that
+appear nowhere else on disk**, and `~/.claude` is not a git repository:
+
+```bash
+for d in ~/.claude/skills/*/; do [ -L "${d%/}" ] || basename "$d"; done
+git -C ~/.claude rev-parse --is-inside-work-tree    # fatal: not a git repository
+```
+
+`dead-guard-detection` (15257 bytes), `parallel-agents-one-codebase` (12825) and
+`speckit-execute` (9295). The first is the whole output of a completed five-round forge:
+`skillforge ledger` carries `dead-guard-check ... done` for 2026-08-26. One `rm -rf` loses
+all three, no test in this repository reads them, and their pins are dated 2026-08-28 with
+nothing scheduled to re-run.
+
+Moving them here is **not** a tidy-up. `main` is public, so importing someone's personal
+skills is a publication decision, and `parallel-agents-one-codebase` carries a 780-character
+description against the 500 cap, so it would fail `test_doctrine_sync.py` on arrival and its
+pin would need re-measuring after the cut. The decision is the owner's; the risk is recorded
+here so it is not discovered by losing them.
+
+## Open: a dispatched orchestrator does not survive the host sleeping
+
+Established by losing one. A forge orchestrator was killed by clamshell sleep on
+2026-08-28 and its record sat `active` for three and a half days
+(`notes/2026-08-31-stuck-forge-audit.md`, `docs/CLAUDE-CODE-BEHAVIOR.md`). `caffeinate`
+does not prevent it and one was running at the time.
+
+What is fixed: the staleness is now reported rather than only computed, by an `IDLE` column
+and a `!` in `skillforge list`, and the refusal that used to advise `skillforge done` —
+which would have recorded the dead forge as completed — now advises `fail` or `clear`.
+
+What is **not** fixed, and is the open part: nothing resumes a forge, and nothing notices
+without a person looking. The mitigation in use is that briefs and round records go to disk
+at the moment they are decided, which is what made the second attempt cheap. A forge whose
+orchestrator dies still costs its rounds.
 
 ## Known tree-state dependency — do not "fix" it
 
@@ -204,6 +210,17 @@ Kept as one line each so a returning session does not reopen them.
   script is now wrapped in one brace group and ends in `exit`, ratcheted by
   `tests/test_script_wrapping.py` with an empty `KNOWN_UNWRAPPED`. Live confirmation is
   still owed and is its own open thread above.
+- **The issue-19 branch is merged and its three deliberate gaps are all closed.** The
+  branch fast-forwarded `main` to `6b23dd1` on 2026-09-01 after a 39-file, 1841-test run
+  in an isolated worktree. The ten counted claims were corrected in `12e44a8`; the
+  repeat-gate `norm_bash` defect in `54200a0`; and `skillforge pending` now answers
+  "nothing is waiting to be applied", so the apply debt is discharged rather than assumed.
+- **The session review now delivers end to end.** The thread above asked for a live
+  dispatch as evidence; there have been three. `reviews/index.jsonl` and both week
+  directories carry 2026-08-26 `NONE`, 2026-08-28 `CANDIDATE kill-and-rerun-full-suite`
+  and 2026-08-31 `NONE`, each with its cost and duration. The 2026-08-28 candidate was
+  forged on 2026-09-01, which closes the loop the package exists for: hook, paid review,
+  candidate, forge.
 - **`bin/skillreport` counted probes as reuse.** Fixed; harness traffic is excluded by
   session entrypoint and reported on its own line.
 - **The README's no-network claim.** Corrected; `## What runs against the API` now states
