@@ -124,8 +124,8 @@ Five shapes carry almost all of them. Read for these, then read again for the re
 On a change you just wrote, this narrows the reading:
 
 ```bash
-git diff HEAD -U0 | grep -E '^\+[^+]' | grep -iE '[0-9]|\b(none|all|every|only|never|always|cannot)\b'
-git ls-files --others --exclude-standard | xargs grep -niE '[0-9]|\b(none|all|every|only|never|always|cannot)\b' /dev/null
+git diff HEAD -U0 | awk '/^\+\+\+ /{f=substr($0,7);sub(/[ \t]+$/,"",f)} /^\+[^+]/{print f": "$0}' | grep -iE '[0-9]|\b(none|all|every|only|never|always|cannot)\b'
+git ls-files -z --others --exclude-standard | xargs -0 grep -niE '[0-9]|\b(none|all|every|only|never|always|cannot)\b' /dev/null
 ```
 
 Both lines are load-bearing and each replaces a version that read clean while missing

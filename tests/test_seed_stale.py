@@ -72,9 +72,18 @@ TOKEN_SHAPE = re.compile(r"^CANARY-[0-9]{10}-[0-9a-f]{8}$")
 # by a test below, so the skill cannot make a claim the suite has not checked.
 INLINE_COMMANDS = [
     'find . -name __pycache__ -type d -exec rm -rf {} +',
-    'grep -ral CANARY-EPOCH-TOKEN dist/',
-    'rm -f CANARY-EPOCH-TOKEN',
-    'test -e CANARY-EPOCH-TOKEN && echo OBSERVED || echo ABSENT',
+    # Was `grep -ral ... dist/` until 2026-09-01. The `grep` an agent shell gets is
+    # ugrep, which honours .gitignore, so a recursive grep is blind to exactly the
+    # gitignored build directory this line is pointed at. find drives the walk now.
+    'find dist -type f -exec grep -al CANARY-EPOCH-TOKEN {} +',
+    # Was `rm -f CANARY-EPOCH-TOKEN` until 2026-09-01: it clears YOUR shell's cwd while
+    # the canary lands in the PROCESS's, so a re-prove that executed nothing still found
+    # yesterday's file and returned OBSERVED -- the exact trap the step claims to close.
+    'find . -name CANARY-EPOCH-TOKEN -delete',
+    # Was `test -e CANARY-EPOCH-TOKEN` until 2026-09-01. `test -e` looks in YOUR shell's
+    # cwd, while the canary file lands in the PROCESS's. Run from anywhere else it said
+    # ABSENT for a live canary, and ABSENT means "discard every conclusion".
+    'find . -name CANARY-EPOCH-TOKEN | grep -q . && echo OBSERVED || echo ABSENT',
 ]
 
 

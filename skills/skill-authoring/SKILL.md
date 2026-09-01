@@ -244,9 +244,19 @@ somebody's only copy:
 
 ```bash
 SKILLS=~/.claude/skills; NAME=<the draft>
-if [ -L "$SKILLS/$NAME" ]; then rm "$SKILLS/$NAME"
-elif [ -d "$SKILLS/$NAME" ]; then mv "$SKILLS/$NAME" "${TMPDIR:-/tmp}/skill-draft-$NAME"
-else echo "not live"; fi
+# BOTH WRITABLE ROOTS. Checking only the first printed `not live` over a draft loaded from
+# ./.claude/skills. The plugin cache is not swept here though Phase 1 sweeps it: a draft you
+# wrote is never in it, and it is restored by the plugin manager. No glob, because an
+# unmatched one aborts the loop under zsh and nothing is cleared or reported.
+[ -n "$NAME" ] || { echo "NAME is empty; refusing to touch a skills root"; exit 1; }
+found=
+for S in "$SKILLS" ./.claude/skills; do
+  [ -e "$S/$NAME" ] || continue; found=1
+  if [ -L "$S/$NAME" ]; then rm "$S/$NAME"
+  else mv "$S/$NAME" "${TMPDIR:-/tmp}/skill-draft-$NAME"; fi
+  echo "cleared $S/$NAME"
+done
+[ -n "$found" ] || echo "not live"
 ```
 
 The other thing a partial run leaves is the Phase 6 test file. A suite that collects its test
@@ -291,6 +301,11 @@ restating constants, it must:
 - re-run Gate B: the six prompts, disjoint, with the vocabulary and overlap constraints;
 - assert both caps, description at most 500 characters and body at most 500 lines;
 - assert the skill directory ships no build artifacts.
+
+Use `python3 -B`, or `PYTHONDONTWRITEBYTECODE=1`: without it, discovery or any sibling
+import writes `tests/__pycache__` into the skill directory and the last assertion above then
+fails on its own side effect, with no route forward. Measured: `python3 -m unittest discover
+-s tests` leaves two artifacts, `-B` leaves none.
 
 Run it. A test you wrote and did not run is worth less than no test: it reads as coverage.
 

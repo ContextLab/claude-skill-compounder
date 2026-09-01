@@ -25,9 +25,9 @@ need in order to run is in `references/`.
 3. **Count the denominator and the rows.** `shortlist.py` sits beside this file. Run
    `python3 <this skill's directory>/shortlist.py --rows --skip=<each range from step 2> <file>`.
    It prints the editable word count, the greppable shortlist, and a count for every
-   catalogue row that is a string. Carry the `--skip` ranges from step 2 into this
-   command; leaving them off re-admits the region step 2 excluded. If you cannot run it,
-   `references/script-notes.md` gives the pass by hand; the reading pass reaches every row.
+   catalogue row that is a string. Carry step 2's ranges in; leaving them off re-admits the
+   region it excluded, and a bare `--skip=` is refused, so pass none when there are none.
+   If you cannot run it, `references/script-notes.md` gives the pass by hand.
 4. **Read every paragraph once, in order.** The command in step 3 reaches two of the ten
    families and only the rows that are strings. Eight families, and every row that describes
    a construction rather than a string, are found only here. Ask each one's recognition test

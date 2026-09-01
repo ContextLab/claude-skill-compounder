@@ -58,13 +58,13 @@ nothing in the toolchain can hide it.
 |`print("CANARY-EPOCH-TOKEN")` or a write to stderr|A capturing runner, on a **passing** test. Measured: a passing `pytest -q` prints it zero times, `pytest -q -s` once. A failing test does show it|
 
 **3. Run the exact command whose result you were about to trust.** Not a similar one. Clear
-the previous run's evidence first with `rm -f CANARY-EPOCH-TOKEN`, or that run answers for
+the previous run's evidence first with `find . -name CANARY-EPOCH-TOKEN -delete`, or it answers for
 this one: a re-prove that executes nothing at all still finds yesterday's file on disk.
 
 **4. Read the result.** For the file form:
 
 ```
-test -e CANARY-EPOCH-TOKEN && echo OBSERVED || echo ABSENT
+find . -name CANARY-EPOCH-TOKEN | grep -q . && echo OBSERVED || echo ABSENT   # not test -e: the file lands in the PROCESS's cwd
 ```
 
 - **Observed.** The artifact is current. If nothing rebuilt or reinstalled in between, the
@@ -89,8 +89,8 @@ installs. For anything else go straight to Phase 3 and let the canary decide.
 Set `PKG` to the **import** name, which is not always the distribution name (`pip install
 acme-widgets` may import as `acme`, and a submodule needs `ns.sub`). Set `SRC` to the file
 you edited. Run it with the same interpreter and from the same directory as the command you
-were about to trust, because both change the answer: pasted outside the project's activated
-environment it will report UNDECIDABLE rather than the truth.
+were about to trust, because both change the answer. **Confirm the interpreter first** with
+`python3 -c 'import sys; print(sys.prefix)'`: run unactivated it can print CURRENT and exit 0.
 
 ```bash
 export PKG=mypkg SRC=src/mypkg/core.py
@@ -171,7 +171,7 @@ canary is what tells you whether it worked.
   A content check can, by comparing the cached bytecode against a fresh compile, but
   deleting the directory costs one command and settles it.
 - **Build output**: a clean rebuild, not an incremental one. Then
-  `grep -ral CANARY-EPOCH-TOKEN dist/` to confirm the canary reached the build output. Point
+  `find dist -type f -exec grep -al CANARY-EPOCH-TOKEN {} +` to confirm it reached the build. Point
   it at the build directory, never at the tree: the source contains the token by definition,
   so a match there proves nothing.
 - **A running server**: find the process holding the port, confirm its working directory is
@@ -192,11 +192,15 @@ what separates another agent's live canary from a dead session's litter.
 ```bash
 mine=CANARY-EPOCH-TOKEN
 now=$(date +%s)
-left=$( { grep -ranF --exclude-dir=.git "$mine" . ; find . -name "$mine" -not -path './.git/*'; } )
-others=$( { grep -raEho --exclude-dir=.git 'CANARY-[0-9]{10}-[0-9a-f]{8}' . ;
+# find DRIVES the walk; grep never recurses. The `grep` an agent shell gets may be ugrep,
+# which honours .gitignore, and a gitignored build directory is exactly where a canary
+# survives a rebuild. Measured: `grep -rn` found nothing while the token sat in `dist/`.
+scan() { find . -type f -not -path './.git/*' -exec grep "$@" {} + 2>/dev/null; }
+left=$( { scan -anHF "$mine" ; find . -name "$mine" -not -path './.git/*'; } )
+others=$( { scan -aEho 'CANARY-[0-9]{10}-[0-9a-f]{8}' ;
             find . -name 'CANARY-*' -not -path './.git/*' -exec basename {} \; ; } \
           | grep -E '^CANARY-[0-9]{10}-[0-9a-f]{8}$' | grep -vxF "$mine" | sort -u)
-for t in $others; do
+printf '%s\n' "$others" | while IFS= read -r t; do [ -n "$t" ] || continue
   age=$(( (now - $(echo "$t" | cut -d- -f2)) / 60 ))
   if [ "$age" -gt 30 ]; then
     echo "ORPHAN, ${age}m old and safe to remove: $t"
