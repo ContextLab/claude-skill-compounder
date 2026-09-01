@@ -248,9 +248,25 @@ signed off.
 **The last two were promoted, not seeded.** They were forged locally, lived in
 `~/.claude/skills` as the only copy of themselves, and were brought in on 2026-09-01
 after the session that needed the skills above also needed both of these. Their
-usage evidence is thinner than the rest of the pool: one had a single recorded
-interactive invocation and the other none, so they are here on the strength of the
-defects they name recurring in this repository, not on a usage record.
+usage evidence is **none**, and the first draft of this paragraph said otherwise. Checked
+row by row: `parallel-agents-one-codebase` has 17 recorded invocations and every one is
+`harness=true` in a `routing-probe-*` directory, which is this package measuring itself.
+`dead-guard-detection` has 28, of which 27 are the same. Its one non-harness row is stamped
+28 seconds after its own forge closed, by the session that forged it, which is a forge
+finishing rather than a skill being reused.
+
+So both are here on the strength of the defects they name recurring in this repository, and
+on nothing else. By the bar `contribute-skill` sets for proposing a skill upstream -- clean
+from the red-team loop **and** used again since it was forged -- neither would qualify
+today. That bar governs proposing to strangers rather than shipping to yourself, and the
+difference is deliberate, but the gap is recorded here rather than left for a reader to
+discover.
+
+**A defect this exposed:** the forge was named `dead-guard-check` and the skill it produced
+is `dead-guard-detection`. `skillreport` joins uses to forges BY NAME, so it reports that
+forge as having produced a skill invoked 0 times, and would do so however often the skill
+were used. A skill renamed between forging and installing is invisible to the reuse half of
+the ledger, silently.
 
 The loudest complaint in the corpus is deliberately **not** here:
 `superpowers:verification-before-completion` occupies that trigger, and two skills racing
