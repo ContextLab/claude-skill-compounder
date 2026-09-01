@@ -347,11 +347,11 @@ Each of these thoughts means stop and return to phase 2:
 <!-- routing-pin
 description-sha256: bee0cadda9369a815978e25e7e19d79ab2360b05de87d56d932b22eddccefa8f
 prompts-sha256: 3481a41b8b015b69a99f8d99ca42118f2a8f3da63e3001ff912b57a6d273cb67
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Debt cleared 2026-08-31: the description changed (572 chars, over cap, to 498) and the whole section then measured clean, which is this ledger's stated clearing condition rather than a re-run until a pass appeared.
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs)
 -->
 
 The must-not prompts are deliberately adversarial rather than restatements of the

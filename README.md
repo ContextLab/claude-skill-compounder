@@ -202,7 +202,7 @@ hooks claim an event once, so the second delivery does nothing.
 
 Everything under `skills/` installs into `~/.claude/skills/`, and not all of it is seed
 pool. `skill-compounder`, `skill-authoring` and `contribute-skill` are the machinery, and
-each has its own row in the table above. The rest is the pool: **seven seed skills ship in
+each has its own row in the table above. The rest is the pool: **nine seed skills ship in
 it**, so a fresh install is useful before you have forged anything.
 
 Each one is here on evidence that the failure is common, not on a hunch. For the
@@ -241,6 +241,16 @@ signed off.
 |`ai-tell-audit`|You are about to publish a README, an issue, a PR description or docs|Prose a model drafted carries recognisable tells. The skill knows them and says, per pattern, whether to rewrite it, delete it, or keep it. It never judges who wrote anything, because automated detection scores human writing as machine-written often enough to be unusable|
 |`claim-provenance`|A claim that is already written down is checked or carried forward: a count restated from another document, a documented behaviour nobody measured, a test asserting what a document says rather than whether it is true|A green suite proves the sentence is present, not that it is true. It defers to `ai-tell-audit` for how prose reads, and its description says so, so the two do not race for one trigger|
 |`finish-task`|A unit of work is done and the pre-publish sequence still has to run|Every step between "it works" and "it is published" is skippable with no immediate consequence, at the moment the author most wants to be done. It sequences them and owns none of them: the prose check is `claim-provenance`, the did-the-run-contain-my-change check is `stale-artifact-check`, and the merge-or-PR decision is `superpowers:finishing-a-development-branch`|
+|`dead-guard-detection`|A cap, limit, validation or early exit is relied on but has never been OBSERVED firing|A dead guard is usually correct in isolation and the program behaves plausibly either way, so no symptom points at it. This repository shipped one: `CLAIM_GATE_MAX_BYTES` was dead code on every macOS, because `wc -c` pads its output and the numeric guard read the leading space as non-numeric|
+|`parallel-agents-one-codebase`|Two or more agents will EDIT, FIX or REFACTOR files in one shared working tree|Every read sees every other agent's uncommitted, half-written edits. Measured here while forging these two: a suite run read a file an agent was mid-write on and reported a failure that did not exist, and a builder committed a fixture into the real repository|
+
+
+**The last two were promoted, not seeded.** They were forged locally, lived in
+`~/.claude/skills` as the only copy of themselves, and were brought in on 2026-09-01
+after the session that needed the skills above also needed both of these. Their
+usage evidence is thinner than the rest of the pool: one had a single recorded
+interactive invocation and the other none, so they are here on the strength of the
+defects they name recurring in this repository, not on a usage record.
 
 The loudest complaint in the corpus is deliberately **not** here:
 `superpowers:verification-before-completion` occupies that trigger, and two skills racing

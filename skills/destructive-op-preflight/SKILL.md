@@ -365,11 +365,11 @@ Each of these is a thought, not an observation. If you notice one, you are in Ph
 <!-- routing-pin
 description-sha256: 4623be42daf9bb82bc68ebfe3c99ba88fdefcdb4092998f38395159267ef224c
 prompts-sha256: 5a42fa5841d8fc005fd7c133ff9c09cd1e120367bd928b6f5e83d9b5c7347d83
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'clear the local commits on this branch and sync to origin/main' 2/3
+result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'delete the scaffolding files you generated, I only want the real source' 2/3
 -->
 
 MUST fire:

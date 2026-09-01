@@ -45,12 +45,12 @@ COST (re-measured 2026-08-26, CLI 2.1.245)
     a one-run cost survived the move to `--runs 3` in both files at once.
 
     Quote the cost at the N the gate demands, not at one run. One skill is 6 prompts:
-    18 calls at `--runs 3`. The ten pinned skills are 60 prompts: 60 calls per run
-    and 180 calls at three.
+    18 calls at `--runs 3`. The twelve pinned skills are 72 prompts: 72 calls per run
+    and 216 calls at three.
 
     Per draw, off the `seconds` field this script writes for every draw into `--json`:
-    over a WHOLE 180-draw `--runs 3` pass of all ten sections, 2026-08-31 at CLI 2.1.252,
-    7-72s per draw, median 22s, and 688s (~11.5 minutes) wall clock, six in parallel.
+    over a WHOLE 216-draw `--runs 3` pass of all twelve sections, 2026-09-01 at CLI
+    2.1.252, 7-76s per draw, median 23s, and 924s (~15.4 minutes) wall clock, six at once.
     That is the gate measured end to end rather than scaled from one section, which is
     what the previous figure here was. Treat wall clock as an order of magnitude and
     never as a figure to check: two 18-draw passes of the same six prompts on one day

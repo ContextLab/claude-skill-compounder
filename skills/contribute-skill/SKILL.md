@@ -309,11 +309,11 @@ These are real and unfixed. Read them as part of the procedure, not as small pri
 <!-- routing-pin
 description-sha256: f2f816f2d07f872183036d47e56a63aa007c8665174ab3fc40f4412bcd55428c
 prompts-sha256: 7140c84e539131ff411a8ddb9fcc2fdd29cea180fe3e660285620f65df5c3efd
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Re-measured after two em-dashes were removed from the prompt list on 2026-08-31, which moved prompts-sha256.
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs)
 -->
 
 Prompts that MUST fire this skill:

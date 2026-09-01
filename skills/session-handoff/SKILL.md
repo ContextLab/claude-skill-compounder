@@ -275,7 +275,7 @@ Each of these is the same thought, and each precedes an unusable handoff:
 <!-- routing-pin
 description-sha256: ec6749f499df8f781b2f165532f44bab8843a8f48410e12d991c357f9a87f2b8
 prompts-sha256: de09a9bf1705ada1ed41359171480a179ee23b29daecab78882153d33d9d4e85
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3

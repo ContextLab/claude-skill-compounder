@@ -247,7 +247,7 @@ Each of these means stop and go to Phase 1:
 <!-- routing-pin
 description-sha256: f51073daf0b11e2bbcc0f0eddc3697a1e08e1556c0b9e425853d86e78e5059d9
 prompts-sha256: 00cf5239ded765faff0dcf7f92e743a85d890cfc8dcf9fb1a3d12e975d71d48b
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3

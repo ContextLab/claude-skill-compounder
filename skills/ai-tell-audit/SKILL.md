@@ -484,11 +484,11 @@ number and make the claim without it.
 <!-- routing-pin
 description-sha256: da8d54d2cf19a14ccb134165a3f628111c6600bed4dbc83da776319678ada044
 prompts-sha256: 7a6241737c1f04075950f822beb9cd0bd5f5df8427f55aae406f8f535db4a0b0
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Re-measured after the description was shortened to the 500-char cap on 2026-08-31; the previous wording opened 'Use BEFORE drafting' which the seed suite's startswith('Use when') assertion rejects, so the opening was recast and re-probed rather than assumed.
+result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'Draft a comment on issue #40 explaining why we rejected the approach.' 2/3
 -->
 
 Must fire:

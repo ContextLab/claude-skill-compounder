@@ -89,54 +89,53 @@ import probe_routing_claims as probe  # noqa: E402
 # failure. Do not add a name to buy a green suite; a new unverified section is the
 # thing this file exists to stop.
 UNVERIFIED = {
-    # Emptied 2026-08-25, when skill-compounder's six claims were measured for real and
-    # its pin promoted to verified. Re-entered 2026-08-26: the SAME section, unedited,
-    # was probed three times at --runs 3 in one day and scored 9/9, 8/9, 9/9. "The skill
-    # I just used told me to run it from the wrong directory." fired nothing at all on
-    # one draw, so it stands at 8/9 over nine draws and the pin says `partial`.
-    #
-    # This entry is the debt that verdict creates, not an exemption bought to get a
-    # green suite. It clears when the DESCRIPTION changes and the whole section measures
-    # clean again -- never by re-running until a pass turns up, which is what pinning
-    # the third pass alone would have been.
-    #
-    # Re-measured 2026-08-31 at CLI 2.1.252: 8/9 again, and the SAME prompt at 2/3. The
-    # description has not changed, so the clearing condition has not been met.
+    # Re-measured in full on 2026-09-01: 12 sections, 72 prompts, 216 real calls at CLI
+    # 2.1.252. Six clean, six not. Every must-not-fire half was 9/9 on all twelve, which
+    # is the result worth saying out loud -- nothing here over-fires.
+
+    # Unedited across three separate measurements and split in all of them, on the same
+    # prompt every time. The clearing condition has never been met because the
+    # description has never changed.
     "skill-compounder": "partial",
 
-    # THREE ENTRIES ADDED 2026-08-31, and what created them is a measurement STANDARD,
-    # not a regression. All three previously read `verified 3/3 must-fire, 3/3
-    # must-not-fire`, pinned 2026-08-25 at CLI 2.1.245. Three draws is ONE run of three
-    # prompts: those pins predate the three-run floor and had never been held to it.
-    # The first --runs 3 measurement of them, at CLI 2.1.252, puts one prompt of each at
-    # 2/3.
-    #
-    # So this ledger grew, and the growth is the ledger working rather than failing. The
-    # dishonest alternative was available and was not taken: leaving a `verified 3/3`
-    # pin standing over evidence that contradicts it. A prompt shown at 2/3 has not
-    # passed, and these three had simply never been asked the question three times.
-    #
-    # Each clears the same way as the entry above: change the DESCRIPTION, then measure
-    # the whole section clean. Not by re-running until a pass turns up.
-    "claim-provenance": "partial",           # 'Our CONTRIBUTING page says broken frontmatter...' 2/3
-    "destructive-op-preflight": "partial",   # 'clear the local commits on this branch...' 2/3
-    "finish-task": "partial",                # 'Wrap up this branch: get it reviewed...' 2/3
+    # Pinned `verified 3/3` on a SINGLE run at CLI 2.1.245, before the three-run floor
+    # existed. The first --runs 3 measurement of it, 2026-08-31, put one prompt at 2/3.
+    "destructive-op-preflight": "partial",
 
-    # `no-silent-stub` was here from 2026-08-28, at 8/9: the split had MOVED rather than
-    # cleared, from "just make the suite pass" to "Finish this parser. For the branches
-    # you can't do yet, return an empty list.", and a later clean pass does not un-show a
-    # prompt already shown unreliable.
-    # REMOVED 2026-08-31, on this ledger's own stated clearing condition and not on a
-    # re-run: the description CHANGED (it was 572 chars, over the 500 cap, and is now
-    # 498), and the whole section then measured 9/9 must-fire and 9/9 must-not-fire at
-    # CLI 2.1.252. Left as a comment because this ledger fails in both directions and the
-    # entry's removal is the evidence that it was paid, not skipped.
+    # THE TWO BELOW MEASURED 9/9 ON 2026-09-01 AND ARE STILL PARTIAL, DELIBERATELY.
+    # Both came back clean at 216 calls. Neither description changed between the split
+    # and the clean pass -- `finish-task`'s repair forge rewrote its body and left the
+    # description byte-identical, and `claim-provenance` was untouched. This ledger's
+    # clearing condition is a description change FOLLOWED BY a clean section, precisely
+    # so that a clean re-run on unchanged wording cannot buy a promotion. Taking the
+    # green here would be the re-roll the protocol names and forbids, and the prompt
+    # would still have been shown unreliable. Both readings are in the pins.
+    "claim-provenance": "partial",
+    "finish-task": "partial",
+
+    # ADDED 2026-09-01, and the first is the instructive one.
+    #
+    # `ai-tell-audit` was measured 9/9 earlier the same day, after its description was
+    # rewritten to fit the 500-char cap, and came back 8/9 hours later on that SAME
+    # wording -- "Draft a comment on issue #40 explaining why we rejected the approach."
+    # lost one draw. Nothing was edited in between. That is the spread this repository
+    # has documented on unchanged descriptions (3/3, then 1/3, then 2/3) landing on a
+    # section that looked settled, and it is why a single clean pass is not a property.
+    "ai-tell-audit": "partial",
+    # `dead-guard-detection` was promoted from ~/.claude/skills on 2026-09-01, where it
+    # was the only copy of a completed five-round forge. It arrives with a split already
+    # measured at CLI 2.1.250 on 2026-08-28, and the same prompt split again here at
+    # 2.1.252, so this one is reproducible rather than a single unlucky draw.
+    "dead-guard-detection": "partial",
+
+    # `no-silent-stub` was here from 2026-08-28 and was REMOVED 2026-08-31 on this
+    # ledger's own stated condition: its description changed (572 chars, over cap, to
+    # 498) and the whole section then measured clean. It measured 9/9 again on
+    # 2026-09-01. Left as a comment because this ledger fails in both directions.
     #
     # `contribute-skill` was here from 2026-08-28 as `unmeasured` -- it shipped with no
-    # `## Trigger precision` section at all, so nothing had ever checked when it fires.
-    # REMOVED the same day, on a first measurement of 9/9 must-fire and 9/9 must-not-fire
-    # draws at CLI 2.1.250. Left as a comment because this ledger fails in both directions
-    # and the entry's removal is the evidence that it was paid, not skipped.
+    # `## Trigger precision` section at all. REMOVED the same day on a first measurement
+    # of 9/9 both halves. Same reason for the comment.
 }
 
 # Measured false on 2026-08-25 by running them. Both have since been removed from the

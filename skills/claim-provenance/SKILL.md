@@ -201,7 +201,7 @@ Two rules that decide most of the hard cases:
 1. **Run the command. Keep the output.** Not a similar command; the one that produces this
    claim. **The trap is that a similar command returns a number, and a number ends the
    search.** Worked, from this file: the bucket A example in Phase 4 read *"this repository
-   ships 10 seed skills"* behind `find skills -maxdepth 2 -name SKILL.md | wc -l`. The count
+   ships 12 seed skills"* behind `find skills -maxdepth 2 -name SKILL.md | wc -l`. The count
    was right and the noun was wrong. That command counts `SKILL.md` files; *seed skill* is a
    narrower term this repository defines elsewhere, in the README's seed-pool table, which
    had five rows (`git show 40babc1:README.md`, as of 2026-08-25). That row count is a past
@@ -226,7 +226,7 @@ Two rules that decide most of the hard cases:
 
 |Bucket|Disposition|What the sentence looks like after|
 |-|-|-|
-|A|Re-derive; put the command beside the number|"this repository ships 10 `SKILL.md` files under `skills/` (`find skills -maxdepth 2 -name SKILL.md \| wc -l`, as of 2026-08-26)"|
+|A|Re-derive; put the command beside the number|"this repository ships 12 `SKILL.md` files under `skills/` (`find skills -maxdepth 2 -name SKILL.md \| wc -l`, as of 2026-09-01)"|
 |A, but the source moves|Replace the number with the command|"run `find skills -maxdepth 2 -name SKILL.md \| wc -l` for the current count"|
 |B|Keep it, with its source and its as-of date|"measured on claude 2.1.245: the description listed as the H1"|
 |C|Delete the claim and write the sentence without it|"we fixed this in three places" becomes "we fixed this"|
@@ -376,11 +376,11 @@ the router reads nothing else; the pin records that wording's measurement.
 <!-- routing-pin
 description-sha256: 9d480e2d11caf9fb99a3746bdaca048b40dbb5a110b3e5f8554fee1981ce3f91
 prompts-sha256: 1e763f03fd8b977bc88c973a2df89bb6b533a07eca5b34669bd7c3e304f70744
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'Our CONTRIBUTING page says broken frontmatter makes a skill load with empty metadata. Has anyone actually measured that, or did we copy it forward?' 2/3
+result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'Our CONTRIBUTING page says broken frontmatter makes a skill load with empty metadata. Has anyone actually measured that, or did we copy it forward?' 2/3. Re-measured 2026-09-01 at 216 calls: 9/9, a CLEAN pass on the SAME description. Kept partial deliberately. This ledger's clearing condition is a description change followed by a clean section; a clean re-run on unchanged wording is the re-roll the protocol forbids, and the prompt has still been shown unreliable.
 -->
 
 Prompts that MUST fire this skill:

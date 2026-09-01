@@ -332,9 +332,9 @@ claude -p --model sonnet --max-turns 3 --output-format stream-json --verbose "<p
 **A non-zero exit is not a failed measurement:** `--max-turns` exhaustion and a denied
 permission both exit 1, after the routing decision. **`--model sonnet`, never haiku** —
 personal and project skill descriptions were measured absent from the router on haiku. Cost
-is one call per prompt per draw: one six-prompt skill is 18 calls at the floor, and the ten
-pinned skills are 60 prompts, so **180 calls** and ~12 minutes. Measured 2026-08-31, CLI
-2.1.252, over that whole 180-draw pass: 7-72s a draw, median 22s, 688s wall, six in parallel.
+is one call per prompt per draw: one six-prompt skill is 18 calls at the floor, and the twelve
+pinned skills are 72 prompts, so **216 calls** and ~15 minutes. Measured 2026-09-01, CLI
+2.1.252, over that whole 216-draw pass: 7-76s a draw, median 23s, 924s wall, six in parallel.
 
 **One run is one draw, and a draw is not a verdict.** Routing is stochastic: one unchanged
 description here gave 3/3, then 1/3, then 2/3, and this skill's own six prompts, probed three
@@ -473,7 +473,7 @@ what the apply debt does and does not demand are in `references/forge-animation.
 <!-- routing-pin
 description-sha256: 7978c6efd2caca28bd8881f136175ef901f0cc558dd79dce6f65abd761630059
 prompts-sha256: b0d3fb4da0e6c09f8453979d51221df6812e8d508da59c7ed43cba5e2dccb40d
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3

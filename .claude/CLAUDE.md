@@ -59,8 +59,8 @@ python3 scripts/setup.py --uninstall --claude-dir /tmp/fake-claude --bin-dir /tm
 Requires `jq` (hooks, CLIs, status line) and `python3` (installer only). The `gh` tests in
 `test_contribute.py` skip cleanly without `gh` or without auth. **One test skips on every
 ordinary run** and is the only one that does: `test_routing_claims.py::LiveProbeTest`, which
-is opt-in behind `SKILL_ROUTING_PROBE=1` because it spends 60 real `claude -p` calls (180
-at the default `--runs 3`), ten pinned skills at six prompts each, re-derivable with
+is opt-in behind `SKILL_ROUTING_PROBE=1` because it spends 72 real `claude -p` calls (216
+at the default `--runs 3`), twelve pinned skills at six prompts each, re-derivable with
 `python3 -c "import sys;sys.path.insert(0,'scripts');import routing_claims as rc;
 print(sum(len(s['must_fire'])+len(s['must_not_fire']) for s in rc.all_skills()))"`. Derive
 the skips by reading the run rather than from this sentence:

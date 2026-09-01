@@ -347,11 +347,11 @@ Each of these means stop and go back to a gate:
 <!-- routing-pin
 description-sha256: f08886748dc04dc8bd670a535a3b64d69c485534f6fa0b02c63cf938d6ed9ad7
 prompts-sha256: e3500966bcaac0ffe4e9ceffd2d8bf220d31166fab4082d87ae88cbfdcbb9281
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Re-measured after the description was rescoped on 2026-08-31: the 2026-08-28 wording broadened 'frontmatter' to 'a skill itself', the exact break its own pinned rule names, and blew the 500-char cap. The new opening names renaming and frontmatter without widening scope.
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs)
 -->
 
 Prompts that MUST fire this skill:

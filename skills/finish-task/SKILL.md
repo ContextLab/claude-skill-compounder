@@ -472,11 +472,11 @@ did not, in your reply and in the record, leave the scratch directory where it i
 <!-- routing-pin
 description-sha256: c9d56fb902e4b2ab4b97ee33ba2fb50ffec8466a05546bfd0cd44d18213c05ba
 prompts-sha256: 5231c9570adecc209567bb4fe3c7c53eddb377c08caeb3d590b5051983096767
-measured: 2026-08-31
+measured: 2026-09-01
 cli: 2.1.252 (Claude Code)
 model: sonnet
 runs: 3
-result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'Wrap up this branch: get it reviewed, run everything, make sure the docs still match, and then we'll decide what to do with it.' 2/3
+result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'Wrap up this branch: get it reviewed, run everything, make sure the docs still match, and then we'll decide what to do with it.' 2/3. Re-measured 2026-09-01 at 216 calls: 9/9, a CLEAN pass on the SAME description (the repair forge changed the body, never the description; the pin sha is byte-identical). Kept partial for the same reason as claim-provenance.
 -->
 
 Prompts that MUST fire this skill:
