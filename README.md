@@ -701,7 +701,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
-All twenty-four are environment variables, and they are not the whole set — this prints every
+All twenty-five are environment variables, and they are not the whole set — this prints every
 name any shipped script reads:
 
 ```bash
@@ -737,6 +737,7 @@ place in `~/.claude/settings.json`:
 |`SKILL_COMPOUNDER_APPLY_GATE`|`1`|the hook entries|Set to `0` to switch the apply gate off entirely — a closed forge leaves no debt to answer|
 |`APPLY_GATE_WINDOW`|`86400`|the hook entries|Seconds after a forge closes during which its apply debt still blocks the turn|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
+|`SKILLFORGE_IDLE_SECS`|`2700`|the top-level `env` block|Age past which a forge nothing has stepped is called idle. **Two components read it** — the status line and `skillforge list` — so setting it anywhere narrower makes them disagree about whether a forge is dead|
 |`STATUSLINE_CACHE_PRUNE_EVERY`|`200`|the `statusLine` entry|Cache misses between sweeps of dead cache entries. The key is a hash of session id and directory, so every session leaves a file; sampled because this runs once a second|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 

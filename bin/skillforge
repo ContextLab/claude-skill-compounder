@@ -183,6 +183,10 @@ SEP="$(printf '\037')"
 
 command -v jq >/dev/null 2>&1 || { echo "skillforge: jq is required" >&2; exit 1; }
 
+# SKILLFORGE_IDLE_SECS (2700) is the age past which `list` marks an active forge
+# stale. It is the RENDERER's knob, read here deliberately rather than duplicated:
+# two thresholds would let the status line call a forge idle while `list` calls it
+# healthy.
 # SKILLFORGE_NOW pins the clock so tests can assert on durations and dates.
 now() { if [ -n "${SKILLFORGE_NOW:-}" ]; then printf '%s' "$SKILLFORGE_NOW"; else date +%s; fi; }
 die() { echo "skillforge: $*" >&2; exit 2; }
@@ -2479,13 +2483,19 @@ SLOTS
 $(slots)
 SLOTS
     [ "$listed" -eq 0 ] && echo "no active forge"
+    # ON STDERR, DELIBERATELY. The `!` in the IDLE column is data and belongs in the
+    # table; this paragraph is advice for a person. Printed to stdout it added five lines
+    # to a surface that is parsed as a table, and three tests that read `list` that way
+    # broke -- correctly. A human sees both streams; a parser sees only the table.
     if [ "$stale" -gt 0 ]; then
-      echo ""
-      echo "! $stale forge(s) have not stepped in over $(fmt_age "$l_thresh"). Nothing expires an"
-      echo "  active forge, and it holds its name against a new one, so a forge whose session"
-      echo "  died stays here until someone says so. If it died: skillforge fail --name <forge>"
-      echo "  <reason>. To discard it: skillforge clear --name <forge>. Both write a ledger row;"
-      echo "  'done' would record it as completed and install it."
+      {
+        echo ""
+        echo "! $stale forge(s) have not stepped in over $(fmt_age "$l_thresh"). Nothing expires an"
+        echo "  active forge, and it holds its name against a new one, so a forge whose session"
+        echo "  died stays here until someone says so. If it died: skillforge fail --name <forge>"
+        echo "  <reason>. To discard it: skillforge clear --name <forge>. Both write a ledger row;"
+        echo "  'done' would record it as completed and install it."
+      } >&2
     fi
     exit 0
     ;;

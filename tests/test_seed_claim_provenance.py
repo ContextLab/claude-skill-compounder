@@ -333,7 +333,13 @@ class SkillDocumentTest(unittest.TestCase):
         # paragraphs (no rule dropped, "same shape" and "entrench" intact). The remaining
         # three bought the measurement, its source and as-of date, and the reason no
         # rewording fixes it. Reset this to the new body size after any deliberate trim.
-        self.assertLessEqual(lines, 403, "working ceiling; the body is paid on every turn")
+        # Raised 403 -> 404 on 2026-08-31. The routing pin gained a `runs:` line it never
+        # carried: this section was pinned `verified 3/3` on a single run, before the
+        # three-run floor existed, and the first --runs 3 measurement of it came back
+        # `partial 8/9`. `runs` is what separates those two readings, so the line buys the
+        # one fact that makes the pin above it interpretable. Nothing was trimmed to pay
+        # for it because no line here is spare; the argument is that the line is load-bearing.
+        self.assertLessEqual(lines, 404, "working ceiling; the body is paid on every turn")
 
     def test_the_iron_law_is_fenced_stated_once_and_is_a_procedure(self):
         law = re.search(r"## The Iron Law\n\n```\n(.+)\n```", read())

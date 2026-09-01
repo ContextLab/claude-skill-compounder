@@ -1569,6 +1569,11 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
             "SKILLFORGE_SKILLS_DIR", "CLAUDE_CONFIG_DIR", "SKILLFORGE_NO_INSTALL",
             "SKILLFORGE_NAME", "SKILLFORGE_SKILL_DIR", "SKILLFORGE_REQUIRE_TRIGGER",
             "CLAUDE_CODE_SESSION_ID",
+            # Shared with statusline/skillforge-status.sh on purpose: `list` marks a forge
+            # stale at the same threshold the renderer calls idle, and two thresholds that
+            # can drift would let one surface call a forge dead while the other calls it
+            # healthy.
+            "SKILLFORGE_IDLE_SECS",
             # Internal state, initialised on every path that reaches the read; the
             # default is a `set -u` belt, not a way in.
             "TRIGGER_TEXT", "TRIGGER_KIND", "SKILL_PRESENT", "RESOLVED_NAME",

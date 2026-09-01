@@ -55,9 +55,17 @@ class StalenessCase(unittest.TestCase):
         return r
 
     def listing(self, now, idle_secs=None):
+        """The TABLE only. The advisory footer goes to stderr on purpose, so that stdout
+        stays a surface a parser can read; three tests that read `list` as a table broke
+        when it was briefly on stdout, and they were right to."""
         r = self.run_cli("list", now=now, idle_secs=idle_secs)
         self.assertEqual(r.returncode, 0, "list failed: %s" % r.stderr)
         return r.stdout
+
+    def advisory(self, now, idle_secs=None):
+        r = self.run_cli("list", now=now, idle_secs=idle_secs)
+        self.assertEqual(r.returncode, 0, "list failed: %s" % r.stderr)
+        return r.stderr
 
 
 class ListReportsAge(StalenessCase):
@@ -75,13 +83,18 @@ class ListReportsAge(StalenessCase):
         self.start()
         out = self.listing(T0 + 10 * MINUTE)
         self.assertNotIn("!", out, "a 10-minute-old forge was flagged stale: %r" % out)
-        self.assertNotIn("have not stepped", out, "footer fired on a fresh forge: %r" % out)
+        self.assertNotIn("have not stepped", self.advisory(T0 + 10 * MINUTE),
+                         "the advisory fired on a fresh forge")
 
     def test_a_forge_idle_past_the_threshold_is_marked_and_explained(self):
         self.start()
-        out = self.listing(T0 + 3 * DAY + 14 * HOUR)
+        at = T0 + 3 * DAY + 14 * HOUR
+        out = self.listing(at)
         self.assertIn("3d14h!", out, "a 3d14h-idle forge is not marked: %r" % out)
-        self.assertIn("have not stepped", out, "no footer explaining the mark: %r" % out)
+        self.assertIn("have not stepped", self.advisory(at),
+                      "nothing on stderr explains the mark")
+        self.assertNotIn("have not stepped", out,
+                         "the advisory is on stdout, which is the table a parser reads")
 
     def test_the_boundary_is_the_threshold_itself(self):
         """One second under is fresh, exactly at it is stale. A guard nobody has watched
@@ -116,10 +129,11 @@ class OnlyActiveCanBeStale(StalenessCase):
         self.start()
         r = self.run_cli("fail", "--name", "demo-skill", "its orchestrator died", now=T0 + HOUR)
         self.assertEqual(r.returncode, 0, r.stderr)
-        out = self.listing(T0 + 30 * DAY)
+        at = T0 + 30 * DAY
+        out = self.listing(at)
         if "demo-skill" in out:
             self.assertNotIn("!", out, "a closed forge was marked stale: %r" % out)
-            self.assertNotIn("have not stepped", out)
+            self.assertNotIn("have not stepped", self.advisory(at))
 
 
 class TheRefusalNamesTheStaleness(StalenessCase):
@@ -147,9 +161,11 @@ class TheRefusalNamesTheStaleness(StalenessCase):
 
     def test_the_footer_does_not_advise_done_either(self):
         self.start()
-        out = self.listing(T0 + 3 * DAY)
-        self.assertIn("skillforge fail --name", out, out)
-        self.assertIn("skillforge clear --name", out, out)
+        err = self.advisory(T0 + 3 * DAY)
+        self.assertIn("skillforge fail --name", err, err)
+        self.assertIn("skillforge clear --name", err, err)
+        self.assertNotIn("skillforge done", err,
+                         "the advisory names the close that records it as completed")
 
 
 class AnUnreadableStampIsNotAFreshOne(StalenessCase):
