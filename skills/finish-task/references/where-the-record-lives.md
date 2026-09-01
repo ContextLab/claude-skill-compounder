@@ -8,9 +8,12 @@ decision, and for why the record's quotation of the sweep deliberately lags by o
 
 Measured, with `notes/` in `.gitignore`: `git add notes/2026-08-26-thing.md` printed
 `The following paths are ignored by one of your .gitignore files` and exited **1**, and the
-`git commit` on the next line then printed `nothing to commit, working tree clean` and exited 1 —
-a reassurance line at the exact moment the deliverable is missing. That is why the body tells you
-to read `git add`'s status and not the `git commit` line after it.
+`git commit` on the next line then reported on the index and exited 1 — a reassurance line at the
+exact moment the deliverable is missing. **Which** reassurance depends on the rest of the tree, and
+both were measured on the same fixture: with nothing else untracked, `nothing to commit, working
+tree clean`; with one unrelated untracked file present, `nothing added to commit but untracked files
+present (use "git add" to track)`. Neither mentions the record. That is why the body tells you to
+read `git add`'s status and not the `git commit` line after it.
 
 `git add -f` does land it, exits 0, and leaves the exclusion intact for every other file in that
 directory: measured, a second file written there afterwards did not appear in

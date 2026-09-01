@@ -37,8 +37,26 @@ Measured: round 1's bracket found 5 new `.omc/` paths, `.omc/` went into `.gitig
 `--ignored` reported all **10**, as `!!`. Pre-existing ignored trees cancel in the diff, so the
 extra output stays bounded.
 
-The remaining blind spot: a reviewer that *edits a tracked file* shows as a modification you must
-recognise, not as a new path.
+## The blind spot `--ignored` does not close: a rewrite of a path already there
+
+The bracket compares two **path sets**, so a path that is in both lists is invisible however much
+its contents moved. Measured on a reviewer's break -> red -> revert around one tracked source file,
+with the snapshots kept outside the tree:
+
+```
+pre : !! src/__pycache__/m.cpython-39.pyc
+post: !! src/__pycache__/m.cpython-39.pyc
+diff pre post -> exit 0, no output          # the bracket reported NOTHING
+git diff --stat -> empty
+.pyc sha   b0064917... -> 79665659...        # moved
+.pyc mtime 1788245372  -> 1788245373         # moved
+```
+
+Bytecode recompiled, an ignored cache overwritten, a tracked file broken and put back: each leaves
+the two lists identical. A reviewer that *edits a tracked file* and leaves it edited does at least
+show as a ` M` you must recognise; one that puts it back shows as nothing at all. Nothing in Phase 2
+closes this, and nothing should try — the instrument that covers it is Phase 3's canary, observed
+inside the run rather than computed from outside it.
 
 ## Why the scratch directory comes from `mktemp -d`
 
@@ -53,8 +71,19 @@ existed. On any machine that has run this skill before, **refusal is the normal 
 the other run's directory the moment one retype is missed. `mktemp -d` never returns a directory
 that already exists, so there is no refusal branch to take.
 
-The placeholder is the other half of the guard. Measured, `>` into the literal
-`/tmp/finish-REPLACE` exits **1** and `diff` on it exits **2** — a missed retype fails loudly
+The placeholder is the other half of the guard, and **a guard around it is how that half was lost
+once already.** Until 2026-09-01 Phase 1 step 2 read the two snapshots behind
+`if [ -f /tmp/finish-REPLACE/post-dispatch.txt ]`, whose whole purpose was to be quiet on round 1.
+An unretyped placeholder can never satisfy that test either, so a missed retype took the same
+branch and printed `round 1 -- no dispatch yet, nothing to subtract`, exit **0** — measured on
+round 2 of a real review loop, silently skipping the 98.7% step above. The repaired block tests the
+*directory* first and says `MISSED THE RETYPE`, so the round-1 reading is reachable only when the
+path is really yours. Its sibling on the next lines is the same shape: `git diff --cached | grep -n
+"$HOME" || echo "no machine-local absolute paths staged"` prints that reassurance over an **empty**
+index, so the staged count is taken and named in the message.
+
+Measured, `>` into the literal `/tmp/finish-REPLACE` exits **1** and `diff` on it exits **2** — a
+missed retype fails loudly
 instead of contaminating someone else's finish.
 
 ## Why you never `cp -a` twice into one destination
@@ -93,6 +122,14 @@ The form Phase 3 gives, and that Phase 4 reuses for `claim-provenance`'s test tr
 `mktemp -d` destination each time, never a second `cp -a` into one that already holds a copy:
 
 ```bash
-st="$(mktemp -d /tmp/finish-REPLACE/scratch-XXXXXX)"   # a destination nothing has filled
-cp -a . "$st"; echo "copy exit=$?"                     # must be 0
+d=/tmp/finish-REPLACE                                  # RETYPE what Phase 0 step 4's mktemp -d printed
+st="$(mktemp -d "$d/scratch-XXXXXX")" || echo "MISSED THE RETYPE: there is no '$d' to copy into"
+[ -n "$st" ] && { cp -a . "$st"; echo "copy exit=$?"; }   # must be 0
 ```
+
+The `|| echo` and the `[ -n "$st" ]` are the same guard the sweep recipe carries, and for the same
+reason. Measured with the placeholder left in place and **no** guard: `mktemp` fails, `st` is the
+empty string, `cp -a . ""` answers `cp: ./. and . are identical (not copied).` and `copy exit=1` —
+which `unhappy-path.md` routes as *"you copied into a destination that already holds a copy"*, a
+different defect entirely. Guarded, the same run prints `MISSED THE RETYPE: there is no
+'/tmp/finish-REPLACE' to copy into` and never reaches `cp`.
