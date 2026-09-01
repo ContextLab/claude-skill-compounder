@@ -779,7 +779,18 @@ jq -s -R -r '
              else ($en.rounds // rounds_of($st.steps)) end),
             (if $en == null then "no" else "yes" end),
             (if $en == null then "" else ($en.rounds_planned // "" | tostring) end),
-            "no" ]))
+            "no",
+            # THE NAME THE SKILL WAS INSTALLED UNDER, which is not always the one the
+            # forge carried. `done` writes an origin row naming the DIRECTORY it linked
+            # and stamps it with the start time of the forge that produced it, in
+            # `created_at`; that stamp is the join key. Without this column the reuse
+            # count below matches on the forge name alone, so a skill renamed between
+            # forging and installing reports 0 uses forever. Measured: forge
+            # `dead-guard-check` produced `dead-guard-detection`, and this table printed
+            # 0 against 28 recorded invocations.
+            (([ $rec[] | select(.event == "origin" and .origin == "forged"
+                                and ((.created_at // -1) == ($st.ts // 0)))
+                       | .name ] | first) // $st.name) ]))
       + ($orphans | map(. as $j | $rec[$j] as $en
         | [ (if ($en.name // "") == "" then "(unnamed)" else $en.name end),
             (($en.ts // 0) - ($en.duration // 0)),
@@ -788,7 +799,10 @@ jq -s -R -r '
             ($en.rounds // 0),
             "yes",
             ($en.rounds_planned // "" | tostring),
-            "yes" ])) )
+            "yes",
+            # An orphaned outcome has no start, so there is no stamp to join on and the
+            # name on the outcome row is the only name there is.
+            ($en.name // "(unnamed)") ])) )
   | sort_by(.[1])
   | .[] | @tsv
 ' "$LEDGER" > "$TMP/forges.tsv" 2>/dev/null
@@ -971,7 +985,7 @@ is_over() { # <completed> <planned>
   [ "$1" -gt "$2" ]
 }
 
-while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed planned orphan; do
+while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed planned orphan installed; do
   [ -n "${name:-}" ] || continue
   is_over "$rounds" "${planned:-}" && overruns=$(( overruns + 1 ))
   rounds="$(rounds_col "$rounds" "${planned:-}")"
@@ -1004,12 +1018,16 @@ while IFS="$(printf '\t')" read -r name start_ts since_ts outcome rounds closed 
   # `during` bucket would have quietly relabelled it "inside a forge window" -- true, but
   # a different claim than the one the reader needs. Its window is still reported, as
   # harness_after: those are the invocations that were inflating USES SINCE.
-  counts="$(SR_NAME="$name" awk -F'\t' -v since="$since_ts" -v start="$start_ts" '
-    BEGIN { n = ENVIRON["SR_NAME"] }
+  counts="$(SR_NAME="$name" SR_INSTALLED="${installed:-$name}" \
+            awk -F'\t' -v since="$since_ts" -v start="$start_ts" '
+    BEGIN { n = ENVIRON["SR_NAME"]; m = ENVIRON["SR_INSTALLED"] }
     {
       bare = $1
       sub(/^[^:]*:/, "", bare)          # accept both "name" and "plugin:name"
-      if ($1 != n && bare != n) next
+      # EITHER name. A session invokes a skill by the directory it sits in, so the
+      # invocations land under the installed name while the forge row carries the forge
+      # name. Matching only the forge name is what hid 28 uses behind a 0.
+      if ($1 != n && bare != n && $1 != m && bare != m) next
       if ($4 == "harness") {
         harness++
         if ($5 == "temp") h_temp++; else h_proj++
