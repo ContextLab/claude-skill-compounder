@@ -20,6 +20,8 @@ A DRAFT YOU HAVE NOT PARSED AND NOT TRIGGER TESTED IS NOT A SKILL
 
 ## When this is the wrong skill
 
+- **`create-agent-skills`** (plugin cache) covers authoring and improving SKILL.md files and
+  overlaps this fully. Phase 1 rates that blocking, and its own sweep surfaces it.
 - **Deciding whether a procedure deserves a skill at all**, red-teaming a draft, or retiring
   one that misfires: that is `skill-compounder`. It owns the threshold, the cold-reviewer
   loop, and the archive protocol. This skill starts after the decision and stops before the
@@ -289,8 +291,10 @@ globally, so a new skill has no guard at all until you write one: `ai-tell-audit
 description and not the body. It was brought under by moving depth into `references/`.
 
 Where it goes, because there is no default: if the skill lives in a repository, the file is
-`tests/test_seed_<name>.py` **relative to that repository's root**, run the way that
-repository runs its suite. A skill forged straight into `~/.claude/skills/<name>/` has no
+`tests/test_seed_<name_with_underscores>.py` **relative to that repository's root**, run the
+way that
+repository runs its suite. Underscores, never the skill's hyphens: a hyphen is not a legal
+module name, so `discover` skips the file and reports `Ran 0 tests ... OK`. Measured: 0 vs 1. A skill forged straight into `~/.claude/skills/<name>/` has no
 repository and no suite — there is no `~/.claude/tests` — so either move the skill into a
 repository first or write the test to `~/.claude/skills/<name>/tests/test_<name>.py` and
 record in the ledger how it is run. Reading the file off disk at run time rather than

@@ -162,10 +162,10 @@ Still open, and not fixed here:
 - `ai-tell-audit`: the RST indented-code exclusion, and the Unsourced-precision family
   firing on real measurements in good human prose. Both need catalogue changes rather than a
   command fix, and both were reproduced against numpy's README.
-- `skill-authoring`: `test_seed_<name>.py` is unrunnable for hyphenated names, so its own
-  documented `discover` command reports `Ran 0 tests ... OK` -- coverage that reads green;
-  and `create-agent-skills` in the plugin cache is a **full** overlap its own Phase 1 calls
-  blocking, unnamed in its decline clause.
+- `skill-authoring`: **both closed after round two.** The test path now says underscores,
+  because a hyphen is not a legal module name and `discover` silently skipped the file --
+  measured, 0 tests against 1. And `create-agent-skills` is named in the decline section, an
+  overlap its own Phase 1 rates blocking and its own sweep surfaces.
 
 **The lesson worth keeping is the ratio.** Round one fixed eight blocking findings. Round two
 found seven more, three of them created by round one. A repair is a change, and a change to a
