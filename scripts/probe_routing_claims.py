@@ -45,18 +45,20 @@ COST (re-measured 2026-08-26, CLI 2.1.245)
     a one-run cost survived the move to `--runs 3` in both files at once.
 
     Quote the cost at the N the gate demands, not at one run. One skill is 6 prompts:
-    18 calls at `--runs 3`. The nine pinned skills are 54 prompts: 54 calls per run
-    and 162 calls at three.
+    18 calls at `--runs 3`. The ten pinned skills are 60 prompts: 60 calls per run
+    and 180 calls at three.
 
     Per draw, off the `seconds` field this script writes for every draw into `--json`:
-    over the 18 draws of a one-skill `--runs 3` pass, 8-47s per draw, median 22s, and 86s
-    wall clock for the whole pass. An earlier pass of the same six prompts the same day
-    took 74s, so treat wall clock as an order of magnitude and never as a figure to
-    check. Scaling 86s/18 draws puts the seed pool at ~1.5 minutes per skill and ~12
-    minutes at `--runs 3`. Draws in which some skill fired ran slower than draws in which
-    none did -- median 32s against 16s -- so a section is dearer than its call count
-    alone suggests. The "~15 minutes" this docstring and `SKILL.md` both carried until
-    today was one run's figure, never re-derived after the gate went to three runs.
+    over a WHOLE 180-draw `--runs 3` pass of all ten sections, 2026-08-31 at CLI 2.1.252,
+    7-72s per draw, median 22s, and 688s (~11.5 minutes) wall clock, six in parallel.
+    That is the gate measured end to end rather than scaled from one section, which is
+    what the previous figure here was. Treat wall clock as an order of magnitude and
+    never as a figure to check: two 18-draw passes of the same six prompts on one day
+    took 86s and 74s. Draws in which some skill fired ran slower than draws in which none
+    did -- median 24s against 18s over those 180 -- so a section is dearer than its call
+    count alone suggests. The "~15 minutes" this docstring and `SKILL.md` both carried
+    until 2026-08-26 was one run's figure, never re-derived after the gate went to three
+    runs; the 8-47s/median-22s spread that replaced it was one section's 18 draws.
 
 MODEL
     `--model sonnet`, always. Personal and project skill descriptions were measured
@@ -307,7 +309,13 @@ def pin_result(rows, runs):
     counts = ("%d/%d must-fire draws, %d/%d must-not-fire draws" % (wf, nf, wn, nn))
     if all(r["pass"] for r in rows):
         return "verified %s (%d/%d each prompt over %d runs)" % (counts, runs, runs, runs)
-    flaky = ["%r %d/%d" % (r["prompt"][:60], r["wins"], r["runs"])
+    # THE WHOLE PROMPT, never a prefix. `[:60]` truncated it, and
+    # `tests/test_routing_gate.py` requires the quoted text to match a prompt that is
+    # actually in the section -- so for any prompt longer than 60 characters this
+    # function emitted a pin the repository's own gate rejects, and every `partial` pin
+    # that ever shipped had to be written by hand instead. Quoted plainly rather than
+    # with %r, because repr escapes an apostrophe and the gate matches literally.
+    flaky = ["'%s' %d/%d" % (r["prompt"], r["wins"], r["runs"])
              for r in rows if not r["pass"]]
     return "partial %s over %d runs; not clean: %s" % (counts, runs, "; ".join(flaky))
 
@@ -386,9 +394,13 @@ def parse_args(argv):
 def main(argv):
     if os.environ.get(GATE) != "1":
         print(__doc__, file=sys.stderr)
-        print("REFUSING TO RUN: set %s=1 to spend real quota on ~48 `claude -p` calls "
-              "per run, x%d runs by default (~%d calls)."
-              % (GATE, RUNS, 48 * RUNS), file=sys.stderr)
+        # DERIVED, never restated. A hardcoded 48 here outlived two prompt additions
+        # and disagreed with the docstring above it; a call is one prompt in one draw,
+        # so the only honest source is the prompt list that exists right now.
+        per_run = len(prompts_for(rc.all_skills()))
+        print("REFUSING TO RUN: set %s=1 to spend real quota on %d `claude -p` calls "
+              "per run, x%d runs by default (%d calls)."
+              % (GATE, per_run, RUNS, per_run * RUNS), file=sys.stderr)
         return 2
     try:
         args, out_json, runs = parse_args(argv[1:])

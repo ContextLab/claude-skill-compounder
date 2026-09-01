@@ -24,12 +24,25 @@ Usage:
 """
 
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SKILLS = REPO / "skills"
+
+# WHERE THE SKILLS BEING CHECKED LIVE. Defaults to this checkout, which is what the suite
+# and `lint` want. `SKILL_ROUTING_ROOT` redirects it, and the reason is that a routing claim
+# is only ever true of an INSTALLED skill: the router reads `~/.claude/skills`, not this
+# tree, and a machine carries skills that no checkout contains -- forged for personal use,
+# symlinked in from another repository, or shipped by a plugin. Hardcoded to the repo, this
+# module could not so much as enumerate those, so "verify every skill on this machine"
+# had no instrument and the four skills installed here from elsewhere had never been probed.
+#
+# It is an env var and not a flag because `probe_routing_claims.py`, `lint` and the tests
+# all reach `all_skills()` by import, so a flag would have to be threaded through three
+# callers that have no opinion about it.
+SKILLS = Path(os.environ.get("SKILL_ROUTING_ROOT") or (REPO / "skills")).expanduser()
 
 SECTION = "## Trigger precision"
 PIN_OPEN = "<!-- routing-pin"
@@ -126,29 +139,55 @@ def parse_skill(skill_md):
     out["section"] = section
     out["pin"] = parse_pin(section)
 
-    bucket = None
-    for line in section.splitlines():
-        if _FIRE.match(line):
-            bucket = "must_fire"
-            continue
-        if _NOT_FIRE.match(line):
-            bucket = "must_not_fire"
-            continue
-        item = _ITEM.match(line)
-        if not item:
-            # A prose paragraph closes the list. This matters: three skills carry a
-            # paragraph quoting the very fragment that was measured NOT to fire, and
-            # collecting it as a claim would invert the file's meaning.
-            if line.strip() and bucket and not line.startswith(" "):
-                bucket = None
-            continue
-        if bucket is None:
-            continue
-        quoted = _QUOTED.search(item.group(1))
+    # A LIST ITEM MAY WRAP, AND ITS CONTINUATION LINES BELONG TO IT. `_QUOTED` matches
+    # within one line, so before this buffered, a prompt whose quote opened on one line and
+    # closed on the next matched nothing and was filed as `unquoted_items` -- the claim was
+    # reported as malformed rather than read. Measured 2026-08-28 on an installed skill that
+    # wrapped its prompts at 78 columns: six prompts on the page, two parsed, and it fell
+    # under both three-prompt floors while looking complete to anyone reading the file.
+    #
+    # Wrapping is ordinary prose formatting, not an authoring error, so the parser is what
+    # was wrong. Joining is safe for prompts that already fit one line, because `_QUOTED`
+    # takes the FIRST quoted span and a trailing parenthetical -- which most must-not-fire
+    # items carry -- lies after it. Verified by comparing every shipped skill's
+    # `prompts_digest` across this change: unchanged for all of them.
+    def flush(bucket, parts):
+        if bucket is None or not parts:
+            return
+        text = " ".join(p.strip() for p in parts).strip()
+        quoted = _QUOTED.search(text)
         if quoted:
             out[bucket].append(quoted.group(1).strip())
         else:
-            out["unquoted_items"].append((bucket, item.group(1).strip()))
+            out["unquoted_items"].append((bucket, text))
+
+    bucket = None
+    pending = []
+    for line in section.splitlines():
+        if _FIRE.match(line):
+            flush(bucket, pending); pending = []
+            bucket = "must_fire"
+            continue
+        if _NOT_FIRE.match(line):
+            flush(bucket, pending); pending = []
+            bucket = "must_not_fire"
+            continue
+        item = _ITEM.match(line)
+        if item:
+            flush(bucket, pending)
+            pending = [item.group(1)] if bucket is not None else []
+            continue
+        # An INDENTED non-empty line continues the item above it.
+        if pending and line.strip() and line.startswith(" "):
+            pending.append(line)
+            continue
+        # A prose paragraph closes the list. This matters: three skills carry a
+        # paragraph quoting the very fragment that was measured NOT to fire, and
+        # collecting it as a claim would invert the file's meaning.
+        if line.strip() and bucket and not line.startswith(" "):
+            flush(bucket, pending); pending = []
+            bucket = None
+    flush(bucket, pending)
     return out
 
 
@@ -187,7 +226,27 @@ def lint(claims_list):
     for c in claims_list:
         name = c["name"]
         if c["section"] is None:
-            continue  # a skill may legitimately ship no routing claims at all
+            # A SKILL WITH NO TRIGGER CONTRACT IS THE ONE THING THIS FILE CANNOT CHECK,
+            # WHICH IS EXACTLY WHY IT MUST BE REPORTED. This used to `continue` under the
+            # comment "a skill may legitimately ship no routing claims at all", and the
+            # cost of that word was measured on 2026-08-28: linting the installed skills
+            # directory printed "10 skill(s) with routing claims, 7 finding(s)" while FOUR
+            # installed skills carried no section at all and were never named. A reader
+            # cannot tell that summary from full coverage, so silence about an unverifiable
+            # skill reads as a pass -- the same failure `unmeasured-is-not-verified` names
+            # for a probe that could not run.
+            #
+            # There is no legitimate case behind the old comment. A skill exists to fire;
+            # a skill with no claim about when it fires has never had that checked by
+            # anything, and shipping one is a decision nobody recorded.
+            findings.append(
+                "%s: no `%s` section, so no claim about when this fires has ever been\n"
+                "  checked -- by this linter, by the probe, or by a reader. A skill that\n"
+                "  advertises nothing testable cannot be verified as advertised. Add the\n"
+                "  section with three must-fire and three must-not-fire prompts, each the\n"
+                "  verbatim utterance a user would type, then measure it."
+                % (name, SECTION))
+            continue
         for bucket, raw in c["unquoted_items"]:
             findings.append(
                 "%s: %s list item carries no quoted prompt: %r\n"
@@ -319,8 +378,15 @@ def _main(argv):
         findings = lint(claims)
         for f in findings:
             print("FINDING: %s\n" % f)
-        print("%d skill(s) with routing claims, %d finding(s)."
-              % (sum(1 for c in claims if c["section"]), len(findings)))
+        # BOTH NUMBERS, ALWAYS, and the second is the one that used to be missing. A line
+        # reading "10 skill(s) with routing claims" over a directory holding 14 is true and
+        # reads as coverage; the four it does not mention are the four nothing can check.
+        # Report the denominator so the gap is a number rather than an absence.
+        with_claims = sum(1 for c in claims if c["section"])
+        print("%d skill(s) scanned in %s: %d with routing claims, %d with none, "
+              "%d finding(s)."
+              % (len(claims), SKILLS, with_claims, len(claims) - with_claims,
+                 len(findings)))
         return 1 if findings else 0
     if cmd == "show":
         for c in claims:

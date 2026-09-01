@@ -81,3 +81,20 @@ was **0 bytes**, the suite passed on a tree with no `diagonal()` in it, and the 
 a complete clean finish of nothing, with every phase reporting success. This is the same failure
 class the canary exists for, arriving from the other direction: the run was honest, the tree was not
 the one being published.
+
+## The sweep command, written out literally
+
+Phase 3 tells you to substitute what this project's own documentation calls full. The shape it has
+in mind, writing to this finish's scratch directory:
+
+```bash
+./run_tests.sh > /tmp/finish-REPLACE/sweep.txt 2>&1; echo "exit=$?"
+tail -20 /tmp/finish-REPLACE/sweep.txt      # the aggregate line, if this runner prints one
+grep -nEi 'ran [0-9]+ test|[0-9]+ (passed|failed|error)|^(OK|FAILED|ERROR)' \
+     /tmp/finish-REPLACE/sweep.txt          # one line per file, if it does not. Count them.
+```
+
+Two things that shape is protecting. If "full" is more than one command, put the commands in a
+script **file** outside the repository and run that file — a shell variable holding several commands
+word-splits. And the `grep` is a reading aid across the common runners, not a rule; the section above
+has what it printed on a `pytest -q` loop, and why the bare `tail` under-reported the same run.

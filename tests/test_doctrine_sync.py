@@ -937,7 +937,10 @@ class SkillforgeContractTest(unittest.TestCase):
         # are taken from the refusal message at runtime, so renaming the flag or the
         # subcommand fails here rather than leaving the skill quietly pointing at neither.
         msg = self.duplicate.stderr
-        for token in ("skillforge done", "--name"):
+        # `skillforge done` was here until 2026-08-31 and was the WRONG recovery: it
+        # records a forge that never finished as completed and installs its skill. The
+        # honest closes are `fail` (it died, with a reason) and `clear` (discard it).
+        for token in ("skillforge fail", "skillforge clear", "--name"):
             self.assertIn(token, msg,
                           "the refusal message no longer names %r, so this assertion is "
                           "checking the docs against nothing" % token)

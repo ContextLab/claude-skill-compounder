@@ -391,7 +391,7 @@ PINNED = (
     # Found by a cold reviewer given the skill and this suite and asked, neutrally, for
     # edits that leave it green. Every one below was reproduced here before it was pinned.
     ("the-description-itself",
-     "Use when a SKILL.md's frontmatter is what you write or fix: naming the directory, "
+     "Use when renaming a skill directory or rewriting a SKILL.md's frontmatter: "
      "wording the description whose `Use when` and decline clauses decide when it fires, "
      "fixing an installed skill that never fires, and running the parse and trigger "
      "gates. Do NOT use for judging whether a procedure earned a skill, red-teaming or "
@@ -405,7 +405,11 @@ PINNED = (
      "routes every caller to the wrong skill), broadening `frontmatter` to `a SKILL.md` "
      "(which re-creates the `writing-skills` overlap Phase 1 calls blocking), and dropping "
      "one deferral clause. All three left this suite green. Rewording the description is "
-     "meant to require editing this line."),
+     "meant to require editing this line. Reworded 2026-08-31 to repair a measured "
+     "routing failure (the prompt naming a directory rename fired nothing, 0/3); the "
+     "opening now names renaming and frontmatter, and was checked against all three "
+     "break modes above: neighbours unswapped, `frontmatter` not broadened to the whole "
+     "file, no deferral dropped."),
 
     ("the-router-decides",
      "A skill has to fire on its own. Nobody calls it by name; a router reads its "

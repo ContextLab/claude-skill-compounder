@@ -88,3 +88,11 @@ A wrapper that returns before the reviewer does: measured, a real dispatch retur
 **0-byte** review file. Nothing about the status says the round did not happen, which is why Phase 2
 counts the bytes rather than reading the status, and why a second empty answer is recorded as "no
 cold reviewer was available" rather than as a clean review.
+
+The form Phase 3 gives, and that Phase 4 reuses for `claim-provenance`'s test trap — a fresh
+`mktemp -d` destination each time, never a second `cp -a` into one that already holds a copy:
+
+```bash
+st="$(mktemp -d /tmp/finish-REPLACE/scratch-XXXXXX)"   # a destination nothing has filled
+cp -a . "$st"; echo "copy exit=$?"                     # must be 0
+```

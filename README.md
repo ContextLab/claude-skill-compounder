@@ -701,7 +701,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
-All twenty-three are environment variables, and they are not the whole set — this prints every
+All twenty-four are environment variables, and they are not the whole set — this prints every
 name any shipped script reads:
 
 ```bash
@@ -737,6 +737,7 @@ place in `~/.claude/settings.json`:
 |`SKILL_COMPOUNDER_APPLY_GATE`|`1`|the hook entries|Set to `0` to switch the apply gate off entirely — a closed forge leaves no debt to answer|
 |`APPLY_GATE_WINDOW`|`86400`|the hook entries|Seconds after a forge closes during which its apply debt still blocks the turn|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
+|`STATUSLINE_CACHE_PRUNE_EVERY`|`200`|the `statusLine` entry|Cache misses between sweeps of dead cache entries. The key is a hash of session id and directory, so every session leaves a file; sampled because this runs once a second|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
 Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
@@ -763,8 +764,8 @@ session-wide `env` block, for the same reason `SKILL_COMPOUNDER_STATE` does.
 `REPEAT_GATE_NOW` has two readers for a narrower reason: it is a **test clock**, and
 `bin/skillrepeat` falls back to it when `SKILLREPEAT_NOW` is unset so the CLI and the gate
 cannot disagree about what time it is inside one test. Neither belongs in a real config.
-`STATUSLINE_BASE_TTL` is read by
-`statusline/statusline.sh`, so setting it on a hook entry does nothing.
+`STATUSLINE_BASE_TTL` and `STATUSLINE_CACHE_PRUNE_EVERY` are read by
+`statusline/statusline.sh`, so setting either on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it
 belongs in the session-wide `env` block. Set it anywhere narrower and they disagree about
 where state lives.

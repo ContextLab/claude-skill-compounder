@@ -303,3 +303,32 @@ These are real and unfixed. Read them as part of the procedure, not as small pri
   executes the read-only staging block against a local git repo. No test opens a pull
   request, so the write sequence in section 6 is verified by flag inspection and by
   reading `gh`'s help, not by having been run end to end.
+
+## Trigger precision
+
+<!-- routing-pin
+description-sha256: f2f816f2d07f872183036d47e56a63aa007c8665174ab3fc40f4412bcd55428c
+prompts-sha256: 7140c84e539131ff411a8ddb9fcc2fdd29cea180fe3e660285620f65df5c3efd
+measured: 2026-08-31
+cli: 2.1.252 (Claude Code)
+model: sonnet
+runs: 3
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Re-measured after two em-dashes were removed from the prompt list on 2026-08-31, which moved prompts-sha256.
+-->
+
+Prompts that MUST fire this skill:
+
+1. "That deploy-check skill has earned its keep: can we get it into the shared repo?"
+2. "I want to send the stale-artifact-check skill upstream. Walk me through it."
+3. "We've been using this skill locally for weeks. How do I propose it to the main skills repo so other people get it?"
+
+Prompts that must NOT fire this skill:
+
+1. "This skill fires on the wrong prompts. Fix it." (`skill-compounder` owns fixing,
+   forging and retiring a skill; this one owns proposing a proven skill upstream.)
+2. "Open a pull request for the bug fix on this branch." (An ordinary code pull request.
+   Nothing about it is a skill, and the duplicate check and consent gates here would be
+   noise.)
+3. "Install the session-handoff skill on this machine." (Local installation, which
+   `skillforge done` does. Nothing leaves the machine, so none of the network-write
+   gates below apply.)

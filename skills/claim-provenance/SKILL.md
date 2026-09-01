@@ -143,9 +143,9 @@ claims you are auditing drown in hunks that are not yours.
 
 **Both of those read a change, and the commoner case here is a document nobody changed
 today.** On an unmodified tracked file they print nothing, and nothing is exactly what a
-clean bill of health looks like. Measured on this repository, as of 2026-08-25: the diff
+clean bill of health looks like. Measured on this repository, as of 2026-08-31: the diff
 sweep over `skills/contribute-skill/SKILL.md` matched 0 lines while the same pattern over the
-whole file matched 103. So when the document is not part of your diff, sweep the file:
+whole file matched 116. So when the document is not part of your diff, sweep the file:
 
 ```bash
 grep -nEi '[0-9]|\b(none|all|every|only|never|always|cannot)\b' README.md
@@ -376,10 +376,11 @@ the router reads nothing else; the pin records that wording's measurement.
 <!-- routing-pin
 description-sha256: 9d480e2d11caf9fb99a3746bdaca048b40dbb5a110b3e5f8554fee1981ce3f91
 prompts-sha256: 1e763f03fd8b977bc88c973a2df89bb6b533a07eca5b34669bd7c3e304f70744
-measured: 2026-08-25
-cli: 2.1.245 (Claude Code)
+measured: 2026-08-31
+cli: 2.1.252 (Claude Code)
 model: sonnet
-result: verified 3/3 must-fire, 3/3 must-not-fire
+runs: 3
+result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'Our CONTRIBUTING page says broken frontmatter makes a skill load with empty metadata. Has anyone actually measured that, or did we copy it forward?' 2/3
 -->
 
 Prompts that MUST fire this skill:

@@ -275,7 +275,11 @@
 #                                     The stream it counts is therefore far sparser than
 #                                     "every tool call", and a recovery five Bash calls
 #                                     later binds however many files were read in between.
-#   REPEAT_GATE_MAX_BYTES   (4194304) store read budget; a larger store fails OPEN.
+#   REPEAT_GATE_MAX_BYTES   (4194304) store read budget; a larger store fails OPEN. The
+#                                     store is ROTATED at half this, by rename into
+#                                     repeats/archive/, so that never happens: an
+#                                     append-only store reaches this cap on its own and
+#                                     then disables the gate in silence.
 #                                     COST, MEASURED rather than assumed. THIS STANZA IS
 #                                     THE ONLY PLACE THE GATE'S FIGURE IS WRITTEN DOWN.
 #                                     bin/skillrepeat cites it and does not restate it: it
@@ -364,6 +368,32 @@ command -v jq >/dev/null 2>&1 || exit 0
 case "$MIN_SESSIONS" in ''|*[!0-9]*) MIN_SESSIONS=2 ;; esac
 case "$WINDOW"       in ''|*[!0-9]*) WINDOW=5 ;; esac
 case "$MAX_BYTES"    in ''|*[!0-9]*) MAX_BYTES=4194304 ;; esac
+# DERIVED, not its own knob, so the two cannot drift apart: rotate at half the read
+# budget and the live half always fits inside it.
+ROTATE_BYTES=$(( MAX_BYTES / 2 ))
+[ "$ROTATE_BYTES" -lt 1 ] && ROTATE_BYTES=1
+
+# ROTATION, so the read budget above is never actually reached. The store is append-only
+# and was measured growing 32,702 bytes a day (173 rows over 5.21 days) on the machine
+# this was written on. At that rate it crosses REPEAT_GATE_MAX_BYTES in about four
+# months, after which the read path fails OPEN and this gate silently stops matching
+# history with nothing on any surface to say why. Failing open is right for a transient
+# over-budget and wrong as a permanent terminal state nothing recovers from.
+#
+# Rotation is a RENAME, never a rewrite. A rewrite has to read the file and write it
+# back, and a racing hook appending between those two steps loses its row outright.
+# `mv` is one operation: a racing append either lands in the file being archived, where
+# it is preserved, or recreates the live store, where it is kept. Nothing is deleted.
+# The pid is in the name because two hooks crossing the threshold in the same second
+# would otherwise archive over each other.
+rotate_store() {
+  [ -f "$STORE" ] || return 0
+  rs="$(wc -c < "$STORE" 2>/dev/null | tr -cd '0-9')"
+  case "$rs" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$rs" -lt "$ROTATE_BYTES" ] && return 0
+  mkdir -p "$DIR/archive" 2>/dev/null || return 0
+  mv "$STORE" "$DIR/archive/index-$now-$$.jsonl" 2>/dev/null || return 0
+}
 [ "$MIN_SESSIONS" -lt 1 ] && MIN_SESSIONS=1
 [ "$WINDOW" -lt 1 ] && WINDOW=1
 
@@ -602,6 +632,7 @@ if [ "$event" = "PostToolUseFailure" ]; then
     '{t:"fail", ts:($ts|tonumber), sig:$sig, ck:$ck, ec:$ec, tool:$tool, norm:$norm,
       cmd:$cmd, err:$err, session:$session, tuid:$tuid}' 2>/dev/null)" || exit 0
   [ -z "$row" ] && exit 0
+  rotate_store
   printf '%s\n' "$row" >> "$STORE" 2>/dev/null || exit 0
 
   # Arm the recovery window for this session. US (0x1f) rather than a tab: tab is IFS

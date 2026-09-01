@@ -1,6 +1,6 @@
 ---
 name: skill-authoring
-description: "Use when a SKILL.md's frontmatter is what you write or fix: naming the directory, wording the description whose `Use when` and decline clauses decide when it fires, fixing an installed skill that never fires, and running the parse and trigger gates. Do NOT use for judging whether a procedure earned a skill, red-teaming or retiring one (that is skill-compounder), proposing one upstream (that is contribute-skill), a body whose trigger works (that is writing-skills), or ordinary docs and commands."
+description: "Use when renaming a skill directory or rewriting a SKILL.md's frontmatter: wording the description whose `Use when` and decline clauses decide when it fires, fixing an installed skill that never fires, and running the parse and trigger gates. Do NOT use for judging whether a procedure earned a skill, red-teaming or retiring one (that is skill-compounder), proposing one upstream (that is contribute-skill), a body whose trigger works (that is writing-skills), or ordinary docs and commands."
 ---
 
 # Authoring a SKILL.md
@@ -345,12 +345,13 @@ Each of these means stop and go back to a gate:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: c3824c94371795f78ffa2ded9b282db21e8d9b4b8e0d5cce7ad632894c9a3623
+description-sha256: f08886748dc04dc8bd670a535a3b64d69c485534f6fa0b02c63cf938d6ed9ad7
 prompts-sha256: e3500966bcaac0ffe4e9ceffd2d8bf220d31166fab4082d87ae88cbfdcbb9281
-measured: 2026-08-25
-cli: 2.1.245 (Claude Code)
+measured: 2026-08-31
+cli: 2.1.252 (Claude Code)
 model: sonnet
-result: verified 3/3 must-fire, 3/3 must-not-fire
+runs: 3
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Re-measured after the description was rescoped on 2026-08-31: the 2026-08-28 wording broadened 'frontmatter' to 'a skill itself', the exact break its own pinned rule names, and blew the 500-char cap. The new opening names renaming and frontmatter without widening scope.
 -->
 
 Prompts that MUST fire this skill:

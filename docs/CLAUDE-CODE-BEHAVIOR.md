@@ -157,6 +157,39 @@ undercount.
 
 ---
 
+## Host sleep kills a running subagent, and the parent hears about it only on wake
+
+**Finding.** When the machine sleeps while a dispatched subagent is mid-response, the agent
+is terminated. The parent receives a task notification with status `failed` whose summary is
+`Agent terminated early due to an API error: API Error: Your computer went to sleep
+mid-response. The response above may be incomplete.` The notification is not delivered at
+sleep. It arrives on the next wake.
+
+**How established.** Read out of a real transcript rather than reproduced deliberately. A
+forge orchestrator dispatched at 2026-08-28T12:24Z stepped its state file for the last time
+at 12:58Z. `pmset -g log` records `Entering Sleep state due to 'Clamshell Sleep'` at 09:07
+local, and a 45-second `DarkWake` at 09:31 local. The failure notification is stamped
+13:31:31Z, inside that DarkWake. The session then produced exactly one further assistant
+turn, `API Error: Can't reach the API server`, and nothing after it. CLI 2.1.250.
+
+**What it means.** Three separate things, and the third is the one that cost the most.
+
+A long dispatch on a laptop is not durable. Whatever an orchestrator holds only in its own
+context dies with it, so anything a run needs in order to resume has to be on disk before the
+dispatch rather than inside the agent.
+
+`caffeinate` is not the mitigation it is assumed to be. One was holding
+`PreventUserIdleSystemSleep` for 140 hours across this event and made no difference, because
+clamshell sleep is not idle sleep.
+
+And the parent's own turn is not a reliable place to notice. This parent did receive the
+`failed` notification and did nothing with it, leaving a forge marked `active` for three and a
+half days. Nothing in a `failed` task notification separates "this needs restarting" from "a
+subprocess exited non-zero", so work that must survive needs its own durable record and
+something that reads that record later.
+
+---
+
 ## `claude plugin validate --strict` does not read `SKILL.md` frontmatter
 
 **Finding.** The validator checks the plugin manifest and nothing below it. A plugin whose

@@ -99,7 +99,44 @@ UNVERIFIED = {
     # green suite. It clears when the DESCRIPTION changes and the whole section measures
     # clean again -- never by re-running until a pass turns up, which is what pinning
     # the third pass alone would have been.
+    #
+    # Re-measured 2026-08-31 at CLI 2.1.252: 8/9 again, and the SAME prompt at 2/3. The
+    # description has not changed, so the clearing condition has not been met.
     "skill-compounder": "partial",
+
+    # THREE ENTRIES ADDED 2026-08-31, and what created them is a measurement STANDARD,
+    # not a regression. All three previously read `verified 3/3 must-fire, 3/3
+    # must-not-fire`, pinned 2026-08-25 at CLI 2.1.245. Three draws is ONE run of three
+    # prompts: those pins predate the three-run floor and had never been held to it.
+    # The first --runs 3 measurement of them, at CLI 2.1.252, puts one prompt of each at
+    # 2/3.
+    #
+    # So this ledger grew, and the growth is the ledger working rather than failing. The
+    # dishonest alternative was available and was not taken: leaving a `verified 3/3`
+    # pin standing over evidence that contradicts it. A prompt shown at 2/3 has not
+    # passed, and these three had simply never been asked the question three times.
+    #
+    # Each clears the same way as the entry above: change the DESCRIPTION, then measure
+    # the whole section clean. Not by re-running until a pass turns up.
+    "claim-provenance": "partial",           # 'Our CONTRIBUTING page says broken frontmatter...' 2/3
+    "destructive-op-preflight": "partial",   # 'clear the local commits on this branch...' 2/3
+    "finish-task": "partial",                # 'Wrap up this branch: get it reviewed...' 2/3
+
+    # `no-silent-stub` was here from 2026-08-28, at 8/9: the split had MOVED rather than
+    # cleared, from "just make the suite pass" to "Finish this parser. For the branches
+    # you can't do yet, return an empty list.", and a later clean pass does not un-show a
+    # prompt already shown unreliable.
+    # REMOVED 2026-08-31, on this ledger's own stated clearing condition and not on a
+    # re-run: the description CHANGED (it was 572 chars, over the 500 cap, and is now
+    # 498), and the whole section then measured 9/9 must-fire and 9/9 must-not-fire at
+    # CLI 2.1.252. Left as a comment because this ledger fails in both directions and the
+    # entry's removal is the evidence that it was paid, not skipped.
+    #
+    # `contribute-skill` was here from 2026-08-28 as `unmeasured` -- it shipped with no
+    # `## Trigger precision` section at all, so nothing had ever checked when it fires.
+    # REMOVED the same day, on a first measurement of 9/9 must-fire and 9/9 must-not-fire
+    # draws at CLI 2.1.250. Left as a comment because this ledger fails in both directions
+    # and the entry's removal is the evidence that it was paid, not skipped.
 }
 
 # Measured false on 2026-08-25 by running them. Both have since been removed from the
@@ -205,6 +242,63 @@ class PinTest(unittest.TestCase):
         self.assertEqual(unexpected, [], "\n\n".join(unexpected))
 
     # -- the pin breaks when something has ----------------------------------------
+
+    def test_a_prompt_wrapped_across_lines_is_still_one_prompt(self):
+        """`_QUOTED` matches within one line, so a prompt whose quote opened on one line
+        and closed on the next matched nothing and was filed as malformed. Six prompts on
+        the page parsed as two, and the skill fell under both three-prompt floors while
+        looking complete to anyone reading it. Measured 2026-08-28 on a real installed
+        skill that wrapped its prompts at 78 columns.
+
+        Wrapping is ordinary prose formatting, not an authoring error, so the parser is
+        what was wrong. A real file on disk, parsed by the real parser."""
+        d = Path(self.tmp) / "wrapped"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            '---\n'
+            'name: wrapped\n'
+            'description: "Use when a thing happens. Do NOT use otherwise."\n'
+            '---\n\n'
+            '# Wrapped\n\n'
+            '## Trigger precision\n\n'
+            'Prompts that MUST fire this skill:\n\n'
+            '1. "I lowered the cap and nothing changed at all — the output is the\n'
+            '   same either way."\n'
+            '2. "Check that this size limit actually fires before we ship it."\n'
+            '3. "This script has a check that is supposed to reject huge files, but\n'
+            '   we have never seen it reject anything — can you prove it runs?"\n\n'
+            'Prompts that must NOT fire this skill:\n\n'
+            '1. "The deploy check fired and blocked my release." (already seen firing)\n'
+            '2. "Write a rate limiter capping requests to 100 per minute."\n'
+            '3. "My tests crash with a NullPointerException in the parser — help me\n'
+            '   track it down." (that territory belongs to systematic debugging)\n')
+        c = rc.parse_skill(d / "SKILL.md")
+        self.assertEqual(c["unquoted_items"], [],
+                         "a wrapped prompt was reported malformed: %r" % c["unquoted_items"])
+        self.assertEqual(len(c["must_fire"]), 3, c["must_fire"])
+        self.assertEqual(len(c["must_not_fire"]), 3, c["must_not_fire"])
+        # The whole prompt, both lines joined -- not the first line alone.
+        self.assertEqual(c["must_fire"][0],
+                         "I lowered the cap and nothing changed at all — the output is "
+                         "the same either way.")
+        # And a trailing parenthetical after a closing quote is NOT swallowed into it.
+        self.assertEqual(c["must_not_fire"][0],
+                         "The deploy check fired and blocked my release.")
+
+    def test_a_skill_with_no_trigger_section_is_reported_not_skipped(self):
+        """`lint` skipped a section-less skill under the comment "a skill may legitimately
+        ship no routing claims at all". The cost, measured 2026-08-28 over a real installed
+        skills directory: the summary read "10 skill(s) with routing claims, 7 finding(s)"
+        while FOUR installed skills carried no section and were never named. A reader
+        cannot tell that from full coverage."""
+        d = Path(self.tmp) / "silent"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            '---\nname: silent\ndescription: "Use when X. Do NOT use for Y."\n---\n\n'
+            '# Silent\n\nIt does a thing. It never says when it fires.\n')
+        findings = rc.lint([rc.parse_skill(d / "SKILL.md")])
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("no `## Trigger precision` section", findings[0])
 
     def test_a_description_edit_fails_the_pin(self):
         """The measured trigger for this whole mechanism: a four-word description edit

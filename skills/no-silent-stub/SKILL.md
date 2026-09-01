@@ -1,6 +1,6 @@
 ---
 name: no-silent-stub
-description: "Use when about to hand back a value you did not compute or asked to fake completeness: 'just make the tests pass' without the key they need, 'for the branches you can't do yet return an empty list', 'show something reasonable' when the service is down; a hardcoded result, `except: pass`, a mock on a live path, or a fallback a caller cannot tell from a real answer. Do NOT use for documented defaults, typed-optional returns the caller must check, or test doubles a project chose on purpose."
+description: "Use when handing back an uncomputed value, or told to fake it finished: 'just make the tests pass' or 'just make the suite pass' when a credential/service is missing, 'for branches you can't do yet, return an empty list', 'show something reasonable' when the service is down; a hardcoded result, `except: pass`, a mock on a live path, or a fallback a caller cannot tell from a real answer. Do NOT use for documented defaults, typed-optional returns callers check, or test doubles chosen on purpose."
 ---
 
 # Fail loudly, never plausibly
@@ -345,12 +345,13 @@ Each of these thoughts means stop and return to phase 2:
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: 58ede0d8fd9018ab58902a856c2cb4e080711134974068087680f6dd49db4152
+description-sha256: bee0cadda9369a815978e25e7e19d79ab2360b05de87d56d932b22eddccefa8f
 prompts-sha256: 3481a41b8b015b69a99f8d99ca42118f2a8f3da63e3001ff912b57a6d273cb67
-measured: 2026-08-25
-cli: 2.1.245 (Claude Code)
+measured: 2026-08-31
+cli: 2.1.252 (Claude Code)
 model: sonnet
-result: verified 3/3 must-fire, 3/3 must-not-fire
+runs: 3
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Debt cleared 2026-08-31: the description changed (572 chars, over cap, to 498) and the whole section then measured clean, which is this ledger's stated clearing condition rather than a re-run until a pass appeared.
 -->
 
 The must-not prompts are deliberately adversarial rather than restatements of the

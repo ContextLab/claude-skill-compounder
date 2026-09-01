@@ -198,6 +198,28 @@ case "${SKILLFORGE_NOW:-}" in
     die "SKILLFORGE_NOW must be epoch seconds (digits only, at most 10); got '$SKILLFORGE_NOW'" ;;
 esac
 
+# How long since a stamp, in the coarsest unit that stays honest. This exists because
+# staleness was COMPUTED and then thrown away: the status line has rendered `idle 3d13h`
+# since it was written, and no other surface ever consumed that signal. A forge whose
+# orchestrator died sat `active` for three and a half days, wedging its own name, with
+# nothing in the CLI willing to say so.
+fmt_age() { # <seconds>
+  a="${1:-}"
+  case "$a" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
+  if   [ "$a" -lt 60 ]   ; then printf '%ds' "$a"
+  elif [ "$a" -lt 3600 ] ; then printf '%dm' "$(( a / 60 ))"
+  elif [ "$a" -lt 86400 ]; then printf '%dh%02dm' "$(( a / 3600 ))" "$(( (a % 3600) / 60 ))"
+  else                          printf '%dd%02dh' "$(( a / 86400 ))" "$(( (a % 86400) / 3600 ))"
+  fi
+}
+
+# Seconds since a record was last stepped, or "" when the stamp is unusable. Never
+# guess: a record with no readable `updated` is reported as unknown, not as fresh.
+slot_idle() { # <file> -> seconds | ""
+  si_u="$(sfield "$1" updated)"
+  case "$si_u" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$(( $(now) - si_u ))" ;; esac
+}
+
 # `.[$k] // empty` WAS WRONG ABOUT EXACTLY ONE VALUE, `false`. jq's `//` is the
 # alternative operator, not a null coalesce: it takes the right-hand side whenever the
 # left is `null` OR `false`. Measured, today, against a file holding
@@ -1393,7 +1415,15 @@ case "$cmd" in
 $(slots)
 SLOTS
     if [ -n "$existing" ] && [ "$existing_state" = "active" ]; then
-      die "a forge named '$name' is already live (step $(sfield "$existing" step)/$(sfield "$existing" steps)). Close it with 'skillforge done --name $name', or forge under a different name."
+      # This refusal is where a wedged name is actually met, so it is where the
+      # staleness has to be named. Nothing expires `active`, so a forge whose
+      # orchestrator died holds its name forever behind a message that otherwise reads
+      # like ordinary contention. NOT `done`: that records a forge which never finished
+      # as COMPLETED and installs it. The honest closes are `fail` and `clear`.
+      e_idle="$(slot_idle "$existing")"
+      if [ -n "$e_idle" ]; then e_age="last stepped $(fmt_age "$e_idle") ago"
+      else e_age="last step time unknown"; fi
+      die "a forge named '$name' is already live (step $(sfield "$existing" step)/$(sfield "$existing" steps), $e_age). If it died, close it with 'skillforge fail --name $name <reason>'; to discard it, 'skillforge clear --name $name'. Do not use 'done' -- that records it as completed. Or forge under a different name."
     fi
 
     # The record is written COMPLETE, to a temp file, before any slot is claimed.
@@ -1462,7 +1492,7 @@ SLOTS
           # Lost a same-name race, or a finished record appeared since the scan above.
           if [ "$(field "$FILE" status)" = "active" ]; then
             rm -f "$tmp"
-            die "a forge named '$name' is already live. Close it with 'skillforge done --name $name', or forge under a different name."
+            die "a forge named '$name' is already live. If it died, close it with 'skillforge fail --name $name <reason>'; to discard it, 'skillforge clear --name $name'. Do not use 'done' -- that records it as completed. Or forge under a different name."
           fi
           mv "$tmp" "$FILE"; break
         fi
@@ -2417,18 +2447,46 @@ SLOTS
     ;;
 
   list)
+    # IDLE IS A COLUMN, NOT A DERIVATION THE READER HAS TO DO. The status line has
+    # computed this since it was written and nothing else consumed it, so the one
+    # place a person asks "what is running?" could not distinguish a forge that
+    # stepped a minute ago from one whose orchestrator died three days back. The
+    # threshold is the renderer's own, so the two surfaces cannot drift apart.
+    #
+    # Nothing is closed or deleted here, deliberately. An idle forge may still be
+    # live work, and the decision to end one belongs to a person; this only makes
+    # the decision possible by putting the age where it is read.
     listed=0
+    stale=0
+    l_thresh="${SKILLFORGE_IDLE_SECS:-2700}"
+    case "$l_thresh" in ''|*[!0-9]*) l_thresh=2700 ;; esac
     while IFS="$SEP" read -r l_st l_nm l_stt l_pth; do
       [ -n "${l_pth:-}" ] || continue
-      [ "$listed" -eq 0 ] && printf '%-28s %-8s %8s  %s\n' "FORGE" "STATE" "STEP" "PHASE"
+      [ "$listed" -eq 0 ] && printf '%-28s %-8s %8s  %-9s %s\n' "FORGE" "STATE" "STEP" "IDLE" "PHASE"
       listed=$(( listed + 1 ))
-      printf '%s %-8s %8s  %s\n' \
+      l_idle="$(slot_idle "$l_pth")"
+      if [ -n "$l_idle" ]; then l_age="$(fmt_age "$l_idle")"; else l_age="?"; fi
+      # Only an ACTIVE forge can be stale. A `done` or `failed` record is old on
+      # purpose and is reaped on its own TTL; flagging it would train the reader to
+      # ignore the mark.
+      if [ "$l_stt" = "active" ] && [ -n "$l_idle" ] && [ "$l_idle" -ge "$l_thresh" ]; then
+        l_age="${l_age}!"; stale=$(( stale + 1 ))
+      fi
+      printf '%s %-8s %8s  %-9s %s\n' \
         "$(cell "$(label_of "$l_nm" "$l_pth")" 28)" "$l_stt" \
-        "$(sfield "$l_pth" step)/$(sfield "$l_pth" steps)" "$(sfield "$l_pth" phase)"
+        "$(sfield "$l_pth" step)/$(sfield "$l_pth" steps)" "$l_age" "$(sfield "$l_pth" phase)"
     done <<SLOTS
 $(slots)
 SLOTS
     [ "$listed" -eq 0 ] && echo "no active forge"
+    if [ "$stale" -gt 0 ]; then
+      echo ""
+      echo "! $stale forge(s) have not stepped in over $(fmt_age "$l_thresh"). Nothing expires an"
+      echo "  active forge, and it holds its name against a new one, so a forge whose session"
+      echo "  died stays here until someone says so. If it died: skillforge fail --name <forge>"
+      echo "  <reason>. To discard it: skillforge clear --name <forge>. Both write a ledger row;"
+      echo "  'done' would record it as completed and install it."
+    fi
     exit 0
     ;;
 

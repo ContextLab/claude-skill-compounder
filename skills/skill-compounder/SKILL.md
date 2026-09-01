@@ -80,10 +80,10 @@ asking (`references/forge-animation.md`).
 
 <!-- doctrine: concurrent-forges -->
 **Just start it.** Concurrent forges are fine — each gets its own record and its own slot in
-the status line, and starting one never disturbs another. Nothing to check first. If
-`skillforge start` exits 2, that name is taken by a forge still running: pick another, or close
-it with `skillforge done --name <forge>`. While more than one is live, `skillforge step`, `done`
-and `fail` refuse to guess which you mean, so pass `--name <forge>` on every call after `start`.
+the status line, and starting one never disturbs another. `skillforge start` exits 2 when the
+name is held by a live forge, and the refusal says how long since it last stepped. Close a dead
+one with `skillforge fail --name <forge> <reason>` or `skillforge clear --name <forge>`, never
+`done`. With several live, `step`, `done` and `fail` refuse to guess: pass `--name <forge>`.
 
 **Decide the round cap here**, because `<total-steps>` encodes it and `skillforge` cannot be
 told later: budget `2 + 2 × (planned D rounds)`, so **12** at the usual 5-round cap and **22**
@@ -332,9 +332,9 @@ claude -p --model sonnet --max-turns 3 --output-format stream-json --verbose "<p
 **A non-zero exit is not a failed measurement:** `--max-turns` exhaustion and a denied
 permission both exit 1, after the routing decision. **`--model sonnet`, never haiku** —
 personal and project skill descriptions were measured absent from the router on haiku. Cost
-is one call per prompt per draw: one six-prompt skill is 18 calls at the floor, and the nine
-pinned skills are 54 prompts, so **162 calls** and ~12 minutes. Measured 2026-08-26, CLI
-2.1.245: 8-47s a draw, median 22s, six in parallel.
+is one call per prompt per draw: one six-prompt skill is 18 calls at the floor, and the ten
+pinned skills are 60 prompts, so **180 calls** and ~12 minutes. Measured 2026-08-31, CLI
+2.1.252, over that whole 180-draw pass: 7-72s a draw, median 22s, 688s wall, six in parallel.
 
 **One run is one draw, and a draw is not a verdict.** Routing is stochastic: one unchanged
 description here gave 3/3, then 1/3, then 2/3, and this skill's own six prompts, probed three
@@ -473,11 +473,11 @@ what the apply debt does and does not demand are in `references/forge-animation.
 <!-- routing-pin
 description-sha256: 7978c6efd2caca28bd8881f136175ef901f0cc558dd79dce6f65abd761630059
 prompts-sha256: b0d3fb4da0e6c09f8453979d51221df6812e8d508da59c7ed43cba5e2dccb40d
-measured: 2026-08-26
-cli: 2.1.245 (Claude Code)
+measured: 2026-08-31
+cli: 2.1.252 (Claude Code)
 model: sonnet
-runs: 9
-result: partial 26/27 must-fire draws, 27/27 must-not-fire draws over 9 runs (three 3-run passes, same description, nothing edited between them); not clean: 'The skill I just used told me to run it from the wrong directory.' 8/9 - one draw in pass 2 fired nothing at all; passes 1 and 3 were 9/9 each
+runs: 3
+result: partial 8/9 must-fire draws, 9/9 must-not-fire draws over 3 runs; not clean: 'The skill I just used told me to run it from the wrong directory.' 2/3
 -->
 
 Should fire:

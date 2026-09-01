@@ -34,6 +34,8 @@ Each of these means you are about to skip a step. Stop and re-read the phase.
 | "I'll `cp -a` into the scratch tree again for the second experiment." | It exits 1 on git's read-only objects and leaves the **first** copy sitting there looking correct. Fresh `mktemp -d` destination every time. |
 | "The record can live in the PR description." | Two of the three integration options never open a PR, and the human picks. Measured: `grep -ci record` over the whole published history printed `0`. |
 | "It's obvious this should just be merged to main." | That decision is not yours. Phase 6. |
+| "Three rounds is the cap and I have done three, so these two findings ship as they are." | The cap bounds *dispatches*, not repairs. A fix after the cap costs no round, because a fix is not a dispatch. Phase 7 step 1 fixes everything with a reproduced failure scenario before any disposition is chosen. |
+| "The loop stopped converging, so I'll report where things stand and leave it there." | That report *is* the state this skill calls worse than a run never started. A stop ends in **Parked**, **Withdrawn** or **Re-scoped**, named in one sentence at the top of the record. Phase 7 step 3. |
 
 ## Common rationalizations
 

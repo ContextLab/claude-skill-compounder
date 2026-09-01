@@ -1,6 +1,6 @@
 ---
 name: ai-tell-audit
-description: "Use when asked to write, draft, or review durable prose other people will read (a README, a GitHub issue or comment, a PR description, release notes, a changelog, a docs page, an announcement, a commit message body of several lines): 'write the release notes', 'draft a comment on the issue', 'get this README ready to ship' all fire. A request to fix typos or grammar is copy-editing and does NOT fire; the request decides, not the file. NOT for chat replies, code comments, or scratch notes."
+description: "Use when about to draft or rewrite prose others will read: run BEFORE drafting (a README or docs page, release notes, a changelog, a GitHub issue or comment, a PR description, an announcement, a multi-paragraph commit body). 'Draft the release notes', 'draft a comment on issue #40', 'rewrite this README section' fire this first. Fixing typos, grammar or comma splices is copy-editing and does NOT fire; the request decides, not the file. NOT for chat replies, code comments, or scratch notes."
 ---
 
 # AI Tell Audit
@@ -482,12 +482,13 @@ number and make the claim without it.
 ## Trigger precision
 
 <!-- routing-pin
-description-sha256: fdf97d8626d3ff2a867e05e81704ada0e8514577b5a284eab6c00c83acfea289
+description-sha256: da8d54d2cf19a14ccb134165a3f628111c6600bed4dbc83da776319678ada044
 prompts-sha256: 7a6241737c1f04075950f822beb9cd0bd5f5df8427f55aae406f8f535db4a0b0
-measured: 2026-08-25
-cli: 2.1.245 (Claude Code)
+measured: 2026-08-31
+cli: 2.1.252 (Claude Code)
 model: sonnet
-result: verified 3/3 must-fire, 3/3 must-not-fire
+runs: 3
+result: verified 9/9 must-fire draws, 9/9 must-not-fire draws (3/3 each prompt over 3 runs) Re-measured after the description was shortened to the 500-char cap on 2026-08-31; the previous wording opened 'Use BEFORE drafting' which the seed suite's startswith('Use when') assertion rejects, so the opening was recast and re-probed rather than assumed.
 -->
 
 Must fire:

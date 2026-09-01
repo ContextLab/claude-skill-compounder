@@ -58,6 +58,14 @@ BASE="$STATE/statusline-base.sh"
 FORGE="$HERE/skillforge-status.sh"
 BASE_TTL="${STATUSLINE_BASE_TTL:-5}"
 CACHE_DIR="$STATE/statusline-cache"
+# Renders between sweeps of dead cache entries. The cache key is a hash of session id
+# and working directory, so EVERY session that ever drew a status line leaves a file
+# here and nothing in this repository deleted one. Sampled rather than swept every
+# render because this script runs once a second, and a `find` at that rate would cost
+# more than the cache it is protecting saves.
+CACHE_PRUNE_EVERY="${STATUSLINE_CACHE_PRUNE_EVERY:-200}"
+case "$CACHE_PRUNE_EVERY" in ''|*[!0-9]*) CACHE_PRUNE_EVERY=200 ;; esac
+[ "$CACHE_PRUNE_EVERY" -lt 1 ] && CACHE_PRUNE_EVERY=1
 
 payload="$(cat 2>/dev/null)"
 
@@ -83,6 +91,13 @@ if [ -x "$BASE" ]; then
   if [ -z "$base" ]; then
     base="$(printf '%s' "$payload" | "$BASE" 2>/dev/null)"
     mkdir -p "$CACHE_DIR" 2>/dev/null && printf '%s' "$base" > "$cache" 2>/dev/null
+    # A week is far beyond any possible use: an entry is only ever READ within
+    # STATUSLINE_BASE_TTL seconds of being written, so a file untouched for seven days
+    # belongs to a session that is long over. Pruned here, on the miss path, because a
+    # hit does not touch the directory at all.
+    if [ $(( ${RANDOM:-0} % CACHE_PRUNE_EVERY )) -eq 0 ]; then
+      find "$CACHE_DIR" -type f -mtime +7 -delete 2>/dev/null || :
+    fi
   fi
 fi
 
