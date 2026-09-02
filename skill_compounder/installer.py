@@ -92,6 +92,14 @@ DOC_GATE_MARKER = "doc-gate.sh"
 # asks for a notification at that moment; the measurement in that issue's own thread is that
 # notifications at that moment are read past, so it refuses instead.
 APPLY_GATE_MARKER = "apply-gate.sh"
+# `remind.sh` delivers a reminder recorded by `skillnote add --remind` at the moment its
+# match rule fires. Two events, because a reminder can be keyed to a prompt (keywords) or
+# to a call about to happen (a command signature, a path glob), and those arrive on
+# different events. It denies nothing on either: it emits `additionalContext`, which is
+# the field measured to reach the model on both events (docs/CLAUDE-CODE-BEHAVIOR.md,
+# CLI 2.1.258). ONE PreToolUse entry covers all three tools it acts on, dispatching on
+# `.tool_name` in-script; three entries would triple the deliveries for the same work.
+REMIND_MARKER = "remind.sh"
 # Substring matching against the user's status line command was wrong twice. A bare
 # "statusline.sh" matched their ~/bin/git-statusline.sh; adding the directory component
 # still matched "$HOME/dotfiles/statusline/statusline.sh", a pipeline mentioning our path,
@@ -120,6 +128,11 @@ COMMIT_MATCHER = "Bash"
 # a matcher regex is applied to an MCP tool name, and a wiring that silently matches nothing
 # is worse than one that admits its scope. Widening it is this one string.
 REPEAT_MATCHER = "Bash|Skill"
+# The reminder hook's PreToolUse matcher. Deliberately NOT `EDIT_MATCHER`, which is the
+# same three tools in a different order: these are two independent decisions about two
+# different scripts, and sharing the constant would make a change to one silently rewire
+# the other. `Bash` for the command arm, `Write|Edit` for the path arm.
+REMIND_MATCHER = "Bash|Write|Edit"
 LEDGER = "ledger.jsonl"
 BACKUP_PREFIX = ".bak-skill-compounder-"
 MAX_BACKUPS = 10
@@ -687,9 +700,9 @@ OUR_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailu
 # skill-use recorder, Stop the insight capture and the claim gate -- so the markers are a
 # tuple per event. Stripping only the first would leave the second wired to a checkout the
 # user had just removed.
-OUR_EVENT_MARKERS = (("UserPromptSubmit", (HOOK_MARKER,)),
+OUR_EVENT_MARKERS = (("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER)),
                      ("PreToolUse", (CLAIM_GATE_MARKER, DOC_GATE_MARKER,
-                                     REPEAT_GATE_MARKER)),
+                                     REPEAT_GATE_MARKER, REMIND_MARKER)),
                      ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_MARKER)),
                      ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_MARKER)),
                      ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER)))
@@ -748,9 +761,16 @@ def merge_hooks(settings, app_home):
     settings["hooks"] = hooks
 
     ups = _strip_marker(_event_groups(hooks, "UserPromptSubmit", True), HOOK_MARKER)
+    # Stripped BEFORE anything is appended, like every other marker here, so an entry an
+    # older checkout left behind is never found sitting beside a fresh one.
+    ups = _strip_marker(ups, REMIND_MARKER)
     ups.append({"hooks": [{"type": "command",
                            "command": _hook_cmd(app_home, "prompt"),
                            "timeout": 10}]})
+    if _has_gate(app_home, "remind.sh"):
+        ups.append({"hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "remind.sh"),
+                               "timeout": 10}]})
     hooks["UserPromptSubmit"] = ups
 
     # The claim gate's commit arm. PreToolUse is a *decision* event: this is the only
@@ -764,7 +784,7 @@ def merge_hooks(settings, app_home):
     # missing from this checkout has its stale entry removed rather than left orphaned
     # pointing at a file that is gone.
     pre = _event_groups(hooks, "PreToolUse", True)
-    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_MARKER):
+    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_MARKER, REMIND_MARKER):
         pre = _strip_marker(pre, _m)
     _pre_wired = False
     if _has_claim_gate(app_home):
@@ -783,6 +803,15 @@ def merge_hooks(settings, app_home):
         pre.append({"matcher": REPEAT_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "repeat-gate.sh"),
+                               "timeout": 10}]})
+        _pre_wired = True
+    # LAST of the four, and the order is pinned by tests/test_plugin.py, which compares the
+    # two wirings' matcher lists POSITIONALLY. It is also the only PreToolUse entry of ours
+    # that cannot deny: the three gates above decide, this one states a fact.
+    if _has_gate(app_home, "remind.sh"):
+        pre.append({"matcher": REMIND_MATCHER,
+                    "hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "remind.sh"),
                                "timeout": 10}]})
         _pre_wired = True
     # `or "PreToolUse" in hooks` IS THE WHOLE OF A FIX, and the bug it closes was silent.

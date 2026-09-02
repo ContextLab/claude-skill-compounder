@@ -942,3 +942,63 @@ of a gate, which is worse than no gate. What is enforced is therefore that *an o
 recorded with a reason*, not that the outcome was true. That is a real limit and it is
 stated rather than papered over — the ledger can count declines, and a skill declined every
 time it comes up is a finding the ledger can surface even though no hook could.
+
+## The reminder store sits beside the counters directory, not inside it
+
+`hooks/compound-improvement.sh` has kept its per-session counters in `<state>/reminders/`
+since long before anything recorded a reminder, and it sweeps that directory on a timer.
+Tier 1 needed a durable store on the same state root and could not have one under a path
+something else deletes from. So the store is `<state>/reminders.jsonl`, a **sibling** of
+that directory rather than a file in it, and `hooks/remind.sh` keeps its own claims,
+cooldown stamps and hit log under `<state>/remind/`. The two paths differ by one character
+on purpose, and a test asserts that the sweep cannot reach the file: renaming either one to
+make them read differently would move a path two shipped scripts already agree on.
+
+**Removal is a tombstone, and the asymmetry with a note is deliberate.** A note is one line
+in a `CLAUDE.md` that a person reads and edits, so `skillnote remove` deletes its line
+outright — a commented-out corpse in prose is litter someone has to read past every time. A
+reminder is a row in an append-only file written by a hook nobody is watching, where one bad
+expression in a rewrite loses every row at once, so removal appends `{"id":…,"t":"remove"}`
+and readers
+skip an id a later tombstone covers. That is the rule `skillrepeat forget` already follows,
+for the reason it follows it, and it also means the hook never has to open the store for
+writing while a CLI may be appending to it.
+
+**Nothing prunes either file yet, and that is a decision rather than an omission.** The
+budget that bounds cost is a read bound — `REMIND_MAX_ROWS` reads the tail — so growth costs
+disk and not latency, and no reminder becomes wrong merely by getting old. A pruner would
+have to decide which rows are dead, and the only honest input to that is hit counts nobody
+has yet. Writing one now would mean guessing a retention rule and then measuring against a
+store the rule had already shaped.
+
+**Every line the hook emits is framed as a record of something that happened, never as an
+instruction.** The wording was measured together with the delivery field, and both results
+are in
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#pretooluse-additionalcontext-reaches-the-model-an-allow-reason-reaches-nothing).
+The local consequence is what belongs here: the frame `Reminder recorded on <date> for this
+project:` is not decoration around the text, it is what makes an arbitrary sentence safe to
+deliver. A reminder whose own text is an imperative still arrives inside
+that frame, so the frame cannot be dropped for the cases where it looks unnecessary.
+
+## `bin/skillnote` reimplements the installer's file-writing rules in shell
+
+`skill_compounder/installer.py` learned four rules the hard way about writing a file that
+may be a symlink into someone's dotfiles repo, and `bin/skillnote` writes exactly that kind
+of file: a `CLAUDE.md`. Sharing the code was not available — the CLIs are shell and `jq`,
+the installer is Python, and making a CLI shell out to the installer would put a Python
+dependency on the one path that has never had one. So the rules are implemented twice, and
+`.claude/CLAUDE.md` carries the instruction to change both halves together.
+
+Two of the four are restated locally, because the shell versions can fail in ways the Python
+cannot. Resolving a symlink by hand means looping on `readlink`, which needs an iteration
+cap or a link pointing at itself hangs the CLI instead of erroring; and a backup
+stamped to the second collides with itself when two `add`s land in the same second, so the
+second one takes a suffix rather than overwriting the copy taken before the change — the
+copy that is the only reason to keep backups at all.
+
+**What is deliberately not shared is the decision to write at all.** The installer writes a
+`CLAUDE.md` once, at install time, under a user who is watching. `skillnote` writes one
+whenever a session records a lesson, which may be from a detached process after the session
+ended. That is why its refusals are wider than the installer's: an unknown scope, an empty
+text, a second marker block in one file, and a memory directory that does not already exist
+all stop it before anything is opened for writing.

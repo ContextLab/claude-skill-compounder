@@ -847,3 +847,80 @@ compliance split rests on four runs and cannot separate 50% from anything nearby
 allow-path result is an absence measured in two places — the model's own report and the
 stream — so it establishes that the reason does not reach the model, not that the string is
 discarded everywhere in the CLI.
+
+---
+
+## A memory file written by another tool is read back, but only if `MEMORY.md` indexes it
+
+**Finding.** A new session in a project picks up memory files that no session of its own
+wrote, and the index decides which ones.
+
+- **`MEMORY.md` is injected.** Its contents arrive in the session's context with no tool
+  call at all — the first probe answered a question about a planted token in **3 of 3**
+  runs at `num_turns: 1` with an empty `tool_use` list.
+- **A body the index links to is fetched on demand.** In the discriminating probe the
+  session's *first* tool call was a `Read` of the exact file `MEMORY.md` named. It did not
+  glob, list the directory, or search: it already knew the filename, and went and got it.
+  **3 of 3.**
+- **A memory file `MEMORY.md` does not list is never seen.** A second file sat in the same
+  directory, in the same format, carrying its own distinct token. It appeared in **0 of 3**
+  runs, and no run mentioned that a third file existed.
+
+The per-project directory name is the absolute path with every `/` turned into `-`. This
+is a plain substitution and not a sanitiser: the scratch path used here begins a segment
+with `-`, and the result carries the doubled `-` verbatim. No path containing a dot or a
+space was observed, so the transform for those remains unknown.
+
+The frontmatter, copied off a file the harness itself wrote:
+
+```
+---
+name: <kebab-case-name>
+description: "<one line, quoted>"
+metadata:
+  node_type: memory
+  type: project
+  originSessionId: <session uuid, absent when unknown>
+  modified: <ISO-8601 with milliseconds and a trailing Z>
+---
+```
+
+**How established.** Claude Code 2.1.258, macOS 25.6.0, 2026-09-02, `--model sonnet`. A
+scratch project directory was created under the scratchpad and one throwaway `claude -p`
+run in it, because the harness — not this package — is what creates the per-project
+directory, and the `memory` subdirectory appeared with it. Files were then written into
+that subdirectory by hand, with tokens randomised for the run, and the session was asked
+to **report** what it could see rather than to obey anything in it:
+
+```
+cd <scratch project> && printf '%s' 'List every token string that appears in your memory.' \
+  | SKILL_COMPOUNDER_DISPATCHED=1 claude -p --model sonnet \
+    --output-format stream-json --verbose --max-turns 2 \
+    --setting-sources '' --strict-mcp-config
+```
+
+Scoring was `grep -c` for each token over the whole stream-json file, and every run's
+`tool_use` records were listed so that "the model was told" could be told apart from "the
+model went and looked". Six runs in total, three per probe. `CLAUDE_CONFIG_DIR` was **not**
+moved: pointing it at a fresh directory costs the run its credentials, as the entry above
+on `HOME` and `CLAUDE_CONFIG_DIR` records, and there was no `CLAUDE_CODE_OAUTH_TOKEN` on
+this machine to hand in instead — verified by running the fresh-directory case first and
+getting `Not logged in · Please run /login`. The isolation is therefore the scratch project
+and its own slug, not a separate config root, and the whole directory was deleted
+afterwards.
+
+**What it means.** Writing a memory file is not enough to be read; writing the index line
+is what makes it reachable, and a tool that creates the body and skips `MEMORY.md` has
+produced something no session will ever open. The index line is also the only part that
+costs context unconditionally, so it should read as a summary and not as a filename. And
+because the body arrives through a `Read` the session chooses to make, it is subject to
+that session's own judgement about what is worth opening — a body is available, not
+guaranteed.
+
+**Limits.** One model tier, one CLI build, n = 3 per probe, `type: project` memories only,
+and one machine. The negative result is an absence: it establishes that an unindexed file
+is not surfaced through the index and that the session never learned it existed, not that
+the CLI could never reach it — a session that listed the directory itself would find it.
+Both probes ran with `--setting-sources ''`, so nothing here depends on the user's
+settings. Two turns was the budget; a longer session might read more of what the index
+offers, which would raise the positive rate and cannot lower it.

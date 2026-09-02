@@ -106,6 +106,53 @@ class HookTest(unittest.TestCase):
 
 
 
+class ReminderStoreIsNotSweptTest(unittest.TestCase):
+    """<state>/reminders.jsonl is a SIBLING of <state>/reminders/, and that is the whole
+    reason the reminder store can keep that name.
+
+    `prune_stale_state()` deletes files under its STATE_DIR older than seven days, and
+    STATE_DIR is `<state>/reminders`. A store one directory level up is out of reach; a
+    store INSIDE it would silently empty itself after a week, which is a data-loss bug
+    that nothing would report. This pins the relationship rather than the sweep's glob,
+    because the glob is what would change.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name)
+        (self.state / "reminders").mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_an_old_reminder_store_survives_a_sweep_that_really_fired(self):
+        import os
+        import time as _time
+        store = self.state / "reminders.jsonl"
+        store.write_text('{"id":"n1x1","text":"keep me","scope":"global"}\n',
+                         encoding="utf-8")
+        # The CANARY: a file of the same age INSIDE the swept directory. Without it,
+        # "the store survived" would also pass if the sweep never ran at all.
+        canary = self.state / "reminders" / "old.edits"
+        canary.write_text("x", encoding="utf-8")
+        old = _time.time() - 60 * 60 * 24 * 9
+        for p in (store, canary):
+            os.utime(str(p), (old, old))
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+               "HOME": str(self.state), "SKILL_COMPOUNDER_STATE": str(self.state),
+               "CI_PRUNE_EVERY": "1"}
+        r = subprocess.run([str(HOOK), "prompt"],
+                           input=json.dumps({"session_id": "sweep", "prompt_id": "p1",
+                                             "prompt": "z" * 120}),
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(canary.exists(),
+                         "the sweep did not run, so this test proves nothing")
+        self.assertTrue(store.exists(),
+                        "the reminder store was deleted by the counter sweep")
+        self.assertIn("keep me", store.read_text(encoding="utf-8"))
+
+
 class BashEditVisibilityTest(unittest.TestCase):
     """A PostToolUse matcher of Write|Edit is blind to how autonomous sessions edit.
 

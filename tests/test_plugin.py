@@ -136,6 +136,41 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(s_arm[0][0], matcher,
                              "installer %s matcher for the claim gate" % event)
 
+    def test_the_reminder_hook_is_wired_on_both_paths_to_both_of_its_events(self):
+        """The drift check above only proves the two paths AGREE. Two paths that both
+        forgot an arm agree perfectly, so this names the wiring.
+
+        `UserPromptSubmit` carries the keyword arm and `PreToolUse`/`Bash|Write|Edit`
+        carries the command and path arms. Dropping either is silent: the hook still runs,
+        and reminders of that kind simply never arrive.
+        """
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event, matcher in (("UserPromptSubmit", None),
+                               ("PreToolUse", "Bash|Write|Edit")):
+            p_arm = [(m, c) for m, c in plugin.get(event, []) if "remind.sh" in c]
+            s_arm = [(g.get("matcher"), h["command"])
+                     for g in settings.get(event, []) for h in g["hooks"]
+                     if "remind.sh" in h["command"]]
+            self.assertEqual(len(p_arm), 1,
+                             "hooks.json must wire the reminder to %s exactly once" % event)
+            self.assertEqual(len(s_arm), 1,
+                             "the installer must wire the reminder to %s exactly once"
+                             % event)
+            self.assertEqual(p_arm[0][0], matcher, "hooks.json %s matcher" % event)
+            self.assertEqual(s_arm[0][0], matcher, "installer %s matcher" % event)
+
+    def test_the_reminder_hook_is_wired_to_no_other_event(self):
+        """It reads a prompt and a call about to happen. On PostToolUse there is nothing
+        left to remind anyone about before the fact, and a Stop arm would arrive after the
+        turn it applied to."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event in ("PostToolUse", "PostToolUseFailure", "Stop"):
+            self.assertEqual([c for _m, c in plugin.get(event, []) if "remind.sh" in c], [])
+            self.assertEqual([h["command"] for g in settings.get(event, [])
+                              for h in g["hooks"] if "remind.sh" in h["command"]], [])
+
     def test_the_claim_gate_accumulator_arm_is_wired_on_neither_path(self):
         """Its PostToolUse arm records numbers out of every tool RESULT, an Agent/Task
         result included -- the subagent testimony the Stop arm excludes from its evidence

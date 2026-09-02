@@ -212,3 +212,54 @@ Execution waves (independent within a wave):
   holds "36" + 900 x bytes: mixed forms, needs hand repair). 41+30+58+31+65 tests OK.
 - ~17:05 Wave 1 close-out agent dispatched (knobs set, setup.py --no-doctrine, README lines,
   CLAUDE.md, OPEN-THREADS, whole suite). Then commit.
+- ~17:35 Wave 1 committed 03773ad and pushed (44 files, 1986 tests, 0 failures, 2 documented skips).
+- ~17:36 Wave 2 dispatched, three agents, disjoint ownership:
+  W2a bin/skillnote (new), tests/test_skillnote.py (new), tests/test_ledger_v2.py,
+      hooks/session-review.sh, tests/test_session_review.py, docs/CLAUDE-CODE-BEHAVIOR.md
+      (memory read-back measurement) -- tier 0 + reminder writer.
+  W2c hooks/remind.sh (new), tests/test_remind.py (new), hooks/repeat-gate.sh (--norm-of),
+      tests/test_repeat_gate.py, hooks/hooks.json, installer.py, tests/test_installer.py,
+      tests/test_plugin.py, tests/test_hook.py -- tier 1 injection hook, both wirings.
+  W2f bin/skillforge, tests/test_skillforge.py, tests/test_forge_rounds.py (new),
+      tests/test_skillforge_hardening.py, tests/test_forge_apply.py -- round/escalate/horizon;
+      default budget unchanged this wave (docs wave changes cap + docs together).
+  Wave 3 after commit: promotion (bin/skillinsight, tests/test_insights.py); forge-diet docs
+  rewrite (skills/skill-compounder/**, skills/skill-authoring cross-refs, README, .claude/CLAUDE.md,
+  tests/test_doctrine_sync.py, test_routing_gate.py, test_seed_authoring.py, docs/DESIGN.md)
+  incl. README tiers section + CLAUDE.md counts; then #19 apply-the-skill, #8, #27, #28.
+- ~17:50 cold review #27/#28: repeat-gate FIX (drove real hook on all 10 threshold sigs: 0 denied,
+  all allowlisted heads; a synthetic non-allowlisted sig DOES deny, machinery fine, population
+  empty; issue's "require recovery" fix is a no-op; concrete fix = default-off REFUSE arm, and
+  correct skillreport:325 + skillrepeat GATE column which print "refuses" without applying
+  allowlist; cost 0.043s+0.035s per Bash call). doc-gate KEEP (3 real refusals, 3 sessions, all
+  wrote docs and pushed; fixes: :533 tr splits quoted DOC_GATE_OVERRIDE reason -> silent bypass;
+  :814 NEITHER_RE ^notes?/ is repo-local, caused the only override). skillcontrib RETIRE (47 runs,
+  0 reconnaissance; DEFAULT_REPO is its own repo; no PR to any upstream ever; contribute-skill
+  skill 0 real uses, archive together) -- second cold opinion dispatched. skillrepeat FIX GATE column.
+- ~17:58 second cold opinion on skillcontrib: KEEP (dedup works live, exit 9 on a real
+  duplicate; 61 tests OK; no misfire evidence; its precondition, a reused clean skill, only just
+  became satisfiable). No concurrence -> not retired. Fix README:783 (promises `gh pr create
+  --dry-run`, which the skill forbids and which "may still push") and README:774-776 (demos
+  dedup/whoami without --repo; DEFAULT_REPO is this repo).
+  #28 resolution: doc-gate keep + 2 fixes; skillcontrib keep + README fixes; skillrepeat fix GATE.
+  #27 resolution: default-off the REFUSE arm, keep learning; fix skillreport:325 + skillrepeat.
+- ~18:12 W2f done: skillforge round (:2181, exit 3 at cap, no row), escalate (:2261, exit 4
+  refused; --converging needs strictly falling blocking; --narrowed once; two grants max ->
+  4 rounds), horizon (:2374). `escalate` ledger event. Default budget unchanged. No new env vars.
+  40 new tests + owned files green. test_doctrine_sync DerivationCommandTest will fail until
+  README's tuning table gains the REMIND_* knobs (W2c's file set does not include README ->
+  orchestrator close-out).
+- ~18:25 W2c done: hooks/remind.sh (453 lines), repeat-gate --norm-of (exempt from the
+  REPEAT_GATE=0 switch), installer REMIND_MARKER on UPS+PreToolUse (14 entries / 8 scripts),
+  hooks.json order pinned. Env: SKILL_COMPOUNDER_REMIND, REMIND_MAX=2, REMIND_COOLDOWN=0,
+  REMIND_MAX_ROWS=2000, REMIND_NOW. Cost 49-66 ms/event on 500 rows (jq splits() regex trap
+  cost 230 ms; pinned in header). 72 new tests. Owed: README:796 + .claude/CLAUDE.md:273
+  derivation grep needs REMIND and SKILLNOTE prefixes (predicted third narrow-grep occasion).
+  Open decision: remind.sh has no prune of its claim/stamp tree.
+- ~18:45 W2a done: bin/skillnote (901 lines; add/remove/list; --remind with --keyword/--path/
+  --command; shell twins of installer write discipline; ensure_horizon; ledger event note).
+  Memory read-back MEASURED (2.1.258): MEMORY.md injected 3/3; an indexed body is Read 3/3;
+  an UNINDEXED memory file is never seen 0/3 -> the index line is load-bearing; ledger records
+  readback:"via-index". session-review CANDIDATE now writes a note. 72+55+69 tests green.
+- ~18:47 Wave 2 close-out agent dispatched (README grep/tuning/tables, CLAUDE.md counts,
+  wrapping ratchet, DESIGN.md, whole suite). Then commit + push, then Wave 3.

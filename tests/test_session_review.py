@@ -1027,6 +1027,75 @@ class PaidForPathTest(SessionReviewBase):
 
         self.assert_no_temps("paid-1")
 
+    # --------------------------------------------------- (a2) the cheap tier on a CANDIDATE
+    def project_note(self):
+        return Path(self.tmp) / ".claude" / "CLAUDE.md"
+
+    def test_a_candidate_verdict_writes_the_cheap_tier_note(self):
+        """BOTH paid-for CANDIDATE verdicts this arm has ever returned produced no
+        artifact: the name reached index.jsonl and .unread, and nothing else in the
+        toolchain ever saw it. A CANDIDATE now also becomes one line in the reviewed
+        project's own .claude/CLAUDE.md, which costs no model call.
+        """
+        r = self.run_review(self.live_env(), sid="noted-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        f = self.project_note()
+        self.assertTrue(f.exists(),
+                        "a CANDIDATE verdict left no note behind: "
+                        f"{sorted(p.name for p in Path(self.tmp).iterdir())}")
+        text = f.read_text()
+        self.assertIn("<!-- skillnote:begin -->", text)
+        self.assertIn("session review: candidate "
+                      "'orchestrator-sendmessage-delivery-unreliable'", text)
+        self.assertIn("source:verdict", text)
+        # --why points at the report, so the one line leads to the whole thing.
+        self.assertIn(str(self.reviews() / "2026-W35" / "noted-1.md"), text)
+        row = [json.loads(l) for l in
+               (self.state / "ledger.jsonl").read_text().splitlines() if l.strip()]
+        notes = [x for x in row if x.get("event") == "note"]
+        self.assertEqual(len(notes), 1, notes)
+        self.assertEqual(notes[0]["kind"], "note")
+        self.assertEqual(notes[0]["source"], "verdict")
+
+    def test_the_note_is_written_where_project_says_and_not_where_pwd_says(self):
+        """This script is DETACHED and runs after its session ended, so its $PWD names
+        nothing. `--project` is the whole reason the note can land anywhere useful."""
+        elsewhere = Path(self.tmp) / "elsewhere"
+        elsewhere.mkdir()
+        r = subprocess.run(
+            [str(REVIEW), "noted-2", self.tmp, str(self.transcript), self.tmp, ""],
+            env=self.live_env(), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=60, cwd=str(elsewhere))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.project_note().exists())
+        self.assertFalse((elsewhere / ".claude" / "CLAUDE.md").exists(),
+                         "the note followed the working directory rather than --project")
+
+    def test_the_same_candidate_twice_writes_one_line(self):
+        """Idempotent twice over: STAGE1_FLUSHED runs the body once per dispatch, and
+        skillnote's own id dedup means a repeat writes neither a line nor a ledger row."""
+        self.assertEqual(self.run_review(self.live_env(), sid="noted-3").returncode, 0)
+        (self.reviews() / ".last-dispatch").unlink()      # reopen the cooldown window
+        self.assertEqual(self.run_review(self.live_env(), sid="noted-4").returncode, 0)
+        text = self.project_note().read_text()
+        self.assertEqual(text.count("<!-- skillnote:begin -->"), 1, text)
+        self.assertEqual(
+            text.count("session review: candidate "
+                       "'orchestrator-sendmessage-delivery-unreliable'"), 1, text)
+
+    def test_a_verdict_that_is_not_a_candidate_writes_no_note(self):
+        """The arm is guarded on the verdict, not merely on "the dispatch finished". The
+        week directory is made unwritable, which is the one failure that reaches the
+        report and nothing else, so the verdict recorded is ERROR."""
+        week = self.reviews() / "2026-W35"
+        week.mkdir(parents=True)
+        week.chmod(0o500)
+        self.addCleanup(week.chmod, 0o700)
+        self.run_review(self.live_env(), sid="unnoted")
+        self.assertEqual(self.index_lines()[0]["verdict"], "ERROR")
+        self.assertFalse(self.project_note().exists(),
+                         "an ERROR verdict wrote a note as if it were a candidate")
+
     # ------------------------------------------- (b) the report fails, the record does not
     def test_the_index_and_announcement_survive_a_report_that_cannot_be_written(self):
         """A report that cannot be written must not take the record down with it.

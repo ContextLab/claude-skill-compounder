@@ -1098,6 +1098,97 @@ class NoCornerTest(GateCase):
 
 
 # ============================================================== what the wiring admits
+class NormOfTest(GateCase):
+    """`--norm-of <tool>` is the normaliser reachable on its own, and hooks/remind.sh
+    matches a reminder's `commands` rule by BYTE EQUALITY against what it prints.
+
+    That makes these tests the join between two scripts: if this arm ever stopped agreeing
+    with what the LEARN arm records, a reminder would quietly stop firing and both halves
+    would still look correct in isolation. So the expected value is never written down
+    here -- it is read off the store the gate itself wrote.
+    """
+
+    def norm_of(self, text, tool="Bash", **env_extra):
+        return subprocess.run(["bash", HOOK, "--norm-of", tool], input=text,
+                              capture_output=True, text=True,
+                              env=self.env(**env_extra), timeout=180)
+
+    def learned_norm(self, command, tool="Bash"):
+        """What the LEARN arm records as the norm for this call."""
+        self.tick()
+        self.run_hook(self.failure(command, "s-learn", tool=tool))
+        rows = [r for r in self.rows() if r.get("t") == "fail"]
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]["norm"]
+
+    def test_it_prints_exactly_what_the_learn_arm_records(self):
+        cmd = 'gh issue comment 19 --body "first draft"'
+        expected = self.learned_norm(cmd)
+        r = self.norm_of(cmd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), expected)
+
+    def test_the_five_hundred_character_cap_is_applied_here_too(self):
+        """`compute_call` caps the raw command before normalising. Skipping the cap here
+        would make byte equality a coin flip on any command longer than that."""
+        cmd = SATURATING_CMD
+        expected = self.learned_norm(cmd)
+        self.assertEqual(self.norm_of(cmd).stdout.strip(), expected)
+
+    def test_two_literals_of_one_call_normalise_the_same(self):
+        a = self.norm_of('gh issue comment 19 --body "first draft"').stdout
+        b = self.norm_of('gh issue comment 4271 --body "quite another message"').stdout
+        self.assertEqual(a, b)
+        self.assertNotEqual(a.strip(), self.norm_of("gh pr list").stdout.strip())
+
+    def test_a_structured_tool_agrees_with_the_learn_arm_as_well(self):
+        payload = {"name": "skill-compounder", "input": {"x": 1}}
+        expected = self.learned_norm(payload, tool="Skill")
+        r = self.norm_of(json.dumps(payload), tool="Skill")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), expected)
+
+    def test_it_writes_nothing_at_all(self):
+        """A pure function of its stdin. It is called from another hook on ordinary tool
+        calls, so a store row per invocation would corrupt the gate's own session counts."""
+        r = self.norm_of("gh pr list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.strip())
+        self.assertFalse(os.path.exists(self.state),
+                         "--norm-of created state: %s"
+                         % (os.path.exists(self.state)
+                            and os.listdir(self.state) or ""))
+
+    def test_the_off_switch_does_not_reach_it(self):
+        """Two scripts, two switches. Turning this gate off must not silently stop
+        hooks/remind.sh matching commands, with nothing on any surface to say why."""
+        r = self.norm_of("gh pr list", SKILL_COMPOUNDER_REPEAT_GATE="0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "gh pr list")
+
+    def test_a_missing_tool_name_is_a_refusal_the_caller_can_see(self):
+        r = self.norm_of("gh pr list", tool="")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_an_empty_command_prints_nothing(self):
+        r = self.norm_of("")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_a_structured_tool_given_something_that_is_not_json_prints_nothing(self):
+        r = self.norm_of("not json at all", tool="Skill")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_the_ordinary_arms_still_work_after_the_argv_check(self):
+        """The guards `--norm-of` skips are the ones a real payload needs; a real payload
+        must still meet every one of them."""
+        self.teach("gh pr list", ["s1", "s2"])
+        self.tick()
+        self.assert_denied(self.run_hook(self.attempt("gh pr list", "s3")))
+
+
 class WiringTest(unittest.TestCase):
     """The matcher is a REGEX over the tool name, and it is `Bash|Skill` on all three
     events in BOTH install paths. Measured 2026-08-26 on 2.1.246: of eight matchers on one

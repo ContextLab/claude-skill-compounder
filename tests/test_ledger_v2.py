@@ -591,6 +591,21 @@ class BackCompatTest(LedgerV2Case):
                "confidence": "measured", "backfilled": False} for i in range(4)],
             {"event": "verdict", "ts": T0 + 2000, "name": "widget", "verdict": "WORKED",
              "evidence": "a quote", "confidence": "measured", "backfilled": False},
+            # `note`, written by bin/skillnote. It carries `name`-shaped neighbours (an
+            # id, a scope, a target) and no `name` at all, which is exactly the row that
+            # would be miscounted by a reader selecting outcomes by exclusion.
+            {"event": "note", "action": "add", "ts": T0 + 2500,
+             "id": "n2847193021x84", "kind": "note", "scope": "project",
+             "target": "/Users/me/proj/.claude/CLAUDE.md",
+             "text": "Kill the runner and re-run the full suite.",
+             "why": "a filtered re-run hides a cross-file failure",
+             "source": "verdict", "project": "/Users/me/proj",
+             "confidence": "measured", "backfilled": False},
+            {"event": "note", "action": "add", "ts": T0 + 2600,
+             "id": "n1993847712x61", "kind": "reminder", "scope": "/Users/me/proj",
+             "target": "/state/reminders.jsonl", "text": "Check the pinning tests first.",
+             "source": "session", "project": "/Users/me/proj",
+             "confidence": "measured", "backfilled": False},
         )
 
     def test_the_forge_count_is_unchanged_by_use_rows(self):
@@ -634,6 +649,45 @@ class BackCompatTest(LedgerV2Case):
                          "a probe invocation or a failed one reached USES SINCE: " + row)
         self.assertIn("EXCLUDED AS PROBE/TEST HARNESS", out)
         self.assertIn("REUSE: 0 of 1", out)
+
+    def test_a_note_row_is_invisible_to_both_readers(self):
+        """`note` is the third event added to this file after the readers were written.
+
+        The fixture above already carries two of them, so every other test in this class
+        proves the invariant too. This one states it: the rows really are there, and the
+        counts really are the same as they were before the tier existed.
+        """
+        self.a_mixed_ledger()
+        rows = [json.loads(l) for l in
+                self.ledger.read_text(encoding="utf-8").strip().splitlines()]
+        self.assertEqual(len([r for r in rows if r.get("event") == "note"]), 2,
+                         "the fixture must actually contain the rows under test")
+        self.assertIn("1 forge(s)", self.forge("ledger").stdout)
+        self.assertIn("of 1 finished forges", self.report().stdout)
+
+    def test_a_note_row_written_by_the_real_cli_changes_no_count(self):
+        """Not a hand-written fixture: the real bin/skillnote, appending to the real
+        ledger, in front of the real readers. A shape this file invents cannot catch a
+        field the CLI actually emits and a reader actually trips over."""
+        self.a_mixed_ledger()
+        before_forge = self.forge("ledger").stdout
+        before_report = self.report().stdout
+        proj = self.root / "noted"
+        (proj / ".claude").mkdir(parents=True)
+        r = subprocess.run([str(REPO / "bin" / "skillnote"), "add", "--scope", "project",
+                            "--project", str(proj), "--source", "verdict",
+                            "a lesson worth one line"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           cwd=str(self.root), env=self.env(now=T0 + 3000,
+                                                            SKILLNOTE_NOW=T0 + 3000))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = [json.loads(l) for l in
+                self.ledger.read_text(encoding="utf-8").strip().splitlines()]
+        written = [r for r in rows if r.get("event") == "note"
+                   and r.get("text") == "a lesson worth one line"]
+        self.assertEqual(len(written), 1, "the CLI wrote no ledger row")
+        self.assertEqual(self.forge("ledger").stdout, before_forge)
+        self.assertEqual(self.report().stdout, before_report)
 
     def test_an_event_from_the_future_is_ignored_rather_than_miscounted(self):
         """Forward compatibility, stated as a test: a row this build has never heard of

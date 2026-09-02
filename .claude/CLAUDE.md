@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Claude Code *configuration* package. It installs every skill under `skills/`, five CLIs,
-a status-line wrapper, and twelve hook entries into `~/.claude/`. Those twelve span five
+A Claude Code *configuration* package. It installs every skill under `skills/`, six CLIs,
+a status-line wrapper, and fourteen hook entries into `~/.claude/`. Those fourteen span five
 events (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`) and
-name seven of the eight scripts in `hooks/` -- every one but `session-review.sh`, which is
+name eight of the nine scripts in `hooks/` -- every one but `session-review.sh`, which is
 launched rather than wired; derive them from
 `OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
 There is no runtime service: the "program" is the
@@ -71,10 +71,22 @@ the skips by reading the run rather than from this sentence:
 the answer depends on which grep you have, because `/usr/bin/grep` counts gitignored
 `__pycache__/*.pyc` as source and the ugrep an agent shell gets does not.
 
-Five CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state, the ledger, and the
-apply debt a closed forge leaves), `skillreport` (ledger joined against transcript
-invocations), `skillinsight` (the candidate queue), `skillcontrib` (read-only contribution
-reconnaissance), `skillrepeat` (the repeat gate's store of learned failure signatures).
+Six CLIs ship in `bin/`, all shell + `jq`: `skillforge` (forge state, the ledger, the
+red-team round record and the apply debt a closed forge leaves), `skillreport` (ledger
+joined against transcript invocations), `skillinsight` (the candidate queue), `skillcontrib`
+(read-only contribution reconnaissance), `skillrepeat` (the repeat gate's store of learned
+failure signatures), `skillnote` (notes into a `CLAUDE.md` or a memory file, and reminders
+into the store `hooks/remind.sh` reads).
+
+**There are three tiers of output, and each writes somewhere different.** Tier 0 is a note:
+`bin/skillnote add` puts one dated line under a `<!-- skillnote:begin -->` marker block in a
+project `.claude/CLAUDE.md` or a global `CLAUDE.md`, or writes a memory file plus the
+`MEMORY.md` index line that gets it read back. Tier 1 is a reminder: `skillnote add
+--remind` appends a match rule to `<state>/reminders.jsonl` and no `CLAUDE.md` at all, and
+`hooks/remind.sh` states it back when a prompt, a path or a command signature matches. Tier
+2 is the forge, which writes a skill directory and the ledger rows around it. A note waits
+to be read; a reminder arrives; only the forge costs hours. Both cheap tiers write a `note`
+ledger row, so the two of them are counted rather than assumed.
 
 ## Architecture
 
@@ -83,13 +95,15 @@ JSON file; `statusline/skillforge-status.sh` renders whatever it finds, once per
 Nothing streams, which is what lets a forge animate across subagent dispatches.
 
 **That file is deliberately not session-keyed**, and the two session ids are why. Do not
-make it session-keyed without reading `docs/DESIGN.md` first. The reminder hook *does* key
-per session, which is correct: it both reads and writes the payload's `.session_id`.
+make it session-keyed without reading `docs/DESIGN.md` first. `hooks/compound-improvement.sh`
+*does* key its reminder counters per session, which is correct: it both reads and writes the
+payload's `.session_id`. So does `hooks/remind.sh`, for its own claims and cooldown stamps --
+name the script, because since Wave 2 "the reminder hook" is two of them.
 
 **Installation is marker-based and surgical.** `installer.py` identifies its own hook
-entries by marker substring (`HOOK_MARKER`, `INSIGHT_MARKER`), and its status line by
-`STATUSLINE_MARKER` -- a trailing `# claude-skill-compounder` shell comment it writes into
-the command itself. Never a substring like `statusline.sh`, which also matches a user's own
+entries by marker substring (`HOOK_MARKER`, `INSIGHT_MARKER`, `REMIND_MARKER`), and its
+status line by `STATUSLINE_MARKER` -- a trailing `# claude-skill-compounder` shell comment
+it writes into the command itself. Never a substring like `statusline.sh`, which also matches a user's own
 `~/bin/git-statusline.sh`, and never the bare path, which stops matching the moment the
 checkout moves; the three location-bound recognitions are kept only as fallbacks for
 entries written before the marker. Install is idempotent and uninstall removes only our
@@ -98,6 +112,16 @@ is backed up before every write and written atomically, and *through* a symlink 
 over it, so a dotfiles source is not orphaned; a malformed `settings.json` disables every
 setting in it. Malformed shapes split by direction: install refuses and names the offending
 key, uninstall never refuses. Read `docs/DESIGN.md` before changing either side of that.
+
+**That backup-atomic-through-symlink discipline now has two implementations, and they must
+not drift.** `skill_compounder/installer.py` applies it to `settings.json` and to the global
+`CLAUDE.md` stanza; `bin/skillnote` applies it to whichever `CLAUDE.md` a note lands in,
+reimplemented in shell because that CLI is shell + `jq` like the other five. The four rules
+are the same four in both: resolve the symlink and write through it, back up beside the
+*configured* path rather than the resolved one, `mktemp` in the resolved file's own
+directory so the `mv` is a `rename(2)`, and never truncate in place. `BACKUP_PREFIX` is the
+same string on both sides. Change one and change the other, or a user whose `CLAUDE.md` is
+stowed loses it from whichever half was left behind.
 
 **The status line wraps whatever is already there.** Any pre-existing `statusLine` command
 is saved to `<state>/statusline-base.sh` (plus `original-statusline.json` for restoration)
@@ -170,8 +194,8 @@ delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a 
 **`hooks/session-review.sh` is a shipped component that spends money, and it is in
 neither wiring.** `settings.json` and `hooks/hooks.json` between them name
 `repeat-gate.sh` (three times), `compound-improvement.sh` (twice), `claim-gate.sh` (twice),
-`skill-use.sh` (twice), `apply-gate.sh`, `doc-gate.sh` and
-`insight-capture.sh` -- twelve entries over seven scripts; grep either for
+`skill-use.sh` (twice), `remind.sh` (twice), `apply-gate.sh`, `doc-gate.sh` and
+`insight-capture.sh` -- fourteen entries over eight scripts; grep either for
 `session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
 detached, never waited on, and only when that turn's session audit actually wrote a
 record. Look for it there, not in a hooks list. Stage 1 is a single `claude -p` with no
@@ -218,8 +242,9 @@ install and uninstall also read the names the manifest recorded for those direct
 install prunes such a link only once it is dead.
 
 **The ledger is append-only, and every reader selects its events BY NAME.** `start` and
-its matching `done` or `fail` are joined into forges; `origin`, `use`, `verdict` and
-`horizon` are invisible to that join. A reader that classified by exclusion -- "anything
+its matching `done` or `fail` are joined into forges; `origin`, `use`, `verdict`,
+`horizon`, `note` (written by `bin/skillnote`) and `escalate` (written by `skillforge
+escalate`) are invisible to that join. A reader that classified by exclusion -- "anything
 that is not a start is an outcome" -- would have folded every `use` row into the forge
 count the day ledger v2 landed, so `tests/test_ledger_v2.py` pins both readers against a
 mixed ledger. Add an event type freely; never widen a selector to a negation.
@@ -247,13 +272,15 @@ stanza. Changing the protocol means updating all three.
 
 **No mocks, ever.** Every test writes real files, runs the real shell scripts through
 `subprocess`, and reads results back off disk. Tests pin nondeterminism with environment
-variables the scripts read for exactly that purpose. There are **nine clocks, not one** --
+variables the scripts read for exactly that purpose. There are **eleven clocks, not one** --
 `SKILLFORGE_NOW` (`bin/skillforge`), `CI_NOW` (`hooks/compound-improvement.sh`),
 `INSIGHT_NOW` (`hooks/insight-capture.sh` and `bin/skillinsight`, which fall back to
 `CI_NOW`), `SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`),
 `SKILL_COMPOUNDER_NOW` (the
-installer's backup stamp), and one apiece for the three refusing gates and the store one
-of them keeps -- `DOC_GATE_NOW` (`hooks/doc-gate.sh`), `REPEAT_GATE_NOW`
+installer's backup stamp), `SKILLNOTE_NOW` (`bin/skillnote`, which stamps both the ledger
+row and the `%Y-%m-%d` on the note line), `REMIND_NOW` (`hooks/remind.sh`, which stamps the
+per-session cooldown the emit is compared against), and one apiece for the three refusing
+gates and the store one of them keeps -- `DOC_GATE_NOW` (`hooks/doc-gate.sh`), `REPEAT_GATE_NOW`
 (`hooks/repeat-gate.sh`), `APPLY_GATE_NOW` (`hooks/apply-gate.sh`) and `SKILLREPEAT_NOW`
 (`bin/skillrepeat`) -- and session-review refuses `CI_NOW` on purpose, because a
 frozen `CI_NOW` makes its `|NOW - last|` cooldown zero forever and silences the trigger
@@ -270,13 +297,15 @@ forge whose orchestrator died -- by appending the `fail` row it never got, never
 the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the one
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
-`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ | sort -u` and reading each hit; re-run it rather
-than trusting the list if the two have drifted. **Twice now the command has been narrower
-than the list it introduces**: it named three prefixes when seven were in use, and seven
-when fourteen were, so on both occasions it could not produce the list it introduces. A
-prefix added to a new script has to be added here too. If new behavior is hard to test without a mock, add a pin like
-those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
+`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
+hooks/ bin/ statusline/ skill_compounder/ | sort -u` -- 107 names as of Wave 2 -- and
+reading each hit; re-run it rather than trusting the list if the two have drifted. **Three
+times now the command has been narrower than the list it introduces**: it named three prefixes when seven were in use,
+seven when fourteen were, and fourteen when sixteen were, so on all three occasions it
+could not produce the list it introduces. The third was Wave 2 adding `SKILLNOTE_NOW`,
+`SKILLNOTE_CLAUDE_DIR` and the six `REMIND_*` names to scripts while leaving the
+alternation at fourteen prefixes. A prefix added to a new script has to be added here too.
+If new behavior is hard to test without a mock, add a pin like those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 
 **Shell portability traps that cause silent failures** (details and reasoning in

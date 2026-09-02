@@ -8,6 +8,10 @@
 #                    --trigger "<verbatim text that set this off>"
 #                    --trigger-kind <user-prompt|hook-checkpoint|review-dispatch|agent-decision>
 #   skillforge step  [--name <forge>] <step-number> <what is happening now...>
+#   skillforge round --name <forge> --blocking <k> --total <m>
+#                    [--subsystems "<what the blocking findings named>"]
+#                    [--shapes "<the finding shapes>"]
+#   skillforge escalate --name <forge> --converging | --narrowed "<what was cut>"
 #   skillforge done  [--name <forge>] [--skill-dir <dir>] [message...]
 #   skillforge fail  [--name <forge>] <reason...>
 #   skillforge reap  [--name <forge>]
@@ -29,6 +33,7 @@
 #                      [--force]
 #   skillforge pending [--json] [--full]
 #   skillforge backfill <file.jsonl | ->
+#   skillforge horizon
 #   skillforge doctor
 #
 # THE LEDGER ANSWERS FIVE QUESTIONS: what triggered the build, what was built, WHETHER
@@ -96,6 +101,48 @@
 # and the name is free, and `start` on that name reaps it itself and says so on stderr
 # instead of refusing. Nothing is edited and nothing is deleted: the ledger stays
 # append-only, and a reaped forge is a forge with the outcome row it was missing.
+#
+# THE ROUND CAP IS ENFORCED ON `round`, AND DELIBERATELY NOT ON `step`. A budget is a
+# plan and the step reached is an OBSERVATION, so `step` records an overrun rather than
+# refusing it -- three tests in tests/test_skillforge.py pin exactly that -- and nothing
+# there could refuse a round anyway, because a step number is whatever the caller types.
+# `round` is different: it owns the per-forge round record, <state>/rounds/<forge>.tsv,
+# one line per red-team round in the format the forging protocol has always written by
+# hand, so it knows how many rounds are really on the record and how many the budget
+# planned (`rounds_planned`, (steps - 2) / 2).
+#
+#   skillforge round     appends one line and exits 0 while budgeted rounds remain. A
+#                        round PAST the budget exits 3 and writes NO row, naming the two
+#                        most recent blocking counts -- "not converging" is a claim about
+#                        a trajectory, and a refusal that hides the trajectory is one
+#                        nobody can check -- and the two ways past it.
+#   skillforge escalate  is the only way past it, and there are exactly two arguments it
+#                        accepts. `--converging` is granted only when the last two
+#                        recorded rounds show a STRICTLY FALLING blocking count.
+#                        `--narrowed "<what was cut>"` is granted ONCE per forge, because
+#                        a narrowed skill is a new skill for review purposes and owes one
+#                        cold round. Either grant raises the forge's `steps` by exactly
+#                        2 -- one round -- so the status line, `show` and the ledger's
+#                        `rounds_planned` all see the raised budget, and appends an
+#                        `escalate` row carrying the round counts and which claim bought
+#                        it. TWO GRANTS PER FORGE IS THE CEILING: a third is refused
+#                        whichever kind it is.
+#
+# WHY THAT IS A REAL CAP AND NOT A SPEED BUMP. `--converging` requires a strictly
+# decreasing sequence of non-negative integers, which terminates on its own; and the
+# two-grant ceiling bounds a forge at four rounds regardless of what the counts do.
+#
+# EXIT CODES. 0 success. 1 an environment that cannot be worked in (no jq, a state
+# directory that cannot be created) or a `doctor` FAIL. 2 bad argv, or a refusal the
+# caller can fix by typing something else. 3 the round cap, from `round` alone. 4 an
+# escalation refused, from `escalate` alone. 3 and 4 are separate on purpose: a caller
+# that hit the cap has two documented moves left, and a caller whose escalation was
+# refused has already spent one of them.
+#
+# `skillforge horizon` writes the ledger's horizon row if the file does not already carry
+# one, and does nothing else. It exists so another CLI in this package can make sure the
+# record says where it begins before appending a row of its own, rather than duplicating
+# `ledger_ensure_horizon` and having two spellings of "where does this record start".
 #
 # `skillforge doctor` is the health surface for everything else. Every hook in this package
 # opens with `command -v jq || exit 0` and `mkdir -p "$STATE_DIR" || exit 0`, so a missing
@@ -227,6 +274,16 @@ command -v jq >/dev/null 2>&1 || { echo "skillforge: jq is required" >&2; exit 1
 # SKILLFORGE_NOW pins the clock so tests can assert on durations and dates.
 now() { if [ -n "${SKILLFORGE_NOW:-}" ]; then printf '%s' "$SKILLFORGE_NOW"; else date +%s; fi; }
 die() { echo "skillforge: $*" >&2; exit 2; }
+
+# `die` is exit 2: bad argv, or a refusal the caller can fix by typing something else.
+# The round cap and a refused escalation are neither -- the caller typed the right thing
+# and the answer is no, for a reason it can act on -- so they carry their own codes, and
+# a script driving this CLI can tell the three apart without parsing prose.
+refuse() { # <exit code> <message...>
+  rf_code="$1"; shift
+  echo "skillforge: $*" >&2
+  exit "$rf_code"
+}
 
 # The renderer guards this knob and the CLI did not, so `SKILLFORGE_NOW=abc` reached
 # `--argjson now abc`, jq failed, and the one thing `start` could report was its own
@@ -903,6 +960,60 @@ rounds_completed() { # <step reached>
   r=$(( ( $(int_or_zero "${1:-0}") - 2 ) / 2 ))
   [ "$r" -lt 0 ] && r=0
   printf '%s' "$r"
+}
+
+# --------------------------------------------------------------- the round record
+#
+# One file per forge, <state>/rounds/<forge>.tsv, one line per red-team round, in the
+# format the forging protocol has been writing by hand since the first forge:
+#
+#   <n><TAB>blocking=<k><TAB>total=<m><TAB>subsystems=<...><TAB>shapes=<...>
+#
+# THE READERS TAKE COLUMNS BY NUMBER AND LEAVE THE REST ALONE, because the two real round
+# files on the machine this was written on carry a sixth, free-text column on some rows
+# (a `DECISION=...` note a session added by hand). A reader that required five columns
+# would refuse the record the protocol actually produced.
+ROUNDS_DIR="$STATE_ROOT/rounds"
+
+# Named with the SAME expression every other per-name file in this package uses
+# (apply_marker_path, the hook claim directories): one spelling, or one forge grows two
+# round files under two spellings and the cap counts half its own rounds.
+rounds_file() { # <forge name> -> path
+  printf '%s/%s.tsv' "$ROUNDS_DIR" "$(safe_name "$1")"
+}
+
+# One value, flattened to one line and one column. A tab inside a value adds a column and
+# a newline adds a row, and either makes the file say something nobody wrote. `LC_ALL=C`
+# is not cosmetic: BSD `tr` ABORTS with "Illegal byte sequence" on a byte that is not
+# valid in the ambient locale, and the failed substitution then yields the empty string,
+# so a subsystem list that is merely not UTF-8 would be silently recorded as blank. Same
+# fix as label_of and as `apply --evidence`.
+tsv_field() { # <value>
+  printf '%s' "${1:-}" | LC_ALL=C tr '\t\n\r' '   ' | LC_ALL=C tr -d '[:cntrl:]'
+}
+
+# How many rounds are really on the record. `grep -c ''` and NOT `wc -l`, for two
+# separate reasons that both bite here: BSD `wc` prints a leading-space-padded count,
+# which a numeric `case` guard reads as non-numeric and zeroes -- the defect that made
+# CLAIM_GATE_MAX_BYTES dead code on BSD -- and `wc -l` counts newlines, so it misses a
+# last line without one, which is exactly the shape a hand-edited round file has.
+rounds_count() { # <rounds file> -> a count, 0 when the file is not there
+  [ -f "$1" ] || { printf '0'; return 0; }
+  int_or_zero "$(grep -c '' "$1" 2>/dev/null | tr -cd '0-9')"
+}
+
+# The `blocking=` column of one recorded round, counted back from the most recent.
+# Prints NOTHING and returns 1 when that round is not there or does not carry a readable
+# count, so no caller can mistake a missing row for a blocking count of zero -- which is
+# the one value that would make every trajectory look like it was falling.
+rounds_blocking() { # <rounds file> <how far back: 1 = most recent>
+  rb_back="$(int_or_zero "${2:-1}")"
+  [ "$rb_back" -ge 1 ] || return 1
+  [ "$(rounds_count "$1")" -ge "$rb_back" ] || return 1
+  rb_v="$(tail -n "$rb_back" "$1" 2>/dev/null | head -n 1 | cut -f2)"
+  case "$rb_v" in blocking=*) rb_v="${rb_v#blocking=}" ;; *) return 1 ;; esac
+  case "$rb_v" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$rb_v"
 }
 
 # The outcome line a CLOSED record implies. Duration is read out of the record's own
@@ -2065,6 +2176,204 @@ SLOTS
     else
       closed_out "$FILE"
     fi
+    ;;
+
+  round)
+    # THE CAP LIVES HERE AND NOT ON `step`; the header says why at length.
+    require_active round fatal
+    FILE="$RESOLVED"
+    # Flags are normalised to --key=value first, the use/verdict/origin arm's pattern and
+    # for its reason: writing the two-form parse out per flag is where a `[ $# -ge 2 ]`
+    # guard gets forgotten, and a missing value then silently becomes the NEXT flag's
+    # name -- recorded, on the round record, as if it were a subsystem.
+    RARGS=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --*=*) RARGS[${#RARGS[@]}]="$1"; shift ;;
+        --*)   [ $# -ge 2 ] || die "$1 requires a value"
+               RARGS[${#RARGS[@]}]="$1=$2"; shift 2 ;;
+        *)     die "skillforge round takes flags only; got '$1'" ;;
+      esac
+    done
+    set -- ${RARGS[@]+"${RARGS[@]}"}
+    r_blocking=""; r_total=""; r_subsystems=""; r_shapes=""
+    for a in "$@"; do
+      k="${a%%=*}"; v="${a#*=}"
+      case "$k" in
+        --blocking)   r_blocking="$v" ;;
+        --total)      r_total="$v" ;;
+        --subsystems) r_subsystems="$v" ;;
+        --shapes)     r_shapes="$v" ;;
+        *)            die "unknown option '$k' for skillforge round" ;;
+      esac
+    done
+    r_usage="usage: skillforge round --name <forge> --blocking <k> --total <m> [--subsystems \"...\"] [--shapes \"...\"]"
+    case "$r_blocking" in ''|*[!0-9]*) die "--blocking must be a count of findings (digits). $r_usage" ;; esac
+    case "$r_total"    in ''|*[!0-9]*) die "--total must be a count of findings (digits). $r_usage" ;; esac
+    case "$r_blocking" in ?????*) die "--blocking must be between 0 and 9999" ;; esac
+    case "$r_total"    in ?????*) die "--total must be between 0 and 9999" ;; esac
+    # The blocking findings are a SUBSET of the findings, so a row claiming otherwise is
+    # a typo, and a typo here is what the whole convergence rule is then read off.
+    [ "$r_blocking" -le "$r_total" ] || die "--blocking ($r_blocking) cannot exceed --total ($r_total): blocking findings are a subset of the round's findings"
+
+    r_name="$(field "$FILE" name)"
+    r_planned="$(rounds_planned "$(int_or_zero "$(field "$FILE" steps)")")"
+    r_file="$(rounds_file "$r_name")"
+    r_have="$(rounds_count "$r_file")"
+    r_n=$(( r_have + 1 ))
+    # Both counts are read BEFORE the cap decision, so the refusal can show the
+    # trajectory it is refusing on.
+    r_b1="$(rounds_blocking "$r_file" 1 || true)"
+    r_b2="$(rounds_blocking "$r_file" 2 || true)"
+    if [ "$r_n" -gt "$r_planned" ]; then
+      r_trend="only $r_have round(s) are on the record, so there is no fall to point at yet"
+      if [ -n "$r_b1" ] && [ -n "$r_b2" ]; then
+        if   [ "$r_b1" -lt "$r_b2" ]; then r_dir="it fell"
+        elif [ "$r_b1" -gt "$r_b2" ]; then r_dir="it rose"
+        else                               r_dir="it held"
+        fi
+        r_trend="round $r_have = $r_b1, round $(( r_have - 1 )) = $r_b2: $r_dir"
+      fi
+      # NOTHING IS WRITTEN ON THIS PATH. The append is below the refusal, not above it:
+      # a cap that records the round it just refused has not refused anything.
+      refuse 3 "round cap reached ($r_have of $r_planned planned). Round $r_n is earned, not taken: 'skillforge escalate --name $r_name --converging' needs blocking to have fallen ($r_trend), 'skillforge escalate --name $r_name --narrowed \"<what you cut>\"' buys the cold round a narrowed skill owes. Otherwise close it: skillforge fail --name $r_name \"not converging: <what kept coming back>\"."
+    fi
+
+    mkdir -p "$ROUNDS_DIR" 2>/dev/null || die "could not create $ROUNDS_DIR"
+    # One `printf` builds and appends the whole row, so a concurrent writer cannot
+    # interleave half a line -- the same reason ledger_line builds its JSON before any
+    # redirect runs. `2>/dev/null` BEFORE the `>>` and the order is the whole point:
+    # written the other way round, a failure to open the file is reported by the SHELL
+    # to a stderr that is still the terminal.
+    printf '%s\tblocking=%s\ttotal=%s\tsubsystems=%s\tshapes=%s\n' \
+      "$r_n" "$r_blocking" "$r_total" \
+      "$(tsv_field "$r_subsystems")" "$(tsv_field "$r_shapes")" \
+      2>/dev/null >> "$r_file" || die "could not append to $r_file"
+    r_left=$(( r_planned - r_n ))
+    if [ "$r_left" -gt 0 ]; then
+      echo "skillforge: round $r_n/$r_planned recorded for '$r_name' — $r_blocking blocking of $r_total finding(s); $r_left round(s) left in the budget"
+    else
+      echo "skillforge: round $r_n/$r_planned recorded for '$r_name' — $r_blocking blocking of $r_total finding(s); that was the last budgeted round. Another one is earned, not taken: 'skillforge escalate --name $r_name --converging' if blocking fell, or '--narrowed \"<what you cut>\"'."
+    fi
+    exit 0
+    ;;
+
+  escalate)
+    require_active escalate fatal
+    FILE="$RESOLVED"
+    EARGS=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --converging) EARGS[${#EARGS[@]}]="$1"; shift ;;
+        --*=*)        EARGS[${#EARGS[@]}]="$1"; shift ;;
+        --*)          [ $# -ge 2 ] || die "$1 requires a value"
+                      EARGS[${#EARGS[@]}]="$1=$2"; shift 2 ;;
+        *)            die "skillforge escalate takes flags only; got '$1'" ;;
+      esac
+    done
+    set -- ${EARGS[@]+"${EARGS[@]}"}
+    e_conv=0; e_cut=""; e_narrow_given=0; e_kind=""
+    for a in "$@"; do
+      k="${a%%=*}"; v="${a#*=}"
+      case "$k" in
+        --converging) e_conv=1 ;;
+        --narrowed)   e_cut="$v"; e_narrow_given=1 ;;
+        *)            die "unknown option '$k' for skillforge escalate" ;;
+      esac
+    done
+    e_usage="usage: skillforge escalate --name <forge> --converging | --narrowed \"<what was cut>\""
+    if [ "$e_conv" -eq 1 ] && [ "$e_narrow_given" -eq 1 ]; then
+      die "give one of --converging or --narrowed, never both: they are different claims about why the round is owed, and the ledger row records which one bought it"
+    fi
+    # Same LC_ALL=C emptiness test `apply --evidence` uses: a value of spaces is not a
+    # value, and a narrowing nobody wrote down is not reviewable by the cold round it
+    # is buying.
+    if [ "$e_narrow_given" -eq 1 ]; then
+      case "$(printf '%s' "$e_cut" | LC_ALL=C tr -d '[:space:]')" in
+        '') die "--narrowed needs the subsystem that was cut, in your own words: a narrowing nobody wrote down is not reviewable" ;;
+      esac
+      e_kind="narrowed"
+    fi
+    [ "$e_conv" -eq 1 ] && e_kind="converging"
+    [ -n "$e_kind" ] || die "$e_usage"
+
+    e_name="$(field "$FILE" name)"
+    e_file="$(rounds_file "$e_name")"
+    e_have="$(rounds_count "$e_file")"
+    e_steps="$(int_or_zero "$(field "$FILE" steps)")"
+    e_grants="$(int_or_zero "$(field "$FILE" escalations)")"
+    e_narrowings="$(int_or_zero "$(field "$FILE" escalations_narrowed)")"
+    e_b1="$(rounds_blocking "$e_file" 1 || true)"
+    e_b2="$(rounds_blocking "$e_file" 2 || true)"
+
+    # TWO GRANTS PER FORGE, WHATEVER KIND THEY WERE. This is what bounds the loop no
+    # matter what the counts do: two budgeted rounds plus two granted is four, and there
+    # is no third grant to ask for.
+    if [ "$e_grants" -ge 2 ]; then
+      refuse 4 "'$e_name' has already been escalated twice — $e_steps steps, $(rounds_planned "$e_steps") rounds planned — and two grants is the ceiling. There is no third. Close it: skillforge fail --name $e_name \"not converging: <what kept coming back>\"."
+    fi
+
+    if [ "$e_kind" = "converging" ]; then
+      # THE ASSESSMENT BINDS FROM ROUND 2, where the first comparison exists. One data
+      # point cannot match the converging definition, so a forge with fewer than two
+      # recorded rounds is refused here rather than granted on a comparison nobody made.
+      if [ -z "$e_b1" ] || [ -z "$e_b2" ]; then
+        refuse 4 "--converging is a claim about a trajectory and '$e_name' has $e_have round(s) with a readable blocking count, so there is no comparison to make. Record the rounds with 'skillforge round --name $e_name --blocking <k> --total <m>' first."
+      fi
+      if [ "$e_b1" -ge "$e_b2" ]; then
+        refuse 4 "--converging refused for '$e_name': blocking went round $(( e_have - 1 )) = $e_b2 → round $e_have = $e_b1, which is not a fall. A further round is earned by a strictly falling blocking count. Narrow instead — 'skillforge escalate --name $e_name --narrowed \"<what you cut>\"' — or close it: skillforge fail --name $e_name \"not converging: <what kept coming back>\"."
+      fi
+    else
+      if [ "$e_narrowings" -ge 1 ]; then
+        refuse 4 "--narrowed is granted once per forge and '$e_name' has already spent it. A second narrowing is a different skill again, not a longer review of this one. Either --converging, which needs blocking to have fallen, or close it: skillforge fail --name $e_name \"not converging: <what kept coming back>\"."
+      fi
+    fi
+
+    # EXACTLY 2, WHICH IS ONE ROUND. SKILL.md budgets steps as 2 + 2 x rounds -- a review
+    # step and a revision step per round -- so any other number would grant a fraction of
+    # a round and leave `rounds_planned` disagreeing with the budget it was derived from.
+    e_after=$(( e_steps + 2 ))
+    [ "$e_after" -le 9999 ] || die "'$e_name' is budgeted $e_steps steps and raising it would pass the 9999-step bound `start` enforces"
+    e_grant=$(( e_grants + 1 ))
+    e_narrow_after="$e_narrowings"
+    [ "$e_kind" = "narrowed" ] && e_narrow_after=$(( e_narrowings + 1 ))
+    # THE RAISED BUDGET GOES ON THE RECORD, which is what the status line renders, what
+    # `show` prints and what `rounds_planned` is read off at close. A second store for
+    # the grant would be a second answer to "how many rounds does this forge have", and
+    # the two would disagree the first time one of them was not written.
+    update "$FILE" --argjson s "$e_after" --argjson g "$e_grant" \
+      --argjson nn "$e_narrow_after" --arg k "$e_kind" --argjson now "$(now)" \
+      '.steps = $s | .escalations = $g | .escalations_narrowed = $nn
+       | .escalated = $k | .updated = $now'
+
+    # A NEW EVENT NAME, so every existing selector is blind to it: `ledger` and
+    # `skillreport` join `start` to `done`/`fail` BY NAME, and the rule this file states
+    # for itself is that an event type may be added freely and a selector never widened
+    # to a negation.
+    es_line="$(jq -n -c --arg name "$e_name" --arg reason "$e_kind" \
+      --arg cut "$e_cut" --arg project "$(project_root)" \
+      --argjson ts "$(now)" --argjson grant "$e_grant" \
+      --argjson recorded "$e_have" \
+      --argjson before "$(rounds_planned "$e_steps")" \
+      --argjson after "$(rounds_planned "$e_after")" \
+      --argjson sb "$e_steps" --argjson sa "$e_after" \
+      --arg b1 "$e_b1" --arg b2 "$e_b2" \
+      '{event:"escalate", ts:$ts, name:$name, reason:$reason, grant:$grant,
+        rounds_recorded:$recorded, rounds_planned_before:$before,
+        rounds_planned_after:$after, steps_before:$sb, steps_after:$sa,
+        project:$project, confidence:"measured", backfilled:false}
+       + (if $cut == "" then {} else {narrowed:$cut}                 end)
+       + (if $b1  == "" then {} else {blocking_last:($b1|tonumber)}  end)
+       + (if $b2  == "" then {} else {blocking_prev:($b2|tonumber)}  end)' 2>/dev/null)"
+    [ -n "$es_line" ] || die "could not build an escalate row for '$e_name'"
+    ledger_raw_append "$es_line"
+    echo "skillforge: escalation granted for '$e_name' ($e_kind) — budget raised to $e_after steps, $(rounds_planned "$e_after") rounds; grant $e_grant of 2. Record the round it buys with 'skillforge round --name $e_name --blocking <k> --total <m>'."
+    exit 0
+    ;;
+
+  horizon)
+    ledger_ensure_horizon
+    exit 0
     ;;
 
   reap)

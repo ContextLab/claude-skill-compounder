@@ -1,0 +1,901 @@
+#!/usr/bin/env bash
+# skillnote — the cheapest tier of compounding: write the lesson down where it will be read.
+#
+#   skillnote add   [--scope project|global|memory] "<text>"
+#                   [--why <text>] [--source session|verdict|forge]
+#                   [--project <dir>] [--remind]
+#                   [--keyword <k>]... [--path <glob>]... [--command "<literal cmd>"]...
+#   skillnote list  [--scope project|global|memory|remind] [--json]
+#   skillnote remove <id>
+#   skillnote --help
+#
+# WHY THIS EXISTS. `skills/skill-compounder/SKILL.md` has always had a cheap branch --
+# "write a note or update the project's CLAUDE.md" -- and it named no path, no command and
+# no record, so nothing counted it and it was taken zero times in ten days. A forge is the
+# only output path this package had, and a forge is a median 3.3 hours and eight agents. A
+# note is one command and no model call. That is the whole argument for this file.
+#
+# WHERE EACH SCOPE WRITES:
+#
+#   project  <project root>/.claude/CLAUDE.md   (never a root CLAUDE.md: that fails
+#            `claude plugin validate --strict`, which is why this repo's own lives under
+#            .claude/. The `.claude/` directory is created if absent.)
+#   global   <claude dir>/CLAUDE.md             (claude dir resolved exactly as
+#            claude_dir() in bin/skillforge does it -- see CLAUDE DIRECTORY below)
+#   memory   <transcripts>/<slug>/memory/<name>.md, plus one index line in MEMORY.md
+#
+# THE MEMORY SCOPE IS READ BACK, AND ONLY THROUGH THE INDEX. Measured 2026-09-02 on
+# Claude Code 2.1.258 (docs/CLAUDE-CODE-BEHAVIOR.md, "A memory file written by another
+# tool is read back, but only if MEMORY.md indexes it"): the contents of MEMORY.md are put
+# into a new session's context automatically, a file MEMORY.md links to is opened by that
+# session when it wants it, and a memory file MEMORY.md does NOT list is never seen at all
+# -- 0 of 3 runs. So the index line this writes is load-bearing rather than decoration,
+# and the ledger row records readback:"via-index" rather than a promise.
+#
+# THE ID is CRC-32 plus byte length over "<scope>|<text>", the same idiom as hashof() in
+# hooks/repeat-gate.sh. Two consequences, both wanted. The same text at the same scope
+# always produces the same id, so a second `add` is a no-op: it exits 0, says "already
+# recorded" and writes NO ledger row -- the dedup-by-hash stance queue_record() takes in
+# hooks/insight-capture.sh. And the id does not depend on the machine, so a note committed
+# into a repo's .claude/CLAUDE.md can be removed from any checkout.
+#
+# --remind WRITES A REMINDER INSTEAD OF A NOTE. A note waits to be read; a reminder
+# arrives, because hooks/remind.sh matches it against a prompt, a file path or a command
+# signature and injects it. It therefore lands in <state>/reminders.jsonl and in NO
+# CLAUDE.md, and it needs at least one --keyword/--path/--command: a reminder with no match
+# rule never fires and is invisible, which is worse than a note. Its id is computed over
+# "remind|<scope value>|<text>", so a note and a reminder carrying the same sentence get
+# different ids and coexist -- which is what the promotion path note -> reminder needs.
+#
+# REMOVAL IS NOT ONE THING, AND THE ASYMMETRY IS DELIBERATE. A CLAUDE.md note is deleted
+# outright, because that file is human-edited prose and a tombstone comment left in it is
+# litter someone has to read past. A reminder is TOMBSTONED -- {"id":...,"t":"remove",...}
+# appended to the same append-only file, never a rewrite -- which is the doctrine
+# `skillrepeat forget` follows, for the reason it follows it: the store is written by a
+# hook nobody watches and one bad expression could erase an hour of it. A memory note is
+# deleted, but its file is copied aside with the backup prefix below first.
+#
+# CLAUDE DIRECTORY, in this order: $SKILLNOTE_CLAUDE_DIR, then `.claude_dir` from
+# <state>/install-manifest.json, then ${CLAUDE_CONFIG_DIR:-$HOME/.claude}. Identical to
+# claude_dir() in bin/skillforge, on purpose: two resolutions of "where is the Claude
+# directory" that disagree is exactly the drift that function was written to avoid.
+#
+# THE FILE-WRITING DISCIPLINE IS A SHELL TWIN OF skill_compounder/installer.py. CLAUDE.md
+# is a file of the user's that this package edits in place, which is the same thing
+# settings.json is, so it gets the same four rules: resolve the symlink and write THROUGH
+# it, back up beside the CONFIGURED path rather than beside a dotfiles source, write
+# atomically inside the resolved file's own directory, and never truncate in place. Each
+# function below names its Python original. BOTH IMPLEMENTATIONS NOW EXIST AND MUST NOT
+# DRIFT.
+#
+# ENV:
+#   SKILL_COMPOUNDER_STATE        state root ($HOME/.claude/skill-compounder). Holds the
+#                                 ledger, reminders.jsonl and remind/hits.jsonl.
+#   SKILL_COMPOUNDER_TRANSCRIPTS  where Claude Code keeps per-project directories
+#                                 ($HOME/.claude/projects). The memory scope writes here.
+#   SKILLNOTE_CLAUDE_DIR          overrides the claude directory for the global scope.
+#   SKILLNOTE_NOW                 this CLI's clock, epoch seconds, digits only. It sets
+#                                 the visible date, the ledger `ts`, the reminder's
+#                                 `created` and the backup stamp. A new script needs its
+#                                 OWN clock: pinning someone else's does nothing to it.
+#   CLAUDE_CODE_SESSION_ID        recorded in the ledger row, and in memory frontmatter,
+#                                 when set; omitted when not.
+#
+# EXIT CODES, following bin/skillforge: 0 success -- and success INCLUDES "already
+# recorded". 1 an environment this script cannot work without (no jq). 2 bad argv, or a
+# refusal the caller can fix by typing something else. 3 an environment the caller must
+# fix: the memory slug directory does not exist, a target cannot be written, or --command
+# was asked for and the normaliser it depends on is not there.
+set -uo pipefail
+
+# ------------------------------------------------------------------------------------
+# THE ENTIRE BODY OF THIS SCRIPT IS ONE BRACE GROUP, AND THE `}` AT THE END OF THE FILE IS
+# WHAT CLOSES IT. bash reads a script LAZILY, by byte offset, and resumes at that offset in
+# whatever the file holds AT THAT MOMENT. This file is symlinked into the user's bin
+# directory and runs out of the checkout, so the same `git pull` that rewrites a hook
+# rewrites this. A brace group is a single compound command, so the whole file must parse
+# in ONE pass before any of it runs. The bare `exit` before the closing `}` is the other
+# half: a group protects its body and nothing past it, and a script that falls off its end
+# can have bash resume past `}` and run the body a SECOND time. It is a BARE `exit` so the
+# `case` this ends in keeps the exit codes documented above; `exit 0` would erase them.
+# tests/test_script_wrapping.py enforces both halves; docs/DESIGN.md has the reproduction.
+# ------------------------------------------------------------------------------------
+{
+
+# HOME can be unset (cron, a stripped env, a container). Under `set -u` reading it aborts
+# the script non-zero before it has printed anything.
+: "${HOME:=/tmp}"
+STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+LEDGER="$STATE_ROOT/ledger.jsonl"
+# A SIBLING of <state>/reminders/, not a file inside it. hooks/compound-improvement.sh
+# keeps per-session counters under <state>/reminders/ and sweeps that directory in
+# prune_stale_state(); reminders.jsonl sits beside it, where no sweep can reach it.
+REMINDERS="$STATE_ROOT/reminders.jsonl"
+HITS="$STATE_ROOT/remind/hits.jsonl"
+TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
+
+# Matches BACKUP_PREFIX / MAX_BACKUPS in skill_compounder/installer.py:137-138. A backup
+# this writes and one the installer writes are the same kind of file and are pruned by the
+# same rule, which is only true while these two agree.
+BACKUP_PREFIX='.bak-skill-compounder-'
+MAX_BACKUPS=10
+
+command -v jq >/dev/null 2>&1 || { echo "skillnote: jq is required" >&2; exit 1; }
+
+die()  { echo "skillnote: $*" >&2; exit 2; }
+die3() { echo "skillnote: $*" >&2; exit 3; }
+
+# Every other clock in this package guards its knob, and bin/skillforge records why: an
+# unguarded pinned clock reaches jq as `--argjson ts abc`, jq fails, and the only thing the
+# CLI can report is its own fallback message against a perfectly healthy directory. Checked
+# once, here, where the message can name the actual cause. Ten digits is every epoch second
+# until the year 2286.
+case "${SKILLNOTE_NOW:-}" in
+  '') : ;;
+  *[!0-9]*|???????????*)
+    die "SKILLNOTE_NOW must be epoch seconds (digits only, at most 10); got '${SKILLNOTE_NOW}'" ;;
+esac
+now() { if [ -n "${SKILLNOTE_NOW:-}" ]; then printf '%s' "$SKILLNOTE_NOW"; else date +%s; fi; }
+
+usage() {
+  sed -n '2,10p' "$0" | sed -e 's/^# \{0,1\}//'
+  echo
+  echo "State:     $STATE_ROOT"
+  echo "Ledger:    $LEDGER"
+  echo "Reminders: $REMINDERS"
+  echo
+  echo "The memory scope IS read back by a later session, but ONLY through MEMORY.md:"
+  echo "measured 2026-09-02 on Claude Code 2.1.258, a memory file that MEMORY.md does not"
+  echo "index was seen in 0 of 3 runs. Ledger rows for that scope say readback:\"via-index\"."
+}
+
+# WHERE THIS SCRIPT REALLY IS. $0 is a symlink in the user's bin directory on any machine
+# that ran the installer, so `dirname $0` finds the symlink's directory -- and neither
+# ../hooks/ nor the sibling skillforge is there. Resolved through the same loop the file
+# writer below uses.
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+
+# ------------------------------------------------------------- portable epoch -> text
+#
+# GNU first, then BSD, and the RESULT is validated rather than the exit status trusted:
+# `date -d` and `date -r` both exist on both platforms and mean different things, so a
+# chain that trusts exit codes never reaches its second branch (docs/DESIGN.md, "Six
+# failures that produce no error"). Falls back to something ugly and true, never to a
+# wrong date.
+fmt_date() { # <epoch> -> YYYY-MM-DD, local time
+  case "${1:-}" in ''|*[!0-9]*) printf '%s' "${1:-?}"; return 0 ;; esac
+  fd="$(date -d "@$1" '+%Y-%m-%d' 2>/dev/null)"
+  case "$fd" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$fd"; return 0 ;; esac
+  fd="$(date -r "$1" '+%Y-%m-%d' 2>/dev/null)"
+  case "$fd" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) printf '%s' "$fd"; return 0 ;; esac
+  printf '%s' "$1"
+}
+
+fmt_stamp() { # <epoch> -> YYYYmmdd-HHMMSS, matching _stamp() in installer.py
+  fs_ok='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+  case "${1:-}" in ''|*[!0-9]*) date '+%Y%m%d-%H%M%S'; return 0 ;; esac
+  fs="$(date -d "@$1" '+%Y%m%d-%H%M%S' 2>/dev/null)"
+  case "$fs" in $fs_ok) printf '%s' "$fs"; return 0 ;; esac
+  fs="$(date -r "$1" '+%Y%m%d-%H%M%S' 2>/dev/null)"
+  case "$fs" in $fs_ok) printf '%s' "$fs"; return 0 ;; esac
+  date '+%Y%m%d-%H%M%S'
+}
+
+fmt_iso_ms() { # <epoch> -> 2026-09-02T12:00:00.000Z, the shape Claude Code writes
+  case "${1:-}" in ''|*[!0-9]*) printf '1970-01-01T00:00:00.000Z'; return 0 ;; esac
+  fi_s="$(date -u -d "@$1" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)"
+  case "$fi_s" in [0-9][0-9][0-9][0-9]-*T*:*:*) printf '%s.000Z' "$fi_s"; return 0 ;; esac
+  fi_s="$(date -u -r "$1" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)"
+  case "$fi_s" in [0-9][0-9][0-9][0-9]-*T*:*:*) printf '%s.000Z' "$fi_s"; return 0 ;; esac
+  printf '1970-01-01T00:00:00.000Z'
+}
+
+# CRC-32 plus byte length. BSD and GNU `cksum` agree on both fields for stdin and both
+# print them whitespace-separated, which is why awk reads them rather than `cut`. The same
+# expression as hashof() in hooks/repeat-gate.sh:556.
+idof() { printf '%s' "n$(printf '%s' "$1" | cksum 2>/dev/null | awk '{printf "%sx%s", $1, $2}')"; }
+
+# The project root. `--project` wins, because hooks/session-review.sh runs DETACHED after
+# its session ended, from a working directory that means nothing -- and it is one of the
+# three callers. Otherwise the same shape project_root() uses in bin/skillforge.
+PROJECT_OPT=""
+project_root() {
+  if [ -n "$PROJECT_OPT" ]; then
+    ( cd "$PROJECT_OPT" 2>/dev/null && pwd ) || printf '%s' "$PROJECT_OPT"
+    return 0
+  fi
+  git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD"
+}
+
+claude_dir() {
+  if [ -n "${SKILLNOTE_CLAUDE_DIR:-}" ]; then printf '%s' "$SKILLNOTE_CLAUDE_DIR"; return 0; fi
+  cd_c="$(jq -r '.claude_dir // empty' "$STATE_ROOT/install-manifest.json" 2>/dev/null)"
+  [ -n "${cd_c:-}" ] || cd_c="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  printf '%s' "$cd_c"
+}
+
+# The transform is a plain substitution and NOT a sanitiser: measured 2026-09-02, a path
+# segment that itself begins with `-` produces a DOUBLED `-` rather than being collapsed.
+# No path containing a dot or a space has ever been observed, which is why the memory scope
+# refuses rather than guessing when the directory it computes is not already there.
+slug_of() { printf '%s' "$1" | sed 's|/|-|g'; }
+
+# lowercase, non-alphanumerics to `-`, runs collapsed, trimmed, capped at 60.
+name_of() {
+  no_s="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')"
+  no_s="$(printf '%s' "$no_s" | sed 's/--*/-/g; s/^-*//; s/-*$//' | cut -c1-60)"
+  no_s="$(printf '%s' "$no_s" | sed 's/-*$//')"
+  if [ -n "$no_s" ]; then printf '%s' "$no_s"; else printf 'note'; fi
+}
+
+# ------------------------------------------------------ the four file-writing rules
+#
+# 1. RESOLVE THE LINK, WRITE THROUGH IT. Shell twin of _real_file_path()
+#    (skill_compounder/installer.py:158-175). stow, chezmoi and hand-rolled dotfiles all
+#    present CLAUDE.md as a symlink into a dotfiles repo, and renaming ONTO the link
+#    deletes it and leaves a regular file, orphaning the source with exit 0 and no
+#    warning. The 40-iteration cap is not paranoia: a symlink loop would otherwise hang
+#    the CLI with nothing printed at all.
+resolve_link() { # <path> -> the regular file it ultimately names
+  rl_p="$1"; rl_n=0
+  while [ -L "$rl_p" ]; do
+    rl_n=$(( rl_n + 1 ))
+    if [ "$rl_n" -gt 40 ]; then printf '%s' "$1"; return 1; fi
+    rl_t="$(readlink "$rl_p" 2>/dev/null)" || { printf '%s' "$rl_p"; return 1; }
+    case "$rl_t" in
+      /*) rl_p="$rl_t" ;;
+      *)  rl_p="$(dirname "$rl_p")/$rl_t" ;;
+    esac
+  done
+  printf '%s' "$rl_p"
+}
+
+# 2. BACK UP BESIDE THE *CONFIGURED* PATH, NOT THE RESOLVED ONE. Twin of backup_file()
+#    (installer.py:211-252). A symlinked CLAUDE.md must not sprinkle .bak- files through
+#    someone's dotfiles git repo. Nothing is written when an existing backup is already
+#    byte-identical, so repeated `add`s do not accumulate copies; a same-second collision
+#    takes a -2, -3 suffix rather than clobbering the pre-change copy, which is the one
+#    worth keeping; and only files carrying OUR prefix are ever pruned.
+backup_file() { # <configured path> -> prints the backup path, or nothing
+  bf_p="$1"
+  bf_real="$(resolve_link "$bf_p")"
+  [ -f "$bf_real" ] || return 0
+  for bf_old in "$bf_p$BACKUP_PREFIX"*; do
+    [ -f "$bf_old" ] || continue
+    if cmp -s "$bf_old" "$bf_real"; then printf '%s' "$bf_old"; return 0; fi
+  done
+  bf_base="$bf_p$BACKUP_PREFIX$(fmt_stamp "$(now)")"
+  bf_dest="$bf_base"; bf_n=1
+  while [ -e "$bf_dest" ]; do bf_n=$(( bf_n + 1 )); bf_dest="$bf_base-$bf_n"; done
+  cp -p "$bf_real" "$bf_dest" 2>/dev/null || return 0
+  prune_backups "$bf_p"
+  printf '%s' "$bf_dest"
+}
+
+prune_backups() { # <configured path> -- newest MAX_BACKUPS kept, our prefix only
+  pb_list=""
+  for pb_f in "$1$BACKUP_PREFIX"*; do
+    [ -f "$pb_f" ] && pb_list="$pb_list$pb_f
+"
+  done
+  pb_n="$(printf '%s' "$pb_list" | grep -c . 2>/dev/null)"
+  case "$pb_n" in ''|*[!0-9]*) pb_n=0 ;; esac
+  [ "$pb_n" -gt "$MAX_BACKUPS" ] || return 0
+  printf '%s' "$pb_list" | sed '/^$/d' | sort | head -n "$(( pb_n - MAX_BACKUPS ))" \
+    | while IFS= read -r pb_drop; do rm -f "$pb_drop" 2>/dev/null; done
+  return 0
+}
+
+# `stat` is the trap fmt_date documents, in its other form: `-f` is a format string on BSD
+# and --file-system on GNU, so the RESULT is validated and the exit status is not trusted.
+mode_of() {
+  mo="$(stat -f '%OLp' "$1" 2>/dev/null)"
+  case "$mo" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$mo"; return 0 ;; esac
+  mo="$(stat -c '%a' "$1" 2>/dev/null)"
+  case "$mo" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$mo"; return 0 ;; esac
+  printf '600'
+}
+
+# 3. WRITE ATOMICALLY, ON THE SAME FILESYSTEM, and 4. NEVER TRUNCATE IN PLACE. Twin of
+#    write_text_file() (installer.py:253-276). The temp lands in the RESOLVED file's own
+#    directory so `mv` is a rename(2) and not a copy, and the name is unique per writer: a
+#    fixed one lets two concurrent runs interleave their bytes into one file and then
+#    rename the result into place. A half-written CLAUDE.md is prose the model reads as if
+#    it were finished, which is silently worse than no file at all. The trap removes the
+#    temp on every failure path.
+write_atomic() { # <configured path> <file holding the new content>
+  wa_p="$1"; wa_src="$2"
+  wa_real="$(resolve_link "$wa_p")"
+  wa_dir="$(dirname "$wa_real")"
+  mkdir -p "$wa_dir" 2>/dev/null || return 1
+  wa_tmp="$(mktemp "$wa_dir/.skillnote.XXXXXX" 2>/dev/null)" || return 1
+  trap 'rm -f "$wa_tmp" 2>/dev/null' EXIT INT TERM HUP
+  if [ -f "$wa_real" ]; then wa_mode="$(mode_of "$wa_real")"; else wa_mode=600; fi
+  if ! cat "$wa_src" > "$wa_tmp" 2>/dev/null; then
+    rm -f "$wa_tmp" 2>/dev/null; trap - EXIT INT TERM HUP; return 1
+  fi
+  chmod "$wa_mode" "$wa_tmp" 2>/dev/null || true
+  if ! mv -f "$wa_tmp" "$wa_real" 2>/dev/null; then
+    rm -f "$wa_tmp" 2>/dev/null; trap - EXIT INT TERM HUP; return 1
+  fi
+  trap - EXIT INT TERM HUP
+  return 0
+}
+
+# --------------------------------------------------------------------------- ledger
+#
+# ledger_ensure_horizon() in bin/skillforge runs before every append there and states where
+# the record begins. A ledger whose FIRST row is a note with no horizon reads as "complete
+# from here", which is false. Rather than duplicate that function -- two implementations of
+# "what does this ledger not know" is exactly one too many -- this calls
+# `skillforge horizon`, which is that function behind a case arm.
+#
+# Best-effort in both directions. skillforge is looked for beside this script first (the
+# checkout and the user's bin directory both put them side by side) and then on PATH; if it
+# is absent, or older than this subcommand and exits non-zero, THE NOTE IS APPENDED ANYWAY.
+# A note is worth more than a horizon row, and a CLI that recorded nothing because a
+# sibling was out of date teaches the caller to stop calling it -- the same argument
+# `--trigger` settles by recording the gap rather than refusing.
+ensure_horizon() {
+  eh_f="$(dirname "$SELF")/skillforge"
+  if [ ! -x "$eh_f" ]; then eh_f="$(command -v skillforge 2>/dev/null)" || eh_f=""; fi
+  [ -n "$eh_f" ] || return 0
+  "$eh_f" horizon >/dev/null 2>&1 || true
+  return 0
+}
+
+ledger_append() { # <action> <kind> <id> <scope> <target> <text> <why> <source> <project> [readback]
+  mkdir -p "$STATE_ROOT" 2>/dev/null || return 0
+  la_line="$(jq -n -c \
+    --arg action "$1" --arg kind "$2" --arg id "$3" --arg scope "$4" \
+    --arg target "$5" --arg text "$6" --arg why "$7" --arg source "$8" \
+    --arg project "$9" --arg readback "${10:-}" \
+    --arg session "${CLAUDE_CODE_SESSION_ID:-}" --argjson ts "$(now)" \
+    '{event:"note", action:$action, ts:$ts, id:$id, kind:$kind, scope:$scope,
+      text:$text, project:$project, confidence:"measured", backfilled:false}
+     + (if $target   == "" then {} else {target:   $target}   end)
+     + (if $why      == "" then {} else {why:      $why}      end)
+     + (if $source   == "" then {} else {source:   $source}   end)
+     + (if $readback == "" then {} else {readback: $readback} end)
+     + (if $session  == "" then {} else {session:  $session}  end)' 2>/dev/null)"
+  [ -n "$la_line" ] || return 0
+  ensure_horizon
+  # `2>/dev/null` BEFORE the `>>`, and the order is the whole point: redirections are
+  # applied left to right, so written the other way round the append is opened first and a
+  # failure to open it is reported by the SHELL to a stderr that is still the terminal --
+  # the suppression that looks like it is there does nothing.
+  printf '%s\n' "$la_line" 2>/dev/null >> "$LEDGER" || return 0
+  return 0
+}
+
+# ------------------------------------------------------------------- the marker block
+#
+# ONE BLOCK PER FILE, EVER.
+#
+#   <!-- skillnote:begin -->
+#   ## Notes (skill-compounder)
+#
+#   - **2026-09-02** <one readable sentence> <!-- id:n... source:verdict why:"..." -->
+#   <!-- skillnote:end -->
+#
+# The id lives in a trailing HTML comment so it renders as nothing and greps as a fixed
+# string, and `--why` goes in there too rather than into the visible line: the line stays
+# one sentence a person can read. `remove` deletes exactly the line whose comment carries
+# the id and touches nothing else in the block, a user's own prose included.
+#
+# `why` is written LAST in the comment on purpose. The reader below takes it as "everything
+# between why:\" and the LAST quote before the close", which no embedded quote can break.
+BEGIN_MARK='<!-- skillnote:begin -->'
+END_MARK='<!-- skillnote:end -->'
+
+# A file with TWO blocks is a merge accident, and guessing which one to append to loses
+# notes into a block nobody reads. Named line numbers, and a refusal.
+check_single_block() { # <resolved path>
+  [ -f "$1" ] || return 0
+  csb_lines="$(grep -n -F "$BEGIN_MARK" "$1" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')"
+  csb_n="$(printf '%s' "$csb_lines" | wc -w | tr -d ' ')"
+  case "$csb_n" in ''|*[!0-9]*) csb_n=0 ;; esac
+  [ "$csb_n" -le 1 ] && return 0
+  die "$1 has $csb_n '$BEGIN_MARK' markers, at lines $(printf '%s' "$csb_lines" | sed 's/ *$//; s/ /, /g'). One block per file: merge them by hand, then run this again. Nothing was written."
+}
+
+esc_why() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+build_line() { # <date> <text> <id> <source> <why>
+  bl="- **$1** $2 <!-- id:$3 "
+  [ -n "$4" ] && bl="${bl}source:$4 "
+  [ -n "$5" ] && bl="${bl}why:\"$(esc_why "$5")\" "
+  printf '%s-->' "$bl"
+}
+
+insert_line() { # <file to read, or /dev/null> <the built line> <output file>
+  SN_LINE="$2" SN_BEGIN="$BEGIN_MARK" SN_END="$END_MARK" awk '
+    BEGIN { line = ENVIRON["SN_LINE"]; b = ENVIRON["SN_BEGIN"]; e = ENVIRON["SN_END"];
+            placed = 0; last = "" }
+    { if (!placed && index($0, e) > 0) { print line; placed = 1 }
+      last = $0; print }
+    END {
+      if (!placed) {
+        if (NR > 0 && last != "") print ""
+        print b
+        print "## Notes (skill-compounder)"
+        print ""
+        print line
+        print e
+      }
+    }' "$1" > "$3" 2>/dev/null
+}
+
+# --------------------------------------------------------------------- reminder store
+#
+# Append-only, and read with the same tombstone rule hooks/remind.sh applies: an id with a
+# `{"t":"remove"}` row later than its `created` is gone. The live hit count is DERIVED by
+# counting <state>/remind/hits.jsonl rather than stored, because the hook that records a
+# hit must never rewrite this file.
+live_reminders() {
+  [ -f "$REMINDERS" ] && [ -r "$REMINDERS" ] || { printf '[]'; return 0; }
+  jq -s -R '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) | select(type == "object") ]
+    | . as $rows
+    | (reduce $rows[] as $r ({}; if ($r.t // "") == "remove" and ($r.id // "") != ""
+                                 then .[$r.id] = (($r.ts // 0) | tonumber) else . end)) as $dead
+    | [ $rows[] | select((.t // "") != "remove") | select(.id != null)
+        | select(($dead[.id] // -1) < ((.created // 0) | tonumber)) ]
+    | unique_by(.id)' "$REMINDERS" 2>/dev/null || printf '[]'
+}
+
+hit_counts() {
+  [ -f "$HITS" ] && [ -r "$HITS" ] || { printf '{}'; return 0; }
+  jq -s -R '[ split("\n")[] | select(length > 0) | (fromjson? // empty)
+              | select(type == "object") | .id | strings ]
+            | group_by(.) | map({key: .[0], value: length}) | from_entries' "$HITS" 2>/dev/null \
+    || printf '{}'
+}
+
+# THE NORMALISER IS NOT REIMPLEMENTED HERE. hooks/repeat-gate.sh owns the masking rules
+# that decide when two commands are the same call, and a second copy of those rules is a
+# second set of rules that will disagree with the first. `--norm-of` is that script's
+# read-only door, the same shape `--verdict-of` is in hooks/session-review.sh.
+norm_of_bash() { # <literal command> -> the normalised signature, or fails
+  nb_gate="$(dirname "$SELF")/../hooks/repeat-gate.sh"
+  [ -x "$nb_gate" ] || return 1
+  nb_out="$(printf '%s' "$1" | "$nb_gate" --norm-of Bash 2>/dev/null)" || return 1
+  [ -n "$nb_out" ] || return 1
+  printf '%s' "$nb_out"
+}
+
+# ------------------------------------------------------------------------------- add
+cmd_add() {
+  scope="project"; text=""; why=""; source=""; remind=0
+  kw=""; pg=""; cm=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope)   [ $# -ge 2 ] || die "--scope needs a value"; scope="$2"; shift 2 ;;
+      --why)     [ $# -ge 2 ] || die "--why needs a value"; why="$2"; shift 2 ;;
+      --source)  [ $# -ge 2 ] || die "--source needs a value"; source="$2"; shift 2 ;;
+      --project) [ $# -ge 2 ] || die "--project needs a directory"; PROJECT_OPT="$2"; shift 2 ;;
+      --remind)  remind=1; shift ;;
+      --keyword) [ $# -ge 2 ] && [ -n "$2" ] || die "--keyword needs a value"
+                 kw="$kw$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+"; shift 2 ;;
+      --path)    [ $# -ge 2 ] && [ -n "$2" ] || die "--path needs a glob"
+                 pg="$pg$2
+"; shift 2 ;;
+      --command) [ $# -ge 2 ] && [ -n "$2" ] || die "--command needs a command"
+                 cm="$cm$2
+"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      --) shift; while [ $# -gt 0 ]; do text="$text${text:+ }$1"; shift; done ;;
+      -*) die "unknown option '$1' (try: skillnote --help)" ;;
+      *)  text="$text${text:+ }$1"; shift ;;
+    esac
+  done
+
+  text="$(printf '%s' "$text" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  [ -n "$text" ] || die "add needs the note text: skillnote add --scope project \"<the one-line lesson>\""
+
+  case "$scope" in
+    project|global|memory) : ;;
+    *) die "unknown --scope '$scope'. The three are: project, global, memory (list also takes 'remind')." ;;
+  esac
+
+  if [ "$remind" = "1" ]; then
+    [ "$scope" = "memory" ] && die "--remind --scope memory: a memory file is not a reminder store. Reminders live in $REMINDERS and are matched by hooks/remind.sh; use --scope project or --scope global."
+    [ -n "$kw$pg$cm" ] || die "--remind needs at least one --keyword, --path or --command. A reminder with no match rule never fires and is invisible, which is worse than a note."
+    add_reminder
+    return $?
+  fi
+  add_note
+}
+
+add_reminder() {
+  ar_scope="global"
+  [ "$scope" = "project" ] && ar_scope="$(project_root)"
+  ar_id="$(idof "remind|$ar_scope|$text")"
+
+  # A `commands` entry is the tool name, a newline, and the signature -- the shape
+  # compute_call() in hooks/repeat-gate.sh keys on -- so the list CANNOT be carried in a
+  # newline-separated shell variable the way keywords and paths are. It is accumulated as
+  # a JSON array instead, one jq call per --command, which is at most a handful.
+  #
+  # `--command` is the one flag whose whole meaning lives in another script. If that door
+  # is not there, REFUSING is the honest answer: storing the literal command as if it were
+  # a signature builds a reminder that silently never fires, which is the failure the
+  # --remind refusal above exists to prevent.
+  ar_cmds='[]'
+  if [ -n "$cm" ]; then
+    while IFS= read -r ar_c; do
+      [ -n "$ar_c" ] || continue
+      ar_n="$(norm_of_bash "$ar_c")" || die3 "--command needs 'hooks/repeat-gate.sh --norm-of Bash', and this checkout's repeat-gate does not answer it (looked at $(dirname "$SELF")/../hooks/repeat-gate.sh). A literal command stored as if it were a signature would never match anything. Use --keyword or --path, or update the checkout."
+      ar_cmds="$(printf '%s' "$ar_cmds" | jq -c --arg e "$(printf 'Bash\n%s' "$ar_n")" '. + [$e]' 2>/dev/null)"
+      [ -n "$ar_cmds" ] || die "could not build the command list (is jq healthy?)"
+    done <<CMDEOF
+$cm
+CMDEOF
+  fi
+
+  if [ -n "$(live_reminders | jq -r --arg id "$ar_id" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]; then
+    echo "skillnote: already recorded ($ar_id)"
+    return 0
+  fi
+
+  # `-c` is load-bearing, not a style choice: this store is JSONL and every reader --
+  # `live_reminders` here, and hooks/remind.sh -- takes one row per line. A pretty-printed
+  # row parses as eleven unparseable lines, so the reminder simply vanishes with no error.
+  ar_row="$(printf '%s' "$kw" | jq -c -R -s --arg id "$ar_id" --arg text "$text" \
+      --arg scope "$ar_scope" --arg source "$source" --argjson created "$(now)" \
+      --arg paths "$pg" --argjson cmds "$ar_cmds" \
+      'def lines: split("\n") | map(select(length > 0));
+       {id:$id, text:$text,
+        match:{keywords: lines, paths: ($paths | lines), commands: $cmds},
+        scope:$scope, created:$created, hits:0}
+       + (if $source == "" then {} else {source:$source} end)' 2>/dev/null)"
+  [ -n "$ar_row" ] || die "could not build the reminder row (is jq healthy?)"
+
+  mkdir -p "$STATE_ROOT" 2>/dev/null || die3 "cannot create $STATE_ROOT"
+  printf '%s\n' "$ar_row" 2>/dev/null >> "$REMINDERS" || die3 "cannot append to $REMINDERS"
+  ledger_append add reminder "$ar_id" "$ar_scope" "$REMINDERS" "$text" "$why" "$source" "$(project_root)"
+  echo "skillnote: reminder recorded ($ar_id) in $REMINDERS"
+  return 0
+}
+
+add_note() {
+  an_root="$(project_root)"
+  case "$scope" in
+    project) an_target="$an_root/.claude/CLAUDE.md" ;;
+    global)  an_target="$(claude_dir)/CLAUDE.md" ;;
+    memory)  add_memory_note "$an_root"; return $? ;;
+  esac
+
+  an_id="$(idof "$scope|$text")"
+  an_real="$(resolve_link "$an_target")"
+  if [ -f "$an_real" ] && grep -q -F "id:$an_id " "$an_real" 2>/dev/null; then
+    echo "skillnote: already recorded ($an_id)"
+    return 0
+  fi
+  check_single_block "$an_real"
+
+  mkdir -p "$(dirname "$an_target")" 2>/dev/null || die3 "cannot create $(dirname "$an_target")"
+  an_line="$(build_line "$(fmt_date "$(now)")" "$text" "$an_id" "$source" "$why")"
+  an_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
+  trap 'rm -f "$an_tmp" 2>/dev/null' EXIT INT TERM HUP
+  # /dev/null rather than creating the target first: a compose that fails must not leave an
+  # empty CLAUDE.md where there was no file at all.
+  an_src="$an_real"; [ -f "$an_real" ] || an_src=/dev/null
+  insert_line "$an_src" "$an_line" "$an_tmp"
+  if [ ! -s "$an_tmp" ]; then
+    rm -f "$an_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+    die3 "could not compose the new $an_target"
+  fi
+  backup_file "$an_target" >/dev/null
+  if ! write_atomic "$an_target" "$an_tmp"; then
+    rm -f "$an_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+    die3 "cannot write $an_target"
+  fi
+  rm -f "$an_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+  ledger_append add note "$an_id" "$scope" "$an_target" "$text" "$why" "$source" "$an_root"
+  echo "skillnote: recorded ($an_id) in $an_target"
+  return 0
+}
+
+# The memory scope REFUSES rather than creating <transcripts>/<slug>/. The slug transform
+# is measured only for paths carrying no dot and no space, so a directory built from a
+# guessed slug is a directory Claude Code will never read -- worse than saying no, because
+# it looks like it worked.
+add_memory_note() { # <project root>
+  am_root="$1"
+  am_slug="$(slug_of "$am_root")"
+  am_proj="$TRANSCRIPTS/$am_slug"
+  [ -d "$am_proj" ] || die3 "no such project directory: $am_proj (slug '$am_slug', computed from $am_root). Claude Code creates it the first time a session runs in that directory; this refuses rather than create one it would never read."
+  am_dir="$am_proj/memory"
+  mkdir -p "$am_dir" 2>/dev/null || die3 "cannot create $am_dir"
+  am_index="$am_dir/MEMORY.md"
+  am_name="$(name_of "$text")"
+  am_file="$am_dir/$am_name.md"
+  am_id="$(idof "memory|$text")"
+
+  # Dedup on the `(<filename>.md)` substring, which is what the index line is keyed by --
+  # and the index is the only thing a later session actually reads.
+  if [ -f "$am_index" ] && grep -q -F "($am_name.md)" "$am_index" 2>/dev/null; then
+    echo "skillnote: already recorded ($am_id)"
+    return 0
+  fi
+
+  am_desc="$why"; [ -n "$am_desc" ] || am_desc="$text"
+  am_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
+  trap 'rm -f "$am_tmp" 2>/dev/null' EXIT INT TERM HUP
+  # THE FRONTMATTER IS CLAUDE CODE'S FORMAT, NOT OURS. Read off a real memory file and
+  # recorded in docs/CLAUDE-CODE-BEHAVIOR.md; the description is quoted by jq's @json so a
+  # quote or a backslash in it cannot break the YAML.
+  {
+    printf -- '---\n'
+    printf 'name: %s\n' "$am_name"
+    printf 'description: %s\n' "$(printf '%s' "$am_desc" | jq -R -s -r 'rtrimstr("\n") | @json')"
+    printf 'metadata:\n'
+    printf '  node_type: memory\n'
+    printf '  type: project\n'
+    [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && printf '  originSessionId: %s\n' "$CLAUDE_CODE_SESSION_ID"
+    printf '  modified: %s\n' "$(fmt_iso_ms "$(now)")"
+    printf -- '---\n\n'
+    printf '%s\n' "$text"
+    [ -n "$why" ] && { printf '\n'; printf '%s\n' "$why"; }
+    printf '\n<!-- id:%s ' "$am_id"
+    [ -n "$source" ] && printf 'source:%s ' "$source"
+    printf -- '-->\n'
+  } > "$am_tmp" 2>/dev/null
+
+  backup_file "$am_file" >/dev/null
+  if ! write_atomic "$am_file" "$am_tmp"; then
+    rm -f "$am_tmp" 2>/dev/null; trap - EXIT INT TERM HUP; die3 "cannot write $am_file"
+  fi
+
+  # The index line, in Claude Code's own shape. EM DASH, not a hyphen: read off a real
+  # MEMORY.md, and this line is the whole of what a later session is handed for free.
+  am_title="$(printf '%s' "$text" | cut -c1-60 | sed 's/[[:space:]]*$//')"
+  am_line="- [$am_title]($am_name.md)"
+  [ -n "$why" ] && am_line="$am_line — $why"
+  : > "$am_tmp" 2>/dev/null
+  [ -f "$am_index" ] && cat "$am_index" >> "$am_tmp" 2>/dev/null
+  printf '%s\n' "$am_line" >> "$am_tmp"
+  backup_file "$am_index" >/dev/null
+  if ! write_atomic "$am_index" "$am_tmp"; then
+    rm -f "$am_tmp" 2>/dev/null; trap - EXIT INT TERM HUP; die3 "cannot write $am_index"
+  fi
+  rm -f "$am_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+
+  # readback:"via-index" is a MEASUREMENT and not a hope: docs/CLAUDE-CODE-BEHAVIOR.md.
+  ledger_append add note "$am_id" memory "$am_file" "$text" "$why" "$source" "$am_root" via-index
+  echo "skillnote: recorded ($am_id) in $am_file, indexed in $am_index"
+  return 0
+}
+
+# ------------------------------------------------------------------------------ remove
+cmd_remove() {
+  rm_id="${1:-}"
+  [ -n "$rm_id" ] || die "remove needs an id: skillnote remove <id>  ('skillnote list' prints them)"
+  case "$rm_id" in -*) die "remove takes an id, not an option" ;; esac
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) [ $# -ge 2 ] || die "--project needs a directory"; PROJECT_OPT="$2"; shift 2 ;;
+      *) die "unknown option '$1'" ;;
+    esac
+  done
+  rm_root="$(project_root)"
+  rm_hit=0
+
+  for rm_scope in project global; do
+    if [ "$rm_scope" = "project" ]; then rm_target="$rm_root/.claude/CLAUDE.md"
+    else rm_target="$(claude_dir)/CLAUDE.md"; fi
+    rm_real="$(resolve_link "$rm_target")"
+    [ -f "$rm_real" ] || continue
+    grep -q -F "id:$rm_id " "$rm_real" 2>/dev/null || continue
+    rm_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
+    SN_NEEDLE="id:$rm_id " awk 'BEGIN { n = ENVIRON["SN_NEEDLE"] } index($0, n) == 0 { print }' \
+      "$rm_real" > "$rm_tmp" 2>/dev/null
+    backup_file "$rm_target" >/dev/null
+    if ! write_atomic "$rm_target" "$rm_tmp"; then
+      rm -f "$rm_tmp" 2>/dev/null; die3 "cannot write $rm_target"
+    fi
+    rm -f "$rm_tmp" 2>/dev/null
+    echo "skillnote: removed $rm_id from $rm_target"
+    rm_hit=1
+    ledger_append remove note "$rm_id" "$rm_scope" "$rm_target" "" "" "" "$rm_root"
+  done
+
+  # A memory note is a whole file, so it is copied aside with the backup prefix before it
+  # goes: "nothing is ever destructively removed" is this package's rule, and a note the
+  # user can no longer produce is exactly what that rule is about.
+  rm_mdir="$TRANSCRIPTS/$(slug_of "$rm_root")/memory"
+  if [ -d "$rm_mdir" ]; then
+    for rm_f in "$rm_mdir"/*.md; do
+      [ -f "$rm_f" ] || continue
+      case "$rm_f" in */MEMORY.md) continue ;; esac
+      grep -q -F "id:$rm_id " "$rm_f" 2>/dev/null || continue
+      rm_base="$(basename "$rm_f")"
+      backup_file "$rm_f" >/dev/null
+      rm -f "$rm_f" 2>/dev/null
+      if [ -f "$rm_mdir/MEMORY.md" ]; then
+        rm_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
+        SN_NEEDLE="($rm_base)" awk 'BEGIN { n = ENVIRON["SN_NEEDLE"] } index($0, n) == 0 { print }' \
+          "$rm_mdir/MEMORY.md" > "$rm_tmp" 2>/dev/null
+        backup_file "$rm_mdir/MEMORY.md" >/dev/null
+        write_atomic "$rm_mdir/MEMORY.md" "$rm_tmp" || true
+        rm -f "$rm_tmp" 2>/dev/null
+      fi
+      echo "skillnote: removed $rm_id from $rm_f"
+      rm_hit=1
+      ledger_append remove note "$rm_id" memory "$rm_f" "" "" "" "$rm_root"
+    done
+  fi
+
+  # THE REMINDER IS TOMBSTONED, NEVER REWRITTEN. See the header.
+  if [ -n "$(live_reminders | jq -r --arg id "$rm_id" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]; then
+    rm_row="$(jq -n -c --arg id "$rm_id" --argjson ts "$(now)" '{id:$id, t:"remove", ts:$ts}' 2>/dev/null)"
+    if [ -n "$rm_row" ]; then
+      mkdir -p "$STATE_ROOT" 2>/dev/null || true
+      printf '%s\n' "$rm_row" 2>/dev/null >> "$REMINDERS" || die3 "cannot append to $REMINDERS"
+      echo "skillnote: tombstoned reminder $rm_id in $REMINDERS"
+      rm_hit=1
+      ledger_append remove reminder "$rm_id" "" "$REMINDERS" "" "" "" "$rm_root"
+    fi
+  fi
+
+  [ "$rm_hit" = "1" ] && return 0
+  die "no note or reminder with id '$rm_id'. Looked in $rm_root/.claude/CLAUDE.md, $(claude_dir)/CLAUDE.md, $rm_mdir and $REMINDERS."
+}
+
+# -------------------------------------------------------------------------------- list
+#
+# FIELDS ARE ONE PER LINE, not separated by a control character. Every value read back here
+# comes off a single markdown line, so none of them can contain a newline, and a fixed
+# stride is both simpler and immune to the separator turning up inside a note.
+parse_file() { # <scope> <configured path> -> a JSON array
+  pf_real="$(resolve_link "$2")"
+  [ -f "$pf_real" ] || { printf '[]'; return 0; }
+  SN_BEGIN="$BEGIN_MARK" SN_END="$END_MARK" awk '
+    function unesc(s) { gsub(/\\"/, "\"", s); gsub(/\\\\/, "\\", s); return s }
+    BEGIN { inb = 0; b = ENVIRON["SN_BEGIN"]; e = ENVIRON["SN_END"] }
+    index($0, b) > 0 { inb = 1; next }
+    index($0, e) > 0 { inb = 0; next }
+    inb == 1 {
+      p = index($0, "<!-- id:")
+      if (p == 0) next
+      head = substr($0, 1, p - 1)
+      tail = substr($0, p + 8)
+      q = index(tail, " ")
+      if (q == 0) next
+      id = substr(tail, 1, q - 1)
+      rest = substr(tail, q + 1)
+      src = ""
+      s = index(rest, "source:")
+      if (s > 0) { t = substr(rest, s + 7); u = index(t, " "); src = (u > 0 ? substr(t, 1, u - 1) : t) }
+      why = ""
+      w = index(rest, "why:\"")
+      if (w > 0) {
+        t = substr(rest, w + 5); v = 0
+        for (i = length(t); i > 0; i--) if (substr(t, i, 1) == "\"") { v = i; break }
+        if (v > 1) why = unesc(substr(t, 1, v - 1))
+      }
+      date = ""
+      if (match(head, /\*\*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\*\*/)) {
+        date = substr(head, RSTART + 2, 10)
+        body = substr(head, RSTART + RLENGTH)
+      } else { body = head; sub(/^- */, "", body) }
+      sub(/^ */, "", body); sub(/ *$/, "", body)
+      print id; print date; print body; print src; print why
+    }' "$pf_real" 2>/dev/null \
+  | jq -R -s --arg scope "$1" --arg target "$2" '
+      (rtrimstr("\n")) as $s
+      | (if $s == "" then [] else ($s | split("\n")) end) as $f
+      | [ range(0; (($f | length) / 5) | floor) as $i
+          | {kind:"note", scope:$scope, target:$target,
+             id:    $f[$i*5],
+             date:  (if $f[$i*5+1] == "" then null else $f[$i*5+1] end),
+             text:  $f[$i*5+2],
+             source:(if $f[$i*5+3] == "" then null else $f[$i*5+3] end),
+             why:   (if $f[$i*5+4] == "" then null else $f[$i*5+4] end)} ]' 2>/dev/null \
+  || printf '[]'
+}
+
+memory_rows() { # <memory dir> -> a JSON array
+  [ -d "$1" ] || { printf '[]'; return 0; }
+  mr_out='[]'
+  for mr_f in "$1"/*.md; do
+    [ -f "$mr_f" ] || continue
+    case "$mr_f" in */MEMORY.md) continue ;; esac
+    # Three fields, one per line: the id, the source, and the first line of the BODY --
+    # the note itself. `fm` counts the `---` fences so the body starts after the second,
+    # which is what keeps a `description:` from being reported as the note's text.
+    mr_one="$(awk '
+      BEGIN { id = ""; src = ""; body = ""; fm = 0 }
+      /^---$/ { fm++; next }
+      { p = index($0, "<!-- id:")
+        if (p > 0) {
+          t = substr($0, p + 8); q = index(t, " ")
+          if (q > 0) {
+            id = substr(t, 1, q - 1); rest = substr(t, q + 1)
+            s = index(rest, "source:")
+            if (s > 0) { u = substr(rest, s + 7); v = index(u, " ")
+                         src = (v > 0 ? substr(u, 1, v - 1) : u) } }
+          next }
+        if (fm >= 2 && body == "" && $0 != "") body = $0 }
+      END { if (id != "") { print id; print src; print body } }' "$mr_f" 2>/dev/null)"
+    [ -n "$mr_one" ] || continue
+    mr_out="$(printf '%s' "$mr_one" | jq -R -s --arg f "$mr_f" --argjson prev "$mr_out" '
+        (rtrimstr("\n") | split("\n")) as $f2
+        | $prev + [{kind:"note", scope:"memory", target:$f, id:$f2[0],
+                    source:(if ($f2[1] // "") == "" then null else $f2[1] end),
+                    text:(if ($f2[2] // "") == "" then null else $f2[2] end),
+                    date:null, why:null}]' 2>/dev/null)"
+    [ -n "$mr_out" ] || mr_out='[]'
+  done
+  printf '%s' "$mr_out"
+}
+
+cmd_list() {
+  want=""; json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope)   [ $# -ge 2 ] || die "--scope needs a value"; want="$2"; shift 2 ;;
+      --project) [ $# -ge 2 ] || die "--project needs a directory"; PROJECT_OPT="$2"; shift 2 ;;
+      --json)    json=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option '$1' (try: skillnote --help)" ;;
+    esac
+  done
+  case "$want" in
+    ''|project|global|memory|remind) : ;;
+    *) die "unknown --scope '$want'. For list the four are: project, global, memory, remind." ;;
+  esac
+
+  cl_root="$(project_root)"
+  cl_all='[]'
+  cl_add() { cl_all="$(printf '%s' "$cl_all" | jq -c --argjson more "${1:-[]}" '. + $more' 2>/dev/null)"
+             [ -n "$cl_all" ] || cl_all='[]'; }
+
+  [ -z "$want" ] || [ "$want" = "project" ] && cl_add "$(parse_file project "$cl_root/.claude/CLAUDE.md")"
+  [ -z "$want" ] || [ "$want" = "global" ]  && cl_add "$(parse_file global "$(claude_dir)/CLAUDE.md")"
+  [ -z "$want" ] || [ "$want" = "memory" ]  && cl_add "$(memory_rows "$TRANSCRIPTS/$(slug_of "$cl_root")/memory")"
+  if [ -z "$want" ] || [ "$want" = "remind" ]; then
+    cl_rem="$(live_reminders | jq -c --argjson hits "$(hit_counts)" '
+        map({kind:"reminder", scope:.scope, target:"reminders.jsonl", id:.id, text:.text,
+             source:(.source // null), why:null, date:null,
+             match:.match, created:.created, hits:($hits[.id] // 0)})' 2>/dev/null)"
+    [ -n "$cl_rem" ] || cl_rem='[]'
+    cl_add "$cl_rem"
+  fi
+
+  if [ "$json" = "1" ]; then printf '%s' "$cl_all" | jq '.'; return 0; fi
+
+  cl_n="$(printf '%s' "$cl_all" | jq -r 'length' 2>/dev/null)"
+  case "$cl_n" in ''|*[!0-9]*) cl_n=0 ;; esac
+  if [ "$cl_n" -eq 0 ]; then
+    echo "No notes or reminders recorded${want:+ for scope '$want'}."
+    echo "  project: $cl_root/.claude/CLAUDE.md"
+    echo "  global:  $(claude_dir)/CLAUDE.md"
+    echo "  memory:  $TRANSCRIPTS/$(slug_of "$cl_root")/memory"
+    echo "  remind:  $REMINDERS"
+    return 0
+  fi
+  printf '%s' "$cl_all" | jq -r '
+    .[] | (.id + "  " + (.kind // "note") + "  " + (.scope // "?")
+           + (if .date then "  " + .date else "" end)
+           + "  " + ((.text // ("(" + (.target // "?") + ")")) | .[0:100])
+           + (if .kind == "reminder" then "  [hits " + ((.hits // 0) | tostring) + "]" else "" end))' \
+    2>/dev/null
+  return 0
+}
+
+sub="${1:-}"
+[ $# -gt 0 ] && shift
+case "$sub" in
+  add)    cmd_add "$@" ;;
+  list)   cmd_list "$@" ;;
+  remove) cmd_remove "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) echo "skillnote: unknown subcommand '$sub'" >&2; usage >&2; exit 2 ;;
+esac
+exit
+
+}

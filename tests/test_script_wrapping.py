@@ -53,6 +53,9 @@ REQUIRE_WRAPPED = (
     "hooks/session-review.sh",
     "hooks/insight-capture.sh",
     "hooks/compound-improvement.sh",
+    # Wired on UserPromptSubmit AND on PreToolUse Bash|Write|Edit, so it is delivered more
+    # often than any other hook here -- twice per tool call under both wirings at once.
+    "hooks/remind.sh",
     "statusline/statusline.sh",
     "statusline/skillforge-status.sh",
     # The CLIs are symlinked into the user's bin directory and run out of this checkout,
@@ -63,6 +66,9 @@ REQUIRE_WRAPPED = (
     "bin/skillforge",
     "bin/skillreport",
     "bin/skillinsight",
+    # Writes a CLAUDE.md through a backup, a temp file and a rename. Resuming at a saved
+    # byte offset in the middle of that is how a half-written CLAUDE.md gets left behind.
+    "bin/skillnote",
 )
 
 # Shipped scripts that are NOT wrapped, each with the reason it is tolerated. EMPTY as of

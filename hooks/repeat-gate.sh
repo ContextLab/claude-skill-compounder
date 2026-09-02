@@ -359,7 +359,15 @@ ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$ROOT/repeats"
 STORE="$DIR/index.jsonl"
 
-[ "$ENABLED" = "0" ] && exit 0
+# THE OFF SWITCH STOPS THE GATE, NOT THE SHARED NORMALISER. `--norm-of` is a pure
+# function of its stdin -- it reads no store, writes no row and denies nothing --
+# and hooks/remind.sh calls it to decide whether a command matches a reminder. A user
+# who turns this gate off must not silently turn off command matching in a DIFFERENT
+# hook, with nothing on any surface to say why it stopped.
+case "${1:-}" in
+  --norm-of) ;;
+  *) [ "$ENABLED" = "0" ] && exit 0 ;;
+esac
 command -v jq >/dev/null 2>&1 || exit 0
 
 # Shape AND magnitude guards on every tunable. A non-numeric value from a typo'd export
@@ -402,31 +410,59 @@ payload="$(cat)"
 
 jqr() { printf '%s' "$payload" | jq -r "$1" 2>/dev/null; }
 
-event="$(jqr '.hook_event_name // empty')"
-case "$event" in
-  PreToolUse|PostToolUse|PostToolUseFailure) ;;
-  *) exit 0 ;;
+# ------------------------------------------------------------------ --norm-of
+# THE NORMALISER, REACHABLE ON ITS OWN. Precedent: `--verdict-of` in
+# hooks/session-review.sh, which exists so a test can drive a parser with real text.
+# This one exists for a second reason as well: hooks/remind.sh matches a `commands`
+# rule by BYTE EQUALITY against a signature, and a second implementation of these
+# five masking rules would drift from this one invisibly -- the symptom is a reminder
+# that quietly stops firing, with both copies looking correct.
+#
+# Usage: the raw command (Bash) or the tool_input JSON (any other tool) on STDIN,
+#        the tool name as the argument. Prints the norm and exits. Touches no store.
+#
+# It is read from `payload` because that is what already holds stdin: the arm sits
+# below the normalisers it calls, and moving those above the payload read would put
+# 90 lines of reasoning about the five rules in front of the first thing the script
+# does. The four guards between here and there are skipped rather than satisfied with
+# invented values, so nothing downstream can read a session id or an event name this
+# mode never had.
+NORM_OF=""
+case "${1:-}" in
+  --norm-of) NORM_OF="${2:-}"; [ -z "$NORM_OF" ] && exit 2 ;;
 esac
 
-now="${REPEAT_GATE_NOW:-}"
-case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
-case "$now" in ''|*[!0-9]*) exit 0 ;; esac
+if [ -z "$NORM_OF" ]; then
+  event="$(jqr '.hook_event_name // empty')"
+  case "$event" in
+    PreToolUse|PostToolUse|PostToolUseFailure) ;;
+    *) exit 0 ;;
+  esac
+fi
 
-# A row with no session cannot be counted per-session, and the whole gate is a count of
-# distinct sessions. Fail open rather than invent one.
-sid="$(jqr '.session_id // empty')"
-[ -z "$sid" ] && exit 0
-sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+if [ -z "$NORM_OF" ]; then
+  now="${REPEAT_GATE_NOW:-}"
+  case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
+  case "$now" in ''|*[!0-9]*) exit 0 ;; esac
 
-tool="$(jqr '.tool_name // empty')"
-[ -z "$tool" ] && exit 0
+  # A row with no session cannot be counted per-session, and the whole gate is a count of
+  # distinct sessions. Fail open rather than invent one.
+  sid="$(jqr '.session_id // empty')"
+  [ -z "$sid" ] && exit 0
+  sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
 
-tuid="$(jqr '.tool_use_id // empty')"
-[ -n "$tuid" ] && tuid="$(printf '%s' "$tuid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  tool="$(jqr '.tool_name // empty')"
+  [ -z "$tool" ] && exit 0
 
-TMP="$(mktemp -d 2>/dev/null)" || exit 0
-cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
-trap cleanup EXIT
+  tuid="$(jqr '.tool_use_id // empty')"
+  [ -n "$tuid" ] && tuid="$(printf '%s' "$tuid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+
+  TMP="$(mktemp -d 2>/dev/null)" || exit 0
+  cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
+  trap cleanup EXIT
+else
+  tool="$NORM_OF"
+fi
 
 # ------------------------------------------------------------------- normalisation
 # Rule 5 from the header: bare integers, and it runs TWICE.
@@ -518,6 +554,24 @@ norm_structured() {
 # CRC-32 plus byte length. BSD and GNU `cksum` agree on both fields for stdin, and both
 # print them whitespace-separated, which is why awk reads them rather than `cut`.
 hashof() { printf '%s' "$1" | cksum 2>/dev/null | awk '{printf "%sx%s", $1, $2}'; }
+
+# The `--norm-of` arm, below every function it uses and above every line that writes.
+# The 500-character cap is `compute_call`'s, applied here for the same reason: the
+# caller must get the signature this gate WOULD have computed, cap included, or byte
+# equality against a stored one is a coin flip on long commands.
+if [ -n "$NORM_OF" ]; then
+  if [ "$tool" = "Bash" ]; then
+    printf '%s\n' "$(norm_bash "$(printf '%s' "$payload" | cut -c1-500)")"
+  else
+    # A structured tool's signature is computed from `.tool_input`, so stdin is that
+    # object and it is wrapped into the shape norm_structured reads. Invalid JSON
+    # leaves `payload` empty, which prints nothing -- the same silence every other
+    # unusable input in this script produces.
+    payload="$(printf '%s' "$payload" | jq -c '{tool_input: .}' 2>/dev/null)"
+    [ -n "$payload" ] && printf '%s\n' "$(norm_structured)"
+  fi
+  exit 0
+fi
 
 # Populates: cmd (the raw call, capped, for display) and norm (the normalised call).
 # Returns 1 when there is nothing to key on, which every caller treats as fail-open.

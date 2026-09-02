@@ -133,6 +133,12 @@
 #   $ROOT/reviews/.unread                   what hooks/compound-improvement.sh surfaces
 #   $ROOT/reviews/staging/<name>/           a stage-2 forge's output. NEVER installed.
 #
+# And one output that is NOT under $ROOT: on a CANDIDATE verdict, emit_index_and_unread()
+# calls `bin/skillnote add --scope project`, which appends one line to the reviewed
+# project's own .claude/CLAUDE.md. That is the cheap tier -- both paid-for CANDIDATE
+# verdicts before it produced a name and no artifact -- and it is best-effort on every
+# path. It costs no model call and cannot fail the dispatch.
+#
 # A report is written on every completed dispatch, including "nothing here clears the
 # bar" -- which is the common case and must stay cheap to produce and cheap to read.
 # A dispatch that fails is written down too, with its stderr, because a trigger that
@@ -480,6 +486,27 @@ emit_index_and_unread() {
   # A count and a path, nothing a shell has to parse.
   ( printf '%s\t%s\t%s\n' "$TS" "$ei_verdict${ei_name:+ $ei_name}" "$ei_report" \
       >> "$REVIEWS/.unread" ) 2>/dev/null
+  # THE CHEAP TIER, ON A VERDICT THAT NAMED SOMETHING. Both paid-for CANDIDATE verdicts
+  # this arm has ever returned produced NO artifact: the name reached index.jsonl and
+  # .unread, and nothing else in the toolchain ever saw it. `skillnote` turns it into one
+  # line in the project's own .claude/CLAUDE.md, which costs no model call.
+  #
+  # `--project "$PROJECT"` because this script is DETACHED and runs after its session
+  # ended, so its $PWD names nothing at all -- that is the reason skillnote has the flag.
+  # Idempotent twice over: STAGE1_FLUSHED above means this body runs once per dispatch,
+  # and skillnote's own id dedup means a repeat writes neither a line nor a ledger row.
+  # No recursion risk -- skillnote makes no model call. And non-fatal on every path, for
+  # the same reason the announcement above is: a dispatch that spent the quota is recorded
+  # even if every other thing about it failed.
+  if [ "$ei_verdict" = "CANDIDATE" ] && [ -n "$ei_name" ]; then
+    ei_note="$(dirname "$0")/../bin/skillnote"
+    [ -x "$ei_note" ] || ei_note="$(command -v skillnote 2>/dev/null)" || ei_note=""
+    if [ -n "$ei_note" ]; then
+      "$ei_note" add --scope project --project "$PROJECT" --source verdict \
+        "session review: candidate '$ei_name'" --why "see $ei_report" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   return 0
 }
 

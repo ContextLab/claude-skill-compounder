@@ -65,8 +65,10 @@ what got built answers them.
 |`hooks/repeat-gate.sh`|**Refuses.** Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it denies the third attempt once and says what to do instead. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
+|`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
-|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`)|
+|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic|
+|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
 |`bin/skillinsight`|Reads and prunes the candidate queue|
 |`bin/skillcontrib`|The read-only reconnaissance behind `contribute-skill`: duplicate check, push-access check, preflight|
@@ -731,7 +733,7 @@ denominator altogether.
 
 ### What the ledger records
 
-`ledger.jsonl` is built to answer four questions, and to say so when it cannot:
+`ledger.jsonl` is built to answer six questions, and to say so when it cannot:
 
 |Question|Row|
 |-|-|
@@ -739,13 +741,18 @@ denominator altogether.
 |What was built|`origin`: one row per skill, with its directory and whether we ship it|
 |Used since|`use`: one row per invocation, written live by the `Skill` hook|
 |Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it|
+|What was written down instead of forged|`note`: one row per `skillnote` entry, with its scope, its target file and its id. A second `add` of the same text writes no row|
+|What an extra red-team round cost|`escalate`: one row per round bought past a forge's budget, carrying the blocking counts that bought it and the round budget before and after|
+
+`note` and `escalate` are invisible to every reader written before them: each reader picks
+its events by name, and no selector lists either one.
 
 A single `horizon` row records where the record begins, because a ledger holding nothing
 before Tuesday says nothing whatever about Monday. A row reconstructed after the fact
 carries `backfilled:true`, `confidence:"reconstructed"` and a `source` naming the evidence
 it was read from, and stays distinguishable from a live row forever.
 
-`skillreport skills` prints all four per skill, with probe and test traffic kept on its
+`skillreport skills` prints the first four per skill, with probe and test traffic kept on its
 own line instead of mixed into the count of genuine use. The default table above is
 unchanged: it counts invocations recovered from transcripts, this view counts ledger rows,
 and the two are never added together.
@@ -793,13 +800,19 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
-All twenty-six are environment variables, and they are not the whole set — this prints every
-name any shipped script reads:
+All thirty are environment variables, and they are not the whole set — this prints every
+name any shipped script reads, 99 of them:
 
 ```bash
-grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?' \
+grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
   hooks/*.sh bin/* statusline/*.sh | sort -u
 ```
+
+The closing `\b` arrived with `REMIND`, and it is not decoration. The suffix group is
+optional, so without it a bare prefix also matches the start of a longer word: `$REMINDERS`
+in `hooks/insight-capture.sh` printed `REMIND`, and `$INSIGHTS_DIR` in
+`hooks/compound-improvement.sh` had been printing `INSIGHT` the whole time. Neither is a
+name any script reads.
 
 Most of what that prints is an internal budget or a clock pin the test suite freezes. The
 ones below are not all read by the same component, so they do not all go in the same
@@ -828,6 +841,10 @@ place in `~/.claude/settings.json`:
 |`DOC_GATE_CODE_EXCLUDE`|*(empty)*|the hook entries|An ERE; a path matching it counts as neither code nor documentation. `^tests?/` is the first knob to reach for if the gate is too loud|
 |`SKILL_COMPOUNDER_APPLY_GATE`|`1`|the hook entries|Set to `0` to switch the apply gate off entirely — a closed forge leaves no debt to answer|
 |`APPLY_GATE_WINDOW`|`86400`|the hook entries|Seconds after a forge closes during which its apply debt still blocks the turn|
+|`SKILL_COMPOUNDER_REMIND`|`1`|the hook entries|Set to `0` to switch reminder delivery off entirely — recorded reminders stay on disk and nothing states them back|
+|`REMIND_MAX`|`2`|the hook entries|Most reminders delivered in one event, highest-scoring first|
+|`REMIND_COOLDOWN`|`0`|the hook entries|Seconds before a reminder that has fired may fire again in the same session. `0` means once per session|
+|`REMIND_MAX_ROWS`|`2000`|the hook entries|Lines read from the tail of the reminder store and of the hit log|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILLFORGE_IDLE_SECS`|`2700`|the top-level `env` block|Age past which a forge nothing has stepped is called idle. **Two components read it** — the status line and `skillforge list` — so setting it anywhere narrower makes them disagree about whether a forge is dead|
 |`SKILLFORGE_ACTIVE_TTL`|`21600`|the top-level `env` block|Seconds of **idle** time, measured since the last `step`, past which an `active` forge is presumed dead: `skillforge doctor` says WARN, `skillforge reap` writes it the `fail` row it never got, and `start` on that name reaps it rather than refusing|
@@ -841,6 +858,9 @@ The `CLAIM_GATE_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables, and every `REPEAT
 `hooks/doc-gate.sh`, `hooks/apply-gate.sh`, `hooks/repeat-gate.sh` — so each belongs on
 that script's own hook entries and nowhere else. Each of the four gates also takes an off
 switch, and setting one to `0` disables that gate completely rather than making it quieter.
+`REMIND_MAX`, `REMIND_COOLDOWN`, `REMIND_MAX_ROWS` and `SKILL_COMPOUNDER_REMIND` follow the
+same rule, with `hooks/remind.sh` as their only reader, so they go on both of its entries —
+the `UserPromptSubmit` one and the `PreToolUse` one — and nowhere else.
 
 **`REPEAT_MIN_SESSIONS` is the exception, and it is the one to get wrong.** Three
 components read it — `hooks/repeat-gate.sh`, which decides, and `bin/skillrepeat` and

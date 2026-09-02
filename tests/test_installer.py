@@ -263,6 +263,95 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn("PreToolUse", s.get("hooks", {}),
                          "an event key we created must not be left behind empty")
 
+    def test_the_reminder_hook_is_wired_to_both_of_its_events(self):
+        """Two events, one entry each, and the PreToolUse matcher covers all three tools.
+
+        Splitting the tool arm into `Bash` and `Write|Edit` entries would deliver the same
+        event twice for the same work; the script dispatches on `.tool_name` instead.
+        """
+        self.do_install()
+        s = self.read()
+        pre = [(g.get("matcher"), h["command"]) for g in s["hooks"]["PreToolUse"]
+               for h in g["hooks"] if "remind.sh" in h["command"]]
+        self.assertEqual(len(pre), 1, "the tool arm must be wired exactly once")
+        self.assertEqual(pre[0][0], "Bash|Write|Edit")
+        ups = [(g.get("matcher"), h["command"]) for g in s["hooks"]["UserPromptSubmit"]
+               for h in g["hooks"] if "remind.sh" in h["command"]]
+        self.assertEqual(len(ups), 1, "the prompt arm must be wired exactly once")
+        self.assertIsNone(ups[0][0],
+                          "UserPromptSubmit has nothing to match on")
+        for g in s["hooks"]["PreToolUse"] + s["hooks"]["UserPromptSubmit"]:
+            for h in g["hooks"]:
+                if "remind.sh" in h["command"]:
+                    self.assertEqual(h["timeout"], 10)
+
+    def test_the_reminder_hook_is_wired_after_the_gates_that_can_deny(self):
+        """Order is load-bearing: tests/test_plugin.py compares the two wirings'
+        matcher lists POSITIONALLY, so a reordering here is a drift failure there."""
+        self.do_install()
+        pre = [h["command"] for g in self.read()["hooks"]["PreToolUse"] for h in g["hooks"]]
+        names = [c.rsplit("/", 1)[-1].strip('"') for c in pre]
+        self.assertEqual(names, ["claim-gate.sh", "doc-gate.sh", "repeat-gate.sh",
+                                 "remind.sh"])
+
+    def test_installing_twice_leaves_one_reminder_entry_per_event(self):
+        self.do_install()
+        self.do_install()
+        s = self.read()
+        for event in ("UserPromptSubmit", "PreToolUse"):
+            found = [h for g in s["hooks"][event] for h in g["hooks"]
+                     if "remind.sh" in h["command"]]
+            self.assertEqual(len(found), 1, "%s grew a duplicate entry" % event)
+
+    def test_the_reminder_hook_is_removed_from_both_events(self):
+        self.do_install()
+        self.do_uninstall()
+        s = self.read()
+        for event in ("UserPromptSubmit", "PreToolUse"):
+            self.assertFalse(any("remind.sh" in h["command"]
+                                 for g in s.get("hooks", {}).get(event, [])
+                                 for h in g["hooks"]),
+                             "the reminder hook survived uninstall on %s" % event)
+
+    def test_a_users_own_prompt_hook_survives_beside_the_reminder(self):
+        self.write_settings({"hooks": {"UserPromptSubmit": [FOREIGN_HOOK]}})
+        self.do_install()
+        cmds = [h["command"] for g in self.read()["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        self.assertTrue(any("other/tool.py" in c for c in cmds))
+        self.assertTrue(any("remind.sh" in c for c in cmds))
+        self.do_uninstall()
+        cmds = [h["command"] for g in self.read()["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        self.assertEqual([c for c in cmds if "other/tool.py" in c], cmds,
+                         "uninstall must leave another tool's prompt hook as it found it")
+
+    def test_a_checkout_without_the_reminder_hook_still_installs(self):
+        """The package must stay installable from a checkout older than any one
+        component; refusing turns a partial upgrade into no upgrade at all."""
+        home = self.make_checkout_without("remind.sh")
+        installer.install(home, str(self.claude), str(self.bin), str(self.state))
+        s = self.read()
+        for event in ("UserPromptSubmit", "PreToolUse"):
+            self.assertFalse(any("remind.sh" in h["command"]
+                                 for g in s["hooks"][event] for h in g["hooks"]),
+                             "%s wired a script this checkout does not carry" % event)
+        self.assertTrue(any("compound-improvement.sh" in h["command"]
+                            for g in s["hooks"]["UserPromptSubmit"] for h in g["hooks"]),
+                        "the rest of the wiring must still be installed")
+
+    def test_a_stale_reminder_entry_is_stripped_by_a_checkout_without_it(self):
+        """The strip runs before any append, so an entry left by a newer checkout is
+        removed rather than left pointing at a file that is gone."""
+        self.do_install()
+        home = self.make_checkout_without("remind.sh")
+        installer.install(home, str(self.claude), str(self.bin), str(self.state))
+        s = self.read()
+        for event in ("UserPromptSubmit", "PreToolUse"):
+            self.assertFalse(any("remind.sh" in h["command"]
+                                 for g in s["hooks"][event] for h in g["hooks"]),
+                             "a stale %s entry was left orphaned" % event)
+
     def test_a_foreign_pretooluse_hook_survives_install_and_uninstall(self):
         """PreToolUse is the event a user is most likely to already be using: it is where
         permission rules live. Ours must land beside theirs and leave with only itself."""
