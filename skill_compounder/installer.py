@@ -21,6 +21,11 @@ What gets wired:
 * ``hooks.Stop``                 -> claim-gate.sh                  (the same check on the
                                                                     closing message)
 * ``statusLine``              -> statusline.sh                    (forge animation)
+* ``CLAUDE.md``               -> the doctrine stanza              (inside a marker block,
+                                                                    so the habits the
+                                                                    hooks name are
+                                                                    written where the
+                                                                    model reads them)
 * ``skills/<name>``           -> one symlink per skill in the repo's ``skills/``
 * ``~/.local/bin/<name>``     -> one symlink per executable in the repo's ``bin/``
 
@@ -137,13 +142,14 @@ def _jsontype(value):
 
 # --------------------------------------------------------------------------- settings
 
-def _real_settings_path(path):
-    """The regular file a settings path ultimately names.
+def _real_file_path(path):
+    """The regular file a configured path ultimately names.
 
-    stow, chezmoi and hand-rolled dotfiles all present ``settings.json`` as a symlink
-    into a dotfiles repo. ``os.replace`` onto the link would delete it and leave a
-    regular file, orphaning the source with exit 0 and no warning, so every write
-    resolves the link first and writes *through* it.
+    stow, chezmoi and hand-rolled dotfiles all present ``settings.json`` -- and
+    ``CLAUDE.md``, which is the same kind of file to the same tools -- as a symlink into
+    a dotfiles repo. ``os.replace`` onto the link would delete it and leave a regular
+    file, orphaning the source with exit 0 and no warning, so every write resolves the
+    link first and writes *through* it.
     """
     p = Path(path)
     if not p.is_symlink():
@@ -189,8 +195,11 @@ def _our_backups(p):
     return sorted(p.parent.glob(p.name + BACKUP_PREFIX + "*"))
 
 
-def backup_settings(path):
-    """Copy settings.json aside before we touch it. Returns the backup path or None.
+def backup_file(path):
+    """Copy a file we are about to rewrite aside. Returns the backup path or None.
+
+    Used for ``settings.json`` and for ``CLAUDE.md``: both are files of the user's that
+    this package edits in place, and both deserve the same stamped copy first.
 
     The copy lands beside the *configured* path rather than beside a dotfiles source,
     so a symlinked settings.json does not sprinkle backups through someone's git repo.
@@ -198,7 +207,7 @@ def backup_settings(path):
     ever pruned.
     """
     p = Path(path)
-    real = _real_settings_path(p)
+    real = _real_file_path(p)
     if not real.exists():
         return None
     content = real.read_bytes()
@@ -228,21 +237,22 @@ def backup_settings(path):
     return str(dest)
 
 
-def write_settings(path, settings):
-    """Write settings.json atomically, so an interrupted install cannot leave a
-    truncated file (a malformed settings.json disables every setting in it).
+def write_text_file(path, text):
+    """Write ``text`` atomically, so an interrupted install cannot leave a truncated
+    file (a malformed settings.json disables every setting in it, and a half-written
+    CLAUDE.md is prose the model reads as if it were finished).
 
     Writes through a symlink rather than over it: the temp file is created beside the
     resolved target so ``os.replace`` stays on one filesystem and the link survives.
     """
-    real = _real_settings_path(path)
+    real = _real_file_path(path)
     real.parent.mkdir(parents=True, exist_ok=True)
     # A fixed temp name lets two concurrent runs interleave their bytes in one file and
     # then rename the result into place, so the name is unique per writer.
     fd, tmp = tempfile.mkstemp(prefix=real.name + ".tmp-", dir=str(real.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(settings, indent=2) + "\n")
+            fh.write(text)
         os.chmod(tmp, 0o600 if not real.exists() else stat.S_IMODE(real.stat().st_mode))
         os.replace(tmp, str(real))
     except BaseException:
@@ -250,6 +260,221 @@ def write_settings(path, settings):
             os.unlink(tmp)
         raise
 
+
+def write_settings(path, settings):
+    """settings.json, through write_text_file above."""
+    write_text_file(path, json.dumps(settings, indent=2) + "\n")
+
+
+# --------------------------------------------------------------------------- doctrine
+#
+# The hooks fire reminders that name three habits ("check for an existing skill first",
+# "notice what is costly AND recurring", "never work around a misfiring skill"). Until
+# this section existed, those habits were written down in exactly one place: a stanza the
+# author had hand-typed into his own ~/.claude/CLAUDE.md. Every other installation got the
+# reminders and not the doctrine, so a hook was telling a session to apply a rule the
+# session had never been given. Wiring the behaviour without the rule it refers to is the
+# defect; this writes the rule where the model actually reads it.
+#
+# It goes into <claude-dir>/CLAUDE.md between two HTML comment markers, and the block is
+# the unit: replaced in place on the next install, removed whole on uninstall, and
+# invisible when the file is rendered. Anything outside the markers is the user's and is
+# never rewritten.
+
+DOCTRINE_FILE = "CLAUDE.md"
+DOCTRINE_START = "<!-- claude-skill-compounder:doctrine:start -->"
+DOCTRINE_END = "<!-- claude-skill-compounder:doctrine:end -->"
+# The heading the stanza opens with, and the one thing that says a user has already
+# written this doctrine down by hand. See install_doctrine().
+DOCTRINE_HEADING = "## Compound Improvement"
+
+# The doctrine itself, and the only copy of it in this repository. README.md describes
+# what gets written and points here rather than restating it, because a second copy is a
+# second thing to keep in step and the one nobody edits is the one a reader finds first.
+# `{app_home}` is substituted with this checkout's path -- the stanza names the clone
+# twice, and a hardcoded ~/claude-skill-compounder is wrong for anyone who cloned
+# somewhere else.
+DOCTRINE_TEXT = """\
+## Compound Improvement
+
+Every session should leave the toolchain measurably better than it found it, so the same
+problem is never solved from scratch twice. The full protocol lives in the
+**`skill-compounder`** skill (installed from https://github.com/ContextLab/claude-skill-compounder,
+clone at `{app_home}`). Invoke the skill rather than working from memory —
+it is the single source of truth and it evolves.
+
+Three standing habits, so the recognition can fire without loading the skill first:
+
+1. **Before any major implementation**, check whether an existing skill already solves it
+   before writing a plan or any code.
+2. **During work**, watch for procedures that are BOTH costly — you can name the specific
+   dead end in one sentence — AND recurring, meaning you can point at the second
+   occurrence. Both need a concrete referent, not a judgement: if either sentence is hard
+   to write, that is the answer. Both, or it gets a note instead of a skill.
+3. **When a skill misfires**, never silently work around it: fix the wording, or fix the
+   procedure and re-red-team it, or retire it — retirement only with independent
+   concurrence from a second fresh agent asked a neutral question.
+
+When any of these fires, invoke `skill-compounder` and follow it exactly. It carries the
+builder/red-team loop, the `skillforge` progress animation, and the retirement protocol.
+The loop runs in an orchestrator subagent, not in the main thread: announce it, start the
+forge, hand it off, and close it when the orchestrator reports. The red-teamer must never
+be a fork of either layer — not of the orchestrator that dispatches it, and not of the
+session that dispatched the orchestrator. A forked reviewer already knows what the skill
+was meant to say, so it cannot find the ambiguity that will bite a cold session later; each
+round needs a genuinely new reviewer, because after round one the previous one is no longer
+cold.
+
+Two hooks in `settings.json` surface these reminders automatically during long sessions
+(they point at `{app_home}/hooks/compound-improvement.sh`). If they become
+noise, tune `CI_EDIT_EVERY` / `CI_PROMPT_COOLDOWN` / `CI_PROMPT_MIN_CHARS` there rather
+than disabling them.
+"""
+
+
+def doctrine_path(claude_dir):
+    return Path(claude_dir) / DOCTRINE_FILE
+
+
+def render_doctrine(app_home):
+    """The block exactly as it is written to disk, with no trailing newline."""
+    body = DOCTRINE_TEXT.replace("{app_home}", str(app_home)).strip("\n")
+    return "%s\n%s\n%s" % (DOCTRINE_START, body, DOCTRINE_END)
+
+
+UNTERMINATED = "unterminated"
+
+
+def _doctrine_span(text):
+    """Where our block sits in ``text``: (start, end), None, or ``UNTERMINATED``.
+
+    A start marker with no end is not a block we may guess the extent of. Appending a
+    fresh one would nest a block inside a block and removing "the block" would take an
+    unknown amount of the user's file with it, so that case is reported and left alone.
+    """
+    i = text.find(DOCTRINE_START)
+    if i < 0:
+        return None
+    j = text.find(DOCTRINE_END, i)
+    if j < 0:
+        return UNTERMINATED
+    return (i, j + len(DOCTRINE_END))
+
+
+def _doctrine_enabled(explicit=None):
+    """An explicit False -- what a `--no-doctrine` flag would pass -- beats the
+    environment; both default to on, because the reminders ship on and the rule they
+    name has to ship with them."""
+    if explicit is not None:
+        return bool(explicit)
+    value = os.environ.get("SKILL_COMPOUNDER_DOCTRINE", "").strip().lower()
+    return value not in ("0", "no", "off", "false")
+
+
+def install_doctrine(claude_dir, app_home, manifest, enabled=None):
+    """Put the doctrine block in <claude-dir>/CLAUDE.md. Returns one report sentence.
+
+    Four outcomes, all recorded in the manifest under ``doctrine`` so uninstall knows
+    what it is undoing:
+
+    * ``installed``   -- the block was written, or was already byte-for-byte current.
+    * ``user-owned``  -- the file already carries a `## Compound Improvement` section of
+      its own, outside our markers. That is the author's own machine, and it is the
+      common case for anyone who followed the README before this existed. Appending
+      would give them the doctrine twice, so nothing is written.
+    * ``declined``    -- --no-doctrine / SKILL_COMPOUNDER_DOCTRINE=0.
+    * ``left-alone``  -- an unterminated marker; see _doctrine_span.
+
+    Never raises for the file's contents: a CLAUDE.md we do not understand is a reason
+    to leave it alone and say so, not a reason to fail an install that is otherwise fine.
+    """
+    path = doctrine_path(claude_dir)
+    if not _doctrine_enabled(enabled):
+        manifest["doctrine"] = "declined"
+        # Both causes named, because either one can be the reason and the report cannot
+        # tell them apart: `--no-doctrine` reaches here as `enabled=False` and the
+        # variable reaches here as an unset `enabled`. Naming only the variable told a
+        # user who passed the flag that something in their environment had done it.
+        return ("not written (opted out: --no-doctrine or "
+                "SKILL_COMPOUNDER_DOCTRINE=0)")
+
+    real = _real_file_path(path)
+    existed = real.exists()
+    text = real.read_text(encoding="utf-8") if existed else ""
+    span = _doctrine_span(text)
+    if span == UNTERMINATED:
+        manifest["doctrine"] = "left-alone"
+        return ("LEFT ALONE: %s carries %s with no matching end marker, so where our "
+                "block stops cannot be known. Close it or delete it and run this again."
+                % (path, DOCTRINE_START))
+
+    # The heading is looked for OUTSIDE our own block, or our own copy would be read as
+    # the user's on every install after the first and the block would never be updated.
+    outside = text if span is None else text[:span[0]] + text[span[1]:]
+    if DOCTRINE_HEADING in outside:
+        manifest["doctrine"] = "user-owned"
+        return ("left to you: %s already has its own '%s' section, so nothing was added"
+                % (path, DOCTRINE_HEADING))
+
+    block = render_doctrine(app_home)
+    if span is None:
+        head = text.rstrip("\n")
+        new = (head + "\n\n" if head else "") + block + "\n"
+    else:
+        new = text[:span[0]] + block + text[span[1]:]
+
+    manifest["doctrine"] = "installed"
+    if not existed:
+        manifest["doctrine_created"] = True
+    elif "doctrine_created" not in manifest:
+        manifest["doctrine_created"] = False
+    if new == text:
+        # Byte-identical: no write, so no backup either. A run that changes nothing
+        # should not push a real pre-install copy out of the ten we keep.
+        return "%s (already current)" % path
+    backup = backup_file(path)
+    write_text_file(path, new)
+    return "%s (%s)" % (path, "backup %s" % backup if backup else "created")
+
+
+def remove_doctrine(claude_dir, manifest):
+    """Take our block back out, and nothing else. Returns one report sentence."""
+    path = doctrine_path(claude_dir)
+    real = _real_file_path(path)
+    if not real.exists():
+        return "(no %s)" % path
+    text = real.read_text(encoding="utf-8")
+    span = _doctrine_span(text)
+    if span is None:
+        return "no block of ours in %s; left alone" % path
+    if span == UNTERMINATED:
+        return ("LEFT ALONE: %s carries %s with no matching end marker; remove it by "
+                "hand." % (path, DOCTRINE_START))
+
+    prefix = text[:span[0]].rstrip("\n")
+    suffix = text[span[1]:].lstrip("\n")
+    if prefix and suffix:
+        new = prefix + "\n\n" + suffix
+    elif prefix:
+        new = prefix + "\n"
+    else:
+        new = suffix
+
+    backup = backup_file(path)
+    created = bool(manifest.get("doctrine_created"))
+    # Delete only a file that is ours to delete: we created it, nothing of anyone else's
+    # is left in it, and it is a regular file. A symlink here means the user pointed the
+    # name at a dotfiles repo after we made the file, and unlinking the target would take
+    # a file we never created.
+    if created and not new.strip() and not path.is_symlink():
+        real.unlink()
+        removed = "%s removed (we created it and nothing else was in it)" % path
+    else:
+        write_text_file(path, new)
+        removed = "block removed from %s" % path
+    manifest.pop("doctrine", None)
+    manifest.pop("doctrine_created", None)
+    return removed + ("" if not backup else "; backup %s" % backup)
 
 # ------------------------------------------------------------------------- preflight
 
@@ -308,7 +533,8 @@ def _executable_problems(app_home):
     return problems
 
 
-def preflight(claude_dir, bin_dir, state_dir, settings_path, app_home=None):
+def preflight(claude_dir, bin_dir, state_dir, settings_path, app_home=None,
+              doctrine=None):
     """Check everything install needs *before* it changes anything.
 
     A read-only bin directory used to raise after the hooks, the status line and every
@@ -321,13 +547,18 @@ def preflight(claude_dir, bin_dir, state_dir, settings_path, app_home=None):
                      ("the skills directory", Path(claude_dir) / "skills"),
                      ("the CLI directory", Path(bin_dir)),
                      ("the state directory", Path(state_dir)),
-                     ("the settings directory", _real_settings_path(settings_path).parent)):
+                     ("the settings directory", _real_file_path(settings_path).parent)):
         reason = _probe_writable(d)
         if reason:
             problems.append("%s: %s" % (label, reason))
-    real = _real_settings_path(settings_path)
+    real = _real_file_path(settings_path)
     if real.exists() and not os.access(str(real), os.W_OK):
         problems.append("settings.json is not writable: %s" % real)
+    if _doctrine_enabled(doctrine):
+        md = _real_file_path(doctrine_path(claude_dir))
+        if md.exists() and not os.access(str(md), os.W_OK):
+            problems.append("CLAUDE.md is not writable: %s (or install with "
+                            "SKILL_COMPOUNDER_DOCTRINE=0)" % md)
     problems.extend(_executable_problems(app_home) if app_home else [])
     if problems:
         raise InstallError("nothing was installed, because:\n  - " + "\n  - ".join(problems))
@@ -1234,7 +1465,7 @@ def adopt_origins(app_home, claude_dir, state_dir, manifest=None):
 
 # ------------------------------------------------------------------- install/uninstall
 
-def install(app_home, claude_dir, bin_dir, state_dir=None):
+def install(app_home, claude_dir, bin_dir, state_dir=None, doctrine=None):
     app_home = str(Path(app_home).resolve())
     claude_dir = Path(claude_dir)
     state_dir = str(state_dir or DEFAULT_STATE)
@@ -1242,7 +1473,7 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
 
     # Everything that can be checked is checked before anything is applied.
     settings = validate_settings(read_settings(settings_path))
-    preflight(claude_dir, bin_dir, state_dir, settings_path, app_home)
+    preflight(claude_dir, bin_dir, state_dir, settings_path, app_home, doctrine)
     # Which event keys are the user's, so uninstall can put back exactly what it found.
     # Read together with the manifest: a reinstall must not adopt the keys the first
     # install created.
@@ -1250,7 +1481,7 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
         settings, read_manifest(state_dir).get("preexisting_hook_events") or ())
 
     report = {}
-    report["backup"] = backup_settings(settings_path) or "(no existing settings.json)"
+    report["backup"] = backup_file(settings_path) or "(no existing settings.json)"
 
     merge_hooks(settings, app_home)
     install_statusline(settings, app_home, state_dir)
@@ -1262,6 +1493,8 @@ def install(app_home, claude_dir, bin_dir, state_dir=None):
     manifest["claude_dir"] = str(claude_dir)
     manifest["preexisting_hook_events"] = preexisting
     manifest["bin_dir"] = str(bin_dir)
+    # Before write_manifest below, which is what records the outcome this returns.
+    report["doctrine"] = install_doctrine(claude_dir, app_home, manifest, doctrine)
 
     skills = _skill_dirs(app_home)
     clis = _cli_files(app_home)
@@ -1304,10 +1537,10 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
     settings_path = claude_dir / "settings.json"
 
     report = {}
-    report["backup"] = backup_settings(settings_path) or "(no existing settings.json)"
+    report["backup"] = backup_file(settings_path) or "(no existing settings.json)"
     problems = []
 
-    if _real_settings_path(settings_path).exists():
+    if _real_file_path(settings_path).exists():
         try:
             settings = read_settings(settings_path)
         except SettingsShapeError as exc:
@@ -1326,6 +1559,7 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
             report["settings"] = str(settings_path)
 
     manifest = read_manifest(state_dir)
+    report["doctrine"] = remove_doctrine(claude_dir, manifest)
     skills = _skill_dirs(app_home)
     clis = _cli_files(app_home)
     report["skills"], skill_failures = _unlink_all(skills, claude_dir / "skills",

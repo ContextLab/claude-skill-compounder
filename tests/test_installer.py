@@ -427,5 +427,219 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("not ours", real.read_text(encoding="utf-8"))
 
 
+class DoctrineTest(unittest.TestCase):
+    """The doctrine stanza the hooks refer to, written where the model actually reads it.
+
+    The hooks fire reminders that name three habits; before this existed those habits
+    lived only in a stanza the author had hand-typed into his own ~/.claude/CLAUDE.md, so
+    every other installation got a reminder pointing at a rule it had never been given.
+
+    Nothing here hardcodes the stanza. The expected bytes come from
+    `installer.render_doctrine(APP_HOME)`, so rewording the doctrine does not fail these
+    tests -- only losing it, duplicating it, or failing to take it back out does.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.claude = root / "claude"
+        self.bin = root / "bin"
+        self.state = root / "state"
+        self.claude.mkdir()
+        self.bin.mkdir()
+        self.md = self.claude / "CLAUDE.md"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def do_install(self, **kw):
+        return installer.install(APP_HOME, str(self.claude), str(self.bin),
+                                 str(self.state), **kw)
+
+    def do_uninstall(self):
+        return installer.uninstall(APP_HOME, str(self.claude), str(self.bin),
+                                   str(self.state))
+
+    def manifest(self):
+        return json.loads((self.state / "install-manifest.json").read_text(encoding="utf-8"))
+
+    def block(self):
+        return installer.render_doctrine(APP_HOME)
+
+    def backups(self):
+        return sorted(p.name for p in self.claude.iterdir()
+                      if p.name.startswith("CLAUDE.md" + installer.BACKUP_PREFIX))
+
+    # ---------------------------------------------------------------- install
+
+    def test_a_fresh_claude_directory_gets_the_block(self):
+        rep = self.do_install()
+        self.assertTrue(self.md.exists(), "install wrote no CLAUDE.md at all")
+        text = self.md.read_text(encoding="utf-8")
+        self.assertIn(self.block(), text)
+        self.assertIn(installer.DOCTRINE_HEADING, text)
+        # The habits the hooks name, so a reminder cannot point at a rule that is absent.
+        for habit in ("Before any major implementation", "During work",
+                      "When a skill misfires"):
+            self.assertIn(habit, text, "the doctrine lost the habit %r" % habit)
+        self.assertIn(str(self.md), rep["doctrine"])
+        self.assertEqual(self.manifest()["doctrine"], "installed")
+        self.assertIs(self.manifest()["doctrine_created"], True)
+
+    def test_the_checkout_path_is_substituted_not_left_as_a_placeholder(self):
+        """The stanza names the clone twice. A hardcoded ~/claude-skill-compounder is
+        wrong for anyone who cloned somewhere else, and `{app_home}` is wrong for
+        everyone."""
+        self.do_install()
+        text = self.md.read_text(encoding="utf-8")
+        self.assertNotIn("{app_home}", text)
+        self.assertIn(APP_HOME + "/hooks/compound-improvement.sh", text)
+
+    def test_a_second_install_leaves_the_file_byte_identical(self):
+        self.do_install()
+        first = self.md.read_bytes()
+        self.do_install()
+        self.assertEqual(self.md.read_bytes(), first,
+                         "a second install rewrote CLAUDE.md")
+        self.assertEqual(self.backups(), [],
+                         "a run that changed nothing wrote a backup anyway")
+
+    def test_existing_content_is_preserved_before_and_after_the_block(self):
+        before = "# My own notes\n\nSome rule of mine.\n"
+        after = "\n## A section of mine after it\n\nMore of my words.\n"
+        self.md.write_text(before + "\n" + self.block() + "\n" + after, encoding="utf-8")
+
+        self.do_install()
+        text = self.md.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(before), "content before the block was rewritten")
+        self.assertTrue(text.endswith(after), "content after the block was rewritten")
+        self.assertEqual(text.count(installer.DOCTRINE_START), 1)
+
+        self.do_uninstall()
+        left = self.md.read_text(encoding="utf-8")
+        self.assertNotIn(installer.DOCTRINE_START, left)
+        self.assertIn("Some rule of mine.", left)
+        self.assertIn("More of my words.", left)
+
+    def test_an_existing_file_is_backed_up_before_it_is_touched(self):
+        self.md.write_text("# Mine\n", encoding="utf-8")
+        os.environ["SKILL_COMPOUNDER_NOW"] = "1700000000"
+        try:
+            self.do_install()
+        finally:
+            del os.environ["SKILL_COMPOUNDER_NOW"]
+        saved = self.backups()
+        self.assertEqual(len(saved), 1, "no stamped backup of CLAUDE.md: %s" % saved)
+        self.assertIn("20", saved[0].split(installer.BACKUP_PREFIX)[1][:2])
+        self.assertEqual((self.claude / saved[0]).read_text(encoding="utf-8"), "# Mine\n")
+
+    # ------------------------------------------------------------- user-owned
+
+    def test_a_stanza_the_user_wrote_by_hand_is_detected_and_not_duplicated(self):
+        """The author's own machine: the heading is there, outside any marker of ours.
+        Appending would hand that session the doctrine twice."""
+        mine = ("# Global rules\n\n%s\n\nMy own wording of the habits.\n"
+                % installer.DOCTRINE_HEADING)
+        self.md.write_text(mine, encoding="utf-8")
+
+        rep = self.do_install()
+
+        self.assertEqual(self.md.read_text(encoding="utf-8"), mine,
+                         "a user-owned CLAUDE.md was modified")
+        self.assertNotIn(installer.DOCTRINE_START, self.md.read_text(encoding="utf-8"))
+        self.assertEqual(self.manifest()["doctrine"], "user-owned")
+        self.assertIn("already has its own", rep["doctrine"])
+
+    def test_our_own_block_is_not_read_as_the_users_stanza(self):
+        """The heading is inside our block too. Looking for it across the whole file
+        would make every install after the first report `user-owned` and never update."""
+        self.do_install()
+        self.do_install()
+        self.assertEqual(self.manifest()["doctrine"], "installed")
+
+    def test_an_unterminated_marker_is_left_alone(self):
+        text = "# Mine\n\n%s\nhalf a block\n" % installer.DOCTRINE_START
+        self.md.write_text(text, encoding="utf-8")
+        rep = self.do_install()
+        self.assertEqual(self.md.read_text(encoding="utf-8"), text)
+        self.assertEqual(self.manifest()["doctrine"], "left-alone")
+        self.assertIn("LEFT ALONE", rep["doctrine"])
+
+    # ------------------------------------------------------------- opting out
+
+    def test_no_doctrine_writes_nothing(self):
+        rep = self.do_install(doctrine=False)
+        self.assertFalse(self.md.exists(), "--no-doctrine still wrote CLAUDE.md")
+        self.assertEqual(self.manifest()["doctrine"], "declined")
+        self.assertIn("SKILL_COMPOUNDER_DOCTRINE", rep["doctrine"])
+
+    def test_the_environment_switch_turns_it_off_too(self):
+        os.environ["SKILL_COMPOUNDER_DOCTRINE"] = "0"
+        try:
+            self.do_install()
+        finally:
+            del os.environ["SKILL_COMPOUNDER_DOCTRINE"]
+        self.assertFalse(self.md.exists())
+        self.assertEqual(self.manifest()["doctrine"], "declined")
+
+    # -------------------------------------------------------------- uninstall
+
+    def test_uninstall_removes_only_the_block(self):
+        self.md.write_text("# Mine\n\nkeep me\n", encoding="utf-8")
+        self.do_install()
+        self.assertIn(installer.DOCTRINE_START, self.md.read_text(encoding="utf-8"))
+
+        rep = self.do_uninstall()
+
+        self.assertTrue(self.md.exists(), "a file we did not create was deleted")
+        self.assertEqual(self.md.read_text(encoding="utf-8"), "# Mine\n\nkeep me\n")
+        self.assertIn("block removed", rep["doctrine"])
+        self.assertNotIn("doctrine", self.manifest())
+
+    def test_uninstall_deletes_a_file_it_created_and_nothing_else_is_in(self):
+        self.do_install()
+        self.do_uninstall()
+        self.assertFalse(self.md.exists(),
+                         "the file we created, holding only our block, was left behind")
+
+    def test_uninstall_keeps_a_file_it_created_that_the_user_has_since_written_in(self):
+        self.do_install()
+        self.md.write_text(self.md.read_text(encoding="utf-8") + "\n# Since then\n",
+                           encoding="utf-8")
+        self.do_uninstall()
+        self.assertTrue(self.md.exists())
+        self.assertIn("# Since then", self.md.read_text(encoding="utf-8"))
+        self.assertNotIn(installer.DOCTRINE_START, self.md.read_text(encoding="utf-8"))
+
+    def test_uninstall_leaves_a_claude_md_that_was_never_ours(self):
+        self.md.write_text("# Nothing to do with us\n", encoding="utf-8")
+        rep = self.do_uninstall()
+        self.assertEqual(self.md.read_text(encoding="utf-8"), "# Nothing to do with us\n")
+        self.assertIn("no block of ours", rep["doctrine"])
+
+    # ---------------------------------------------------------------- symlink
+
+    def test_a_symlinked_claude_md_is_written_through_not_over(self):
+        """stow and chezmoi present CLAUDE.md as a link into a dotfiles repo, exactly as
+        they do settings.json. Replacing the link orphans the source with exit 0."""
+        dotfiles = Path(self.tmp.name) / "dotfiles"
+        dotfiles.mkdir()
+        source = dotfiles / "CLAUDE.md"
+        source.write_text("# from dotfiles\n", encoding="utf-8")
+        self.md.symlink_to(source)
+
+        self.do_install()
+
+        self.assertTrue(self.md.is_symlink(), "the symlink was replaced by a real file")
+        self.assertEqual(os.path.realpath(str(self.md)), os.path.realpath(str(source)))
+        self.assertIn(self.block(), source.read_text(encoding="utf-8"))
+        self.assertTrue(source.read_text(encoding="utf-8").startswith("# from dotfiles"))
+
+        self.do_uninstall()
+
+        self.assertTrue(self.md.is_symlink(), "uninstall replaced the symlink")
+        self.assertEqual(source.read_text(encoding="utf-8"), "# from dotfiles\n")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

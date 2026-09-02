@@ -176,6 +176,98 @@ class TheUsesAreAttributed(RenamedSkillCase):
                          "the join matched a skill this forge never produced")
 
 
+class ForgedMoreThanOnce(RenamedSkillCase):
+    """The same join, read the other way round: one NAME with several forge rows.
+
+    `skillreport` matches invocations by name, and a name cannot say which of its forges
+    it belongs to, so every forge row of a name was credited with ALL of that name's uses.
+    Measured on the real ledger before this was fixed: `ai-tell-audit` had three forge rows
+    each reporting the same 4 uses, `finish-task` the same, the harness breakdown printed
+    `finish-task 72` three times, and the headline read "7 of 10 finished forges" over 5
+    distinct skills -- a number inflated on both sides of the fraction at once.
+
+    The unit is the skill, so a name gets one row: its latest SUCCESSFUL forge. Real
+    scripts, real ledger written by the real CLI, real transcript files. No mocks.
+    """
+
+    NAME = "twice-forged"
+
+    def forge_once(self, start, end, outcome="done"):
+        r = self.forge("start", self.NAME, "8", "a thing",
+                       "--trigger", "t", "--trigger-kind", "agent-decision", now=start)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.forge(outcome, "ok" if outcome == "done" else "gave up", now=end)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def uses(self, n, at=T0 + 5000):
+        d = self.transcripts / "-Users-me-proj"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "sess.jsonl").write_text(
+            "\n".join(json.dumps(use_record(self.NAME, at + i * 60, PROJ, "toolu_%d" % i),
+                                 separators=(",", ":")) for i in range(n)) + "\n",
+            encoding="utf-8")
+
+    def rows(self, out):
+        return [l for l in out.splitlines() if l.startswith(self.NAME)]
+
+    def test_a_name_forged_twice_gets_one_row_not_two(self):
+        self.forge_once(T0, T0 + 600)
+        self.forge_once(T0 + 1000, T0 + 1600)
+        self.uses(2)
+        out = self.report()
+        self.assertEqual(len(self.rows(out)), 1,
+                         "one skill printed once per forge, so its uses are credited "
+                         "once per forge too:\n" + out)
+
+    def test_the_denominator_counts_skills_not_forge_rows(self):
+        self.forge_once(T0, T0 + 600)
+        self.forge_once(T0 + 1000, T0 + 1600)
+        self.uses(2)
+        out = self.report()
+        self.assertRegex(out, r"REUSE: 1 of 1 finished forges \(100%\)")
+        self.assertIn("1 of the 2 forge", out,
+                      "the folded row is not reported, so the table silently loses "
+                      "a forge instead of visibly folding it:\n" + out)
+
+    def test_the_uses_are_counted_once(self):
+        self.forge_once(T0, T0 + 600)
+        self.forge_once(T0 + 1000, T0 + 1600)
+        self.uses(2)
+        self.assertEqual(int(self.rows(self.report())[0].split()[-2]), 2,
+                         "the same invocations were credited to more than one forge")
+
+    def test_a_later_failure_does_not_open_the_window_that_counts(self):
+        """The `finish-task` shape from the real ledger: forged and shipped, used, then
+        re-forged twice into failures. Ranking by recency alone measured the uses against
+        a window opened by a forge that produced nothing, and reported 0."""
+        self.forge_once(T0, T0 + 600)                          # the forge that shipped it
+        self.uses(1, at=T0 + 5000)                             # used after that forge
+        self.forge_once(T0 + 9000, T0 + 9600, outcome="fail")  # a later, failed re-forge
+        out = self.report()
+        self.assertEqual(len(self.rows(out)), 1, out)
+        row = self.rows(out)[0]
+        self.assertIn("done", row,
+                      "the failed re-forge stands for the skill, but it built nothing "
+                      "for anyone to invoke:\n" + out)
+        self.assertEqual(int(row.split()[-2]), 1,
+                         "the use was measured against the wrong forge window:\n" + out)
+        self.assertRegex(out, r"REUSE: 1 of 1 finished forges \(100%\)")
+
+    def test_two_different_names_are_still_two_rows(self):
+        """Non-vacuity: the fold must key on the name, not swallow the table."""
+        self.forge_once(T0, T0 + 600)
+        r = self.forge("start", "other-thing", "8", "a thing",
+                       "--trigger", "t", "--trigger-kind", "agent-decision", now=T0 + 2000)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.forge("done", "ok", now=T0 + 2600)
+        out = self.report()
+        self.assertEqual(len(self.rows(out)), 1, out)
+        self.assertTrue([l for l in out.splitlines() if l.startswith("other-thing")], out)
+        self.assertRegex(out, r"REUSE: 0 of 2 finished forges \(0%\)")
+        self.assertNotIn("forge row(s) in the ledger share a name", out,
+                         "nothing was folded, so nothing should say it was:\n" + out)
+
+
 class ItActuallyNeededFixing(RenamedSkillCase):
     """Proof the tests above are not vacuous, run against whatever SKILLREPORT_BIN names.
     Skipped when it points at the working copy, since then there is nothing to contrast."""

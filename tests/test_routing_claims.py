@@ -56,10 +56,11 @@ THE LIMIT, WHICH IS THE MOST IMPORTANT LINE IN THIS FILE
         SKILL_ROUTING_PROBE=1 python3 scripts/probe_routing_claims.py
 
     Six prompts per section, each submitted `--runs N` times (default 3), one real
-    `claude -p --model sonnet --max-turns 3` call per draw, six at a time. ~54 calls per
-    run over the nine pinned skills, so ~162 at the default. It is gated so it can never
-    fire from `./run_tests.sh` or CI, and the model is hardcoded because personal and
-    project skill descriptions were measured ABSENT from the router on haiku.
+    `claude -p --model sonnet --max-turns 3` call per draw, six at a time. The size of
+    that bill is DERIVED here, never restated -- see PROBE_CALLS_PER_RUN below and the
+    skip message it feeds. It is gated so it can never fire from `./run_tests.sh` or CI,
+    and the model is hardcoded because personal and project skill descriptions were
+    measured ABSENT from the router on haiku.
 
     ONE DRAW IS NOT A VERDICT. Routing here is stochastic -- one unchanged description
     gave 3/3, then 1/3, then 2/3 -- so the probe aggregates k/N per prompt and a section
@@ -82,6 +83,16 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 import routing_claims as rc  # noqa: E402
 import probe_routing_claims as probe  # noqa: E402
+
+# WHAT THE LIVE PROBE COSTS, COMPUTED, BECAUSE THE HARDCODED FIGURE WENT STALE. The skip
+# message below said "~54 calls (~162 at --runs 3)" while the real answer was 72 and 216:
+# skills were pinned after the sentence was written and nothing recomputed it, so the one
+# number a person uses to decide whether to spend real quota was wrong by a third. A call
+# is one prompt in one draw, so the only honest source is the prompt list that exists
+# right now -- the same derivation `probe_routing_claims.py` prints when it refuses to
+# run, rather than a second copy of it that can drift away again.
+PROBE_CALLS_PER_RUN = len(probe.prompts_for(rc.all_skills()))
+PROBE_CALLS_DEFAULT = PROBE_CALLS_PER_RUN * probe.RUNS
 
 # Sections whose claims are NOT yet verified against a real session, with why. This is
 # a debt ledger, not an exemption list: it may only ever shrink, and the test below
@@ -614,9 +625,50 @@ class LiveProbeTest(unittest.TestCase):
     """The only test in the repository that verifies a routing claim rather than its
     provenance. Gated: it needs auth and real quota."""
 
+    def test_the_live_probe_is_gated_and_says_what_it_will_cost(self):
+        """This one runs, and it guards two things that have each failed once.
+
+        THE GATE. Inserting a method between the `skipUnless` and the test it guards
+        leaves the expensive test undecorated, and nothing about that looks wrong when
+        you read it: the decorator is still there, still correct, now attached to the
+        wrong function. It was done here while editing the skip message, and an ordinary
+        `python3 tests/test_routing_claims.py` then spent real quota on real `claude -p`
+        calls with nobody having asked for any. So the gate is asserted, not assumed.
+
+        THE FIGURE. The skip message read "~54 calls (~162 at --runs 3)" while the real
+        bill was 72 and 216, because skills were pinned after the sentence was written
+        and nothing recomputed it. A number somebody uses to decide whether to spend real
+        quota may not be a sentence; it has to be the prompt list, read at import.
+        """
+        live = self.test_every_routing_claim_holds_against_a_real_session
+        if os.environ.get("SKILL_ROUTING_PROBE") != "1":
+            self.assertTrue(getattr(live, "__unittest_skip__", False),
+                            "the live probe is NOT gated: an ordinary run of this file "
+                            "would spend %d real `claude -p` calls"
+                            % PROBE_CALLS_DEFAULT)
+        expected = len(probe.prompts_for(rc.all_skills()))
+        self.assertEqual(PROBE_CALLS_PER_RUN, expected)
+        self.assertEqual(PROBE_CALLS_DEFAULT, expected * probe.RUNS)
+        why = getattr(live, "__unittest_skip_why__", "")
+        if why:  # absent when SKILL_ROUTING_PROBE=1 and nothing is being skipped
+            self.assertIn(str(expected), why)
+            self.assertIn(str(expected * probe.RUNS), why)
+        # And the decorator that guards the live test must still be COMPUTING it. Read
+        # the decorator ATTACHED TO THAT DEF, not the whole class: a message that happens
+        # to carry the right digits today because somebody pasted them in is the exact
+        # failure this replaced, and the assertion has to be able to see it.
+        # rsplit, not split: this method's own body names that def, so splitting from
+        # the front cuts at the mention rather than at the definition.
+        head = Path(__file__).read_text().rsplit(
+            "def test_every_routing_claim_holds_against_a_real_session", 1)[0]
+        decorator = head[head.rindex("@unittest.skipUnless"):]
+        self.assertIn("PROBE_CALLS_PER_RUN", decorator)
+        self.assertIn("PROBE_CALLS_DEFAULT", decorator)
+
     @unittest.skipUnless(os.environ.get("SKILL_ROUTING_PROBE") == "1",
-                         "set SKILL_ROUTING_PROBE=1 to spend ~54 real `claude -p` calls "
-                         "per run (~162 at the default --runs 3)")
+                         "set SKILL_ROUTING_PROBE=1 to spend %d real `claude -p` calls "
+                         "per run, x%d runs (%d calls)"
+                         % (PROBE_CALLS_PER_RUN, probe.RUNS, PROBE_CALLS_DEFAULT))
     def test_every_routing_claim_holds_against_a_real_session(self):
         results = probe.probe(rc.all_skills())
         ok = probe.report(results, probe.cli_version())

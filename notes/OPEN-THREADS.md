@@ -1,6 +1,8 @@
 # Open threads
 
-What is actually open, as of **2026-09-01**, on `6b23dd1`. Written so nothing here depends
+What is actually open, as of **2026-09-02**, on `ee7cef5` plus the uncommitted Wave 1 tree
+(`skillforge doctor`/`reap`, `skillinsight reindex`, the installer doctrine block, and the
+`skillreport` counter fix). Written so nothing here depends
 on a session remembering it: every entry carries the command or the path that establishes
 it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
 close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
@@ -158,10 +160,70 @@ What is fixed: the staleness is now reported rather than only computed, by an `I
 and a `!` in `skillforge list`, and the refusal that used to advise `skillforge done` —
 which would have recorded the dead forge as completed — now advises `fail` or `clear`.
 
+Also fixed, in Wave 1: the ledger half. A forge idle past `SKILLFORGE_ACTIVE_TTL` (21600s,
+idle time since its last `step`) is reported WARN by `skillforge doctor`, closed by
+`skillforge reap` with an appended `fail` row naming the TTL, and reaped by `skillforge
+start` on the same name rather than refusing it. So a dead forge no longer counts as never
+closed out and no longer holds its name. `tests/test_forge_staleness.py` and
+`tests/test_doctor.py` cover it.
+
 What is **not** fixed, and is the open part: nothing resumes a forge, and nothing notices
-without a person looking. The mitigation in use is that briefs and round records go to disk
-at the moment they are decided, which is what made the second attempt cheap. A forge whose
-orchestrator dies still costs its rounds.
+on its own — `doctor` and `reap` are both commands somebody has to run. The mitigation in
+use is that briefs and round records go to disk at the moment they are decided, which is
+what made the second attempt cheap. A forge whose orchestrator dies still costs its rounds.
+
+## Open: one live counter file is written in both forms and only a person can repair it
+
+`skillforge doctor` reports **FAIL counters** on this machine and will keep doing so until
+somebody fixes the file by hand:
+
+```bash
+f=~/.claude/skill-compounder/reminders/f0feae4c-834a-409b-8e25-9a2894341168.edits
+wc -c < "$f"        # 902
+head -c 4 "$f"      # 36xx
+```
+
+It holds `36` and then 900 `x` bytes: one session counted as a decimal number, then
+appended to as a unary tally when the hook changed form under it. Neither reader can add
+the halves up — one sees a non-number, the other counts 902 bytes for 936 edits — so those
+edits are lost to every count that uses them. `doctor` reports it rather than repairing it,
+deliberately: the correct total is a judgement about which half is which, and a command
+that guessed would destroy the evidence. What is open is the repair itself and whether
+anything should ever write the other form again.
+
+The branch is reproducible without touching live state — write `36` and 900 `x` bytes into
+`<dir>/reminders/<id>.edits` and run `SKILL_COMPOUNDER_STATE=<dir> skillforge doctor`; it
+prints `FAIL  counters ... these hold a decimal count with a tally appended after it`.
+
+## Open: the `PostToolUseFailure` and `Skill` arms have never been exercised in the wild
+
+`hooks/skill-use.sh` and `hooks/repeat-gate.sh` are both wired on `PostToolUseFailure`, and
+the repeat gate's matcher is `Bash\|Skill`. Every `use` row in the ledger carries
+`ok:true`, so the failure arm of the skill path has never fired on a real event — only in
+tests. Re-derive it rather than quoting a total, because the ledger grows: it was 773 rows
+when `notes/2026-09-02-audit-and-replan.md` measured it and 876 the same day.
+
+```bash
+jq -r 'select(.event=="use") | (.ok|tostring)' ~/.claude/skill-compounder/ledger.jsonl \
+  | sort | uniq -c
+```
+
+Two things follow: no live evidence that a failing `Skill` invocation is
+delivered as `PostToolUseFailure` at all (the platform finding in
+`docs/CLAUDE-CODE-BEHAVIOR.md` records a Skill failure that was *not* delivered), and no
+live evidence that the gate's learned signature for a `Skill` call is ever populated. Do
+not quote either arm as working until a real failure lands in the ledger.
+
+## Open: the reminder-to-invocation conversion baseline is 10.5%, and that is the baseline
+
+Issue #30. Measured across 1456 transcripts, all projects: 866 sessions were nudged, 96
+invoked `skill-compounder`, 91 did both — 10.5%. In this repository alone, 249 nudges
+produced 3 invocations. The measurement is in `notes/2026-09-02-audit-and-replan.md`.
+
+This is a baseline, not a verdict: nothing has been changed against it yet, and a nudge a
+session correctly ignores is a correct outcome, so the ceiling is unknown and 100% would be
+wrong. What is open is what the number should be compared against, and re-running it after
+Wave 2 lands so the two are measured the same way.
 
 ## Known tree-state dependency — do not "fix" it
 
@@ -208,8 +270,13 @@ Kept as one line each so a returning session does not reopen them.
 - **The lost session-review report.** The lazy-parse cause is written up in
   `notes/2026-08-25-first-live-review-verdict.md` and in `docs/DESIGN.md`; every shipped
   script is now wrapped in one brace group and ends in `exit`, ratcheted by
-  `tests/test_script_wrapping.py` with an empty `KNOWN_UNWRAPPED`. Live confirmation is
-  still owed and is its own open thread above.
+  `tests/test_script_wrapping.py` with an empty `KNOWN_UNWRAPPED`. Live confirmation
+  arrived: three dispatches, in the entry below. **And the lost verdict itself is
+  recoverable** — Wave 1 added `skillinsight reindex`, which reads the `.stage1-*.json` the
+  dispatcher left behind and appends the row it never got, keyed for idempotence on
+  `index.jsonl` rather than on a stamp of its own, deleting nothing. Session `f0feae4c` has
+  been recovered: `index.jsonl` now carries its `CANDIDATE` row with
+  `reindexed_at: 2026-09-02T20:07:54Z`, eight days after the call that paid for it.
 - **The issue-19 branch is merged and its three deliberate gaps are all closed.** The
   branch fast-forwarded `main` to `6b23dd1` on 2026-09-01 after a 39-file, 1841-test run
   in an isolated worktree. The ten counted claims were corrected in `12e44a8`; the

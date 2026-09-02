@@ -512,5 +512,388 @@ class CliTest(InsightsTestBase):
         self.assertNotEqual(r.returncode, 0)
 
 
+
+# The session review that was paid for and never recorded. `hooks/session-review.sh`
+# writes the model's raw answer to `reviews/.stage1-<session>.json`, indexes it, and only
+# then removes that file; the first real dispatch this package ever made died in between
+# -- 2026-08-25, $0.2221734, a well-formed CANDIDATE returned -- and left the answer on
+# disk with nothing pointing at it. Everything below plants files of that SHAPE, never a
+# copy of the real one, and drives the real CLI over them.
+REVIEW_HOOK = REPO / "hooks" / "session-review.sh"
+
+# A CANDIDATE whose EVIDENCE quotes a NONE line, which is the shape that broke the
+# substring parser this rule replaced: the prompt orders the model to quote its evidence
+# verbatim, and a transcript from this repo contains "VERDICT: NONE" constantly.
+CANDIDATE_ANSWER = (
+    "VERDICT: CANDIDATE orchestrator-delivery-unreliable\n"
+    "DEAD END: the session waited on a message that was never delivered.\n"
+    "SECOND OCCURRENCE: it happened again two hours later.\n"
+    "EVIDENCE:\n"
+    "VERDICT: NONE\n"
+    "  VERDICT: CANDIDATE indented-and-must-not-win\n")
+
+NONE_ANSWER = "VERDICT: NONE\nNothing in this session clears the bar.\n"
+
+
+class ReindexTest(InsightsTestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.reviews = self.state / "reviews"
+        self.reviews.mkdir(parents=True)
+        self.transcripts = self.root / ".claude" / "projects"
+
+    # ------------------------------------------------------------------ fixtures
+
+    def plant(self, sid, answer=CANDIDATE_ANSWER, mtime=None, cost=0.2221734,
+              as_stream=False, body=None):
+        """A stage-1 file of the shape hooks/session-review.sh leaves behind.
+
+        `session_id` here is the id of the session the MODEL ran in, which is what the
+        real file carries and what makes reading the reviewed session out of the JSON
+        wrong. The reviewed session is in the FILENAME.
+        """
+        row = {"type": "result", "subtype": "success", "is_error": False,
+               "session_id": "99999999-9999-9999-9999-999999999999",
+               "num_turns": 1, "duration_ms": 79817, "total_cost_usd": cost,
+               "modelUsage": {"claude-haiku-4-5-20251001": {},
+                              "claude-sonnet-5": {}}}
+        if answer is not None:
+            row["result"] = answer
+        path = self.reviews / (".stage1-%s.json" % sid)
+        if body is not None:
+            path.write_text(body)
+        else:
+            path.write_text(json.dumps([row] if as_stream else row) + "\n")
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def transcript_for(self, sid, cwd, project_dir="-tmp-demo"):
+        d = self.transcripts / project_dir
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / ("%s.jsonl" % sid)
+        p.write_text(json.dumps({"type": "summary", "summary": "no cwd here"}) + "\n"
+                     + json.dumps({"type": "user", "cwd": cwd,
+                                   "sessionId": sid}) + "\n")
+        return p
+
+    def rows(self):
+        idx = self.reviews / "index.jsonl"
+        if not idx.exists():
+            return []
+        return [json.loads(line) for line in idx.read_text().splitlines()
+                if line.strip()]
+
+    def unread(self):
+        f = self.reviews / ".unread"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def verdict_of_hook(self, answer):
+        """What hooks/session-review.sh's own parser makes of the same text.
+
+        `payload="$(cat)"`-shaped: the hook reads stdin, so `input=` is mandatory or the
+        call hangs forever.
+        """
+        r = subprocess.run([str(REVIEW_HOOK), "--verdict-of"], input=answer,
+                           capture_output=True, text=True, env=self.env(),
+                           timeout=TIMEOUT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        parts = r.stdout.rstrip("\n").split("\t")
+        return parts[0], (parts[1] if len(parts) > 1 else "")
+
+    # ------------------------------------------------------------------ recovery
+
+    def test_a_lost_candidate_is_indexed_from_the_answer_it_left_behind(self):
+        self.plant("aaaa1111-0000-0000-0000-000000000001")
+        r = self.run_cli("reindex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["verdict"], "CANDIDATE")
+        self.assertEqual(rows[0]["name"], "orchestrator-delivery-unreliable")
+        self.assertEqual(rows[0]["session"], "aaaa1111-0000-0000-0000-000000000001")
+        self.assertEqual(rows[0]["cost_usd"], "0.2221734")
+        self.assertEqual(rows[0]["stage"], "analysis")
+
+    def test_the_row_says_it_was_reindexed_and_names_the_file_it_came_from(self):
+        """A row nobody can tell from a live one hides that a dispatch failed."""
+        self.plant("aaaa1111-0000-0000-0000-000000000002")
+        self.run_cli("reindex")
+        row = self.rows()[0]
+        self.assertIn("reindexed_at", row)
+        self.assertTrue(row["reindexed_at"].endswith("Z"), row["reindexed_at"])
+        self.assertEqual(row["source_file"],
+                         ".stage1-aaaa1111-0000-0000-0000-000000000002.json")
+
+    def test_a_second_run_appends_nothing(self):
+        self.plant("aaaa1111-0000-0000-0000-000000000003")
+        self.run_cli("reindex")
+        first = (self.reviews / "index.jsonl").read_text()
+        r = self.run_cli("reindex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.reviews / "index.jsonl").read_text(), first,
+                         "reindex must be idempotent: the index is its own state")
+        self.assertEqual(len(self.unread()), 1, "nor may it re-announce")
+        self.assertIn("already indexed", r.stdout)
+
+    def test_a_session_already_in_the_index_is_left_alone(self):
+        sid = "aaaa1111-0000-0000-0000-000000000004"
+        self.plant(sid)
+        (self.reviews / "index.jsonl").write_text(json.dumps(
+            {"ts": "2025-08-01T00:00:00Z", "week": "2025-W31", "session": sid,
+             "verdict": "NONE", "name": "", "stage": "analysis"}) + "\n")
+        self.run_cli("reindex")
+        self.assertEqual(len(self.rows()), 1, "a live row must not be duplicated")
+        self.assertNotIn("reindexed_at", self.rows()[0])
+
+    def test_a_half_written_last_index_line_does_not_cause_a_duplicate(self):
+        """The dispatcher appends from another process. A plain stream read aborts on a
+        torn last line and loses every row before it -- here that means re-appending
+        rows that are already there, which is the one thing this must never do."""
+        sid = "aaaa1111-0000-0000-0000-000000000005"
+        self.plant(sid)
+        (self.reviews / "index.jsonl").write_text(
+            json.dumps({"ts": "2025-08-01T00:00:00Z", "session": sid,
+                        "verdict": "NONE"}) + "\n" + '{"ts":"2025-08-02T00:00')
+        self.run_cli("reindex")
+        text = (self.reviews / "index.jsonl").read_text()
+        self.assertEqual(text.count(sid), 1, text)
+
+    def test_the_stage_one_file_is_never_deleted(self):
+        """It is the evidence for the row and the only copy of what was paid for."""
+        p = self.plant("aaaa1111-0000-0000-0000-000000000006")
+        self.run_cli("reindex")
+        self.assertTrue(p.exists())
+
+    # ------------------------------------------------------- the verdict rules
+
+    def test_the_verdict_matches_the_dispatchers_own_parser(self):
+        """Two copies of one rule need a check that they agree, not a comment saying so.
+
+        `bin/skillinsight` reimplements `parse_verdict` because the CLI has to work with
+        only itself on disk. This drives both over the same answers.
+        """
+        cases = {
+            "aaaa2222-0000-0000-0000-000000000001": CANDIDATE_ANSWER,
+            "aaaa2222-0000-0000-0000-000000000002": NONE_ANSWER,
+            "aaaa2222-0000-0000-0000-000000000003":
+                "The session went fine but nothing here begins with the word.\n",
+            "aaaa2222-0000-0000-0000-000000000004":
+                "VERDICT: CANDIDATE\nno name on the line at all\n",
+            "aaaa2222-0000-0000-0000-000000000005":
+                "  VERDICT: NONE\nindented, so it is not a verdict line\n",
+            # THE CASE THAT MAKES THE ANCHOR LOAD-BEARING, and the only one here that
+            # separates `grep '^VERDICT:'` from `grep 'VERDICT:'`. Dropping the caret
+            # makes the first line win, and it is not a verdict -- so a real CANDIDATE
+            # is recorded as UNPARSED. Checked by mutating the CLI: with the anchor
+            # removed this row comes back UNPARSED and this test fails, which is what
+            # tells us the rule is doing work rather than sitting there.
+            "aaaa2222-0000-0000-0000-000000000006":
+                "The reviewer had written VERDICT: NONE in a quote above.\n"
+                "VERDICT: CANDIDATE quoted-line-must-not-win\n",
+        }
+        for sid, answer in cases.items():
+            self.plant(sid, answer=answer)
+        self.run_cli("reindex")
+        rows = {row["session"]: row for row in self.rows()}
+        self.assertEqual(len(rows), len(cases), rows)
+        for sid, answer in cases.items():
+            verdict, name = self.verdict_of_hook(answer)
+            self.assertEqual(rows[sid]["verdict"], verdict,
+                             "%s: CLI and hook disagree on %r" % (sid, answer))
+            self.assertEqual(rows[sid]["name"], name, sid)
+
+    def test_a_none_verdict_is_indexed_but_not_announced(self):
+        """`.unread` is the next session's first-prompt announcement. "Nothing cleared
+        the bar" is news on the day and noise a fortnight later; the index has it."""
+        self.plant("aaaa3333-0000-0000-0000-000000000001", answer=NONE_ANSWER)
+        self.run_cli("reindex")
+        self.assertEqual(self.rows()[0]["verdict"], "NONE")
+        self.assertEqual(self.unread(), [])
+
+    def test_a_candidate_is_announced_in_unread(self):
+        self.plant("aaaa3333-0000-0000-0000-000000000002")
+        self.run_cli("reindex")
+        lines = self.unread()
+        self.assertEqual(len(lines), 1, lines)
+        fields = lines[0].split("\t")
+        self.assertEqual(len(fields), 3, fields)
+        self.assertEqual(fields[1], "CANDIDATE orchestrator-delivery-unreliable")
+        self.assertTrue(Path(fields[2]).exists(), fields[2])
+
+    def test_an_answer_with_no_verdict_line_is_unparsed_not_error(self):
+        """The call ran and was paid for. Reporting that as a crash sends whoever reads
+        it looking for a bug in the wrong place."""
+        self.plant("aaaa3333-0000-0000-0000-000000000003",
+                   answer="I could not decide, sorry.\n")
+        self.run_cli("reindex")
+        self.assertEqual(self.rows()[0]["verdict"], "UNPARSED")
+
+    def test_a_file_with_no_answer_in_it_is_not_indexed_at_all(self):
+        """Nothing was recovered, so a permanent row asserting a failure this command
+        cannot observe would only block a real recovery later -- the row IS the
+        idempotence key."""
+        self.plant("aaaa3333-0000-0000-0000-000000000004", answer=None)
+        r = self.run_cli("reindex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.rows(), [])
+        self.assertIn("no model answer", r.stdout)
+
+    def test_a_stream_array_is_accepted_as_well_as_a_bare_object(self):
+        """`--output-format json` returns either, depending on what else is loaded."""
+        self.plant("aaaa3333-0000-0000-0000-000000000005", as_stream=True)
+        self.run_cli("reindex")
+        self.assertEqual(self.rows()[0]["verdict"], "CANDIDATE")
+
+    def test_unreadable_json_is_survived(self):
+        self.plant("aaaa3333-0000-0000-0000-000000000006", body="{not json at all\n")
+        r = self.run_cli("reindex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.rows(), [])
+
+    # ------------------------------------------------------------ what the row says
+
+    def test_the_timestamp_is_the_answers_own_age_not_todays(self):
+        """A verdict recovered a week late is still a verdict from the day it returned.
+        Filing it under today would sort it above reviews that came after it."""
+        old = NOW - 90 * 86400
+        self.plant("aaaa4444-0000-0000-0000-000000000001", mtime=old)
+        self.run_cli("reindex")
+        row = self.rows()[0]
+        self.assertEqual(row["ts"], time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                  time.gmtime(old)))
+        self.assertEqual(row["week"], time.strftime("%G-W%V", time.gmtime(old)))
+        self.assertNotEqual(row["ts"], row["reindexed_at"])
+        self.assertEqual(row["reindexed_at"],
+                         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW)))
+
+    def test_the_project_is_recovered_from_the_reviewed_sessions_transcript(self):
+        """The stage-1 JSON's `session_id` is the id of the session the MODEL ran in, so
+        the project can only come from the transcript of the session under review."""
+        sid = "aaaa4444-0000-0000-0000-000000000002"
+        self.plant(sid)
+        self.transcript_for(sid, "/tmp/some-repo")
+        self.run_cli("reindex")
+        self.assertEqual(self.rows()[0]["project"], "/tmp/some-repo")
+
+    def test_a_missing_transcript_leaves_the_project_empty_rather_than_guessed(self):
+        self.plant("aaaa4444-0000-0000-0000-000000000003")
+        self.run_cli("reindex")
+        self.assertEqual(self.rows()[0]["project"], "")
+
+    def test_the_transcript_root_is_overridable(self):
+        sid = "aaaa4444-0000-0000-0000-000000000004"
+        self.plant(sid)
+        alt = self.root / "elsewhere"
+        (alt / "-x").mkdir(parents=True)
+        (alt / "-x" / ("%s.jsonl" % sid)).write_text(
+            json.dumps({"type": "user", "cwd": "/tmp/elsewhere"}) + "\n")
+        self.run_cli("reindex", SKILL_COMPOUNDER_TRANSCRIPTS=str(alt))
+        self.assertEqual(self.rows()[0]["project"], "/tmp/elsewhere")
+
+    def test_the_model_field_is_empty_rather_than_guessed(self):
+        """`modelUsage` names every model the call touched -- on the real lost dispatch,
+        two -- and none of them records which one the dispatcher asked for."""
+        self.plant("aaaa4444-0000-0000-0000-000000000005")
+        self.run_cli("reindex")
+        self.assertEqual(self.rows()[0]["model"], "")
+
+    # ---------------------------------------------------------------- the report
+
+    def test_a_report_is_written_and_reviews_can_print_it(self):
+        self.plant("aaaa5555-0000-0000-0000-000000000001")
+        self.run_cli("reindex")
+        report = Path(self.rows()[0]["report"])
+        self.assertTrue(report.exists(), report)
+        body = report.read_text()
+        self.assertIn("orchestrator-delivery-unreliable", body)
+        self.assertIn("- session:", body)
+        r = self.run_cli("reviews", "--show", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("orchestrator-delivery-unreliable", r.stdout)
+
+    def test_the_report_says_it_was_recovered_and_from_where(self):
+        sid = "aaaa5555-0000-0000-0000-000000000002"
+        self.plant(sid)
+        self.run_cli("reindex")
+        body = Path(self.rows()[0]["report"]).read_text()
+        self.assertIn("recovered", body.lower())
+        self.assertIn(".stage1-%s.json" % sid, body)
+
+    def test_an_existing_report_is_never_overwritten(self):
+        sid = "aaaa5555-0000-0000-0000-000000000003"
+        old = NOW - 90 * 86400
+        self.plant(sid, mtime=old)
+        week = time.strftime("%G-W%V", time.gmtime(old))
+        (self.reviews / week).mkdir(parents=True, exist_ok=True)
+        existing = self.reviews / week / ("%s.md" % sid)
+        existing.write_text("recovered by hand, do not clobber\n")
+        self.run_cli("reindex")
+        self.assertEqual(existing.read_text(), "recovered by hand, do not clobber\n")
+        self.assertEqual(self.rows()[0]["report"], str(existing))
+
+    def test_a_recovered_review_sorts_by_its_own_age_not_by_when_it_was_appended(self):
+        """`reviews` promises "newest first" and `--show 1` promises the same row.
+
+        Reversing the file delivered that for as long as the dispatcher was the only
+        writer. `reindex` appends an answer that came back weeks ago, so a listing that
+        reverses the file puts the OLDEST review at position 1 and calls it the newest.
+        """
+        idx = self.reviews / "index.jsonl"
+        recent = self.reviews / "2025-W34"
+        recent.mkdir(parents=True, exist_ok=True)
+        live_report = recent / "live.md"
+        live_report.write_text("# a review that happened yesterday\n")
+        idx.write_text(json.dumps(
+            {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - 86400)),
+             "week": WEEK, "session": "live-and-recent", "project": "/p",
+             "verdict": "NONE", "name": "", "report": str(live_report),
+             "cost_usd": "0.10", "model": "sonnet", "stage": "analysis"}) + "\n")
+        self.plant("aaaa6666-0000-0000-0000-000000000001", mtime=NOW - 90 * 86400)
+        self.run_cli("reindex")
+        out = self.run_cli("reviews").stdout
+        newest = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - 86400))
+        oldest = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - 90 * 86400))
+        self.assertIn(newest, out)
+        self.assertIn(oldest, out)
+        self.assertLess(out.index(newest), out.index(oldest),
+                        "the recovered review is the OLDEST; it must not head the "
+                        "list just because it was appended last:\n" + out)
+        self.assertIn("a review that happened yesterday",
+                      self.run_cli("reviews", "--show", "1").stdout)
+
+    def test_the_listing_shows_the_recovered_review(self):
+        self.plant("aaaa5555-0000-0000-0000-000000000004")
+        self.run_cli("reindex")
+        r = self.run_cli("reviews")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("orchestrator-delivery-unreliable", r.stdout)
+        self.assertIn("automatic session reviews: 1", r.stdout)
+
+    # ------------------------------------------------------------------ argument
+
+    def test_nothing_to_do_is_a_success(self):
+        r = self.run_cli("reindex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("0 indexed", r.stdout)
+
+    def test_no_reviews_directory_at_all_is_a_success(self):
+        shutil.rmtree(self.reviews)
+        r = self.run_cli("reindex")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("nothing to reindex", r.stdout)
+
+    def test_it_takes_no_arguments(self):
+        r = self.run_cli("reindex", "--week", "2025-W34")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no arguments", r.stderr)
+
+    def test_it_is_in_the_usage_text(self):
+        """A recovery command nobody can find recovers nothing."""
+        r = self.run_cli("--help")
+        self.assertIn("skillinsight reindex", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

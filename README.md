@@ -66,7 +66,7 @@ what got built answers them.
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
-|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, and records the *use* that closes a forge (`skillforge apply`)|
+|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`)|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
 |`bin/skillinsight`|Reads and prunes the candidate queue|
 |`bin/skillcontrib`|The read-only reconnaissance behind `contribute-skill`: duplicate check, push-access check, preflight|
@@ -177,6 +177,45 @@ Requires `python3` (installer only), `jq` (hooks, CLIs, and status line), and
 
 Hooks and skills are picked up **without restarting Claude Code**, though `/hooks` forces
 a config reload if you want to be certain.
+
+### What the installer writes into your `CLAUDE.md`
+
+The two reminders name three habits, and a reminder is worth nothing if the rule it
+points at was never given to the session reading it. So install also appends those
+habits to `~/.claude/CLAUDE.md`, between a pair of HTML comments that render as nothing:
+
+```
+<!-- claude-skill-compounder:doctrine:start -->
+## Compound Improvement
+...the three habits, and when to invoke the skill...
+<!-- claude-skill-compounder:doctrine:end -->
+```
+
+The text itself is `DOCTRINE_TEXT` in `skill_compounder/installer.py` and that is the
+only copy of it in this repository; [The three habits](#the-three-habits) below is the
+long form of the same doctrine. Everything outside the two markers is yours. The block
+is replaced in place by the next install and removed whole by uninstall, so installing
+twice leaves the file byte for byte as it was, and a `CLAUDE.md` you already had is
+copied to a timestamped backup beside it before anything is written. A `CLAUDE.md`
+symlinked into a dotfiles repo is written *through*, like `settings.json`.
+
+Two things stop it from talking over you. If your `CLAUDE.md` already carries a
+`## Compound Improvement` section of its own — as it does if you wrote one by hand
+before this shipped — install prints a notice and adds nothing rather than giving you
+the doctrine twice. And to skip it entirely, by flag or by variable:
+
+```bash
+./install.sh --no-doctrine
+SKILL_COMPOUNDER_DOCTRINE=0 ./install.sh
+```
+
+`install.sh` passes its arguments straight to `scripts/setup.py`, so the flag works from a
+clone and over `curl … | bash -s -- --no-doctrine`. The flag is the stronger of the two:
+`--no-doctrine` declines even where `SKILL_COMPOUNDER_DOCTRINE=1` is set, and leaving it
+off does not override a `SKILL_COMPOUNDER_DOCTRINE=0` in your environment.
+
+Uninstall then deletes the file only if this package created it and nothing but our own
+block was ever in it.
 
 ### As a plugin
 
@@ -581,7 +620,27 @@ skillforge step 2 "red-team round 1"
 skillforge done "clean"                     # closes the record AND installs the skill
 skillforge install demo [--skill-dir DIR]   # the retry path when that install did not happen
 skillforge clear     # escape hatch if a forge is ever left open
+skillforge doctor    # one PASS/WARN/FAIL line per check; exit 1 on any FAIL
+skillforge reap [--name <forge>]   # close every forge idle past SKILLFORGE_ACTIVE_TTL
 ```
+
+A forge orchestrator has been killed by the host going to sleep, and the forge it left
+behind stayed `active` for three and a half days. Nothing resumes one: the ledger counts
+it as never closed out, and its name is held against the next `skillforge start`.
+`skillforge reap` appends the `fail` row it is missing, which closes the ledger join and
+frees the name in one append — nothing is edited and nothing is deleted. It only ever touches a forge that has been idle longer than
+`SKILLFORGE_ACTIVE_TTL`, six hours by default, and that is **idle** time rather than
+elapsed time, measured since the last `skillforge step`. A six-hour cap on elapsed time
+would close a forge that was still working; a six-hour gap between steps is longer than
+any healthy forge here has lived. `--name` narrows which forges are considered and does not
+lower the bar. `skillforge start` on a name held by a forge past the TTL reaps it and says
+so, instead of refusing.
+
+`skillforge doctor` is the health check for everything else: jq, the state directory, the
+settings entries, the status line, the skill links, the ledger, the reminder counters and
+the open forges. Every hook here opens with `command -v jq || exit 0`, so a missing jq or
+a state directory gone read-only stops all of it with nothing said anywhere — from
+outside, indistinguishable from a package that had nothing to report.
 
 Closing a forge installs the skill. A skill that has been written but not linked into
 `~/.claude/skills/` cannot be invoked by anything, so `done` looks for
@@ -620,9 +679,16 @@ skillinsight review        # emit the batch, with the reviewing instructions
 skillinsight decline <hash> [--why <why>]   # judged and declined; the record is kept
 skillinsight snooze [<days>] | --clear      # stop announcing the queue without judging it
 skillinsight reviews [--show <n>] [--all]   # the automatic session reviews, newest first
+skillinsight reindex       # recovers a paid-for verdict that never reached index.jsonl
 skillinsight stats
 skillinsight prune --older-than 8   # archives old week files, never deletes them
 ```
+
+`reindex` exists because a dispatch that dies mid-flight leaves its answer on disk and no
+row anywhere: it reads the stage-1 files `hooks/session-review.sh` left behind and appends
+the row each one never got. Whether a review has been recovered is answered by reading
+`index.jsonl` itself, so a second run appends nothing, and the stage-1 file is kept rather
+than deleted because it is the evidence the row is checked against.
 
 The review step rewrites each candidate with repo-specific names stripped, which is the
 operation that actually matters. Most insights are a universal kernel wrapped in local
@@ -727,7 +793,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
-All twenty-five are environment variables, and they are not the whole set — this prints every
+All twenty-six are environment variables, and they are not the whole set — this prints every
 name any shipped script reads:
 
 ```bash
@@ -764,6 +830,7 @@ place in `~/.claude/settings.json`:
 |`APPLY_GATE_WINDOW`|`86400`|the hook entries|Seconds after a forge closes during which its apply debt still blocks the turn|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILLFORGE_IDLE_SECS`|`2700`|the top-level `env` block|Age past which a forge nothing has stepped is called idle. **Two components read it** — the status line and `skillforge list` — so setting it anywhere narrower makes them disagree about whether a forge is dead|
+|`SKILLFORGE_ACTIVE_TTL`|`21600`|the top-level `env` block|Seconds of **idle** time, measured since the last `step`, past which an `active` forge is presumed dead: `skillforge doctor` says WARN, `skillforge reap` writes it the `fail` row it never got, and `start` on that name reaps it rather than refusing|
 |`STATUSLINE_CACHE_PRUNE_EVERY`|`200`|the `statusLine` entry|Cache misses between sweeps of dead cache entries. The key is a hash of session id and directory, so every session leaves a file; sampled because this runs once a second|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 

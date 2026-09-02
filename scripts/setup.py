@@ -33,6 +33,9 @@ def main():
     ap.add_argument("--claude-dir", default=str(Path.home() / ".claude"))
     ap.add_argument("--bin-dir", default=str(Path.home() / ".local" / "bin"))
     ap.add_argument("--state-dir", default=None)
+    ap.add_argument("--no-doctrine", action="store_true",
+                    help="do not append the Compound Improvement block to CLAUDE.md "
+                         "(same as SKILL_COMPOUNDER_DOCTRINE=0)")
     args = ap.parse_args()
 
     if args.uninstall:
@@ -53,7 +56,12 @@ def main():
         return 0
 
     try:
-        rep = installer.install(APP_HOME, args.claude_dir, args.bin_dir, args.state_dir)
+        # `False if the flag is set else None`, never `not args.no_doctrine`. The kwarg is
+        # tri-state: None means "ask SKILL_COMPOUNDER_DOCTRINE", and an explicit True beats
+        # the environment, so passing `not args.no_doctrine` would make every ordinary run
+        # override `SKILL_COMPOUNDER_DOCTRINE=0` and write the block the user declined.
+        rep = installer.install(APP_HOME, args.claude_dir, args.bin_dir, args.state_dir,
+                                doctrine=False if args.no_doctrine else None)
     except (installer.InstallError, ValueError, OSError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1

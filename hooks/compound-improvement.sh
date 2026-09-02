@@ -517,6 +517,12 @@ $ctx"
     # parallelism the old counter recorded 12 of 60, so a 12-edit checkpoint fired about
     # five times too rarely and skillreport's conversion denominator was inflated to
     # match. An O_APPEND write of one byte is atomic, so nothing is lost.
+    #
+    # THE FORMAT HAS A READER, and it is `bin/skillreport`'s REMINDER CONVERSION block.
+    # It must count BYTES; when it required decimal digits instead it matched nothing
+    # this line has ever written and printed "not computable" against a full state
+    # directory. Changing the byte written here without changing that reader silences
+    # the only measurement these counters exist to feed.
     counter="$STATE_DIR/$sid.edits"
     printf 'x' >> "$counter" 2>/dev/null || exit 0
     n="$(wc -c < "$counter" 2>/dev/null | tr -d ' ')"

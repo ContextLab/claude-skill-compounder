@@ -6,6 +6,7 @@
 #   skillinsight decline <hash> [--why <reason>]
 #   skillinsight pending [--project <dir>] [--format tsv|text]
 #   skillinsight snooze  [<days>] | --clear
+#   skillinsight reindex
 #   skillinsight stats
 #   skillinsight prune   --older-than <weeks>
 #   skillinsight --help
@@ -86,6 +87,11 @@ set -uo pipefail
 STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$STATE_ROOT/insights"
 REVIEWS="$STATE_ROOT/reviews"
+# Same default and same override as bin/skillreport. `reindex` needs it to recover the
+# project a lost review belonged to: a stage-1 answer records the id of the session the
+# MODEL ran in, never the id of the session it reviewed, so the only place the reviewed
+# session's working directory survives is that session's own transcript.
+TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
 
 command -v jq >/dev/null 2>&1 || { echo "skillinsight: jq is required" >&2; exit 1; }
 
@@ -114,6 +120,9 @@ skillinsight: review the captured skill-candidate queue.
   skillinsight reviews [--show <n>] [--all]  the automatic session reviews written by
                                             hooks/session-review.sh, newest first;
                                             --show <n> prints the nth newest in full
+  skillinsight reindex                      index any paid-for session review whose
+                                            verdict was never recorded, from the
+                                            stage-1 answer it left behind
   skillinsight stats                        queue size, weeks covered, duplicates skipped
   skillinsight prune   --older-than <weeks>  archive week files older than the cutoff
   skillinsight --help
@@ -156,6 +165,10 @@ Set CI_QUEUE_NUDGE=0 to switch the announcement off entirely.
 
 Environment:
   SKILL_COMPOUNDER_STATE   queue root (default ~/.claude/skill-compounder)
+  SKILL_COMPOUNDER_TRANSCRIPTS
+                           where session transcripts live, which is where `reindex`
+                           recovers a lost review's project from
+                           (default ~/.claude/projects)
   INSIGHT_NOW / CI_NOW     pin the clock, so the current ISO week is deterministic
   INSIGHT_PENDING_WINDOW   week files `pending` reads, newest first (default 8)
 USAGE
@@ -171,6 +184,59 @@ DECLINED="$DIR/.declined.jsonl"
 # record snapshots that list at the moment the threshold was crossed, and the session
 # usually keeps editing afterwards, so `review` re-reads it when it is still there.
 REMINDERS="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders"
+
+# The verdict rules, WORD FOR WORD THE ONES IN `parse_verdict` IN
+# hooks/session-review.sh: the verdict is the FIRST line that STARTS WITH `VERDICT:`,
+# and nothing else. That anchoring is not fussiness. It was a substring test there,
+# `case "$result" in *"VERDICT: NONE"*)`, and it broke on the first reviewer that
+# exercised it: the prompt ORDERS the model to quote its evidence verbatim, the evidence
+# is a transcript digest, and a transcript from this repository contains the literal
+# string "VERDICT: NONE" constantly -- so a well-formed CANDIDATE whose EVIDENCE block
+# quoted such a line was recorded as NONE.
+#
+# Reimplemented here rather than sourced from the hook: this CLI is symlinked into the
+# user's PATH and has to work with nothing but itself on disk, and `reindex` is the one
+# command that runs when the dispatcher has already proved it can die mid-run. Two copies
+# of one rule need a CHECK that they agree, not a comment claiming they do:
+# tests/test_insights.py drives this command and `hooks/session-review.sh --verdict-of`
+# over the same answers and compares the two verdicts.
+#
+# Prints "<verdict>TAB<name>". An answer with no `VERDICT:` line prints an empty verdict;
+# the caller decides what that means, because the hook's answer depends on something only
+# the caller knows -- an empty verdict over a NON-EMPTY answer is UNPARSED (the call ran
+# and was paid for, the shape was wrong), and over nothing at all it is ERROR.
+verdict_of() { # $1 = the model's answer
+  vo_line=""
+  [ -n "${1:-}" ] && vo_line="$(printf '%s\n' "$1" | grep -m1 '^VERDICT:' || true)"
+  vo_v=""
+  vo_n=""
+  case "$vo_line" in
+    "VERDICT: NONE"*) vo_v="NONE" ;;
+    "VERDICT: CANDIDATE"*)
+      vo_n="$(printf '%s' "$vo_line" | sed -n 's/^VERDICT: CANDIDATE[[:space:]]*\([A-Za-z0-9][A-Za-z0-9-]*\).*/\1/p')"
+      if [ -n "$vo_n" ]; then vo_v="CANDIDATE"; else vo_v="UNPARSED"; vo_n=""; fi
+      ;;
+  esac
+  printf '%s\t%s\n' "$vo_v" "$vo_n"
+}
+
+# NEWEST FIRST MEANS BY TIMESTAMP, NOT BY POSITION IN THE FILE. Reversing the file was
+# the same thing for exactly as long as the only writer was the dispatcher, which appends
+# a row the moment it earns it. `reindex` ends that: it recovers an answer that came back
+# weeks ago and appends it today, so the OLDEST review lands at the bottom of the file and
+# therefore at the TOP of a listing whose header promises the newest and whose `--show 1`
+# promises the same thing. Sorting on the field that carries the time is the only spelling
+# that stays true for both writers.
+#
+# One jq, slurped. `-R -s` with `fromjson?` survives the half-written last line the
+# dispatcher leaves behind while appending from another process with no lock, where a
+# plain stream read aborts and loses every row BEFORE the torn one. It also replaces a
+# `tail -r`, else `tac`, else `awk` reversal, one arm of which was BSD-only.
+reviews_newest_first() { # $1 = index.jsonl -> one compact JSON object per line
+  jq -R -s -c '[ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                 | select(type == "object") ]
+               | sort_by(.ts // "") | reverse | .[]' "$1" 2>/dev/null
+}
 
 files_for_week() { # $1 = ISO week
   [ -f "$DIR/$1.jsonl" ] && printf '%s\n' "$DIR/$1.jsonl"
@@ -726,14 +792,11 @@ SOURCES_EOF
     if [ -n "$show" ]; then
       case "$show" in ''|*[!0-9]*) die "--show takes a whole number" ;; esac
       [ "$show" -lt 1 ] && die "--show counts from 1 (1 = newest)"
-      rpt="$(jq -R -r '(fromjson? // empty) | select(type=="object") | .report // empty' "$idx" \
-             2>/dev/null | tail -r 2>/dev/null | sed -n "${show}p")"
-      # tail -r is BSD. GNU has tac. Reversing in awk needs neither, so use that when
-      # the first two are absent rather than silently printing the OLDEST review.
-      if [ -z "$rpt" ]; then
-        rpt="$(jq -R -r '(fromjson? // empty) | select(type=="object") | .report // empty' "$idx" \
-               2>/dev/null | awk '{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}' | sed -n "${show}p")"
-      fi
+      # Numbered the same way the listing numbers them, and it has to be the same
+      # expression: two orderings means `--show 2` prints something other than the row
+      # printed as 2.
+      rpt="$(reviews_newest_first "$idx" | jq -r '.report // empty' 2>/dev/null \
+             | sed -n "${show}p")"
       [ -z "$rpt" ] && die "no review number $show"
       [ -f "$rpt" ] || die "the report file is gone: $rpt"
       cat "$rpt"
@@ -741,14 +804,13 @@ SOURCES_EOF
     fi
     lim=20
     [ "$all" -eq 1 ] && lim=100000
-    total="$(jq -R -r '(fromjson? // empty) | select(type=="object") | .ts // empty' "$idx" 2>/dev/null | grep -c '[^[:space:]]' | tr -d ' ')"
+    total="$(reviews_newest_first "$idx" | grep -c '[^[:space:]]' | tr -d ' ')"
     case "$total" in ''|*[!0-9]*) total=0 ;; esac
     echo "automatic session reviews: $total"
     echo
-    jq -R -r '(fromjson? // empty) | select(type=="object")
-      | [(.ts // "?"), (.verdict // "?"), (.name // ""), (.stage // ""), (.cost_usd // ""), (.project // "")]
-      | @tsv' "$idx" 2>/dev/null \
-      | awk '{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}' \
+    reviews_newest_first "$idx" \
+      | jq -r '[(.ts // "?"), (.verdict // "?"), (.name // ""), (.stage // ""),
+                (.cost_usd // ""), (.project // "")] | @tsv' 2>/dev/null \
       | head -n "$lim" \
       | awk -F'\t' '{n=NR; printf "  %2d  %s  %-9s %-34s %-8s $%s\n", n, $1, $2, ($3==""?"-":$3), ($4==""?"-":$4), ($5==""?"?":$5); printf "      %s\n", $6}'
     echo
@@ -757,6 +819,192 @@ SOURCES_EOF
     echo
     echo "NONE is the expected verdict. A CANDIDATE is a proposal a person still decides on;"
     echo "nothing in here has been forged or installed."
+    ;;
+
+  reindex)
+    # RECOVERING A REVIEW THAT WAS PAID FOR AND NEVER RECORDED.
+    #
+    # hooks/session-review.sh writes the model's raw answer to
+    # `$REVIEWS/.stage1-<session>.json`, parses it, appends one row to index.jsonl,
+    # announces it in `.unread`, and only then removes the temp file. A dispatch that
+    # dies between the write and the parse leaves that file holding the whole answer and
+    # leaves NOTHING anywhere else: no row, no report, no announcement -- and the
+    # cooldown stamp already written, so the next qualifying session is refused too.
+    #
+    # That is not hypothetical. It is what happened to the first real dispatch this
+    # package ever made: 2026-08-25, session f0feae4c, sonnet, 79.8s, $0.2221734,
+    # `is_error: false`, a well-formed CANDIDATE returned. The script was rewritten on
+    # disk while it was blocked inside that 80-second CLI call, bash -- which reads a
+    # script lazily, by byte offset -- resumed in the middle of unrelated text, and the
+    # verdict was lost. notes/2026-08-25-first-live-review-verdict.md.
+    #
+    # So a LEFTOVER .stage1-*.json IS THE SIGNAL. On every path that completes, including
+    # every failing one, the dispatcher removes it; one still sitting there is a run that
+    # did not reach its own cleanup.
+    #
+    # IDEMPOTENT BY THE INDEX, NOT BY A STAMP OF ITS OWN. "Has this been recovered?" is
+    # answered by reading the file this command appends to, so a second run appends
+    # nothing and needs no extra state -- and there is no separate stamp that can get out
+    # of step with the index and either re-append a row or hide one forever.
+    #
+    # AND NOTHING IS DELETED. The stage-1 file stays exactly where it is and the row
+    # names it in `source_file`, because it is the evidence FOR the row: it is what a
+    # later reader checks the row against, and it is the only copy of what was paid for.
+    wants_help "$@" && { usage; exit 0; }
+    [ "$#" -gt 0 ] && die "reindex takes no arguments"
+    if [ ! -d "$REVIEWS" ]; then
+      echo "skillinsight: no reviews directory yet ($REVIEWS); nothing to reindex"
+      exit 0
+    fi
+    idx="$REVIEWS/index.jsonl"
+    # Every session that already has a row. `-R` with `fromjson?` for the same reason
+    # `reviews` uses it and a stronger one: the dispatcher appends to this file from
+    # another process, so its last line can be half-written, and a plain stream read
+    # would abort on it and lose every row BEFORE it -- which here does not mean an
+    # empty listing, it means re-appending rows that are already there.
+    ri_seen=""
+    [ -f "$idx" ] && ri_seen="$(jq -R -r '(fromjson? // empty) | select(type=="object")
+                                          | .session // empty' "$idx" 2>/dev/null)"
+    ri_found=0; ri_added=0; ri_known=0; ri_empty=0
+    ri_now_ts="$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                 || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    # An explicit leading dot in the pattern matches a dotfile; the `[ -f ]` is what
+    # handles the no-match case, where the glob comes back as the literal pattern.
+    for sf in "$REVIEWS"/.stage1-*.json; do
+      [ -f "$sf" ] || continue
+      ri_found=$(( ri_found + 1 ))
+      ri_base="$(basename "$sf")"
+      # THE SESSION ID COMES FROM THE FILENAME, AND IT HAS TO. The stage-1 JSON carries
+      # a `session_id`, and it is the id of the session the MODEL ran in -- a fresh
+      # `claude -p` -- not the id of the session under review. Reading it from there
+      # would file every recovered verdict under a session nobody has ever seen. What
+      # the filename holds is the dispatcher's sanitised id, which for a UUID is the id.
+      ri_sid="${ri_base#.stage1-}"; ri_sid="${ri_sid%.json}"
+      [ -n "$ri_sid" ] || continue
+      if printf '%s\n' "$ri_seen" | grep -Fxq "$ri_sid"; then
+        ri_known=$(( ri_known + 1 ))
+        continue
+      fi
+      # The same extraction finalize_stage1 does: `--output-format json` returns either
+      # the result object or a stream array containing it, depending on what else is
+      # loaded, so accept both rather than guessing which.
+      ri_res="$(jq -s -r 'map(if type == "array" then .[] else . end)
+                          | map(select(type == "object" and .type == "result"))
+                          | (last // {}) | .result // empty' "$sf" 2>/dev/null)"
+      if [ -z "$ri_res" ]; then
+        # No answer in it means nothing was paid for that can be recovered, so there is
+        # nothing to say about it beyond that it is there. NOT indexed as an ERROR row:
+        # a permanent row asserting a failure this command cannot actually observe would
+        # also be the thing that stops a real recovery later, since the row is the
+        # idempotence key.
+        ri_empty=$(( ri_empty + 1 ))
+        echo "skillinsight: $ri_base holds no model answer; left alone, not indexed"
+        continue
+      fi
+      ri_v=""; ri_n=""
+      ri_parsed="$(verdict_of "$ri_res")"
+      ri_v="$(printf '%s' "$ri_parsed" | cut -f1)"
+      ri_n="$(printf '%s' "$ri_parsed" | cut -f2)"
+      # The answer is non-empty by the guard above, so an unmatched verdict is UNPARSED
+      # and never ERROR -- the same split hooks/session-review.sh makes, and it matters:
+      # reporting a paid-for call whose answer took the wrong shape as a crash sends
+      # whoever reads it looking for a bug in the wrong place.
+      [ -z "$ri_v" ] && ri_v="UNPARSED"
+      ri_cost="$(jq -s -r 'map(if type == "array" then .[] else . end)
+                           | map(select(type == "object" and .type == "result"))
+                           | (last // {}) | .total_cost_usd // empty' "$sf" 2>/dev/null | head -1)"
+      # THE TIMESTAMP IS THE FILE'S, NOT THE CLOCK'S. A verdict recovered a week later is
+      # still a verdict from the day it was returned, and filing it under today would put
+      # it at the top of `reviews` above reviews that came after it. mtime is what the
+      # run left behind; `reindexed_at` below is the only thing that carries today.
+      ri_mt="$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null)"
+      case "$ri_mt" in ''|*[!0-9]*) ri_mt="$now" ;; esac
+      ri_ts="$(date -u -r "$ri_mt" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+               || date -u -d "@$ri_mt" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+      ri_wk="$(week_of "$ri_mt")"
+      [ -z "$ri_ts" ] && ri_ts="$ri_now_ts"
+      [ -z "$ri_wk" ] && ri_wk="$(week_of "$now")"
+      # The project, from the reviewed session's own transcript. BOUNDED: the largest
+      # transcript measured on this machine was 663 MB and `cwd` is on the first records,
+      # so read the head and stop. Absent transcript, absent project -- an empty string,
+      # never a guess. The directory name it sits in is the path with the slashes
+      # replaced, and turning that back into a path is not reversible.
+      ri_proj=""
+      for ri_tf in "$TRANSCRIPTS"/*/"$ri_sid".jsonl; do
+        [ -f "$ri_tf" ] || continue
+        ri_proj="$(head -c 262144 "$ri_tf" 2>/dev/null \
+                   | jq -R -r '(fromjson? // empty) | select(type == "object")
+                               | .cwd // empty' 2>/dev/null | head -1)"
+        [ -n "$ri_proj" ] && break
+      done
+      # The report. Written only if there is none: a report already on disk is either a
+      # real one or a hand-recovery, and either way it is not this command's to overwrite.
+      ri_rep="$REVIEWS/$ri_wk/$ri_sid.md"
+      if [ ! -f "$ri_rep" ]; then
+        mkdir -p "$REVIEWS/$ri_wk" 2>/dev/null
+        # `printf -- ` on every line beginning "- ". A FORMAT STRING STARTING WITH "- "
+        # IS AN INVALID OPTION TO BASH'S BUILTIN PRINTF and prints nothing, while zsh
+        # accepts it, so without the `--` the metadata block silently vanishes under the
+        # shell in the shebang and nothing anywhere reports it.
+        {
+          printf '# Session review (recovered) — %s\n\n' "$ri_ts"
+          printf -- '- session: `%s`\n' "$ri_sid"
+          printf -- '- project: `%s`\n' "$ri_proj"
+          printf -- '- verdict: **%s%s**\n' "$ri_v" "${ri_n:+ $ri_n}"
+          printf -- '- cost: $%s\n' "${ri_cost:-unknown}"
+          printf -- '- recovered from: `%s`\n' "$ri_base"
+          printf -- '- recovered by `skillinsight reindex` at: %s\n\n' "$ri_now_ts"
+          printf 'This dispatch ran and was paid for, and its answer was never recorded:\n'
+          printf 'the run died between writing the answer out and indexing it. Nothing\n'
+          printf 'below has been edited or refined. It is the answer as it was returned.\n\n'
+          printf -- '---\n\n'
+          printf '%s\n' "$ri_res"
+        } > "$ri_rep" 2>/dev/null
+      fi
+      [ -f "$ri_rep" ] || ri_rep="(the report could not be written to $ri_rep)"
+      # `reindexed_at` and `source_file` are the two fields a live row does not have, and
+      # they are the whole difference: this row was not written by the dispatch that
+      # earned it, and anyone reading it later has to be able to tell, and to go check.
+      ri_row="$(jq -c -n --arg ts "$ri_ts" --arg week "$ri_wk" --arg session "$ri_sid" \
+        --arg project "$ri_proj" --arg verdict "$ri_v" --arg name "$ri_n" \
+        --arg report "$ri_rep" --arg cost "$ri_cost" --arg model "" \
+        --arg stage "analysis" --arg rat "$ri_now_ts" --arg src "$ri_base" \
+        '{ts:$ts, week:$week, session:$session, project:$project, verdict:$verdict,
+          name:$name, report:$report, cost_usd:$cost, model:$model, stage:$stage,
+          reindexed_at:$rat, source_file:$src}' 2>/dev/null)"
+      # `model` is deliberately empty. The stage-1 file records `modelUsage` keyed by
+      # every model the call touched -- on the real lost dispatch that is two, sonnet and
+      # a haiku -- and none of them is a record of which model the dispatcher ASKED for.
+      # An empty field says "not recorded". A guess would say something false forever.
+      if [ -z "$ri_row" ]; then
+        echo "skillinsight: could not build an index row for $ri_base; left alone" >&2
+        continue
+      fi
+      printf '%s\n' "$ri_row" >> "$idx" || die "cannot append to $idx"
+      # The announcement, for a CANDIDATE. `.unread` is what hooks/compound-improvement.sh
+      # surfaces on the first prompt of the next session, and it is the whole reason to
+      # recover a verdict rather than just file it: a CANDIDATE nobody is told about is
+      # in the same state it was in when it was lost. A recovered NONE is not announced
+      # -- "nothing here cleared the bar" is news on the day and noise a fortnight later,
+      # and it is in the index either way.
+      if [ "$ri_v" = "CANDIDATE" ]; then
+        ( printf '%s\t%s\t%s\n' "$ri_ts" "$ri_v${ri_n:+ $ri_n}" "$ri_rep" \
+            >> "$REVIEWS/.unread" ) 2>/dev/null
+      fi
+      ri_added=$(( ri_added + 1 ))
+      echo "skillinsight: recovered $ri_sid"
+      echo "               $ri_v${ri_n:+ $ri_n}  $ri_ts  \$${ri_cost:-unknown}  from $ri_base"
+      echo "               row    -> $idx"
+      echo "               report -> $ri_rep"
+      [ "$ri_v" = "CANDIDATE" ] && echo "               announced in $REVIEWS/.unread"
+    done
+    echo "skillinsight: $ri_found stage-1 file(s) examined; $ri_added indexed, $ri_known already indexed, $ri_empty with no answer"
+    # Recovering nothing is a success and must exit 0. A bare `[ ... ] && echo` as the
+    # last command of a subcommand makes the whole run exit 1 when the test is false,
+    # which is how `prune` once reported "archived 0" as a failure.
+    if [ "$ri_added" -eq 0 ]; then
+      echo "               nothing to recover; the index already accounts for every answer on disk"
+    fi
     ;;
 
   prune)

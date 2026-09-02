@@ -261,7 +261,14 @@ permanently with nothing on any surface to say why. Two more redirect what a scr
 and writes, `SKILL_COMPOUNDER_STATE` and `SKILL_COMPOUNDER_TRANSCRIPTS`; two pin the ages
 the status line expires on, `SKILLFORGE_DONE_TTL` and `SKILLFORGE_FAIL_TTL`; and one lifts
 a refusal, `SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE`, without which `session-review.sh`
-declines to spend money from any state root under a temp directory. A new script needs its
+declines to spend money from any state root under a temp directory. One more is a real
+threshold rather than a pin and reads differently for it: `SKILLFORGE_ACTIVE_TTL`
+(`bin/skillforge`, 21600) is measured against **idle** time, since that forge's last
+`step`, never against elapsed time, so `skillforge doctor` is the surface that says whether
+anything here is working at all and `skillforge reap` is the only thing that unwedges a
+forge whose orchestrator died -- by appending the `fail` row it never got, never by editing
+the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the one
+`doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
 `grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
 hooks/ bin/ statusline/ skill_compounder/ | sort -u` and reading each hit; re-run it rather
@@ -327,7 +334,12 @@ completion claim and a hook can — the reasoning `hooks/claim-gate.sh` was buil
 protocol and for the gate landing, `2026-08-26-handoff.md` for the resume state of that
 work, `2026-08-26-issue19-plan.md` and `2026-08-26-issue19-session.md` for the three
 refusing gates and the loop that ends in recorded use, `2026-08-26-toolbox-state.md` for a
-review entry point that carries the command behind every figure in it, and
+review entry point that carries the command behind every figure in it,
+`2026-09-02-audit-and-replan.md` for the subagent audit that found one output path and no
+cheap tier under it, `2026-09-02-tiers-design.md` for the two cheap tiers it answers with
+(the note and the injected reminder, issues #20, #21 and #23),
+`2026-09-02-forge-diet-design.md` for cutting the default forge to two agents and two
+rounds (issue #22), and
 `notes/research/` for the evidence behind the seed-pool selection, the
 insight queue, and the contribution mechanics. `notes/OPEN-THREADS.md` is the one file
 there that tracks current state rather than history. Read the dated ones for reasoning,

@@ -527,7 +527,13 @@ class ReportKnobTest(Base):
         super().setUp()
         self.forge("start", "gamma", "8", "s", SKILLFORGE_NOW=1000)
         (self.state / "reminders").mkdir(parents=True, exist_ok=True)
-        (self.state / "reminders" / "s.edits").write_text("60", encoding="utf-8")
+        # SIXTY EDITS IN THE FORM THE HOOK ACTUALLY WRITES: one `x` appended per edit, so
+        # the count is the file's length. It was seeded here as the decimal string "60",
+        # which no longer reaches the reader -- `bin/skillreport` counts the tally with
+        # `tr -cd 'x' | wc -c` and skips a file holding any other byte -- so this fixture
+        # was measuring a knob against a counter the report had stopped being able to
+        # read. Sixty either way, and the expected conversion below is unchanged.
+        (self.state / "reminders" / "s.edits").write_text("x" * 60, encoding="utf-8")
 
     def test_a_nonsense_edit_interval_neither_aborts_nor_lies(self):
         for value in ("abc", "0", "-1", "", " ", "9" * 40):

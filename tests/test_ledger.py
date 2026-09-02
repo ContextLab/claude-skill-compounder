@@ -15,6 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 FORGE = REPO / "bin" / "skillforge"
 REPORT = REPO / "bin" / "skillreport"
+HOOK = REPO / "hooks" / "compound-improvement.sh"
 
 PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
 
@@ -483,13 +484,42 @@ class ReportTest(LedgerTestBase):
         r = self.report()
         self.assertIn("0 of 1 finished forges (0%)", r.stdout)
 
+    # ------------------------------------------------- reminder-to-forge conversion
+    #
+    # THE COUNTERS ARE SEEDED BY RUNNING THE REAL HOOK, never by writing a file this test
+    # invented. The two sides of this measurement disagreed on the format and nothing
+    # caught it: `hooks/compound-improvement.sh` appends one byte per edit, `skillreport`
+    # required decimal digits, so every real counter was skipped and the block printed
+    # "not computable" for its whole life -- while these tests stayed green by pinning
+    # "30" and "11", a shape the hook has never written. A test that writes its own
+    # counter can only ever pin the reader against itself.
+
+    def real_edits(self, sid, n):
+        """Drive `n` real edits through the real hook and return the counter file."""
+        for i in range(n):
+            payload = json.dumps({"session_id": sid, "tool_name": "Edit",
+                                  "tool_use_id": "toolu_%s_%d" % (sid, i),
+                                  "tool_input": {"file_path": "/p/f%d.py" % i}})
+            r = subprocess.run([str(HOOK), "edit"], input=payload, capture_output=True,
+                               text=True, cwd=str(self.root),
+                               env={"PATH": PATH, "HOME": str(self.root),
+                                    "SKILL_COMPOUNDER_STATE": str(self.state)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+        return self.state / "reminders" / ("%s.edits" % sid)
+
+    def test_the_counter_the_hook_writes_is_a_unary_tally(self):
+        """The format both sides must agree on, read off disk after 30 real edits."""
+        c = self.real_edits("sess-a", 30)
+        raw = c.read_bytes()
+        self.assertEqual(raw, b"x" * 30,
+                         "the hook no longer writes one tally byte per edit; "
+                         "bin/skillreport counts bytes and must be changed with it")
+
     def test_reminder_conversion_is_derived_and_labelled_an_estimate(self):
         self.forge("start", "widget", "8", "summary", now=T0)
         self.forge("done", "ok", now=T0 + 600)
-        rem = self.state / "reminders"
-        rem.mkdir()
-        (rem / "sess-a.edits").write_text("30", encoding="utf-8")   # 2 checkpoints at 12
-        (rem / "sess-b.edits").write_text("11", encoding="utf-8")   # 0 checkpoints
+        self.real_edits("sess-a", 30)   # 2 checkpoints at 12
+        self.real_edits("sess-b", 11)   # 0 checkpoints
         r = self.report()
         self.assertIn("estimate", r.stdout)
         self.assertIn("2 session(s)", r.stdout)
@@ -497,11 +527,21 @@ class ReportTest(LedgerTestBase):
         self.assertIn("CI_EDIT_EVERY=12", r.stdout)
         self.assertIn("forges started, all time:   1", r.stdout)
 
+    def test_the_conversion_is_a_number_and_not_not_computable(self):
+        """The defect this pins: counters written by the real hook, on disk, in the
+        directory the reader reads, and the reader answering `not computable`."""
+        self.forge("start", "widget", "8", "summary", now=T0)
+        self.forge("done", "ok", now=T0 + 600)
+        self.real_edits("sess-a", 30)
+        self.real_edits("sess-b", 11)
+        r = self.report()
+        self.assertNotIn("not computable", r.stdout,
+                         "the reader still cannot parse what the hook writes:\n" + r.stdout)
+        self.assertIn("rough conversion:           50%", r.stdout)
+
     def test_reminder_conversion_honours_ci_edit_every(self):
         self.forge("start", "widget", "8", "summary", now=T0)
-        rem = self.state / "reminders"
-        rem.mkdir()
-        (rem / "sess-a.edits").write_text("30", encoding="utf-8")
+        self.real_edits("sess-a", 30)
         r = self.report(edit_every=5)
         self.assertIn("CI_EDIT_EVERY=5", r.stdout)
         self.assertIn("checkpoints they imply:     6", r.stdout)
@@ -511,6 +551,18 @@ class ReportTest(LedgerTestBase):
         rem = self.state / "reminders"
         rem.mkdir()
         (rem / "sess-a.edits").write_text("not-a-number", encoding="utf-8")
+        r = self.report()
+        self.assertIn("0 session(s)", r.stdout)
+        self.assertIn("not computable", r.stdout)
+
+    def test_a_decimal_counter_is_not_guessed_at(self):
+        """The shape the reader used to demand. Nothing writes it, so reading it as a
+        count would be inventing a number: a two-byte file saying "30" is either 2 edits
+        or 30 and the file cannot say which. It is skipped, and the skip is visible."""
+        self.forge("start", "widget", "8", "summary", now=T0)
+        rem = self.state / "reminders"
+        rem.mkdir()
+        (rem / "sess-a.edits").write_text("30", encoding="utf-8")
         r = self.report()
         self.assertIn("0 session(s)", r.stdout)
         self.assertIn("not computable", r.stdout)

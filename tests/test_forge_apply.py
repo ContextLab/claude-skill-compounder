@@ -1574,6 +1574,11 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
             # can drift would let one surface call a forge dead while the other calls it
             # healthy.
             "SKILLFORGE_IDLE_SECS",
+            # The two `doctor`/`reap` knobs, both documented in the header under "THE TWO
+            # KNOBS THOSE ADD": the idle TTL past which an `active` forge is presumed
+            # dead, and the jq version `doctor` reads instead of asking jq, which is a
+            # test pin of the same kind as SKILLFORGE_NOW.
+            "SKILLFORGE_ACTIVE_TTL", "SKILLFORGE_DOCTOR_JQ_VERSION",
             # Internal state, initialised on every path that reaches the read; the
             # default is a `set -u` belt, not a way in.
             "TRIGGER_TEXT", "TRIGGER_KIND", "SKILL_PRESENT", "RESOLVED_NAME",

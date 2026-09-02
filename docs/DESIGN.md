@@ -660,6 +660,52 @@ exactly what it found.
 
 ---
 
+## The doctrine ships in `CLAUDE.md`, in a marker block
+
+The reminders went out before the rule they refer to did. `hooks/compound-improvement.sh`
+tells a session to check for an existing skill and to notice what is costly *and*
+recurring; both sentences are shorthand for three habits that, until this landed, existed
+in exactly one place on earth -- a stanza the author had typed by hand into his own
+`~/.claude/CLAUDE.md`. Everyone who ran `install.sh` got a hook naming a doctrine their
+session had never been shown. That is the same defect class as a status line pointing at a
+file the shell will not run: wired, plausible, and referring to nothing.
+
+**Why a marker block rather than a file of our own.** A `~/.claude/CLAUDE.md` is loaded as
+context for every session on the machine, and it is the user's document. Shipping a
+separate file next to it would need the user to include it, which is a step they have to
+be told about and can forget; overwriting theirs is out of the question. The block is the
+smallest unit that can be found again later without a record on the side: install replaces
+what is between the two comments and leaves the rest, uninstall cuts out exactly that
+span, and a second install is a no-op because the rendered block is a pure function of the
+checkout path. The markers are HTML comments so they render as nothing in every viewer,
+and they name the package, so a reader who finds one knows what put it there.
+
+**Why the heading is detected outside the markers.** The first machine this would ever run
+on already had the stanza, hand-maintained, with no markers around it. Appending would
+have handed that session the doctrine twice, which is worse than not shipping it: two
+copies drift, and the reader cannot tell which is current. So install looks for
+`## Compound Improvement` in everything *except* our own block, and when it finds one it
+prints a notice, records `doctrine: "user-owned"` and writes nothing. Excluding our own
+block is not a refinement -- searching the whole file would find the heading we just wrote
+and report every install after the first as the user's, so the block could never be
+updated again.
+
+**Why not a hook.** A `UserPromptSubmit` hook could inject the doctrine as
+`additionalContext` and never touch a file. It was rejected for three reasons. It pays
+tokens on every prompt for a rule that changes about twice a year; it is invisible to the
+user, who cannot edit, argue with, or grep what the model was told; and it is not durable
+across the surfaces that read `CLAUDE.md` but run no hooks of ours. The habits are
+standing instructions, not an event response -- and this package already has the event
+response, which is the part that was working.
+
+**What uninstall is allowed to delete.** The block, always. The file, only when install
+created it, nothing but our block is left in it, and the path is not a symlink -- a link
+means the name was pointed at a dotfiles repo after we made the file, and unlinking the
+target would take a file we never created. That is the same rule the symlinks obey above:
+remove only what we can prove we made.
+
+---
+
 ## Why `hooks/skill-use.sh` wires an event that never arrives
 
 The platform side of this is in

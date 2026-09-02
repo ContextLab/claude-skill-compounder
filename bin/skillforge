@@ -10,6 +10,7 @@
 #   skillforge step  [--name <forge>] <step-number> <what is happening now...>
 #   skillforge done  [--name <forge>] [--skill-dir <dir>] [message...]
 #   skillforge fail  [--name <forge>] <reason...>
+#   skillforge reap  [--name <forge>]
 #   skillforge clear [--name <forge> | --all]
 #   skillforge show  [--name <forge> | --all] [--full]
 #   skillforge list
@@ -28,6 +29,7 @@
 #                      [--force]
 #   skillforge pending [--json] [--full]
 #   skillforge backfill <file.jsonl | ->
+#   skillforge doctor
 #
 # THE LEDGER ANSWERS FIVE QUESTIONS: what triggered the build, what was built, WHETHER
 # THE SKILL WAS THEN PUT ON THE PROBLEM THAT CAUSED IT, when it has been used since, and
@@ -80,6 +82,41 @@
 # `trigger_verbatim` (and the table's project column) and say so. Those four are the forging
 # protocol's held-out test data, and the orchestrator subagent that drives this CLI must
 # not hold them; the record on disk keeps every one of them. `--full` prints them.
+#
+# A FORGE THAT NOTHING CLOSES HOLDS ITS NAME FOREVER. `start` refuses a name whose forge
+# is live, which is right, and nothing ever expires `active`, which is not: on 2026-08-28 a
+# forge killed with its session -- a laptop closing its lid is enough -- sat
+# `status:"active"` for three and a half days and wedged the one name anybody wanted to
+# re-forge. So there is a TTL, SKILLFORGE_ACTIVE_TTL, six hours by default, measured
+# against IDLE time and not elapsed time. The distinction is the whole safety of it: the
+# median real forge here runs 3.3 hours and the longest healthy one ran 6.5, so a six-hour
+# ELAPSED cap would reap a forge that was still working, while a six-hour gap BETWEEN STEPS
+# is longer than any healthy forge has ever lived. Past it, `skillforge doctor` says WARN,
+# `skillforge reap` appends a `fail` row reading "reaped: exceeded SKILLFORGE_ACTIVE_TTL"
+# and the name is free, and `start` on that name reaps it itself and says so on stderr
+# instead of refusing. Nothing is edited and nothing is deleted: the ledger stays
+# append-only, and a reaped forge is a forge with the outcome row it was missing.
+#
+# `skillforge doctor` is the health surface for everything else. Every hook in this package
+# opens with `command -v jq || exit 0` and `mkdir -p "$STATE_DIR" || exit 0`, so a missing
+# jq, a state directory gone read-only, a SKILL_COMPOUNDER_STATE pointing somewhere that no
+# longer exists, or a settings.json that stopped parsing silences all of it with nothing on
+# any surface -- indistinguishable, from the outside, from a package that had nothing to
+# say. `doctor` prints one line per check, PASS, WARN or FAIL, and exits 1 on any FAIL.
+#
+# THE TWO KNOBS THOSE ADD. Both are read in exactly one place and both default to the
+# behaviour described above, so neither has to be set for anything here to work:
+#   SKILLFORGE_ACTIVE_TTL         Seconds of IDLE time after which an `active` forge is
+#                                 presumed dead. 21600, six hours. A value that is not
+#                                 digits falls back to it rather than erroring, because
+#                                 `[ x -ge y ]` on a non-number prints "integer expected"
+#                                 and takes the meaning of every reap decision with it.
+#   SKILLFORGE_DOCTOR_JQ_VERSION  Pins the version string `doctor` reads instead of asking
+#                                 `jq --version`, exactly as SKILLFORGE_NOW pins the clock
+#                                 and for the same reason: the too-old branch is otherwise
+#                                 reachable only by installing a jq from 2015, and a guard
+#                                 nobody has watched fire is a guard nobody has watched at
+#                                 all. For tests; nothing else should set it.
 #
 # State is NOT keyed on a session id. The id in $CLAUDE_CODE_SESSION_ID and the
 # .session_id delivered to hooks and the status line are different values for the same
@@ -201,6 +238,27 @@ case "${SKILLFORGE_NOW:-}" in
   *[!0-9]*|???????????*)
     die "SKILLFORGE_NOW must be epoch seconds (digits only, at most 10); got '$SKILLFORGE_NOW'" ;;
 esac
+
+# HOW LONG AN `active` FORGE IS BELIEVED. Six hours, of IDLE -- time since the last
+# `skillforge step` -- and not of elapsed time. See the header: 6.5 hours is the longest
+# healthy forge on record and 3.3 the median, so a cap on ELAPSED time at this magnitude
+# would close a forge that was still working, and one on IDLE time at this magnitude cannot:
+# a live forge steps, and a gap this long is longer than any healthy forge has existed.
+#
+# IT IS DELIBERATELY NOT SKILLFORGE_IDLE_SECS, which is 45 minutes and means something
+# else. That one marks a row in `list` -- "this has stopped moving, look at it" -- and a
+# person looks. This one is the threshold past which a forge is presumed DEAD and a `fail`
+# row is written for it without anybody being asked, which is a far stronger claim and
+# needs a far longer wait. One knob for both would make the reaper as eager as the marker.
+# A junk value falls back rather than erroring: `[ x -ge y ]` prints "integer expected" and
+# takes the meaning of every reap decision with it.
+ACTIVE_TTL="${SKILLFORGE_ACTIVE_TTL:-21600}"
+case "$ACTIVE_TTL" in ''|*[!0-9]*|???????????*) ACTIVE_TTL=21600 ;; esac
+# The reason string is written into a ledger row that outlives every session, so it names
+# the knob that produced it. A row reading "abandoned" says a person judged it; this one
+# says a clock did, and which clock, so the judgement can be checked later against the TTL
+# that was in force.
+REAP_REASON="reaped: exceeded SKILLFORGE_ACTIVE_TTL"
 
 # How long since a stamp, in the coarsest unit that stays honest. This exists because
 # staleness was COMPUTED and then thrown away: the status line has rendered `idle 3d13h`
@@ -1158,11 +1216,19 @@ abspath() { # <path> -> absolute, with trailing slashes stripped so basename is 
 # Where a skill has to land to be visible. In order: an explicit override (tests, and
 # anyone whose layout is unusual), the claude_dir this package was actually installed
 # into, and only then the default location.
+# WHERE CLAUDE CODE'S OWN CONFIG LIVES, resolved once and in one place. `doctor` reads
+# settings.json out of here and `skills_dest` hangs skills/ off it, and the two must agree:
+# a doctor that checks the wiring in one directory while `done` installs into another
+# reports a healthy install of something nobody is running.
+claude_dir() {
+  cd_c="$(jq -r '.claude_dir // empty' "$STATE_ROOT/install-manifest.json" 2>/dev/null)"
+  [ -n "${cd_c:-}" ] || cd_c="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  printf '%s' "$cd_c"
+}
+
 skills_dest() {
   if [ -n "${SKILLFORGE_SKILLS_DIR:-}" ]; then printf '%s' "$SKILLFORGE_SKILLS_DIR"; return 0; fi
-  sd_c="$(jq -r '.claude_dir // empty' "$STATE_ROOT/install-manifest.json" 2>/dev/null)"
-  [ -n "${sd_c:-}" ] || sd_c="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-  printf '%s/skills' "$sd_c"
+  printf '%s/skills' "$(claude_dir)"
 }
 
 # WHERE THE SKILL IS. Answered in this order:
@@ -1278,6 +1344,360 @@ install_forged_skill() { # <name> <record file, or empty>
   fi
   if [ -n "${ins_warn:-}" ]; then echo "skillforge: $ins_warn" >&2; fi
   return "$ins_rc"
+}
+
+
+# --------------------------------------------------------------------------- doctor
+#
+# WHY THIS IS A SURFACE AND NOT A LOG. Every hook in this package opens with
+# `command -v jq >/dev/null 2>&1 || exit 0` and `mkdir -p "$STATE_DIR" 2>/dev/null || exit 0`,
+# and both of those are RIGHT: a hook that fails a turn is worse than a hook that does
+# nothing. The price is that a missing jq, a state directory that has gone read-only, a
+# SKILL_COMPOUNDER_STATE pointing somewhere that no longer exists, a settings.json that
+# stopped parsing, or a skills symlink left dangling by a moved checkout silences the whole
+# package -- no error, no status-line segment, no ledger row, nothing anywhere saying so.
+# Every one of those is quiet in EXACTLY the same way a package with nothing to say is
+# quiet, which is why none of them has ever been noticed from the inside.
+#
+# THE VERDICT IS THE FIRST WORD, so the output greps, and there are three of them:
+#   FAIL  this package is not doing something it says it does.
+#   WARN  look at it; it may be a deliberate choice. The plugin wiring cannot carry a
+#         statusLine, a fresh install has no ledger, an idle forge may still be live work.
+#   PASS  the check ran and found nothing.
+# ONLY FAIL SETS THE EXIT STATUS. A WARN that failed the command would be switched off
+# inside a week, and every FAIL would go with it.
+#
+# NOTHING HERE CHANGES STATE except one probe file, written and immediately removed to
+# answer the one question `[ -w ]` cannot (below). `doctor` never reaps, never installs and
+# never repairs: a health surface that edits what it is measuring cannot be run twice.
+DOCTOR_FAILED=0
+DOCTOR_PASS=0
+DOCTOR_WARN=0
+DOCTOR_FAIL_N=0
+dr() { # <PASS|WARN|FAIL> <label> <detail...>
+  dr_v="$1"; dr_l="$2"; shift 2
+  case "$dr_v" in
+    FAIL) DOCTOR_FAILED=1; DOCTOR_FAIL_N=$(( DOCTOR_FAIL_N + 1 )) ;;
+    WARN) DOCTOR_WARN=$(( DOCTOR_WARN + 1 )) ;;
+    *)    DOCTOR_PASS=$(( DOCTOR_PASS + 1 )) ;;
+  esac
+  # The detail is an ARGUMENT to %s and never part of the format, so a `%` inside it --
+  # a path, a jq program, a settings.json command line -- is printed and not interpreted.
+  printf '%-4s  %-10s  %s\n' "$dr_v" "$dr_l" "$*"
+}
+# A continuation line, indented past the verdict column so it cannot be mistaken for one.
+dr_note() { printf '            %s\n' "$*"; }
+
+# THE MARKERS ARE READ FROM skill_compounder/installer.py, NEVER COPIED. They are the
+# installer's own definition of which settings.json entries are ours, and a copy that
+# drifted would have `doctor` report a wiring nobody has -- passing against markers the
+# installer stopped writing, or failing against ones it started writing. `sed`, not
+# `python3`: python3 is the installer's dependency, not this script's, and a doctor that
+# needs an interpreter the machine may not have is one more thing to be silently absent.
+APP_ROOT=""
+app_root() {
+  [ -n "$APP_ROOT" ] || APP_ROOT="$(app_home)"
+  printf '%s' "$APP_ROOT"
+}
+installer_py() { printf '%s/skill_compounder/installer.py' "$(app_root)"; }
+installer_const() { # <CONSTANT NAME> -> its string value, or nothing
+  ic_f="$(installer_py)"
+  [ -f "$ic_f" ] || return 1
+  sed -n "s/^$1 = \"\\(.*\\)\"[[:space:]]*\$/\\1/p" "$ic_f" | head -n 1
+}
+# Every marker naming a hook SCRIPT, whatever it is called and however many there are.
+# Listing the seven of them by name here would be an eighth place to update on the day an
+# eighth hook lands, and the one that got missed would look exactly like a hook the user
+# had removed. STATUSLINE_MARKER falls out on the `.sh`: it is a shell comment, not a file.
+installer_hook_markers() {
+  ih_f="$(installer_py)"
+  [ -f "$ih_f" ] || return 1
+  sed -n 's/^[A-Z_]*MARKER = "\(.*\)"[[:space:]]*$/\1/p' "$ih_f" | grep '\.sh$' | sort -u
+}
+
+doctor_jq() {
+  dj_p="$(command -v jq 2>/dev/null || true)"
+  if [ -z "$dj_p" ]; then
+    # UNREACHABLE FROM HERE TODAY, and kept anyway: this script refuses at its own
+    # `command -v jq` guard a hundred lines above, so a jq-less machine gets that message
+    # rather than this one. The line stays because the CHECK is about the package and not
+    # about this CLI -- every hook exits 0 without jq and says nothing at all -- and
+    # because a `doctor` whose jq row simply vanished would read as a doctor with fewer
+    # checks rather than a machine with no jq.
+    dr FAIL jq "jq is not on PATH. Every hook in this package exits 0 without it, silently, and that is the whole failure."
+    return 0
+  fi
+  # SKILLFORGE_DOCTOR_JQ_VERSION pins the version string, exactly as SKILLFORGE_NOW pins
+  # the clock and for the same reason: the too-old branch below is otherwise reachable
+  # only by installing a jq from 2015, and a guard nobody has watched fire is a guard
+  # nobody has watched at all. It pins the STRING, not the answer -- the comparison under
+  # test is the real one.
+  dj_v="${SKILLFORGE_DOCTOR_JQ_VERSION:-}"
+  [ -n "$dj_v" ] || dj_v="$(jq --version 2>/dev/null || true)"
+  dj_n="${dj_v#jq-}"
+  dj_maj="${dj_n%%.*}"
+  dj_rest="${dj_n#*.}"; dj_min="${dj_rest%%.*}"
+  case "$dj_maj" in ''|*[!0-9]*) dj_maj="" ;; esac
+  case "$dj_min" in ''|*[!0-9]*) dj_min="" ;; esac
+  if [ -z "$dj_maj" ] || [ -z "$dj_min" ]; then
+    dr WARN jq "$dj_p answers '$dj_v', which is not a version this can compare. 1.6 or newer is what the package is written against."
+    return 0
+  fi
+  # 1.6 AND THE EVIDENCE FOR IT: `skillforge backfill` runs jq with --rawfile, which jq
+  # gained in 1.6, and hooks/doc-gate.sh records the same floor from the other side. Not a
+  # guess at what "modern jq" means -- one measured feature, in this file, at this version.
+  if [ "$dj_maj" -lt 1 ] || { [ "$dj_maj" -eq 1 ] && [ "$dj_min" -lt 6 ]; }; then
+    dr FAIL jq "$dj_v at $dj_p is older than 1.6, which is the floor: 'skillforge backfill' passes --rawfile, and jq did not have it before 1.6."
+    return 0
+  fi
+  dr PASS jq "$dj_v at $dj_p"
+}
+
+doctor_state() {
+  ds_src="the default"
+  [ -n "${SKILL_COMPOUNDER_STATE:-}" ] && ds_src="SKILL_COMPOUNDER_STATE"
+  if [ ! -d "$STATE_ROOT" ]; then
+    dr FAIL state "$STATE_ROOT does not exist and could not be created (from $ds_src)."
+    return 0
+  fi
+  # A REAL WRITE, NOT `[ -w ]`. access(2) answers out of the permission bits, and is wrong
+  # about a read-only mount, an ACL that denies what the bits allow, and a full filesystem
+  # -- three of the ways this directory actually stops accepting writes. The probe is
+  # removed immediately; it is the only thing `doctor` writes anywhere.
+  ds_probe="$STATE_ROOT/.doctor-probe.$$"
+  if ( : > "$ds_probe" ) 2>/dev/null; then
+    rm -f "$ds_probe" 2>/dev/null
+    dr PASS state "$STATE_ROOT is writable (from $ds_src)"
+  else
+    dr FAIL state "$STATE_ROOT (from $ds_src) will not accept a write. Every hook here does 'mkdir -p ... || exit 0' and then goes quiet, so nothing else will ever tell you."
+  fi
+}
+
+doctor_settings() {
+  dx_f="$(claude_dir)/settings.json"
+  if [ ! -f "$dx_f" ]; then
+    dr WARN settings "no $dx_f, so nothing here is wired through the installer path"
+    return 0
+  fi
+  if ! jq -e . "$dx_f" >/dev/null 2>&1; then
+    dr FAIL settings "$dx_f does not parse as JSON. Claude Code disables EVERY setting in a malformed file, not only ours."
+    return 0
+  fi
+  dx_markers="$(installer_hook_markers)"
+  if [ -z "$dx_markers" ]; then
+    dr WARN settings "$dx_f parses, but the hook markers cannot be read from $(installer_py), so the wiring cannot be checked against anything but a duplicate of that list."
+    return 0
+  fi
+  dx_cmds="$(jq -r '[(.hooks // {}) | to_entries[] | .value[]? | (.hooks // [])[]? | (.command // "")] | .[]' "$dx_f" 2>/dev/null)"
+  dx_have=0; dx_missing=""
+  while IFS= read -r dx_m; do
+    [ -n "$dx_m" ] || continue
+    # `tr -cd '0-9'` on the count: BSD `grep -c` and `wc` pad with a leading space, and a
+    # numeric guard that reads that space as non-numeric has already zeroed one cap here.
+    dx_c="$(int_or_zero "$(printf '%s\n' "$dx_cmds" | grep -c -F -- "$dx_m" 2>/dev/null | tr -cd '0-9')")"
+    [ "$dx_c" -eq 0 ] && dx_missing="$dx_missing${dx_missing:+, }$dx_m"
+    dx_have=$(( dx_have + dx_c ))
+  done <<MARKERS
+$dx_markers
+MARKERS
+  # The expected count comes from hooks/hooks.json, which is the plugin wiring of the same
+  # scripts to the same events. tests/test_plugin.py already pins the two against each
+  # other, so counting against it here cannot drift from what install.sh writes.
+  dx_want="$(int_or_zero "$(jq '[(.hooks // {}) | to_entries[] | .value[]? | (.hooks // [])[]?] | length' "$(app_root)/hooks/hooks.json" 2>/dev/null)")"
+  if [ "$dx_want" -eq 0 ]; then
+    dr WARN settings "$dx_have entry/entries of ours in $dx_f, but $(app_root)/hooks/hooks.json could not be read for the expected count"
+  elif [ "$dx_have" -eq "$dx_want" ]; then
+    dr PASS settings "$dx_have/$dx_want hook entries wired in $dx_f"
+  elif [ "$dx_have" -eq 0 ]; then
+    dr WARN settings "none of our $dx_want hook entries are in $dx_f. Expected if this repo is loaded as a PLUGIN, which carries hooks/hooks.json instead; a fault if install.sh was ever run."
+  elif [ "$dx_have" -lt "$dx_want" ]; then
+    dr FAIL settings "$dx_have of $dx_want hook entries wired; not wired to anything: $dx_missing. A PARTIAL wiring is the shape that silences one event and leaves the rest working, so nothing downstream will report it."
+  else
+    dr WARN settings "$dx_have hook entries against the $dx_want in hooks/hooks.json: duplicates. Everything a hook counts, stamps or does once has to survive the same event twice."
+  fi
+}
+
+doctor_statusline() {
+  dl_f="$(claude_dir)/settings.json"
+  if [ ! -f "$dl_f" ]; then
+    dr WARN statusline "no $dl_f, so the forge animation has nothing to render into"
+    return 0
+  fi
+  dl_m="$(installer_const STATUSLINE_MARKER)"
+  if [ -z "$dl_m" ]; then
+    dr WARN statusline "cannot read STATUSLINE_MARKER from $(installer_py)"
+    return 0
+  fi
+  dl_c="$(jq -r '.statusLine.command // ""' "$dl_f" 2>/dev/null)"
+  case "$dl_c" in
+    *"$dl_m"*) dr PASS statusline "installed, carrying the marker '$dl_m'" ;;
+    '')  dr WARN statusline "no statusLine in $dl_f. The forge animation renders from there and nowhere else; a plugin install cannot carry one, so this is expected on that path." ;;
+    *)   dr WARN statusline "a statusLine is set but carries no '$dl_m' marker, so the forge animation is not being rendered: $dl_c" ;;
+  esac
+}
+
+doctor_skills() {
+  dk_dir="$(skills_dest)"
+  if [ ! -d "$dk_dir" ]; then
+    dr WARN skills "no skills directory at $dk_dir, so nothing forged here can be invoked"
+    return 0
+  fi
+  dk_here=0; dk_broken=""; dk_foreign=""
+  dk_app="$(app_root)"
+  while IFS= read -r dk_l; do
+    [ -n "$dk_l" ] || continue
+    dk_t="$(readlink "$dk_l" 2>/dev/null)"
+    [ -n "$dk_t" ] || continue
+    case "$dk_t" in /*) : ;; *) dk_t="$(dirname "$dk_l")/$dk_t" ;; esac
+    case "$dk_t" in
+      "$dk_app"/*)
+        dk_here=$(( dk_here + 1 ))
+        [ -e "$dk_t" ] || dk_broken="$dk_broken${dk_broken:+, }$(basename "$dk_l")" ;;
+      *)
+        [ -e "$dk_t" ] || dk_foreign="$dk_foreign${dk_foreign:+, }$(basename "$dk_l")" ;;
+    esac
+  done <<LINKS
+$(find "$dk_dir" -maxdepth 1 -type l 2>/dev/null)
+LINKS
+  if [ -n "$dk_broken" ]; then
+    dr FAIL skills "$dk_here link(s) in $dk_dir point into $dk_app and these do not resolve: $dk_broken. A dangling link is an 'Unknown skill' at the moment it is invoked, and only then."
+  else
+    dr PASS skills "$dk_here link(s) into this checkout, all resolve ($dk_dir)"
+  fi
+  # Reported, never removed, and never counted as ours. A dangling link pointing somewhere
+  # else may be the user's own, or another tool's, and this package has twice destroyed a
+  # user's skills by being generous about what counts as its own.
+  if [ -n "$dk_foreign" ]; then
+    dr_note "also dangling, pointing outside this checkout and so not ours to judge: $dk_foreign"
+  fi
+}
+
+doctor_ledger() {
+  if [ ! -s "$LEDGER" ]; then
+    dr PASS ledger "no ledger yet at $LEDGER; nothing has been forged, which is not a fault"
+    return 0
+  fi
+  # Counted with jq rather than with `wc`, and blank lines excluded, because the question
+  # is how many ROWS there are. `-R -n` with `inputs` reads a raw line at a time and
+  # `fromjson?` drops what does not parse, which is the same reader every other consumer
+  # of this file uses; `jq -s` would abort on the first bad line and take the count with it.
+  dg_pair="$(jq -r -R -n '[inputs | select(test("^[[:space:]]*$") | not)] as $l
+                       | "\([$l[] | select((fromjson? | type) == "object")] | length) \($l | length)"' \
+             < "$LEDGER" 2>/dev/null)"
+  dg_ok="$(int_or_zero "$(printf '%s' "$dg_pair" | cut -d" " -f1)")"
+  dg_all="$(int_or_zero "$(printf '%s' "$dg_pair" | cut -d" " -f2)")"
+  if printf '%s' "$(tail -n 1 "$LEDGER" 2>/dev/null)" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    if [ "$dg_ok" -lt "$dg_all" ]; then
+      dr WARN ledger "the last line parses, but $(( dg_all - dg_ok )) of $dg_all row(s) in $LEDGER do not. Every reader here drops those silently, so whatever they recorded is already gone from every count."
+    else
+      dr PASS ledger "$dg_all row(s), all parse, last one included ($LEDGER)"
+    fi
+  else
+    dr FAIL ledger "the LAST line of $LEDGER does not parse as JSON. That is the shape a killed append leaves, and every reader here drops it silently, so the forge it was about is simply missing from the record."
+  fi
+}
+
+doctor_counters() {
+  dc_dir="$STATE_ROOT/reminders"
+  if [ ! -d "$dc_dir" ]; then
+    dr PASS counters "no $dc_dir yet; the reminder hook has not run against this state"
+    return 0
+  fi
+  # THE FORM IS REPORTED, NOT JUDGED. The hook appends one byte per edit -- an `x` -- so
+  # the count is the file SIZE, which is what makes it safe under the 4-way parallelism
+  # edits actually arrive at; a read-modify-write lost 48 of 60 when it was measured. A
+  # reader that expects a decimal number sees `xxxx`, and a reader that expects a tally
+  # sees `4`, and each drops what it does not recognise WITHOUT SAYING SO. So this counts
+  # both forms and prints which is on disk, and leaves which one is correct to whoever
+  # owns the reader -- the two only have to agree, and nothing else here can see whether
+  # they do.
+  dc_n=0; dc_unary=0; dc_digits=0; dc_empty=0; dc_junk=""; dc_mixed=""
+  while IFS= read -r dc_f; do
+    [ -n "$dc_f" ] || continue
+    dc_n=$(( dc_n + 1 ))
+    # LC_ALL=C: BSD `tr` ABORTS on a byte that is not valid in the ambient locale, and the
+    # empty string it then yields is exactly the answer this `case` reads as "empty file".
+    dc_v="$(LC_ALL=C tr -d '\n\r' < "$dc_f" 2>/dev/null)"
+    case "$dc_v" in
+      '') dc_empty=$(( dc_empty + 1 )) ;;
+      *[!0-9]*)
+        case "$dc_v" in
+          *[!x]*)
+            # DIGITS FOLLOWED BY A TALLY IS ITS OWN THING, and it is on this machine: one
+            # file here holds `36` and then 900 `x` bytes. That is a single session that
+            # was counted as a decimal number, then appended to as a tally when the hook
+            # changed form under it. Neither reader can add the two halves up -- one sees
+            # a non-number, the other counts 902 bytes for 936 edits -- so it is called
+            # out separately from a file that is simply corrupt.
+            dc_head="$(printf '%s' "$dc_v" | LC_ALL=C sed 's/^[0-9]*//')"
+            case "$dc_head" in
+              *[!x]*) dc_junk="$dc_junk${dc_junk:+, }$(basename "$dc_f")" ;;
+              *)      dc_mixed="$dc_mixed${dc_mixed:+, }$(basename "$dc_f")" ;;
+            esac ;;
+          *) dc_unary=$(( dc_unary + 1 )) ;;
+        esac ;;
+      *) dc_digits=$(( dc_digits + 1 )) ;;
+    esac
+  done <<COUNTERS
+$(find "$dc_dir" -maxdepth 1 -type f -name '*.edits' 2>/dev/null)
+COUNTERS
+  dc_sum="$dc_n counter file(s): $dc_unary unary 'x' tally/tallies, $dc_digits digit string(s), $dc_empty empty"
+  if [ -n "$dc_junk" ]; then
+    dr FAIL counters "$dc_sum, and these are neither a tally nor a number: $dc_junk"
+    [ -n "$dc_mixed" ] && dr_note "and these hold a number with a tally appended to it: $dc_mixed"
+  elif [ -n "$dc_mixed" ]; then
+    dr FAIL counters "$dc_sum, and these hold a decimal count with a tally appended after it: $dc_mixed. One session written under both forms; no reader can add the halves up, so those edits are lost to every count that uses them."
+  elif [ "$dc_unary" -gt 0 ] && [ "$dc_digits" -gt 0 ]; then
+    dr WARN counters "$dc_sum. BOTH forms are present, so a reader that takes one is dropping the other and is not saying so."
+  elif [ "$dc_n" -eq 0 ]; then
+    dr PASS counters "no *.edits counters in $dc_dir yet"
+  else
+    dr PASS counters "$dc_sum"
+  fi
+}
+
+doctor_forges() {
+  df_act=0; df_stale=""; df_unknown=""
+  while IFS="$SEP" read -r df_st df_nm df_stt df_pth; do
+    [ -n "${df_pth:-}" ] || continue
+    [ "$df_stt" = "active" ] || continue
+    df_act=$(( df_act + 1 ))
+    df_idle="$(slot_idle "$df_pth")"
+    if [ -z "$df_idle" ]; then
+      df_unknown="$df_unknown${df_unknown:+, }$(label_of "$df_nm" "$df_pth")"
+    elif [ "$df_idle" -ge "$ACTIVE_TTL" ]; then
+      df_stale="$df_stale${df_stale:+, }$(label_of "$df_nm" "$df_pth") (idle $(fmt_age "$df_idle"))"
+    fi
+  done <<SLOTS
+$(slots)
+SLOTS
+  if [ -n "$df_stale" ]; then
+    dr WARN forges "$df_act active, and these have not stepped in over $(fmt_age "$ACTIVE_TTL"): $df_stale"
+    dr_note "Each one holds its name against a new forge. 'skillforge reap' writes each a 'fail' row and frees the name; it never touches a forge inside the TTL."
+  elif [ -n "$df_unknown" ]; then
+    dr WARN forges "$df_act active, and the age of these cannot be read: $df_unknown"
+  else
+    dr PASS forges "$df_act active forge(s), none idle over $(fmt_age "$ACTIVE_TTL")"
+  fi
+  if [ -n "$df_stale" ] && [ -n "$df_unknown" ]; then
+    dr_note "age unreadable, so never guessed at and never reaped: $df_unknown"
+  fi
+  # THE LEDGER'S OWN OPEN STARTS, which are a different set. A `start` row whose forge FILE
+  # is gone -- cleared, or lost with the directory -- can never be reaped, because reap
+  # closes a record and there is no record left; it stays "never closed out" in the ledger
+  # forever. Counted by NAME, per the rule this file states for itself, and reported only
+  # when it exceeds what is on disk, so a healthy machine says nothing.
+  if [ -s "$LEDGER" ]; then
+    df_open="$(int_or_zero "$(jq -R -n '
+        [inputs | fromjson? // empty | select(type == "object")] as $r
+        | (reduce ($r[] | select(.event == "start") | (.name // "")) as $n ({}; .[$n] = ((.[$n] // 0) + 1))) as $s
+        | (reduce ($r[] | select(.event == "done" or .event == "fail") | (.name // "")) as $n ({}; .[$n] = ((.[$n] // 0) + 1))) as $e
+        | [ $s | to_entries[] | (.value - ($e[.key] // 0)) | select(. > 0) ] | add // 0' \
+        < "$LEDGER" 2>/dev/null)")"
+    if [ "$df_open" -gt "$df_act" ]; then
+      dr_note "$df_open start row(s) in the ledger have no done/fail row and $df_act still have a forge file, so $(( df_open - df_act )) cannot be reaped at all: nothing is left to close. 'skillforge ledger' lists them as never closed out."
+    fi
+  fi
 }
 
 # --------------------------------------------------------------------- option parse
@@ -1427,7 +1847,27 @@ SLOTS
       e_idle="$(slot_idle "$existing")"
       if [ -n "$e_idle" ]; then e_age="last stepped $(fmt_age "$e_idle") ago"
       else e_age="last step time unknown"; fi
+      # PAST THE TTL, REFUSING IS THE WRONG ANSWER. A forge that has not stepped in longer
+      # than any healthy forge has ever lived is not contention with a colleague, it is a
+      # corpse holding the one name the caller wants -- and the caller is usually a subagent,
+      # which reads "already live" as "somebody else is on it" and stops. So it is reaped
+      # here, with the same `fail` row `skillforge reap` writes, and the start goes through.
+      # Told on stderr, not stdout: stdout is the line the caller may be parsing, and a
+      # reap is something that happened TO the caller rather than an answer to what it asked.
+      #
+      # REAPING NEEDS A READABLE AGE. A record whose `updated` cannot be parsed is refused
+      # exactly as before, because the alternative is guessing that an unreadable stamp
+      # means old, and closing somebody's live forge on that guess.
+      if [ -n "$e_idle" ] && [ "$e_idle" -ge "$ACTIVE_TTL" ]; then
+        if close_forge "$existing" failed fail "$REAP_REASON"; then
+          echo "skillforge: reaped the forge named '$name' — it had not stepped in $(fmt_age "$e_idle"), past SKILLFORGE_ACTIVE_TTL ($(fmt_age "$ACTIVE_TTL")). A 'fail' row is in the ledger; this start is taking the name." >&2
+        else
+          echo "skillforge: '$name' was closed out by another process as it was being reaped; this start is taking the name." >&2
+        fi
+        existing_state="failed"
+      else
       die "a forge named '$name' is already live (step $(sfield "$existing" step)/$(sfield "$existing" steps), $e_age). If it died, close it with 'skillforge fail --name $name <reason>'; to discard it, 'skillforge clear --name $name'. Do not use 'done' -- that records it as completed. Or forge under a different name."
+      fi
     fi
 
     # The record is written COMPLETE, to a temp file, before any slot is claimed.
@@ -1625,6 +2065,69 @@ SLOTS
     else
       closed_out "$FILE"
     fi
+    ;;
+
+  reap)
+    # THE `fail` ROW IS THE POINT OF THIS, not the freed name. An `active` forge with no
+    # outcome is invisible to the ledger's start-to-outcome join -- it counts as "never
+    # closed out" for as long as the ledger exists -- and it holds its name against every
+    # new forge. One appended row does both jobs at once: the join closes and the name is
+    # free. Nothing is edited and nothing is deleted, so the ledger stays append-only,
+    # which is the property every reader of it depends on.
+    #
+    # ONLY FORGES PAST THE TTL, EVER. `--name` narrows the set; it does not lower the bar.
+    # A reap that could be talked into closing a forge that stepped a minute ago writes a
+    # `fail` row over live work, and the forge has no way to tell anyone it was working.
+    rp_n=0; rp_unknown=""
+    while IFS="$SEP" read -r rp_st rp_nm rp_stt rp_pth; do
+      [ -n "${rp_pth:-}" ] || continue
+      [ "$rp_stt" = "active" ] || continue
+      if [ -n "$NAME_OPT" ] && [ "$rp_nm" != "$NAME_OPT" ]; then continue; fi
+      rp_idle="$(slot_idle "$rp_pth")"
+      if [ -z "$rp_idle" ]; then
+        rp_unknown="$rp_unknown${rp_unknown:+, }$(label_of "$rp_nm" "$rp_pth")"
+        continue
+      fi
+      [ "$rp_idle" -ge "$ACTIVE_TTL" ] || continue
+      if close_forge "$rp_pth" failed fail "$REAP_REASON"; then
+        rp_n=$(( rp_n + 1 ))
+        echo "skillforge: reaped '$CLOSED_NAME' — idle $(fmt_age "$rp_idle"), past SKILLFORGE_ACTIVE_TTL ($(fmt_age "$ACTIVE_TTL")). A 'fail' row is in the ledger and the name is free again."
+      fi
+    done <<SLOTS
+$(slots)
+SLOTS
+    if [ "$rp_n" -eq 0 ]; then
+      if [ -n "$NAME_OPT" ]; then
+        echo "skillforge: nothing reaped — no forge named '$NAME_OPT' has been idle longer than $(fmt_age "$ACTIVE_TTL")."
+      else
+        echo "skillforge: nothing reaped — no active forge has been idle longer than $(fmt_age "$ACTIVE_TTL")."
+      fi
+    fi
+    # Never guessed at, and never silently skipped either: a record nobody can date is
+    # exactly the one that would otherwise hold its name forever with no surface saying why.
+    if [ -n "$rp_unknown" ]; then
+      echo "skillforge: not reaped, age unknown: $rp_unknown. A record with no readable 'updated' is never guessed at; close it by hand with 'skillforge fail --name <forge> <reason>'." >&2
+    fi
+    exit 0
+    ;;
+
+  doctor)
+    echo "skillforge doctor"
+    echo ""
+    doctor_jq
+    doctor_state
+    doctor_settings
+    doctor_statusline
+    doctor_skills
+    doctor_ledger
+    doctor_counters
+    doctor_forges
+    echo ""
+    echo "$DOCTOR_PASS pass, $DOCTOR_WARN warn, $DOCTOR_FAIL_N fail"
+    # `if`, not a trailing `&&`: a false `&&` as the last command makes the script exit
+    # non-zero, which is precisely the answer this line exists to reserve for a real FAIL.
+    if [ "$DOCTOR_FAILED" -eq 1 ]; then exit 1; fi
+    exit 0
     ;;
 
   install)
@@ -2607,11 +3110,19 @@ SLOTS
     ' "$LEDGER"
     ;;
   ""|-h|--help|help)
-    # The header block is the help text, and the range ENDS ONE LINE ABOVE
-    # `set -uo pipefail` (line 121 as this is written). Add a line to the header and
-    # this number moves with it: too small silently truncates the help, too large
-    # prints shell code at the user.
-    sed -n '2,120p' "$0" | sed 's/^# \{0,1\}//'
+    # The header block is the help text, and it ends one line above `set -uo pipefail`.
+    # THAT LINE NUMBER WAS A LITERAL AND IT WAS WRONG THE FIRST TIME THE HEADER GREW: it
+    # said 120, the header reached 143, and twenty-three lines of help -- including two
+    # whole subcommands -- were silently cut off. Nothing failed and nothing said so, which
+    # is what a hard-coded offset into a file that people edit always does eventually. So
+    # it is DERIVED, from the one line that is guaranteed to be the first statement, and
+    # the literal survives only as the fallback for a `$0` that cannot be read.
+    help_end="$(grep -n '^set -uo pipefail$' "$0" 2>/dev/null | head -n 1 | cut -d: -f1)"
+    case "$help_end" in
+      ''|*[!0-9]*) help_end=120 ;;
+      *) help_end=$(( help_end - 1 )) ;;
+    esac
+    sed -n "2,${help_end}p" "$0" | sed 's/^# \{0,1\}//'
     ;;
   *) die "unknown command '$cmd' (try: skillforge help)" ;;
 esac

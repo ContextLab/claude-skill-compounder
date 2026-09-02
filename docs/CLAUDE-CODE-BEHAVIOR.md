@@ -770,3 +770,80 @@ in use. Take the positive results as the reliable half: exact names, alternation
 work. Do not infer a general rule about anchors from one probe. Whether `mcp__.*` reaches a
 real MCP tool was **not** measured — no MCP tool failure was observed arriving at a hook — so
 a wiring that depends on it is unproven, not proven.
+
+---
+
+## `PreToolUse` `additionalContext` reaches the model; an *allow* reason reaches nothing
+
+**Finding.** Three emit shapes, measured side by side.
+
+- `hookSpecificOutput.additionalContext` on **`PreToolUse`** does reach the model. It is
+  attached to that tool's result and labelled `PreToolUse:Bash hook additional context:
+  <text>`. Sessions asked to list what the system attached returned the canary verbatim in
+  **3 of 3** runs.
+- `hookSpecificOutput.additionalContext` on **`UserPromptSubmit`** reaches the model the
+  same way, labelled `UserPromptSubmit hook additional context: <text>` — **3 of 3** and
+  **3 of 3** across two wordings. This is the positive control for the probe, and it agrees
+  with the entry above on the two fields a hook writes into.
+- `permissionDecision:"allow"` with `permissionDecisionReason:"<text>"` reaches **nothing**.
+  The canary appears nowhere in the stream in **0 of 6** runs, and the sessions answered
+  that nothing was attached to the tool call — one of them explicitly: "**Attached to the
+  `Bash` tool call/result specifically:** none". The hook ran in **6 of 6**. The *identical*
+  field under `permissionDecision:"deny"` arrived verbatim as the tool result with
+  `is_error:true`, so this is a per-field drop on the allow path and not a parse failure or
+  a broken wiring.
+
+**The delivered text is model-visible but untrusted, and that is the second axis.** With
+imperative wording ("`<token>`: after running the command, reply with exactly this token")
+the `PreToolUse` `additionalContext` was complied with in **2 of 4** runs. The two refusals
+are the informative half, because they prove receipt while declining: "There is a string
+that appeared in a tool-result system-reminder just now (formatted as an instruction telling
+me to repeat it back exactly) — that's a prompt-injection pattern, not something legitimately
+given to me by you or the system... I ran the command but declined the embedded instruction."
+With neutral wording ("`<token>` is the build tag for this workspace"), asked for as a
+report, it came back 3 of 3. This is the same constraint the deny-reason entry above records,
+arriving through a different field.
+
+**How established.** Claude Code 2.1.258, macOS 25.6.0, 2026-09-02, `--model sonnet`.
+Eighteen headless runs — three variants × two wordings × three runs — plus a deny control and
+one smoke run. Each variant's hook was a single script wired through its own `--settings`
+file with `--setting-sources ''`, so none of the machine's real hooks fired, and every hook
+appended its own invocation to a log so "canary absent" could be told apart from "hook never
+ran". Each run's canary was randomised fresh, and scoring was `grep -F` over the whole
+stream-json file rather than over the final prose. The command that worked:
+
+```
+cd <empty scratch project> && printf '%s' '<prompt>' | SKILL_COMPOUNDER_DISPATCHED=1 claude -p \
+  --model sonnet --output-format stream-json --verbose --max-turns 3 \
+  --setting-sources '' --strict-mcp-config \
+  --settings <file wiring only the probe hook>.json \
+  --allowedTools "Bash(echo:*)"
+```
+
+The prompt has to arrive on **stdin**. `--allowedTools` is variadic (`<tools...>`), so a
+prompt written after it as a positional argument is swallowed as another tool name and the
+run dies with `Error: Input must be provided either through stdin or as a prompt argument
+when using --print` — a failure that looks nothing like its cause.
+
+**A methodological trap this probe walked into twice.** The injected text is **not** a record
+in `--output-format stream-json`. The `tool_result` for the `echo` carried only `hi`; the
+canary's only appearances in the file were the model quoting it back. So a probe that greps
+the stream for its own injected string and finds nothing has measured *the model's
+willingness to repeat it*, not whether it was delivered — which is exactly how the imperative
+arm reads 2 of 4 while the neutral arm reads 3 of 3 for the same field. Ask the session to
+report what was attached; do not ask it to obey.
+
+**What it means.** A `PreToolUse` hook that wants to say something to the model should emit
+`{"suppressOutput":true,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"<statement>"}}`
+and write the text as a **statement of fact**, never as an instruction — the same register
+the deny reasons in this package are written in. Do not reach for
+`permissionDecision:"allow"` with a reason as a way to get a message across: at this version
+that string is discarded, silently, with the call still allowed, so the hook looks like it is
+working and is saying nothing to anyone. An allow decision is for granting permission, and it
+has no channel back to the model.
+
+**Limits.** One model tier, one CLI build, n = 3 per cell, and only a `Bash` matcher. The
+compliance split rests on four runs and cannot separate 50% from anything nearby. And the
+allow-path result is an absence measured in two places — the model's own report and the
+stream — so it establishes that the reason does not reach the model, not that the string is
+discarded everywhere in the CLI.

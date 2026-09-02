@@ -816,6 +816,65 @@ if [ ! -s "$TMP/forges.tsv" ]; then
   exit 0
 fi
 
+# ------------------------------------------------- ONE ROW PER SKILL, NOT PER FORGE
+#
+# A skill forged more than once has one forge row per forge, and every one of those rows
+# was credited with the SAME invocations. The join below matches invocations BY NAME, and
+# a name cannot say which of its forges it belongs to, so each row counted the lot.
+# Measured on the real ledger this package keeps: `ai-tell-audit` had three forge rows
+# each reporting the same 4 uses, `finish-task` the same, the harness breakdown printed
+# `finish-task 72` three times, and the headline read "7 of 10 finished forges" over 5
+# distinct skills. Every one of those figures was a multiple of a real one, and nothing
+# on the page said so.
+#
+# So the unit of the reuse fraction is the SKILL NAME, and the row that stands for a name
+# is its LATEST SUCCESSFUL forge. Latest, because `since` is the window every count below
+# is measured against and the newest window is the one a reader means by "since it was
+# forged".
+#
+# SUCCESSFUL, and that is not a tidiness preference. The headline says the forge "produced
+# a skill that was invoked", and a `fail` produced none. Ranking by recency alone made
+# `finish-task` -- forged and shipped 2026-08-27, used once, then re-forged twice into
+# failures on 09-01 -- report 0 uses against a window opened by a forge that built nothing,
+# and dropped it out of the reused half. The rank is therefore done, then any outcome at
+# all, then none: a name with only failures keeps its latest failure and is still counted
+# as a finished forge exactly as before, and a name whose only rows are unfinished keeps
+# its latest unfinished row, still visible in the table and still excluded from both halves
+# of the fraction.
+#
+# The dropped rows are not lost data: `skillforge ledger` lists every one, and how many
+# were folded is reported under the headline. What is dropped is the double counting.
+#
+# GROUPED BY THE FORGE NAME, which is the name this table prints, so the SKILL column can
+# no longer repeat. It is not grouped by the installed name: that would let a rename fold
+# two rows the table would then print under one visible name and one hidden one.
+#
+# Two passes over the same file. The first picks a representative line number per name,
+# the second prints the lines it picked, so the ordering by start time survives.
+awk -F'\t' '
+  NR == FNR {
+    rank = ($4 == "done") ? 2 : (($6 == "yes") ? 1 : 0)
+    if (!($1 in best) || rank > r[$1] || (rank == r[$1] && $3 + 0 >= t[$1] + 0)) {
+      best[$1] = FNR; r[$1] = rank; t[$1] = $3 + 0
+    }
+    next
+  }
+  FNR == best[$1]
+' "$TMP/forges.tsv" "$TMP/forges.tsv" > "$TMP/skills.tsv" 2>/dev/null
+
+# FAIL OPEN. An awk that produced nothing must not empty the table: a duplicated view is
+# wrong by a multiple, an absent one is wrong by everything.
+forge_rows="$(wc -l < "$TMP/forges.tsv" 2>/dev/null | tr -cd '0-9')"
+skill_rows="$(wc -l < "$TMP/skills.tsv" 2>/dev/null | tr -cd '0-9')"
+case "${forge_rows:-}" in ''|*[!0-9]*) forge_rows=0 ;; esac
+case "${skill_rows:-}" in ''|*[!0-9]*) skill_rows=0 ;; esac
+if [ ! -s "$TMP/skills.tsv" ]; then
+  cp "$TMP/forges.tsv" "$TMP/skills.tsv" 2>/dev/null
+  skill_rows="$forge_rows"
+fi
+folded=$(( forge_rows - skill_rows ))
+[ "$folded" -lt 0 ] && folded=0
+
 # ---------------------------------------------------------------- the transcripts
 
 # Skill invocations are recorded as assistant tool_use blocks. The grep prefilter is
@@ -1070,7 +1129,7 @@ COUNTS
     "$(printf '%.30s' "$name")" \
     "$(jq -n -r --argjson t "$since_ts" '$t | gmtime | strftime("%Y-%m-%d")' 2>/dev/null || echo "?")" \
     "$rounds" "$outcome" "$after" "$projects"
-done < "$TMP/forges.tsv"
+done < "$TMP/skills.tsv"
 
 # --------------------------------------------------------------- the headline
 
@@ -1096,6 +1155,12 @@ fi
 if [ "$unclosed" -gt 0 ]; then
   echo "       $unclosed forge(s) never closed out and are excluded from both halves of that"
   echo "       fraction. They have no finish time, so nothing can be counted as after it."
+fi
+if [ "$folded" -gt 0 ]; then
+  echo "       Counted once per SKILL, not once per forge row. $folded of the $forge_rows forge"
+  echo "       row(s) in the ledger share a name with a row above and are folded into it, so"
+  echo "       one skill's invocations are not credited to each of its forges in turn."
+  echo "       \`skillforge ledger\` lists every forge row."
 fi
 
 # The same headline the two early exits above print, from the same function, so the three
@@ -1150,14 +1215,31 @@ fi
 # hit floor(N / CI_EDIT_EVERY) checkpoints. This is an estimate, and it is a loose one:
 # the hook prunes counters older than 7 days, so the denominator is a rolling window
 # while the ledger numerator is the whole history.
+#
+# THE COUNTER IS A UNARY TALLY, NOT A DECIMAL NUMBER. `hooks/compound-improvement.sh`
+# appends ONE BYTE per counted edit (`printf 'x' >> "$STATE_DIR/$sid.edits"`), so the
+# count is the FILE SIZE. It writes that way on purpose: an O_APPEND write of one byte
+# is atomic, and the read-modify-write it replaced lost events under the double hook
+# delivery and the parallel-agent bursts this package runs in -- measured there at 12 of
+# 60. The reader here required digits, which is a shape the hook has never written, so
+# EVERY counter on every real disk was skipped and this block printed "not computable"
+# for its whole life while the state directory was full of counters. The two sides are
+# one format with two halves; change neither alone.
+#
+# `wc -c` prints a leading-space-padded count on BSD, and reading that as a number has
+# already zeroed one cap in this package, so the digits are extracted rather than
+# trusted. A file holding any byte other than the tally byte was not written by the
+# hook: it is skipped, which is also what keeps the "not computable" branch reachable.
 checkpoints=0
 sessions=0
 if [ -d "$REMINDERS" ]; then
   find "$REMINDERS" -maxdepth 1 -type f -name '*.edits' 2>/dev/null > "$TMP/counters"
   while IFS= read -r c; do
     [ -f "$c" ] || continue
-    n="$(cat "$c" 2>/dev/null)"
+    [ -z "$(tr -d 'x' < "$c" 2>/dev/null)" ] || continue
+    n="$(tr -cd 'x' < "$c" 2>/dev/null | wc -c | tr -cd '0-9')"
     case "${n:-}" in ''|*[!0-9]*) continue ;; esac
+    [ "$n" -gt 0 ] || continue
     sessions=$(( sessions + 1 ))
     checkpoints=$(( checkpoints + n / EDIT_EVERY ))
   done < "$TMP/counters"
