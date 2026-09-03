@@ -478,13 +478,10 @@ pending_tsv() {
 # days of quiet, and then whatever is still undeclined is raised again.
 record_nudge() {
   mkdir -p "$DIR" 2>/dev/null || return 0
-  rn_mark="${1:-}"
-  if [ -z "$rn_mark" ]; then
-    rn_mark=0
-    if [ -f "$NUDGE_STAMP" ]; then
-      rn_mark="$(awk '{print $2; exit}' "$NUDGE_STAMP" 2>/dev/null)"
-      case "$rn_mark" in ''|*[!0-9]*) rn_mark=0 ;; esac
-    fi
+  rn_mark=0
+  if [ -f "$NUDGE_STAMP" ]; then
+    rn_mark="$(awk '{print $2; exit}' "$NUDGE_STAMP" 2>/dev/null)"
+    case "$rn_mark" in ''|*[!0-9]*) rn_mark=0 ;; esac
   fi
   # Subshell, so a failed redirect cannot reach the terminal: the shell reports it
   # before applying the 2>/dev/null on the same command.
