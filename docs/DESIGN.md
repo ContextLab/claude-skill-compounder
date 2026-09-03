@@ -1100,6 +1100,49 @@ ended. That is why its refusals are wider than the installer's: an unknown scope
 text, a second marker block in one file, and a memory directory that does not already exist
 all stop it before anything is opened for writing.
 
+## The paid review is opt-in, because the install is a one-liner
+
+`hooks/session-review.sh` is the only thing here that spends the user's Anthropic quota and
+the only thing that sends any part of a transcript off the machine. It shipped defaulting to
+on, with the cost and the off switch written up in the README, and that was the wrong trade
+for one reason: the advertised install is
+`curl -fsSL .../install.sh | bash`. A person who pastes that has agreed to install a package.
+They have not necessarily read the README section that says a detached `claude -p` will
+start reading their sessions, and they have not been shown a price. Telling someone afterwards what you
+already took is disclosure; it is not their agreement, and a default that has to be
+retracted is the shape of a default that should never have been set.
+
+So `SKILL_COMPOUNDER_REVIEW` defaults to `0`, and only the literal `1` enables it -- the same
+shape `SKILL_COMPOUNDER_REVIEW_FORGE` already had one layer down, though that one is off for
+a different reason, and its own block says so: not the money, but a completion gate a
+dispatched session cannot reach. The
+asymmetry with `SKILL_COMPOUNDER_REPEAT_GATE` and the rest is deliberate: every other switch
+in this package turns off something free, so its default costs a user who ignores it nothing
+but noise. This one costs money.
+
+**What did not become opt-in is the capture.** `hooks/insight-capture.sh` still writes the
+weekly candidate queue, `hooks/precompact.sh` still fills it from a transcript a compaction is
+about to replace, and the session audit still runs. None of them asks a model anything; they
+are `jq` over files the user already has. Turning those off with the review would have cost
+the user the whole feature to save them a bill they were not being charged, and would have
+left an installed package that does nothing at all until a variable is set.
+
+**Reading the switch has to be identical in three places, and one of them is a report.** The
+launch site in `hooks/insight-capture.sh` decides whether to spawn anything; the first gate in
+`hooks/session-review.sh` decides whether the spawned script proceeds; `doctor` in
+`bin/skillforge` tells the user which way it is set, and is the only surface that does, since
+the script is in neither wiring. A `doctor` that read the default differently from the script
+would report a state nothing is in -- which is worse than not reporting, because it is
+believed. `tests/test_doctrine_sync.py` derives the README's documented default from the
+`${VAR:-default}` in the scripts, so the fourth copy, the one in prose, cannot drift either.
+
+**The gate stays at position 10, and that is deliberate.** It is still first,
+still ahead of the per-session claim, the lock, the cooldown stamp and any read of the
+transcript, and `tests/test_session_review.py` asserts that a refusal there leaves nothing
+under the reviews directory. A gate that refused after taking the session's one claim would
+spend no money and still consume the session, which is the bug the cooldown ordering already
+taught us once.
+
 ## Why the `PreCompact` capture is a second script and not a third arm of the first
 
 `hooks/insight-capture.sh` already reads the same two signals and writes the same weekly

@@ -254,22 +254,29 @@ and `tests/test_precompact.py` alike, and the pair is what stops one copy regres
 the other does not. The three-marker test is not redundant: two adjacent markers alone pass
 on a scan that still skips every other one.
 
-**`hooks/session-review.sh` is a shipped component that spends money, and it is in
-neither wiring.** `settings.json` and `hooks/hooks.json` between them name
+**`hooks/session-review.sh` is the one shipped component that spends money, it is
+OPT-IN, and it is in neither wiring.** `settings.json` and `hooks/hooks.json` between
+them name
 `repeat-gate.sh` (three times), `compound-improvement.sh` (twice), `claim-gate.sh` (twice),
 `skill-use.sh` (twice), `remind.sh` (twice), `apply-gate.sh`, `doc-gate.sh`,
 `insight-capture.sh` and `precompact.sh` -- fifteen entries over nine scripts; grep either for
 `session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
 detached, never waited on, and only when that turn's session audit actually wrote a
-record. Look for it there, not in a hooks list. Stage 1 is a single `claude -p` with no
-tools at all -- `--disallowed-tools` over every built-in, `--strict-mcp-config`,
+record *and* `SKILL_COMPOUNDER_REVIEW` is exactly `1`. Look for it there, not in a hooks
+list. That default is `0`, and the reason is in `docs/DESIGN.md`: the advertised install
+is `curl | bash`, so the spend and the transcript digest both need a yes rather than the
+absence of a no. Only the literal `1` passes; every other value, unset included, refuses.
+Three files read the switch and all three must spell the default the same way --
+`hooks/session-review.sh`, `hooks/insight-capture.sh`'s launch site, and `doctor` in
+`bin/skillforge`, which is the only surface that reports which way it is set.
+Stage 1 is a single `claude -p` with no tools at all -- `--disallowed-tools` over every built-in, `--strict-mcp-config`,
 `--setting-sources ''` -- reading a bounded digest of the transcript and answering
 `VERDICT: NONE` or `VERDICT: CANDIDATE <name>`.
 
 Its gates all fail closed, and each reports through one `refuse` helper that prints a
 single line to stderr — `/dev/null` in production — and exits on that gate's own code, so
-a test asserts on the code rather than on prose. The gates run 10 through 20: off switch,
-recursion, CI/test environment, a state root under a temp directory, no `claude` on
+a test asserts on the code rather than on prose. The gates run 10 through 20: the opt-in
+switch, recursion, CI/test environment, a state root under a temp directory, no `claude` on
 `PATH`, bad argv, then the per-session claim, the lock, the 21-hour cooldown, an
 unwritable state directory and an empty digest. 21 and 22 are not gates — they report a
 verdict that errored or would not parse, after the money has been spent. Nothing here

@@ -141,11 +141,22 @@ class SessionReviewBase(unittest.TestCase):
         )
 
     def env(self, **extra):
+        """The environment every test below starts from.
+
+        `SKILL_COMPOUNDER_REVIEW=1` IS PART OF THE BASELINE, and it has to be, because the
+        default flipped to `0` (issue #39: the advertised install is `curl | bash`, so the
+        one arm that spends the user's quota and sends a transcript digest off the machine
+        needs a yes rather than the absence of a no). Every test that exercises anything
+        past gate 10 is therefore testing an opted-in run, which is the only kind there is.
+        The default itself is pinned by `OptInTest` below, which builds its environment
+        without going through here.
+        """
         e = {
             "PATH": PATH,
             "HOME": self.tmp,
             "SKILL_COMPOUNDER_STATE": str(self.state),
             "SKILL_COMPOUNDER_REVIEW_NOW": str(NOW),
+            "SKILL_COMPOUNDER_REVIEW": "1",
         }
         e.update(extra)
         return e
@@ -160,10 +171,117 @@ class SessionReviewBase(unittest.TestCase):
         )
 
 
+class OptInTest(SessionReviewBase):
+    """The default is OFF, and a run that was not opted into spends nothing at all.
+
+    Issue #39. This arm is the only thing in the package that spends the user's Anthropic
+    quota and the only thing that sends any part of a transcript off the machine, and the
+    advertised install is `curl | bash`, so it needs a yes rather than the absence of a no.
+
+    Nothing here goes through `SessionReviewBase.env()`, which sets the switch as part of
+    its baseline. A test for a default that reads the default out of a helper is testing
+    the helper.
+    """
+
+    def bare_env(self, **extra):
+        """Everything the script needs EXCEPT the review switch.
+
+        `SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE` is set so gate 13 is not what refuses:
+        with it, an opted-in run gets past 13 and lands on 14 (no `claude` on the test
+        PATH), so a returncode of 10 can only have come from gate 10 and a returncode of
+        14 can only mean gate 10 let it through.
+        """
+        e = {
+            "PATH": PATH,
+            "HOME": self.tmp,
+            "SKILL_COMPOUNDER_STATE": str(self.state),
+            "SKILL_COMPOUNDER_REVIEW_NOW": str(NOW),
+            "SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE": "1",
+        }
+        e.update(extra)
+        return e
+
+    def populated_reviews(self):
+        """A reviews directory holding one of everything a dispatch would touch.
+
+        An empty directory would let `assertFalse(exists())` pass for the wrong reason.
+        This way the assertion is that the claim was NOT taken, the lock was NOT created
+        and the cooldown stamp was NOT rewritten -- each against a file already there.
+        """
+        reviews = self.state / "reviews"
+        (reviews / ".claims").mkdir(parents=True)
+        (reviews / ".claims" / "sess-other").mkdir()
+        (reviews / ".last-dispatch").write_text("1")
+        (reviews / "index.jsonl").write_text("")
+        return reviews
+
+    def snapshot(self, root):
+        """Every path under `root`, with its bytes. Compared before and after."""
+        out = {}
+        for q in sorted(root.rglob("*")):
+            out[q.relative_to(root).as_posix()] = (
+                q.read_bytes() if q.is_file() else None)
+        return out
+
+    def test_unset_refuses_at_the_opt_in_gate(self):
+        r = self.run_review(self.bare_env())
+        self.assertEqual(r.returncode, OFF,
+                         "unset must refuse at gate 10, not run: %s" % r.stderr)
+        self.assertFalse((self.state / "reviews").exists(),
+                         "a run nobody opted into must not create the state directory")
+
+    def test_unset_spends_nothing_and_touches_nothing(self):
+        """No claim, no lock, no cooldown stamp, no row -- gate 10 is ahead of all four.
+
+        The order is the whole point of putting the switch at gate 10 rather than deeper:
+        a refusal that had already taken the session's one claim would cost no money and
+        still consume the session, so the session could never be reviewed after the user
+        opted in.
+        """
+        reviews = self.populated_reviews()
+        before = self.snapshot(reviews)
+        r = self.run_review(self.bare_env())
+        self.assertEqual(r.returncode, OFF)
+        self.assertEqual(self.snapshot(reviews), before,
+                         "a refusal at the opt-in gate changed the reviews directory")
+        self.assertFalse((reviews / ".claims" / "sess-1").exists(), "claim was taken")
+        self.assertFalse((reviews / ".lock").exists(), "lock was taken")
+        self.assertEqual((reviews / ".last-dispatch").read_text(), "1",
+                         "the cooldown stamp was rewritten")
+
+    def test_no_value_but_the_literal_one_enables_it(self):
+        for value in ("", "0", "true", "yes", "TRUE", "on", "2", " 1", "1 ", "01"):
+            with self.subTest(value=value):
+                r = self.run_review(self.bare_env(SKILL_COMPOUNDER_REVIEW=value),
+                                    sid="optin-%s" % value.strip().replace(" ", "_"))
+                self.assertEqual(r.returncode, OFF,
+                                 "%r must not enable the paid arm" % value)
+                self.assertFalse((self.state / "reviews").exists())
+
+    def test_the_literal_one_gets_past_the_gate(self):
+        """Proved by which gate it reaches instead: 14, the CLI gate, three gates later."""
+        r = self.run_review(self.bare_env(SKILL_COMPOUNDER_REVIEW="1"))
+        self.assertEqual(r.returncode, NO_CLI,
+                         "opted in, this should reach the CLI gate: %s" % r.stderr)
+
+    def test_the_launch_site_reads_the_switch_the_same_way(self):
+        """hooks/insight-capture.sh gates the launch too, and must agree.
+
+        Two readings that disagree are both wrong: a launcher stricter than the script
+        withholds a dispatch the user asked for, and one looser starts a process that is
+        about to refuse. Derived from the two files, not restated.
+        """
+        review = REVIEW.read_text()
+        capture = CAPTURE.read_text()
+        self.assertIn('REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-0}"', review)
+        self.assertIn('[ "$REVIEW_ON" = "1" ]', review)
+        self.assertIn('[ "${SKILL_COMPOUNDER_REVIEW:-0}" = "1" ]', capture)
+
+
 class GateTest(SessionReviewBase):
     """Each gate, in isolation, against the real script."""
 
-    def test_off_switch_stops_everything(self):
+    def test_the_literal_zero_still_stops_everything(self):
         r = self.run_review(self.env(SKILL_COMPOUNDER_REVIEW="0"))
         self.assertEqual(r.returncode, OFF)
         self.assertFalse((self.state / "reviews").exists(),
@@ -227,8 +345,14 @@ class GateTest(SessionReviewBase):
         self.assertFalse((REPO / "tests" / "fixtures" / "_state_probe").exists())
 
     def test_a_temp_state_root_refuses_even_when_the_variable_is_unset(self):
-        """The discriminator is the directory, so HOME under a temp dir is caught too."""
+        """The discriminator is the directory, so HOME under a temp dir is caught too.
+
+        The unset variable in the name is SKILL_COMPOUNDER_STATE. The review switch is set
+        here on purpose: since the opt-in flip it defaults to 0, so leaving it out would
+        make gate 10 refuse first and this would pass while testing nothing about gate 13.
+        """
         env = {"PATH": PATH, "HOME": self.tmp,
+               "SKILL_COMPOUNDER_REVIEW": "1",
                "SKILL_COMPOUNDER_REVIEW_NOW": str(NOW)}
         r = subprocess.run([str(REVIEW), "t-1", self.tmp, str(self.transcript), self.tmp],
                            env=env, capture_output=True, text=True,
@@ -1003,6 +1127,9 @@ class SourceContractTest(unittest.TestCase):
         r = subprocess.run(
             [str(REVIEW), "parse-probe", tmp, str(transcript), tmp],
             env={"PATH": PATH, "HOME": tmp, "SKILL_COMPOUNDER_STATE": str(state),
+                 # Opted in: the default is 0 since issue #39, and this probe has to run
+                 # the script to the end to see the whole file parse in one pass.
+                 "SKILL_COMPOUNDER_REVIEW": "1",
                  "SKILL_COMPOUNDER_REVIEW_ALLOW_TEST_STATE": "1",
                  "SKILL_COMPOUNDER_REVIEW_CLAUDE": "/bin/cat",
                  "SKILL_COMPOUNDER_REVIEW_NOW": str(NOW)},

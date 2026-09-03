@@ -165,9 +165,10 @@
 #                                 nobody has watched fire is a guard nobody has watched at
 #                                 all. For tests; nothing else should set it.
 #   SKILL_COMPOUNDER_REVIEW       Read by `doctor` only to REPORT whether the paid session
-#                                 review is enabled (hooks/session-review.sh owns the
-#                                 switch and its default). The check is informational
-#                                 and never fails; doctor is where a user learns it.
+#                                 review has been opted into (hooks/session-review.sh owns
+#                                 the switch and its default, which is 0). The check is
+#                                 informational and never fails; doctor is where a user
+#                                 learns it, and where they are told how to turn it on.
 #
 # State is NOT keyed on a session id. The id in $CLAUDE_CODE_SESSION_ID and the
 # .session_id delivered to hooks and the status line are different values for the same
@@ -1831,20 +1832,22 @@ SLOTS
 
 # INFORMATIONAL, NOT A HEALTH CHECK: this is never anything but PASS, because whether the
 # paid session review is on or off is a choice, not a fault -- doctor has no basis for
-# preferring either. It exists only because nothing else surfaces the answer: the off
-# switch is read by hooks/session-review.sh alone, at its first gate, and that script is
+# preferring either. It exists only because nothing else surfaces the answer: the switch
+# is read by hooks/session-review.sh alone, at its first gate, and that script is
 # detached (started by hooks/insight-capture.sh, in neither settings.json nor
 # hooks/hooks.json), so a user who wants to know whether it is live has nowhere else to
-# look. The env var name and its default ("1", meaning on) are read here exactly as
-# hooks/session-review.sh reads them -- REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-1}", and
-# only the literal string "0" turns it off -- so this can never report a wiring that
-# script does not itself have.
+# look. The env var name and its default ("0", meaning nothing runs until the user asks
+# for it) are read here exactly as hooks/session-review.sh reads them --
+# REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-0}", and only the literal string "1" turns it on
+# -- so this can never report a wiring that script does not itself have. The disabled
+# branch carries the way to switch it on, because the user reading that line is the one
+# who wants to know; the enabled branch carries the price, for the same reason.
 doctor_review() {
-  dv_on="${SKILL_COMPOUNDER_REVIEW:-1}"
-  if [ "$dv_on" = "0" ]; then
-    dr PASS review "review: disabled (SKILL_COMPOUNDER_REVIEW=0); hooks/session-review.sh refuses at its first gate"
+  dv_on="${SKILL_COMPOUNDER_REVIEW:-0}"
+  if [ "$dv_on" = "1" ]; then
+    dr PASS review "review: enabled (SKILL_COMPOUNDER_REVIEW=1); one paid claude -p per session review, median \$0.17, and the default cooldown caps it at 8 a week (see README)"
   else
-    dr PASS review "review: enabled (SKILL_COMPOUNDER_REVIEW=${dv_on}); set SKILL_COMPOUNDER_REVIEW=0 to disable"
+    dr PASS review "review: disabled (opt in with SKILL_COMPOUNDER_REVIEW=1 in the top-level env block of settings.json, which is where all three readers see it; see README)"
   fi
 }
 

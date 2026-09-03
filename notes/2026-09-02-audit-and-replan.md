@@ -451,3 +451,13 @@ supported versions, upgrade/rollback test). P4 cannot be done in a session.
   --json` still exits 0 and `test_ledger.py` is 45 tests OK. Worth noting for the next
   agent: this is a substring gate, so any future `-nc`, `-c`-clustered flag or a URL in a
   comment will trip it the same way.
+- ~01:05 (Sep 3) CI wave committed 89ca608, pushed to branch and main. Local suite: 48 files,
+  2351 tests, 0 failures, 2 documented skips; shellcheck --severity=error clean; plugin
+  validate --strict clean. CI watch armed for 89ca608. #39 (paid review opt-in) dispatched;
+  #40 (docs split) follows it; tag v0.3.0 per docs/releasing.md once CI is green on both OS.
+- ~01:50 (Sep 3) CI for 89ca608 still red (run 33715482451); round-2 triage+fix agent dispatched.
+  #39 done: SKILL_COMPOUNDER_REVIEW default 0 (only literal "1" enables), gate 10 refuses
+  before any claim/lock/stamp, doctor reports it, README cost median $0.17 (n=6) with the jq
+  command; suite 48 files / 2338 tests OK / 2 skips. Owed: tests/test_forge_apply.py:1605
+  stale comment says default "1"; install.sh opt-in flag (#39 bullets 2-3) not done.
+  Watcher lesson: `gh run list --commit` returned nothing; filter on headSha instead.

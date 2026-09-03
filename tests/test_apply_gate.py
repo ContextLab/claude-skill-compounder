@@ -28,6 +28,7 @@ and the status line reads SKILLFORGE_NOW; pinning one does nothing to the other,
 exactly the trap .claude/CLAUDE.md warns about, so each test pins the one it needs.
 """
 
+import errno
 import json
 import os
 import re
@@ -66,20 +67,29 @@ def columns(text):
 
 
 # A stand-in for the KERNEL, not for anything in this package: a real executable named
-# `jq`, put first on PATH, that refuses any single argv element over MAX_ARG_STRLEN and
-# otherwise execs the real jq. That is what execve(2) does on Linux and what macOS does
-# not do, which is the whole reason CI could be red while this suite was green.
+# `jq`, put first on PATH, that refuses any single argv element the kernel would refuse
+# and otherwise execs the real jq. That is what execve(2) does on Linux and what macOS
+# does not do, which is the whole reason CI could be red while this suite was green.
 #
 # The length is counted under LC_ALL=C so `${#a}` counts BYTES rather than characters --
 # the kernel counts bytes, and a 409 KB message of 3-byte glyphs is only 136 KB of
 # characters. LC_ALL is restored before the exec so the real jq runs in the caller's
 # locale.
+#
+# THE `+ 1` IN THE COMPARISON IS THE TERMINATING NUL, AND THE OFF-BY-ONE IS THE KERNEL'S.
+# `copy_strings()` measures each argument with `strnlen_user(str, MAX_ARG_STRLEN)`, which
+# returns the length INCLUDING the terminating NUL, and refuses when that exceeds the cap.
+# So a string of exactly MAX_ARG_STRLEN characters occupies MAX_ARG_STRLEN + 1 bytes and
+# Linux rejects it, while MAX_ARG_STRLEN - 1 characters is the widest that fits. A shim
+# comparing the character count alone is one byte more permissive than the thing it stands
+# in for, which is a false green of exactly the kind this class exists to prevent: a
+# message landing on the boundary would pass here and be refused on ubuntu.
 SHIM_JQ = r"""#!/bin/bash
 _shim_saved_lc="${LC_ALL-}"
 _shim_had_lc="${LC_ALL+yes}"
 LC_ALL=C
 for _shim_a in "$@"; do
-  if [ "${#_shim_a}" -gt %(cap)d ]; then
+  if [ $(( ${#_shim_a} + 1 )) -gt %(cap)d ]; then
     printf '%%s\n' "jq: Argument list too long" >&2
     exit 126
   fi
@@ -890,12 +900,21 @@ class LinuxArgvCapTest(ApplyGateBase):
     on Linux at settings its own ENV block calls legal.
 
     THE SHIM IS A STAND-IN FOR THE KERNEL, NOT FOR ANY CODE IN THIS PACKAGE. It is a real
-    executable named `jq`, first on PATH, that refuses any argv element over 131072 bytes
-    and otherwise `exec`s the real jq -- which is precisely what execve(2) does on Linux.
-    The hook is the real hook, the markers are real files, and the jq that answers is the
-    real jq. `test_the_shim_itself_refuses_and_only_over_the_cap` proves the shim is live
+    executable named `jq`, first on PATH, that refuses any argv element Linux would refuse
+    -- 131072 bytes counting the terminating NUL, so 131071 characters is the widest that
+    fits -- and otherwise `exec`s the real jq, which is precisely what execve(2) does. The
+    hook is the real hook, the markers are real files, and the jq that answers is the real
+    jq. `test_the_shim_itself_refuses_and_only_over_the_cap` proves the shim is live
     before anything is concluded from it; a fault injector that quietly does nothing is
     the dead guard this repo has a skill about.
+
+    AND THE SHIM IS NOT ALWAYS THE ONE THAT SPEAKS. On ubuntu the real kernel refuses an
+    over-cap argument before any shim is loaded, so the probes that watch a refusal happen
+    get it from a different layer there than here.
+    `test_the_same_assertion_holds_when_the_kernel_is_the_refuser` puts this machine in
+    that configuration on purpose -- against a boundary it measures rather than assumes,
+    because macOS bounds the whole vector where Linux bounds one string -- so neither
+    layer's path through these tests is reasoned about rather than run.
     """
 
     MAX_ARG_STRLEN = 131072
@@ -903,20 +922,62 @@ class LinuxArgvCapTest(ApplyGateBase):
     CEIL_TRIGGER = 20000
     CEIL_NAMED = 20
 
+    # A cap far below every kernel's, so an argument at its boundary is one the real
+    # execve(2) is happy to carry on BOTH platforms and the only thing that can refuse it
+    # is the stand-in itself. That is what makes the liveness probe below mean the same
+    # thing on macOS and on ubuntu.
+    PROBE_CAP = 8192
+
+    KERNEL = "kernel"
+    SHIM = "shim"
+
     def setUp(self):
         super().setUp()
-        real = shutil.which("jq", path=BASE_PATH)
-        self.assertIsNotNone(real, "jq is not on the test PATH; this suite needs it")
-        self.shimdir = self.state / "argv-cap-shim"
-        self.shimdir.mkdir()
-        shim = self.shimdir / "jq"
-        shim.write_text(SHIM_JQ % {"real": real, "cap": self.MAX_ARG_STRLEN})
-        shim.chmod(0o755)
+        self.real_jq = shutil.which("jq", path=BASE_PATH)
+        self.assertIsNotNone(self.real_jq, "jq is not on the test PATH; this suite needs it")
+        self.shimdir = self.make_shim(self.MAX_ARG_STRLEN)
 
-    def shim_env(self, **extra):
+    def make_shim(self, cap):
+        """A directory holding a `jq` that refuses what a kernel with this cap would."""
+        d = self.state / ("argv-cap-shim-%012d" % cap)
+        d.mkdir(exist_ok=True)
+        shim = d / "jq"
+        shim.write_text(SHIM_JQ % {"real": self.real_jq, "cap": cap})
+        shim.chmod(0o755)
+        return d
+
+    def shim_env(self, shimdir=None, **extra):
         e = self.env(**extra)
-        e["PATH"] = "%s:%s" % (self.shimdir, BASE_PATH)
+        e["PATH"] = "%s:%s" % (shimdir or self.shimdir, BASE_PATH)
         return e
+
+    def hand_jq_one_argument(self, nbytes, shimdir=None, env=None):
+        """Hand `jq` ONE argument of nbytes and report WHICH LAYER refused it.
+
+        Returns `(layer, proc)`. `layer` is KERNEL when execve(2) itself answered E2BIG --
+        which is what Linux does for any argument over MAX_ARG_STRLEN, and what macOS does
+        once the whole vector passes ARG_MAX -- and in that case there is no process and
+        no `proc`. `layer` is SHIM when the exec succeeded and the stand-in answered, and
+        `layer` is None when jq answered normally.
+
+        THE TWO LAYERS ARE NOT INTERCHANGEABLE AND THIS IS NOT A PLATFORM `if`. Both are
+        real refusals of the same argument by the same mechanism at the same boundary;
+        which one fires is a property of the machine, not of the code under test, so the
+        tests below assert the refusal and print its provenance rather than branching on
+        `sys.platform` and quietly testing nothing on one of them.
+        """
+        argv = ["jq", "-n", "--arg", "r", "R" * nbytes, "$r|length"]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL,
+                                  env=env or self.shim_env(shimdir=shimdir))
+        except OSError as exc:
+            if exc.errno != errno.E2BIG:
+                raise
+            return (self.KERNEL, None)
+        if proc.returncode == 0:
+            return (None, proc)
+        return (self.SHIM, proc)
 
     def shim_stop(self, session="sess-A", prompt="p1", now=4600, **envextra):
         payload = {"hook_event_name": "Stop", "session_id": session,
@@ -936,21 +997,126 @@ class LinuxArgvCapTest(ApplyGateBase):
 
     def test_the_shim_itself_refuses_and_only_over_the_cap(self):
         """The injector must be observed working, in both directions, or every other
-        assertion in this class is vacuous."""
-        env = self.shim_env()
-        over = subprocess.run(["jq", "-n", "--arg", "r", "R" * (self.MAX_ARG_STRLEN + 1),
-                               "$r|length"], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, env=env)
-        self.assertNotEqual(over.returncode, 0,
-                            "the shim let a %d-byte argument through; Linux would not"
-                            % (self.MAX_ARG_STRLEN + 1))
-        self.assertEqual(over.stdout, "", "a refused exec must produce no answer")
-        under = subprocess.run(["jq", "-n", "--arg", "r", "R" * (self.MAX_ARG_STRLEN - 1),
-                                "$r|length"], capture_output=True, text=True,
-                               stdin=subprocess.DEVNULL, env=env)
-        self.assertEqual(under.returncode, 0,
-                         "the shim refused a LEGAL argument: %r" % under.stderr)
-        self.assertEqual(under.stdout.strip(), str(self.MAX_ARG_STRLEN - 1))
+        assertion in this class is vacuous.
+
+        PROBED AT A CAP NO KERNEL ENFORCES, AND THAT IS THE WHOLE POINT. Probing at
+        MAX_ARG_STRLEN is what made this test fail on ubuntu and pass here: to watch the
+        shim refuse a 131073-byte argument, Python has to hand execve(2) a 131073-byte
+        argument first, and on Linux the real kernel answers E2BIG before the shim is even
+        loaded -- `OSError: [Errno 7] Argument list too long`, raised out of
+        `subprocess.run` itself, so the assertion never ran. At 8192 both kernels carry
+        the argument happily and the only thing that can refuse it is the stand-in, so a
+        dead injector is caught on both platforms.
+
+        Three points, because the boundary is where a fault injector lies: one byte under
+        the cap must reach the real jq and be ANSWERED (a shim that refused everything
+        would satisfy a one-sided test), and exactly at the cap must be refused, because
+        the kernel counts the terminating NUL and so must anything standing in for it.
+        """
+        d = self.make_shim(self.PROBE_CAP)
+        layer, proc = self.hand_jq_one_argument(self.PROBE_CAP - 1, shimdir=d)
+        self.assertIsNone(layer, "the shim refused a LEGAL argument: %r"
+                          % (proc.stderr if proc else "exec refused"))
+        self.assertEqual(proc.stdout.strip(), str(self.PROBE_CAP - 1),
+                         "the shim did not exec through to the real jq")
+        for n, why in ((self.PROBE_CAP, "the terminating NUL puts it one byte over"),
+                       (self.PROBE_CAP + 1, "plainly over")):
+            layer, proc = self.hand_jq_one_argument(n, shimdir=d)
+            self.assertEqual(layer, self.SHIM,
+                             "a %d-byte argument was not refused by the shim (%s); a "
+                             "kernel with this cap would refuse it" % (n, why))
+            self.assertEqual(proc.stdout, "", "a refused exec must produce no answer")
+            self.assertIn("Argument list too long", proc.stderr)
+
+    def assert_over_cap_is_refused(self, cap, shimdir):
+        """One byte over `cap` must produce no answer; one byte under must produce one.
+
+        Factored out so the SAME assertions can be run against the Linux per-argument cap
+        (refused by the shim here, by the kernel on ubuntu) and against a cap THIS kernel
+        actually enforces. Returns the layer that refused.
+        """
+        layer, proc = self.hand_jq_one_argument(cap + 1, shimdir=shimdir)
+        self.assertIn(layer, (self.KERNEL, self.SHIM),
+                      "a %d-byte argument was ANSWERED; nothing enforced the cap" % (cap + 1))
+        if proc is not None:
+            self.assertEqual(proc.stdout, "", "a refused exec must produce no answer")
+        under, (ulayer, uproc) = cap - 1, self.hand_jq_one_argument(cap - 1, shimdir=shimdir)
+        self.assertIsNone(ulayer,
+                          "the widest LEGAL argument was refused by the %s" % ulayer)
+        self.assertEqual(uproc.stdout.strip(), str(under))
+        return layer
+
+    def test_an_over_cap_argument_never_reaches_jq_whichever_layer_refuses(self):
+        """The real cap, asserted the only way it can be on both platforms.
+
+        On ubuntu the kernel refuses this before any shim runs; here the shim does. The
+        outcome under test is the same either way -- no answer comes back -- and the
+        provenance is PRINTED rather than branched on, so a reader of either run can see
+        which layer spoke.
+        """
+        layer = self.assert_over_cap_is_refused(self.MAX_ARG_STRLEN, self.shimdir)
+        print("\n  [linux argv cap] %d-byte argument refused by the %s"
+              % (self.MAX_ARG_STRLEN + 1, layer))
+
+    def measured_kernel_arg_cap(self, env):
+        """Bisect for the widest single argument execve(2) on THIS machine will carry.
+
+        MEASURED, NOT ASSUMED, AND THE FIRST DRAFT OF THIS TEST ASSUMED. ARG_MAX bounds
+        the WHOLE vector on macOS -- argv and the environment together -- so `ARG_MAX - 1`
+        bytes in one argument is still refused, and where the boundary actually falls
+        depends on how big this process's environment happens to be. On Linux the binding
+        limit is per-argument instead. Bisecting finds whichever of the two this kernel
+        enforces, in the exact environment the assertions will then use, so the test pins
+        a real boundary on both platforms rather than a constant that is right on one.
+        """
+        lo, hi = 4096, self.MAX_ARG_STRLEN * 16
+        self.assertIsNone(self.hand_jq_one_argument(lo, env=env)[0],
+                          "even %d bytes was refused; the bisection has no floor" % lo)
+        self.assertEqual(self.hand_jq_one_argument(hi, env=env)[0], self.KERNEL,
+                         "%d bytes in one argument was carried; no kernel here refuses "
+                         "anything and this class cannot mean what it says" % hi)
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if self.hand_jq_one_argument(mid, env=env)[0] is None:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
+    def test_the_same_assertion_holds_when_the_kernel_is_the_refuser(self):
+        """UBUNTU'S CONFIGURATION, REPRODUCED HERE RATHER THAN REASONED ABOUT.
+
+        On ubuntu the test above never reaches its own assertion: to watch anything refuse
+        a 131073-byte argument, `subprocess.run` must first hand execve(2) a 131073-byte
+        argument, and Linux answers E2BIG out of `_execute_child` -- so the KERNEL branch
+        of `hand_jq_one_argument` is the one that runs there and the SHIM branch never
+        does. If that branch were only reasoned about, a mistake in it would stay
+        invisible until CI ran, which is precisely how the previous round went red.
+
+        macOS has no per-argument cap, but it does have ARG_MAX over the whole vector, and
+        passing it raises the SAME `OSError` with the SAME errno out of the SAME call. So
+        running the assertions against ARG_MAX puts this machine in ubuntu's configuration
+        exactly: a shim sitting on PATH, ready to refuse, that the kernel never gives a
+        chance to speak. Asserting the layer is KERNEL is what proves the shim did not
+        answer -- it is built at this cap and would have refused the same argument.
+        """
+        # A shim too permissive to ever refuse, so the bisection measures the KERNEL.
+        wide = self.make_shim(self.MAX_ARG_STRLEN * 64)
+        edge = self.measured_kernel_arg_cap(self.shim_env(shimdir=wide))
+
+        # ...then the same boundary with a shim that WOULD refuse one byte past it. The
+        # two directory names are the same length, so PATH is the same length, so the
+        # environment is the same size and the boundary has not moved between them.
+        armed = self.make_shim(edge + 1)
+        self.assertEqual(len(str(armed)), len(str(wide)),
+                         "the two shim paths differ in length, so they differ in how "
+                         "much of ARG_MAX the environment eats")
+        layer = self.assert_over_cap_is_refused(edge, armed)
+        self.assertEqual(layer, self.KERNEL,
+                         "execve(2) carried a %d-byte argument, so the E2BIG branch "
+                         "ubuntu takes was never exercised here" % (edge + 1))
+        print("\n  [linux argv cap] kernel E2BIG measured at %d bytes: the branch "
+              "ubuntu takes at %d" % (edge + 1, self.MAX_ARG_STRLEN + 1))
 
     def test_the_gate_still_emits_at_the_ceilings_under_the_linux_argv_cap(self):
         """The ubuntu failure, reproduced and then closed. Before the streaming fix this

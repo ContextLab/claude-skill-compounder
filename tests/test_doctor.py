@@ -586,24 +586,51 @@ class TheReviewCheck(DoctorCase):
     see whether it is live. It must never itself be a FAIL -- whether review is on or off
     is a choice, not a fault this package can judge."""
 
-    def test_enabled_by_default(self):
-        r = self.doctor(SKILLFORGE_NOW=T0)
-        self.assertEqual(verdict(r.stdout, "review"), "PASS", line_for(r.stdout, "review"))
-        self.assertIn("review: enabled", line_for(r.stdout, "review"))
+    def test_disabled_by_default(self):
+        """The default flipped to OFF in issue #39.
 
-    def test_disabled_reflects_the_off_switch_and_still_passes(self):
-        r = self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=0)
+        The paid review is the one arm that spends the user's quota and sends a transcript
+        digest off the machine, and the advertised install is `curl | bash`, so it is now
+        opt-in. This check is the only surface that reports which way it is set, so the
+        default it reports is the claim most worth pinning.
+        """
+        r = self.doctor(SKILLFORGE_NOW=T0)
         self.assertEqual(verdict(r.stdout, "review"), "PASS", line_for(r.stdout, "review"))
         self.assertIn("review: disabled", line_for(r.stdout, "review"))
 
-    def test_anything_other_than_the_literal_zero_is_still_enabled(self):
-        """hooks/session-review.sh only turns off on the literal string '0'
-        (REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-1}"; [ "$REVIEW_ON" = "0" ]), so this check
-        has to read the switch the same way or it could report a wiring that script does
-        not itself have."""
-        r = self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW="false")
+    def test_the_disabled_line_says_how_to_opt_in(self):
+        """A user who wants it on has nowhere else to look: the script is in neither
+        wiring, so nothing but this line can tell them the name of the switch."""
+        line = line_for(self.doctor(SKILLFORGE_NOW=T0).stdout, "review")
+        self.assertIn("SKILL_COMPOUNDER_REVIEW=1", line)
+        self.assertIn("env", line)
+        self.assertIn("README", line)
+
+    def test_enabled_reflects_the_opt_in_and_still_passes(self):
+        r = self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=1)
         self.assertEqual(verdict(r.stdout, "review"), "PASS", line_for(r.stdout, "review"))
         self.assertIn("review: enabled", line_for(r.stdout, "review"))
+
+    def test_the_enabled_line_carries_a_price(self):
+        """Whoever switched it on is owed the figure, on the surface that confirms it is
+        on. The number itself is README's to state and derive; doctor quotes it."""
+        line = line_for(self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=1).stdout,
+                        "review")
+        self.assertRegex(line, r"\$[0-9]+\.[0-9]+", "no price on the enabled line: %s" % line)
+        self.assertIn("a week", line)
+
+    def test_anything_other_than_the_literal_one_is_disabled(self):
+        """hooks/session-review.sh only turns ON for the literal string '1'
+        (REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-0}"; [ "$REVIEW_ON" = "1" ]), so this check
+        has to read the switch the same way or it could report a wiring that script does
+        not itself have. Before the flip this test ran the other way round, against a
+        default of 1 and an off switch of '0'."""
+        for value in ("false", "0", "", "true", "yes", "2"):
+            with self.subTest(value=value):
+                r = self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=value)
+                self.assertEqual(verdict(r.stdout, "review"), "PASS",
+                                 line_for(r.stdout, "review"))
+                self.assertIn("review: disabled", line_for(r.stdout, "review"))
 
 
 # --------------------------------------------------------------------------- --json
@@ -672,8 +699,9 @@ class TheJsonForm(DoctorCase):
                          "FAIL")
 
     def test_the_review_check_reflects_the_env_var_in_json_too(self):
-        on = self.json_doctor(SKILLFORGE_NOW=T0)
-        off = self.json_doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=0)
+        # `on` has to be asked for since the flip in issue #39; unset is `off`.
+        on = self.json_doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=1)
+        off = self.json_doctor(SKILLFORGE_NOW=T0)
         on_review = next(c for c in json.loads(on.stdout)["checks"] if c["name"] == "review")
         off_review = next(c for c in json.loads(off.stdout)["checks"] if c["name"] == "review")
         self.assertEqual(on_review["status"], "PASS")

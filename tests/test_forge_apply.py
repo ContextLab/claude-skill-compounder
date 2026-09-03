@@ -1603,7 +1603,7 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
             "SKILLFORGE_ACTIVE_TTL", "SKILLFORGE_DOCTOR_JQ_VERSION",
             # NOT this CLI's knob, and the only entry here that is not. `doctor_review`
             # reads hooks/session-review.sh's off switch with that script's own default
-            # ("1") purely to REPORT it: the switch is read at that script's first gate,
+            # ("0" since 2026-09-03: the paid review is opt-in) purely to REPORT it: the switch is read at that script's first gate,
             # and the script is in neither wiring, so nothing else surfaces whether it
             # is live. A second copy of a default is a drift risk, which is why the
             # comment above `doctor_review` quotes the line it is copied from.

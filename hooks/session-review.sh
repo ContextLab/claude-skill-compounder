@@ -50,7 +50,9 @@
 # Every gate is evaluated from the environment or from files on disk. None of them asks
 # anything of any model. All of them fail closed and exit 0 in silence.
 #
-#   SKILL_COMPOUNDER_REVIEW=0         the off switch. Nothing runs.
+#   SKILL_COMPOUNDER_REVIEW=1         THE ON SWITCH, and it is unset by default, so
+#                                     the default is that nothing here runs. Any
+#                                     other value refuses too -- see gate 1.
 #   SKILL_COMPOUNDER_DISPATCHED       set by us on every process we launch. THE
 #                                     RECURSION BARRIER -- see below.
 #   CI / GITHUB_ACTIONS / CONTINUOUS_INTEGRATION / PYTEST_CURRENT_TEST /
@@ -183,7 +185,13 @@ AUDIT_HASH="${5:-}"
 ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 REVIEWS="$ROOT/reviews"
 
-REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-1}"
+# OPT-IN, and the default is 0. This is the one part of the package that spends the
+# user's Anthropic quota and sends a digest of a transcript off the machine, and the
+# advertised install is a `curl | bash` one-liner, so the person running it has not
+# necessarily read the README paragraph that describes either. Disclosure is not
+# consent. Same shape as REVIEW_FORGE below, and for the same reason. Everything else
+# this package does is shell and jq over files already on disk, and stays on.
+REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-0}"
 # 21 hours. See the cooldown reasoning in the header.
 REVIEW_COOLDOWN="${SKILL_COMPOUNDER_REVIEW_COOLDOWN:-75600}"
 # A lock older than this is a crashed dispatch, not a running one. Stage 2 can legitimately
@@ -223,7 +231,7 @@ WEEK="$(stamp %G-W%V)"
 # test; the exit code is what a test asserts on, because a test that greps prose breaks
 # when the prose is improved.
 #
-#   10 off switch      11 recursion       12 CI/test env      13 redirected state
+#   10 not opted in    11 recursion       12 CI/test env      13 redirected state
 #   14 no CLI          15 bad argv        16 session claimed  17 lock held
 #   18 cooldown        19 unwritable state
 #   20 no digest       21 stage-1 dispatch failed
@@ -328,11 +336,17 @@ if [ "${1:-}" = "--verdict-of" ]; then
   exit 0
 fi
 
-# ------------------------------------------------------------------------ gate 1: off
-[ "$REVIEW_ON" = "0" ] && refuse 10 "disabled by SKILL_COMPOUNDER_REVIEW=0"
+# --------------------------------------------------------------------- gate 1: opt-in
+# Not `= "0"`. The paid arm runs only for a user who asked for it in so many words, so
+# every other value refuses here: unset, empty, "true", "yes", or a typo. This is still
+# the first gate, ahead of the per-session claim, the lock, the cooldown stamp and any
+# read of the transcript, so a refusal here creates nothing under $REVIEWS and spends
+# nothing.
+[ "$REVIEW_ON" = "1" ] || \
+  refuse 10 "not enabled: SKILL_COMPOUNDER_REVIEW is 0 unless set to 1 (see README)"
 
 # ------------------------------------------------------------- gate 2: recursion
-# FIRST after the off switch, deliberately. Every other gate reads a file, and a nested
+# FIRST after the opt-in gate, deliberately. Every other gate reads a file, and a nested
 # dispatch must be refused even when the state directory is gone.
 [ -n "${SKILL_COMPOUNDER_DISPATCHED:-}" ] && \
   refuse 11 "already inside a dispatched session (SKILL_COMPOUNDER_DISPATCHED set)"

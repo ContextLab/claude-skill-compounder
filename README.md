@@ -67,7 +67,7 @@ otherwise.
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
-|`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
+|`hooks/session-review.sh`|**Calls the Anthropic API, and is off until you switch it on** with `SKILL_COMPOUNDER_REVIEW=1`. After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and how to enable it: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic|
 |`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
@@ -92,13 +92,16 @@ reported and left alone.
 
 ## What runs against the API
 
-**One part of this package calls the Anthropic API through your own `claude` CLI and your
-own account, and it is on by default.** Everything else here is shell and `jq` over files
-already on your disk.
+**One part of this package can call the Anthropic API through your own `claude` CLI
+and your own account, and it is off until you switch it on.** Everything else here is
+shell and `jq` over files already on your disk, and runs either way. The advertised
+install is a `curl | bash` one-liner, which is why: a command pasted from a web page
+should not start spending your quota on its own.
 
 That part is `hooks/session-review.sh`. It is not wired into `settings.json` as a hook:
-`hooks/insight-capture.sh` starts it detached on `Stop`, and only for a session that has
-crossed a mechanical edit threshold — by default 24 file edits across 8 distinct files
+`hooks/insight-capture.sh` starts it detached on `Stop`, and only when
+`SKILL_COMPOUNDER_REVIEW` is set to exactly `1` and the session has crossed a
+mechanical edit threshold — by default 24 file edits across 8 distinct files
 (`INSIGHT_AUDIT_MIN_EDITS`, `INSIGHT_AUDIT_MIN_FILES`). It runs one `claude -p` with no
 tools, no MCP servers and no settings sources, asks whether the session that just ended
 repeated a procedure worth keeping, writes the answer under
@@ -119,7 +122,19 @@ of paths touched. Nothing else is read, and nothing goes anywhere but the API en
 your CLI already talks to.
 
 **What it costs.** Two real runs on `sonnet` over a 60 KB digest: $0.19 in 60s, and
-$0.222 in 80s (2026-08-25, CLI 2.1.245). A global 21-hour cooldown bounds how often it
+$0.222 in 80s (2026-08-25, CLI 2.1.245). Six dispatches have since accumulated on one
+machine, median $0.17, range $0.042 to $0.222 (as of 2026-09-03). Once you have your own,
+`skillinsight reviews --all` lists them with their prices, and this prints the same three
+figures from the index those rows are read out of:
+
+```bash
+jq -s 'map(.cost_usd|tonumber)|sort|{n:length,min:.[0],max:.[-1],
+        median:(if length%2==1 then .[length/2|floor]
+                else (.[length/2-1]+.[length/2])/2 end)}' \
+  ~/.claude/skill-compounder/reviews/index.jsonl
+```
+
+A global 21-hour cooldown bounds how often it
 can happen at all — `604800 / 75600 = 8` dispatches in any seven-day window, so a ceiling
 of $1.52 to $1.78 a week at those two prices. The edit threshold above was measured firing
 on 18 of 126 real transcripts spanning 54 days on one machine, and the cooldown collapses
@@ -127,27 +142,42 @@ those to 13 distinct days: about 1.7 dispatches a week, or $0.32 to $0.38. Your 
 depends on how you work. The dispatch is detached and the launch was measured at 3ms, so it adds nothing to
 the wall clock of the session that triggers it.
 
-**Switching it off**, in `~/.claude/settings.json`:
+**Switching it on.** Put it in the top-level `env` block of `~/.claude/settings.json`,
+beside the hook entries, so both the hook that launches the review and the detached
+script that runs it see it:
 
 ```json
-{"env": {"SKILL_COMPOUNDER_REVIEW": "0"}}
+{"env": {"SKILL_COMPOUNDER_REVIEW": "1"}}
 ```
 
-Both hooks check that before doing anything. For cheaper rather than off,
+Or export it in the shell you start `claude` from, which turns it on for that terminal
+only:
+
+```bash
+export SKILL_COMPOUNDER_REVIEW=1
+```
+
+Only the literal `1` enables it: unset, empty, `true` and a typo all leave it off, and
+the script refuses at its first gate — before it claims the session, takes its lock,
+writes a cooldown stamp or reads a byte of any transcript. To turn it back off, set it
+to `0` or delete the line. `skillforge doctor` prints which way it is set, since
+nothing else surfaces the answer. For cheaper rather than off,
 `SKILL_COMPOUNDER_REVIEW_MODEL=haiku` was measured at $0.099 against the same digest; it
 is not the default because its answer paraphrased the evidence instead of quoting it, and
 a `NONE` you cannot check is not much of a `NONE`.
 
 |Variable|Default|What it changes|
 |-|-|-|
-|`SKILL_COMPOUNDER_REVIEW`|`1`|`0` stops the dispatch entirely, from either hook|
+|`SKILL_COMPOUNDER_REVIEW`|`0`|`1` opts in to the paid review; every other value stops the dispatch entirely, from either hook|
 |`SKILL_COMPOUNDER_REVIEW_MODEL`|`sonnet`|Model the review runs on|
 |`SKILL_COMPOUNDER_REVIEW_COOLDOWN`|`75600`|Seconds between any two dispatches, across all sessions|
 |`SKILL_COMPOUNDER_REVIEW_FORGE`|`0`|`1` lets a `CANDIDATE` verdict go on to the forging protocol|
 |`SKILL_COMPOUNDER_REVIEW_CLAUDE`|whatever `claude` resolves to on `PATH`|Which CLI to dispatch, when the hook's `PATH` does not carry one|
 
 Set these in the top-level `env` block, for the same reason `SKILL_COMPOUNDER_STATE`
-belongs there: both hooks and the dispatched script read them.
+belongs there: both hooks and the dispatched script read them, and
+`SKILL_COMPOUNDER_REVIEW` has a third reader in `skillforge doctor`, which is what
+tells you which way it ended up set.
 
 The second stage, which would take a `CANDIDATE` and run the full builder/red-team
 protocol on it, is off. It was measured once end to end at $3.02 over 19 minutes, two cold
@@ -524,8 +554,9 @@ has crossed 24 edits across 8 files, `hooks/insight-capture.sh` writes a session
 record from counters that `hooks/compound-improvement.sh` already wrote to disk — nothing
 is asked of the session and nothing it said is consulted — and then starts
 `hooks/session-review.sh` detached. That is a separate `claude -p` whose only task is this
-question, reading a digest of the session that just ended. It costs money and it is on by
-default: [What runs against the API](#what-runs-against-the-api).
+question, reading a digest of the session that just ended. It costs money, so it runs
+only for someone who set `SKILL_COMPOUNDER_REVIEW=1`:
+[What runs against the API](#what-runs-against-the-api).
 
 **That arm analyses and queues. It does not forge.** Its verdict is `NONE` or
 `CANDIDATE <name>`, written to `~/.claude/skill-compounder/reviews/` and reported by

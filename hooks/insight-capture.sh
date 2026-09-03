@@ -62,8 +62,10 @@
 #   INSIGHT_AUDIT_MAX_PATHS  paths listed inline in the record (default 40)
 #   INSIGHT_NOW / CI_NOW pin the clock, so the ISO-week filename is deterministic
 #   INSIGHT_DEBUG_DUMP   append the raw stdin payload to this path for inspection
-#   SKILL_COMPOUNDER_REVIEW=0  do not dispatch the automatic session review (see
-#                        hooks/session-review.sh for every other gate)
+#   SKILL_COMPOUNDER_REVIEW=1  opt in to the automatic session review, which is off
+#                        unless set to exactly 1 -- it is the one arm here that calls
+#                        the API and costs money (see hooks/session-review.sh for the
+#                        reasoning and for every other gate)
 set -uo pipefail
 
 # ------------------------------------------------------------------------------------
@@ -289,7 +291,10 @@ queue_record() {
 # Every failure here is silent and costs the turn nothing: no script, no dispatch.
 dispatch_review() {
   [ -n "$AUDIT_WROTE" ] || return 0
-  [ "${SKILL_COMPOUNDER_REVIEW:-1}" = "0" ] && return 0
+  # Opt-in, default 0: only the literal "1" dispatches. Read the same way here as in
+  # session-review.sh's own first gate, so this can never launch a script that is
+  # about to refuse -- and never withhold one that would have run.
+  [ "${SKILL_COMPOUNDER_REVIEW:-0}" = "1" ] || return 0
   # Refuse from inside a session we ourselves dispatched, before spending even a fork on
   # it. session-review.sh checks this again as its own second gate; both checks are
   # cheap and neither is sufficient on its own, because this one is skipped entirely
