@@ -5,6 +5,11 @@
 #   SKILL_COMPOUNDER_REF=v0.3.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh)"
 # Or from a clone:  ./install.sh
 #
+# SKILL_COMPOUNDER_REPO_URL overrides where the managed checkout is cloned FROM. The
+# default is the public repository and nothing but a test should change it; it exists so
+# tests/test_install_sh.py can point this script at a local bare repository and exercise
+# --ref/--update/--rollback with no network at all.
+#
 # THE WHOLE FILE IS ONE BRACE GROUP AND EVERY PATH ENDS IN `exit`, and here that is
 # load-bearing rather than housekeeping. `--update` runs `git` against the very checkout
 # this script is being read out of, and bash reads a script lazily by byte offset: rewrite
@@ -18,7 +23,7 @@
 set -euo pipefail
 {
 
-REPO_URL="https://github.com/ContextLab/claude-skill-compounder.git"
+REPO_URL="${SKILL_COMPOUNDER_REPO_URL:-https://github.com/ContextLab/claude-skill-compounder.git}"
 DEFAULT_HOME="$HOME/.claude/skill-compounder-app"
 # The checkout this script manages on the user's behalf. A clone the user made themselves
 # is theirs, and the two moving flags below refuse to touch it.
@@ -49,6 +54,9 @@ install.sh [--ref <tag|branch|sha>] [--update] [--rollback] [setup.py options...
   --ref <r>    check out <r> instead of the default (env: SKILL_COMPOUNDER_REF)
   --update     fetch and move the managed checkout to --ref (env: SKILL_COMPOUNDER_UPDATE=1)
   --rollback   return the managed checkout to the ref recorded before the last update
+
+  SKILL_COMPOUNDER_REPO_URL overrides the origin cloned from (default: the public
+  repository). It is there so a test can use a local bare repo; leave it alone otherwise.
 
 A plain re-run re-wires the current checkout and does NOT move it. Every other option is
 passed straight through to scripts/setup.py: --uninstall, --claude-dir, --bin-dir,
@@ -275,7 +283,13 @@ if [ -z "$APP_HOME" ] || [ "$APP_HOME" = "$MANAGED_HOME" ]; then
         echo "error: could not fetch $REF from $REPO_URL." >&2
         exit 3
       fi
-      checkout_ref "$REF"; cr=$?
+      # `checkout_ref "$REF"; cr=$?` is what this said, and under `set -e` -- see the
+      # header -- a non-zero `checkout_ref` took the shell out on the FIRST statement, so
+      # `cr` was never read and both branches below were dead code. A dirty managed
+      # checkout exited 2, not 3, having printed the right message by luck: `checkout_ref`
+      # echoes before it returns. `|| cr=$?` is the exemption `set -e` honours.
+      cr=0
+      checkout_ref "$REF" || cr=$?
       if [ "$cr" = 2 ]; then exit 3; fi   # dirty tree: checkout_ref already said so
       if [ "$cr" != 0 ]; then
         echo "error: $REF is not a tag, branch or commit in $APP_HOME." >&2

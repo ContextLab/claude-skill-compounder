@@ -15,7 +15,10 @@ subprocess invocations of the shell scripts, real git repositories built and the
 destroyed to prove the destructive-op fixtures, a real virtual environment to prove the
 stale-import one, and live `gh` queries against a repo with thousands of pull requests in
 every state. The `gh` tests skip cleanly when it is absent or unauthenticated; nothing
-else does.
+else does. `tests/test_install_sh.py` drives `install.sh` itself rather than
+`scripts/setup.py`: it builds a tagged bare repository in a temp directory, points the
+installer at it with `SKILL_COMPOUNDER_REPO_URL`, and exercises `--ref`, `--update` and
+`--rollback` with no network.
 
 The suite never spends a model call. The acceptance journey that does — one pass through
 install, note, reminder, capture, forge, route, apply, report and uninstall against a

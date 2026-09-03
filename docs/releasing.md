@@ -52,6 +52,17 @@ the tag and no `v` in the JSON, which is the split this repository already has.
 
 ## Verifying the tag, in a throwaway config
 
+`tests/test_install_sh.py` runs this sequence offline on every suite. It builds a bare
+repository in a temp directory, tags two commits `v0.1` and `v0.2`, aims `install.sh` at it
+with `SKILL_COMPOUNDER_REPO_URL`, and asserts that a pinned install lands on the tag, that a
+plain re-run leaves HEAD where it was, that `--update` followed by `--rollback` returns the
+tree to the first tag's commit, that the managed checkout's own copy moves it too, and that
+a dirty checkout is refused with exit 3. What it cannot reach is everything the steps below
+add: it clones over `file://` from tags it made itself, so nothing in it exercises the
+`https://` URL the README hands people, the tag you actually pushed, or whether
+`gh release create` left a release behind. Run the steps by hand against the real origin as
+well.
+
 Run `--update` and `--rollback` from the standalone `install.sh` (the copy `curl` fetched, or
 `$SCRATCH/install.sh`), not from the copy inside the managed checkout at a ref older than
 v0.3.1: through v0.3.0 that copy detected itself as a clone and skipped the move with exit 0

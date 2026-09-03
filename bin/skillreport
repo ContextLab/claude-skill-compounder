@@ -55,7 +55,8 @@
 #       tool-use id and error flag that say whether the invocation ran. Prompts,
 #       responses, file contents and tool output are never parsed or printed.
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/*.edits
-#       per-session edit counters written by the reminder hook (an integer each).
+#       per-session edit counters written by the reminder hook: a unary tally, one 'x'
+#       byte per edit, appended with >> so parallel writers cannot lose a count.
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/repeats/index.jsonl
 #       the repeat gate's append-only failure/recovery store. THAT FILE HOLDS THE TEXT OF
 #       THE COMMAND THAT FAILED AND THE ERROR IT PRINTED, so it is worth saying what is
