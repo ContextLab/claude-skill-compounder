@@ -711,13 +711,87 @@ between levels — "L2 returned what L3 gave it" is really "the top-level model 
 marker in its context". A design that needs per-level isolation is not what this establishes;
 that needs subagents. Consistent with the absence of real returns, several runs dropped the
 outer levels' required output wrappers while still carrying the inner marker, so a chain that
-depends on each level *transforming* a value is untested.
+depends on each level *transforming* a value was untested here; the entry below measures it.
 
 **Further limits.** Every level used strong compulsion language ("MANDATORY", "do NOT read
-files"). Weaker wording is untested, and the depth-2 prior work suggests wording carries the
-result. The unnamed-callee variant had exactly one plausible candidate whose description
-echoed the caller's phrasing; discrimination among two or more candidates is not established.
-n = 3 per condition cannot distinguish 100% from about 70%.
+files"), the unnamed-callee variant had exactly one plausible candidate, and n = 3 per
+condition cannot distinguish 100% from about 70%. The first two were re-measured on
+2.1.259 with `--model sonnet` and both held without the crutch — see the next entry. The
+third stands: n = 3 (n = 6 for the transformation arm) still bounds nothing below roughly
+70%, and the entry that follows carries the same caveat.
+
+---
+
+## The chain entry's three untested limits, re-measured: transformation, wording and discrimination all hold
+
+**Finding.** The three limits the entry above left open were each put to real sessions and
+none of them bit. A depth-3 chain in which every level must **transform** what the inner
+level produced arrived in the correct outermost form 6/6, every level a `Skill` tool use
+every time. Replacing "MANDATORY / do NOT read files" with ordinary wording ("then use the
+X skill for the next step") fired all three levels 3/3, and so did a *passive mention* that
+does not instruct at all ("the X skill has the next step, if you want it"), 3/3. An
+unnamed-callee delegation with **three** installed candidates — one right, two same-domain
+neighbours — picked the right one 3/3, and picked it again 3/3 when the two wrong
+neighbours' descriptions echoed the caller's phrasing word for word and the right one's
+shared no word with it. Not one of the 18 runs called `Read`, `Grep` or any tool other than
+`Skill`, and no run fired a wrong candidate.
+
+**How established.** Claude Code 2.1.259, `claude-sonnet-5`, macOS 25.6.0, 2026-09-03.
+Six scratch project directories, each with its own `.claude/skills/<name>/SKILL.md` set,
+each run started in that directory so the session saw only that condition's project
+skills — plus the machine's real roster, since `HOME` was not isolated: the `init` row
+lists 121 or 122 skills and 171 or 172 slash commands across the runs, so every routing
+decision here was made against ~120 competitors. Eighteen runs of
+
+```
+cd <condition dir> && SKILL_COMPOUNDER_DISPATCHED=1 claude -p --model sonnet --max-turns 12 \
+  --output-format stream-json --verbose --strict-mcp-config '<prompt naming only the outermost skill>'
+```
+
+scored by reading the `Skill` tool uses (by `input.skill`), their `Launching skill:` tool
+results and the `result` row out of the JSON, never from prose. Every run exited 0 as
+`success`; chains took 7 turns (depth 3) or 5–6 (depth 2) and 7–26 s wall time.
+
+| condition | runs | all levels fired | Skill uses per run | correct final |
+|-|-|-|-|-|
+| depth 3, each level transforms (`kelvorn` → `[[nrovlek]]` → `<<[[NROVLEK]]>>`), strong wording | 6 | 6/6 | 3,3,3,3,3,3 | 6/6 carried `<<[[NROVLEK]]>>` verbatim |
+| depth 3, no transformation, ordinary wording ("then use the X skill") | 3 | 3/3 | 3,3,3 | 3/3 marker |
+| depth 3, no transformation, passive mention ("the X skill has the next step, if you want it") | 3 | 3/3 | 3,3,3 | 3/3 marker |
+| depth 2, unnamed callee, 3 candidates, right one's description matches the job | 3 | 3/3 | 2,2,2 | 3/3 right skill, 0 wrong |
+| depth 2, unnamed callee, 3 candidates, wrong ones echo the caller's words, right one shares none | 3 | 3/3 | 2,2,2 | 3/3 right skill, 0 wrong |
+
+The transformation chain: the innermost skill's body is the only file on disk holding
+`kelvorn`; the middle skill must invoke it and emit the word reversed inside `[[…]]`; the
+outer skill must invoke the middle one and emit that uppercased inside `<<…>>`. The
+"middle variant" the plan held in reserve ("you must use the X skill") was not run, because
+the ordinary wording did not drop. In the hard discrimination arm the caller asked for
+"whichever installed skill covers checking that a CSV export's column headers are in the
+expected order"; the wrong neighbours were described as checking that "a CSV export's
+column headers are spelled as expected" and "are all present and none of the expected ones
+is missing", and the right one as "validating the sequence of field names on the first
+line of a delimited text file against a reference layout".
+
+**What it means.** On this version and model the compulsion language is not what carries
+a chain, so a skill that names its next step in plain prose can expect it to fire; the
+entry above stopped short of saying that and now can. The transformation result does not
+contradict "there is no call stack" — it is what the absence of a stack predicts: the
+marker, the reversed form and the wrapped form all sit in one context, and each level's
+instruction is applied to text the model can still see. What it retires is the fear that
+outer wrappers get *dropped*: on sonnet they were not, in any of six runs, where the
+2.1.246 haiku runs had dropped them in several. And the router discriminated on the
+*job*, not on lexical overlap with the caller's phrasing, three times out of three in the
+arm built to make overlap mislead it.
+
+**Limits.** n = 3 per arm, n = 6 for the transformation arm, one model, one CLI version,
+project scope, one machine's roster as the competition; 3/3 does not bound the rate below
+~70%. All five conditions used a prompt that named the outermost skill by name, so nothing
+here is about routing the *first* hop from an unnamed prompt. The wrong neighbours were
+plausible but their jobs were cleanly distinct from the right one's; two candidates whose
+descriptions genuinely overlap on the job were not tried. The transformation was a
+7-letter reversal, chosen to be within the model's reliable reach so a wrong answer would
+count against composition rather than arithmetic; a harder transform would test the model,
+not the chain. And the 2.1.246 wrapper-drops were on haiku, so "sonnet keeps them" and
+"2.1.259 keeps them" are confounded here.
 
 ---
 
