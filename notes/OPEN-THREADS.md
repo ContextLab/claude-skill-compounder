@@ -1,9 +1,11 @@
 # Open threads
 
-What is actually open, as of **2026-09-02**, on `7507a0b` (Waves 1 and 2 committed) plus
-the uncommitted Wave 3 tree — the forge-diet rewrite of `skills/skill-compounder/SKILL.md`,
-`skillinsight promote`/`decline --source`, the repeat gate's default-off refusal arm, and
-the doc-gate fixes. Written so nothing here depends
+What is actually open, as of **2026-09-02**, on `15b3b28` (Waves 1 through 3 committed —
+the forge-diet rewrite of `skills/skill-compounder/SKILL.md`, `skillinsight
+promote`/`decline --source`, the repeat gate's default-off refusal arm and the doc-gate
+fixes are all in) plus the uncommitted Wave 4 tree: `hooks/precompact.sh` and
+`tests/test_precompact.py` for issue #8, their wiring on both install paths, and the shared
+marker-extractor fix in `hooks/insight-capture.sh`. Written so nothing here depends
 on a session remembering it: every entry carries the command or the path that establishes
 it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
 close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
@@ -174,19 +176,31 @@ happens, a session reading the global file is being told an older protocol than 
 skill carries — the three-tier split, the cheap branch, and the round cap are all missing
 from it.
 
-## Open: `#8` PreCompact capture is still unbuilt
+## Open: the PreCompact 100 ms target holds on one jq and is unmeasured on the other
 
-The design is settled and nothing has been written. A `PreCompact` hook would capture what a
-session learned at the moment its context is about to be discarded, which is the one moment
-the information is both complete and about to be lost. The settled constraints: no model
-call in the hook, under 100 ms, and the output goes to the same weekly queue
-`hooks/insight-capture.sh` writes, so nothing new has to be read back.
+`hooks/precompact.sh` ships against issue #8's 100 ms budget and **meets it on
+`/usr/bin/jq` only**. Medians over 15 runs against a 5 MB transcript, macOS 25.6.0,
+2026-09-02, at the default 256 KB bound:
 
-It is issue #8. Waves 1 and 2 did not scope it; Wave 3 scoped it and did not dispatch it,
-alongside #19, and both were pushed to a Wave 4 that has not run. What has changed while it waited is that
-the queue it would write into is no longer write-only — `skillinsight promote` and `decline
---source` drained it, and `bin/skillnote` gives a promoted record somewhere to land — so a
-`PreCompact` capture would now feed a path that is read rather than one that only fills.
+|jq|no candidate|one candidate|
+|-|-|-|
+|`/usr/bin/jq` (jq-1.7.1-apple)|27.4 ms|86.3 ms|
+|anaconda's jq-1.6|62.4 ms|147.9 ms|
+
+The gap is process starts, not bytes: `jq -n 1` medians 9.6 ms as the system jq and 22.4 ms
+as jq-1.6, and this hook runs several programs. So a user whose `PATH` resolves `jq` to a
+slow build is over budget on the candidate path, by 48 ms. It is still 0.1% of the
+128-second median compaction the hook delays, which is why it shipped rather than blocking;
+what is unresolved is whether the 100 ms number should be restated as a system-jq figure or
+the hook should shed a process. `tests/test_precompact.py::ProcessCountTest` pins the
+process count, so shedding one is a testable change rather than a stopwatch argument.
+
+Second, unrelated gap in the same measurement: **`custom_instructions` has only ever been
+observed `null`**. Every probe recorded it empty (docs/CLAUDE-CODE-BEHAVIOR.md:510), so the
+populated shape — whether it is a string, and what a `/compact <instructions>` invocation
+puts in it — is unprobed. Nothing in `hooks/precompact.sh` reads the field, so this costs
+nothing today; it is a gap in the platform record, and the probe is one `/compact` with an
+argument against a payload dump.
 
 ## Open: stage-2 auto-forge cannot finish its own gate
 
@@ -340,6 +354,19 @@ evaluating the outputs critically rather than checking exit codes. Never against
 
 Kept as one line each so a returning session does not reopen them.
 
+- **`#8` PreCompact capture is built.** It was "settled design, nothing written" through
+  three waves. `hooks/precompact.sh` now captures skill candidates from the transcript
+  about to be summarised away and appends them to the same weekly queue
+  `hooks/insight-capture.sh` writes, with `source:"precompact"`. No model call, string
+  extraction only — issue #8 measured why: a `PreCompact` hook blocks compaction and has no
+  default timeout, and a timeout instead kills the writer mid-write. The payload was
+  re-measured on 2.1.259 and is recorded at `docs/CLAUDE-CODE-BEHAVIOR.md:510`, including
+  the previously unconfirmed `"trigger":"auto"`; the field is `trigger`, not the documented
+  `compaction_trigger`, and there is no `last_assistant_message`, so the bounded transcript
+  read is mandatory rather than a fallback. Cost is 27 ms with no candidate and 86 ms with
+  one, median, on the system jq — the jq-1.6 figures and the unprobed `custom_instructions`
+  are open above. Wired on both install paths, which takes the package to **15 hook entries
+  over 6 events**; `tests/test_precompact.py` is 47 tests.
 - **The cheap branch has a mechanism.** `SKILL.md` used to say "write a note or update
   CLAUDE.md" and name no path, no CLI and no ledger row, so the branch was taken zero
   times. `bin/skillnote` is that path: `add`/`remove`/`list` against a marker block in a

@@ -507,6 +507,62 @@ are not repeated here.
 
 ---
 
+## `PreCompact` carries seven keys, `trigger` is one of them, and both its values look alike
+
+**Finding.** Re-measured on 2.1.259, two years of builds after the capture above, and
+unchanged. The payload is exactly:
+
+```
+{"session_id","transcript_path","cwd","prompt_id",
+ "hook_event_name":"PreCompact","trigger":"manual"|"auto","custom_instructions":null}
+```
+
+Four things a hook author needs from that. The key set is **identical on both triggers**,
+so an automatic compaction and a typed `/compact` are distinguishable only by the value of
+`trigger` — the `auto` payload had been unconfirmed until now. There is **no
+`last_assistant_message`**, which `Stop` has, so anything a `PreCompact` hook wants from
+the session it must read out of `transcript_path`. That path **exists and is complete
+before the hook runs**: the transcript file was on disk and readable from inside the hook.
+And `custom_instructions` is present as a key with a JSON `null` value even when no
+instructions were given, so `has("custom_instructions")` and "there were custom
+instructions" are different questions.
+
+**How established.** Claude Code 2.1.259, macOS 25.6.0, 2026-09-02, `--model sonnet`. A
+scratch project directory, one dumping hook wired through its own `--settings` file with
+`--setting-sources ''` and `SKILL_COMPOUNDER_DISPATCHED=1`, so none of the machine's real
+hooks fired, and the hook appended both its own invocation and its raw stdin to separate
+files so "no payload" could be told from "hook never ran". Two arms, one run each:
+
+```
+# manual: the prompt is the slash command, and it arrives on stdin
+cd <scratch> && printf '%s' '/compact' | SKILL_COMPOUNDER_DISPATCHED=1 claude -p \
+  --model sonnet --output-format stream-json --verbose --max-turns 3 \
+  --setting-sources '' --strict-mcp-config --settings <probe>.json
+
+# auto: force the window down and hand it more than the window
+cd <scratch> && SKILL_COMPOUNDER_DISPATCHED=1 claude -p --model sonnet \
+  --autocompact 100k --output-format stream-json --verbose --max-turns 4 \
+  --setting-sources '' --strict-mcp-config --settings <probe>.json < <520 KB prompt>
+```
+
+**`--autocompact <auto|tokens>` is how an automatic compaction is forced**, and its floor
+is 100k tokens. The second arm fed a 520 KB neutral inventory listing on stdin, which
+billed 243302 cache-creation tokens and $0.98, and fired one `PreCompact` with
+`"trigger":"auto"` on a single turn. Nothing shorter will do it: the window is the trigger.
+
+**Remaining limits.** One run per arm and one model tier. `custom_instructions` was `null`
+in both, so its populated shape is still unconfirmed — `/compact <instructions>` was not
+probed.
+
+**What it means.** A hook that means to act on every compaction must be wired with **no
+matcher**. `PreCompact`'s matcher selects the trigger rather than a tool, so a matcher of
+`manual` still fires when someone types `/compact` and silently skips every automatic
+compaction — the ones the session did not see coming, which are the majority. A hook that
+branches on `compaction_trigger` instead of `trigger` gets `null` on both and cannot tell
+them apart, and nothing reports the mistake.
+
+---
+
 ## Recorded elsewhere, not repeated here
 
 - The **two session ids** visible in one session, and what a writer and a reader can

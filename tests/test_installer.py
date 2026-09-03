@@ -381,6 +381,36 @@ class InstallerTest(unittest.TestCase):
                              for g in s.get("hooks", {}).get("Stop", [])
                              for h in g["hooks"]))
 
+    def test_precompact_hook_is_wired_and_removed(self):
+        self.do_install()
+        s = self.read()
+        self.assertTrue(any("precompact.sh" in h["command"]
+                            for g in s["hooks"]["PreCompact"] for h in g["hooks"]),
+                        "the PreCompact capture must be wired")
+        self.do_uninstall()
+        s = self.read()
+        self.assertNotIn("PreCompact", s.get("hooks", {}),
+                         "uninstall created no PreCompact key for the user, so it must "
+                         "not leave an empty one behind")
+
+    def test_a_users_own_precompact_hook_survives_both_directions(self):
+        """`PreCompact` is a new event key for this package, and a new key is exactly
+        where an installer forgets that someone else may already be there. It is also the
+        event most likely to be occupied: checkpointing something before a compaction is
+        the obvious use for it, and at least one other tool ships such a hook."""
+        self.write_settings({"hooks": {"PreCompact": [FOREIGN_HOOK]}})
+        self.do_install()
+        s = self.read()
+        cmds = [h["command"] for g in s["hooks"]["PreCompact"] for h in g["hooks"]]
+        self.assertTrue(any("other/tool.py" in c for c in cmds),
+                        "install must not displace another tool's PreCompact hook")
+        self.assertTrue(any("precompact.sh" in c for c in cmds))
+        self.do_uninstall()
+        s = self.read()
+        cmds = [h["command"] for g in s["hooks"]["PreCompact"] for h in g["hooks"]]
+        self.assertEqual([c for c in cmds if "other/tool.py" in c], cmds,
+                         "uninstall must leave the user's PreCompact hook and only that")
+
     # -------------------------------------------------- coexisting with other tools
 
     def test_foreign_hooks_survive_install_and_uninstall(self):

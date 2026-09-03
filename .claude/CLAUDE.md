@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Claude Code *configuration* package. It installs every skill under `skills/`, six CLIs,
-a status-line wrapper, and fourteen hook entries into `~/.claude/`. Those fourteen span five
-events (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`) and
-name eight of the nine scripts in `hooks/` -- every one but `session-review.sh`, which is
+a status-line wrapper, and fifteen hook entries into `~/.claude/`. Those fifteen span six
+events (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`,
+`PreCompact`) and
+name nine of the ten scripts in `hooks/` -- every one but `session-review.sh`, which is
 launched rather than wired; derive them from
 `OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
 There is no runtime service: the "program" is the
@@ -210,7 +211,10 @@ one `Stop` starts it twice. Being detached buys it nothing.
 The guard is idempotence keyed on something the payload already carries, and each script
 spells it differently. `claim_once()` in `hooks/compound-improvement.sh` claims a
 directory named for the payload's own `tool_use_id` or `prompt_id`, under the session and
-the mode; `hooks/insight-capture.sh` claims on a hash derived from the session id; `hooks/session-review.sh` claims with an atomic `mkdir` under
+the mode; `hooks/insight-capture.sh` claims on a hash derived from the session id;
+`hooks/precompact.sh` claims on a hash of the session id and the payload's `prompt_id`,
+falling back to the transcript's size when that field is absent, because a session that
+compacts twice must not be keyed to one claim; `hooks/session-review.sh` claims with an atomic `mkdir` under
 `<state>/reviews/.claims/`, behind a global `.lock` directory and a cooldown compared on
 `|NOW - last|`. So the rule is *"be idempotent per event"*, not *"call `claim_once()`"* --
 that function is local to one script and reaches nothing outside it. Two hazards the next
@@ -222,11 +226,39 @@ already burned its claim, so it could never be reviewed at all. The measured dou
 delivery is in `docs/CLAUDE-CODE-BEHAVIOR.md`; the choice of idempotence over a rule is in
 `docs/DESIGN.md`.
 
+**`hooks/precompact.sh` is a second capture on a second event, and it is a separate
+script for reasons the file itself lists.** `PreCompact` fires just before a compaction
+replaces the context with a summary, and its payload carries no `last_assistant_message`
+(measured on 2.1.259; `docs/CLAUDE-CODE-BEHAVIOR.md`), so it reads a bounded tail of
+`transcript_path` and runs the same extractor `insight-capture.sh` runs, writing
+`source:"precompact"` into the same weekly queue. Three things to know before touching it.
+It is wired with **no matcher**, because `PreCompact`'s matcher selects the trigger and
+`manual` and `auto` name the same loss. It blocks the compaction while it runs, so its
+budget is process starts rather than bytes and `tests/test_precompact.py` pins the exec
+count rather than a stopwatch. And what must stay identical to `insight-capture.sh` is
+`hash_of` and the `normalise` inside the candidate scan and nothing else -- that digest is
+the shared name the two scripts look one record up under, and it is the only thing keeping
+Stop and PreCompact from queueing the same sentence twice. The rationale is in
+`docs/DESIGN.md`.
+
+That extractor's paragraph terminator is a **lookahead**, `(?=\n[ \t]*\n|\z)`, and the
+scan line is byte-identical in the two scripts. It was a consuming group and that was a
+defect: it ate the blank line ending each candidate, so the scan resumed with no newline in
+front of the next marker, the leading `(?:^|\n)` could not assert, and every SECOND marker
+was dropped -- a marker immediately after another vanished, and three in a row lost the
+middle one. Two markers with prose between them were found normally, which is why it went
+unseen through both hooks' review. Fixed in both scripts together and measured on
+jq-1.7.1-apple and jq-1.6; `test_a_marker_immediately_after_another_is_captured` and
+`test_three_markers_in_a_row_do_not_lose_the_middle_one` exist in `tests/test_insights.py`
+and `tests/test_precompact.py` alike, and the pair is what stops one copy regressing while
+the other does not. The three-marker test is not redundant: two adjacent markers alone pass
+on a scan that still skips every other one.
+
 **`hooks/session-review.sh` is a shipped component that spends money, and it is in
 neither wiring.** `settings.json` and `hooks/hooks.json` between them name
 `repeat-gate.sh` (three times), `compound-improvement.sh` (twice), `claim-gate.sh` (twice),
-`skill-use.sh` (twice), `remind.sh` (twice), `apply-gate.sh`, `doc-gate.sh` and
-`insight-capture.sh` -- fourteen entries over eight scripts; grep either for
+`skill-use.sh` (twice), `remind.sh` (twice), `apply-gate.sh`, `doc-gate.sh`,
+`insight-capture.sh` and `precompact.sh` -- fifteen entries over nine scripts; grep either for
 `session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
 detached, never waited on, and only when that turn's session audit actually wrote a
 record. Look for it there, not in a hooks list. Stage 1 is a single `claude -p` with no
@@ -309,10 +341,12 @@ constant in this repo rather than a file on somebody's machine, and
 
 **No mocks, ever.** Every test writes real files, runs the real shell scripts through
 `subprocess`, and reads results back off disk. Tests pin nondeterminism with environment
-variables the scripts read for exactly that purpose. There are **eleven clocks, not one** --
+variables the scripts read for exactly that purpose. There are **twelve clocks, not one** --
 `SKILLFORGE_NOW` (`bin/skillforge`), `CI_NOW` (`hooks/compound-improvement.sh`),
 `INSIGHT_NOW` (`hooks/insight-capture.sh` and `bin/skillinsight`, which fall back to
-`CI_NOW`), `SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`),
+`CI_NOW`), `PRECOMPACT_NOW` (`hooks/precompact.sh`, which pointedly does NOT fall back to
+either of those: a script whose clock is someone else's is a script a test can freeze
+without meaning to), `SKILL_COMPOUNDER_REVIEW_NOW` (`hooks/session-review.sh`),
 `SKILL_COMPOUNDER_NOW` (the
 installer's backup stamp), `SKILLNOTE_NOW` (`bin/skillnote`, which stamps both the ledger
 row and the `%Y-%m-%d` on the note line), `REMIND_NOW` (`hooks/remind.sh`, which stamps the
@@ -334,10 +368,11 @@ forge whose orchestrator died -- by appending the `fail` row it never got, never
 the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the one
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
-`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ | sort -u` -- **111** names as of Wave 3. A grep
+`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
+hooks/ bin/ statusline/ skill_compounder/ | sort -u` -- **116** names, over **18**
+prefixes. A grep
 that reads a gitignored `.pyc` as source adds one more line, `Binary file
-skill_compounder/__pycache__/installer.cpython-39.pyc matches`, and answers 112; that is
+skill_compounder/__pycache__/installer.cpython-39.pyc matches`, and answers 117; that is
 the same split that makes the `skipTest` count above depend on which grep you have. Each
 hit was then read; re-run the command rather than trusting the list above if the two have
 drifted. **Four
@@ -346,8 +381,10 @@ seven when fourteen were, fourteen when sixteen were, and sixteen when seventeen
 on all four occasions it could not produce the list it introduces. The third was Wave 2
 adding `SKILLNOTE_NOW`, `SKILLNOTE_CLAUDE_DIR` and the six `REMIND_*` names to scripts
 while leaving the alternation at fourteen prefixes; the fourth was Wave 3 adding
-`SKILLREPORT_GATE` to `bin/skillreport` and leaving it at sixteen. Nobody has yet widened
-a script's prefixes and this alternation in the same change, which is the argument for
+`SKILLREPORT_GATE` to `bin/skillreport` and leaving it at sixteen. `PRECOMPACT` broke the
+run: `hooks/precompact.sh` and the eighteenth prefix landed in one change, because
+`tests/test_doctrine_sync.py` fails the moment a script reads a name this command cannot
+print, and it did. That test is the reason, not diligence, which is the argument for
 re-running the command instead of reading this paragraph. A prefix added to a new script
 has to be added here too.
 If new behavior is hard to test without a mock, add a pin like those instead. Tests run with a minimal `PATH` and `HOME` pointed at a

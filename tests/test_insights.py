@@ -136,6 +136,59 @@ class CaptureTest(InsightsTestBase):
         self.assertEqual(recs[0]["session"], "s1")
         self.assertTrue(recs[0]["hash"])
 
+    def test_a_marker_immediately_after_another_is_captured(self):
+        """THE REGRESSION TEST FOR A FIXED DEFECT, pinned here because this is where the
+        defect lived: the same scan is copied into hooks/precompact.sh, and both hooks
+        were measured producing ONE row from this exact two-marker text on 2026-09-02.
+
+        The paragraph terminator `(?:\n[ \t]*\n|\z)` was CONSUMED, so after the first
+        match the scan resumed with no newline in front of the second marker and the
+        leading `(?:^|\n)` could not assert. Two markers with any prose between them were
+        found normally, which is the case immediately below and is why this went unseen.
+
+        The fix is a lookahead, `(?=\n[ \t]*\n|\z)`, applied to both scripts together
+        and verified on jq-1.7.1-apple and jq-1.6. This test and its twin in
+        tests/test_precompact.py are what stop either copy regressing.
+        """
+        second = ("SKILL-CANDIDATE: a claim taken before the gates that can refuse is a "
+                  "claim burned on a run that never happened.")
+        self.run_hook({"session_id": "s1", "hook_event_name": "Stop",
+                       "last_assistant_message": MARKER + "\n\n" + second + "\n"})
+        recs = self.records()
+        self.assertEqual(len(recs), 2,
+                         "back-to-back markers must both capture; if this finds 1 the "
+                         "terminator went back to being consumed -- fix hooks/"
+                         "insight-capture.sh AND hooks/precompact.sh together")
+        self.assertEqual([r["source"] for r in recs], ["marker", "marker"])
+        self.assertTrue(any("663 MB" in r["text"] for r in recs))
+        self.assertTrue(any("claim burned" in r["text"] for r in recs))
+
+    def test_three_markers_in_a_row_do_not_lose_the_middle_one(self):
+        """The consuming terminator dropped every SECOND marker, not merely the one after
+        the first, so three in a row lost the middle. Two adjacent markers alone would
+        pass on a scan that still skipped every other one."""
+        def m(n):
+            return ("SKILL-CANDIDATE: candidate %s, written long enough to clear the "
+                    "twenty-four character floor comfortably." % n)
+        self.run_hook({"session_id": "s1", "hook_event_name": "Stop",
+                       "last_assistant_message":
+                           m("alpha") + "\n\n" + m("beta") + "\n\n" + m("gamma") + "\n"})
+        recs = self.records()
+        self.assertEqual(len(recs), 3)
+        for name in ("alpha", "beta", "gamma"):
+            self.assertTrue(any(name in r["text"] for r in recs),
+                            "%s was dropped" % name)
+
+    def test_two_markers_with_prose_between_them_are_both_captured(self):
+        """The control for the test above. Without it, that one passes on a hook that
+        captures only ever one candidate per turn, which is a much worse bug."""
+        second = ("SKILL-CANDIDATE: a claim taken before the gates that can refuse is a "
+                  "claim burned on a run that never happened.")
+        self.run_hook({"session_id": "s1", "hook_event_name": "Stop",
+                       "last_assistant_message":
+                           MARKER + "\n\nOrdinary prose.\n\n" + second + "\n"})
+        self.assertEqual(len(self.records()), 2)
+
     def test_star_insight_captured_from_last_assistant_message(self):
         self.run_hook({"session_id": "s1", "hook_event_name": "Stop",
                        "last_assistant_message": "Text.\n\n" + INSIGHT + "\n\nMore text."})

@@ -171,6 +171,57 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual([h["command"] for g in settings.get(event, [])
                               for h in g["hooks"] if "remind.sh" in h["command"]], [])
 
+    def test_the_precompact_capture_is_wired_on_both_paths_with_no_matcher(self):
+        """The drift check above only proves the two paths AGREE, and two paths that both
+        forgot PreCompact agree perfectly.
+
+        The matcher must be absent, and that is the whole substance of this test.
+        PreCompact's matcher selects the TRIGGER -- `manual` or `auto`, both captured live
+        on 2.1.259 -- not a tool name. A matcher of `manual` would look correct, would
+        still fire when someone typed `/compact`, and would silently skip every automatic
+        compaction: the ones the session did not see coming, which is the case the hook
+        exists for.
+        """
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        p_arm = [(m, c) for m, c in plugin.get("PreCompact", []) if "precompact.sh" in c]
+        s_arm = [(g.get("matcher"), h["command"])
+                 for g in settings.get("PreCompact", []) for h in g["hooks"]
+                 if "precompact.sh" in h["command"]]
+        self.assertEqual(len(p_arm), 1,
+                         "hooks.json must wire the PreCompact capture exactly once")
+        self.assertEqual(len(s_arm), 1,
+                         "the installer must wire the PreCompact capture exactly once")
+        self.assertIsNone(p_arm[0][0], "hooks.json must not narrow PreCompact by trigger")
+        self.assertIsNone(s_arm[0][0], "the installer must not narrow PreCompact by trigger")
+
+    def test_the_precompact_capture_is_wired_to_no_other_event(self):
+        """It reads a transcript that is about to be summarised away. On any other event
+        that transcript is not going anywhere, and insight-capture.sh already covers Stop
+        from `last_assistant_message` at zero I/O. A second wiring would be a second full
+        transcript read per turn for nothing."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse",
+                      "PostToolUseFailure", "Stop"):
+            self.assertEqual([c for _m, c in plugin.get(event, [])
+                              if "precompact.sh" in c], [])
+            self.assertEqual([h["command"] for g in settings.get(event, [])
+                              for h in g["hooks"] if "precompact.sh" in h["command"]], [])
+
+    def test_insight_capture_is_not_wired_to_precompact(self):
+        """The two capture hooks are deliberately separate scripts, and this is the wiring
+        half of that decision. insight-capture.sh runs its session audit and its paid
+        review dispatch unconditionally on load; delivering it a PreCompact would spend the
+        session's one audit record mid-session and launch a `claude -p` from inside a hook
+        that the compaction is blocked on."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        self.assertEqual([c for _m, c in plugin.get("PreCompact", [])
+                          if "insight-capture.sh" in c], [])
+        self.assertEqual([h["command"] for g in settings.get("PreCompact", [])
+                          for h in g["hooks"] if "insight-capture.sh" in h["command"]], [])
+
     def test_the_claim_gate_accumulator_arm_is_wired_on_neither_path(self):
         """Its PostToolUse arm records numbers out of every tool RESULT, an Agent/Task
         result included -- the subagent testimony the Stop arm excludes from its evidence

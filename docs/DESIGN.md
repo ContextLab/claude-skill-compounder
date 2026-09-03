@@ -1044,3 +1044,64 @@ whenever a session records a lesson, which may be from a detached process after 
 ended. That is why its refusals are wider than the installer's: an unknown scope, an empty
 text, a second marker block in one file, and a memory directory that does not already exist
 all stop it before anything is opened for writing.
+
+## Why the `PreCompact` capture is a second script and not a third arm of the first
+
+`hooks/insight-capture.sh` already reads the same two signals and writes the same weekly
+queue, so a `PreCompact` arm inside it looks like the smaller change. It is not, and three
+things decide it.
+
+**That script does two Stop-shaped things unconditionally on load.** `session_audit` keys
+its claim on the session id alone, so a `PreCompact` delivery would spend the session's one
+audit record mid-session, on a session that had not finished, describing counters still
+being written. `dispatch_review` then launches a paid `claude -p` — from inside a hook that
+the compaction is blocked on. Both would have to be guarded by an event test, and a file
+that is mostly `if this is not PreCompact` is a second script wearing the first one's name.
+
+**The budgets are different by two orders of magnitude.** A `Stop` hook that takes a second
+delays a turn. A `PreCompact` hook that takes a second delays the compaction, because
+`PreCompact` blocks and has no default timeout: issue #8 measured a 300-second hook holding
+a compaction for 300.9 seconds. Giving it a timeout instead is worse, not better — a
+3-second timeout against a 10-second writer left a `CLAUDE.md` truncated at line 4 of 11,
+and the next session loaded the truncated file as project context with no error. So the
+whole design of this hook is "do less", and it starts from a different place than a hook
+that gets `last_assistant_message` free.
+
+**The cost model is process starts, not bytes.** Measured against a 5 MB transcript, 15 runs
+each, macOS 25.6.0: 27.4 ms with no candidate and 86.3 ms with one, at the default 256 KB
+bound with `/usr/bin/jq` (jq-1.7.1-apple). The same hook on a `PATH` whose first `jq` is
+anaconda's 1.6 medians 62.4 ms and 147.9 ms. Doubling the bound to 512 KB costs 11 ms;
+swapping the jq costs 62 ms. That is why the transcript read and the candidate scan are one
+`jq` rather than two, and why `tests/test_precompact.py` pins the number of programs the
+hook runs rather than a wall-clock figure: a stopwatch assertion tight enough to catch one
+added `jq` flakes on a loaded machine, and one loose enough not to flake catches nothing.
+Issue #8's 100 ms holds on the system jq and not on every `PATH`, and the honest way to
+state it is with the `PATH` attached.
+
+**Where the per-compaction claim sits, and what it is actually for.** It is taken after the
+candidates are in hand, not at the top of the script, and two rules point at that line.
+Claiming before the gates that can still refuse is the bug `hooks/session-review.sh` shipped
+first. And the queue directory is created on first write and never on load, so a claim taken
+at the top would have to create `insights/` on every compaction that captured nothing —
+which is most of them — turning "nothing was captured" into something no caller can test
+for.
+
+It is also not what keeps the queue clean. The content claim inside `queue_record` already
+stops a second delivery writing a second row. What the per-compaction claim protects is the
+duplicate **counter**: without it, the second delivery walks every candidate, finds every
+content claim held, and bumps `.dedup-count` once per candidate per compaction, so
+`skillinsight stats` would report "duplicates skipped" as a count of how many times the hook
+is wired. That is the same distortion the `quiet` flag prevents on the session audit,
+arriving from the other side.
+
+**What must not diverge between the two scripts is the digest, and nothing else.** They keep
+separate claims, separate clocks and separate bounds on purpose. But the normalised
+candidate text is hashed to produce the name a record is looked up under, so if `hash_of` or
+`normalise` drifted between them the same sentence would get two rows under two digests and
+nothing would report it. `tests/test_precompact.py` proves they agree the only way that
+means anything: it runs both real hooks over one transcript — with the `Stop` hook given no
+`last_assistant_message`, so it takes its own transcript-read path — and asserts the second
+one writes nothing.
+
+The payload this is all built on, and the probe that captured it, are in
+[CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md).

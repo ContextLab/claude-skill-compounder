@@ -20,6 +20,11 @@ What gets wired:
 * ``hooks.Stop``                 -> insight-capture.sh             (skill-candidate queue)
 * ``hooks.Stop``                 -> claim-gate.sh                  (the same check on the
                                                                     closing message)
+* ``hooks.PreCompact``           -> precompact.sh                  (the same queue, filled
+                                                                    from the transcript
+                                                                    just before a
+                                                                    compaction discards
+                                                                    it)
 * ``statusLine``              -> statusline.sh                    (forge animation)
 * ``CLAUDE.md``               -> the doctrine stanza              (inside a marker block,
                                                                     so the habits the
@@ -100,6 +105,11 @@ APPLY_GATE_MARKER = "apply-gate.sh"
 # CLI 2.1.258). ONE PreToolUse entry covers all three tools it acts on, dispatching on
 # `.tool_name` in-script; three entries would triple the deliveries for the same work.
 REMIND_MARKER = "remind.sh"
+# `precompact.sh` queues skill candidates out of the transcript that is about to be
+# replaced by a summary. It is the only entry of ours on an event whose payload carries no
+# `last_assistant_message`, which is why it reads the transcript and why it is bounded.
+# Issue #8. Its wiring below deliberately carries NO matcher.
+PRECOMPACT_MARKER = "precompact.sh"
 # Substring matching against the user's status line command was wrong twice. A bare
 # "statusline.sh" matched their ~/bin/git-statusline.sh; adding the directory component
 # still matched "$HOME/dotfiles/statusline/statusline.sh", a pipeline mentioning our path,
@@ -708,17 +718,20 @@ def _strip_marker(groups, marker):
 
 
 OUR_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-              "Stop")
-# Two events carry two entries of ours -- PostToolUse the edit checkpoint and the
-# skill-use recorder, Stop the insight capture and the claim gate -- so the markers are a
-# tuple per event. Stripping only the first would leave the second wired to a checkout the
-# user had just removed.
+              "Stop", "PreCompact")
+# Most events carry more than one entry of ours, so the markers are a tuple per event:
+# stripping only the first would leave the second wired to a checkout the user had just
+# removed. `PreCompact` is the one event with a single marker, and it still spells it as a
+# one-tuple rather than a bare string -- a string is iterable too, so `for marker in
+# markers` over `"precompact.sh"` would strip on the letter `p` and delete every hook of
+# the user's whose command contains one.
 OUR_EVENT_MARKERS = (("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER)),
                      ("PreToolUse", (CLAIM_GATE_MARKER, DOC_GATE_MARKER,
                                      REPEAT_GATE_MARKER, REMIND_MARKER)),
                      ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_MARKER)),
                      ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_MARKER)),
-                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER)))
+                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER)),
+                     ("PreCompact", (PRECOMPACT_MARKER,)))
 
 
 def preexisting_events(settings, recorded=()):
@@ -913,6 +926,23 @@ def merge_hooks(settings, app_home):
     # not it had emptied it.
     if wired_stop or stop or "Stop" in hooks:
         hooks["Stop"] = stop
+
+    # PreCompact is the one event of ours that carries NO `last_assistant_message`
+    # (measured on 2.1.259; docs/CLAUDE-CODE-BEHAVIOR.md), so its hook reads the
+    # transcript. It is wired with no matcher deliberately: PreCompact's matcher selects
+    # the trigger, `manual` or `auto`, and both name the same loss -- a session's text
+    # about to be replaced by a summary. A matcher of `manual` would silently skip every
+    # automatic compaction, which is the majority of them and the ones the session did not
+    # see coming.
+    pre = _strip_marker(_event_groups(hooks, "PreCompact", True), PRECOMPACT_MARKER)
+    wired_pre = False
+    if _has_gate(app_home, "precompact.sh"):
+        pre.append({"hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "precompact.sh"),
+                               "timeout": 10}]})
+        wired_pre = True
+    if wired_pre or pre or "PreCompact" in hooks:
+        hooks["PreCompact"] = pre
     return settings
 
 

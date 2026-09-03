@@ -60,6 +60,7 @@ otherwise.
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
+|`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
 |`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it can deny the third attempt once and say what to do instead. **That refusal is off by default** (`REPEAT_GATE_REFUSE=1` arms it); learning and recovery run either way. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
@@ -752,6 +753,28 @@ queue, deduped. `★ Insight` blocks are picked up too, as an opportunistic feed
 than the mechanism: they exist only because a particular output-style plugin injects
 them, and subagents never emit any.
 
+A second hook reads the same two signals on `PreCompact`, the moment before a compaction
+replaces the session's context with a summary. It is there for the case `Stop` cannot
+cover: a session that compacts without a `Stop` capture in between loses that turn, and a
+session only compacts when it is carrying a lot. Its rows carry `source: precompact`, so
+`skillinsight list --source precompact` selects them and `skillinsight decline --source
+precompact` retires the lot if they turn out to be noise.
+
+There is no model in it, and the reason was measured. A `PreCompact` hook blocks the
+compaction: a 300-second hook stalled one for 300.9 seconds and ran to completion, and
+putting a timeout on it instead killed a writer mid-write and left a truncated `CLAUDE.md`
+that the next session then loaded as project context with no error. So this hook
+tails the transcript, runs the same extractor, appends, and exits. Against a 5 MB
+transcript it medians 27.4 ms when it finds nothing and 86.3 ms when it queues a
+candidate, over 15 runs on macOS 25.6.0 with `/usr/bin/jq`; on a `PATH` that resolves `jq`
+to a slower build those become 62.4 ms and 147.9 ms, because what it spends is process
+starts rather than bytes. Nothing writes `CLAUDE.md` from a hook — that is `skillinsight
+promote` and `skillnote`, under your judgement.
+
+Neither hook can double-queue the other's find. The queue is addressed by a hash of the
+normalised candidate text and both hooks compute it the same way, so whichever runs first
+writes the row and the other counts a duplicate.
+
 Review the queue in one batch, once a week, not once a turn:
 
 ```bash
@@ -896,7 +919,7 @@ All thirty-four are environment variables, and they are not the whole set — th
 prints every name any shipped script reads, 103 of them:
 
 ```bash
-grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
+grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
   hooks/*.sh bin/* statusline/*.sh | sort -u
 ```
 

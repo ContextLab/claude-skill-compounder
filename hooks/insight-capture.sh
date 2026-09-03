@@ -533,6 +533,17 @@ has_text "$text" || exit 0
 # (U+2605 star, U+2500 box drawing) and variable length, and jq's regex engine is the
 # only one here that is reliably UTF-8 aware. Output is one candidate per line:
 #   <source> TAB <normalised text, for hashing> TAB <original text as a JSON string>
+# THE PARAGRAPH TERMINATOR IS A LOOKAHEAD, `(?=\n[ \t]*\n|\z)`, AND MUST STAY ONE.
+# As a consuming group it ate the blank line that ended each candidate, so `scan` resumed
+# with no newline in front of the NEXT marker and the leading `(?:^|\n)` could not assert:
+# a marker immediately after another was silently dropped, and three in a row lost the
+# middle one. Two markers with prose between them were found normally, which is why it
+# went unseen. Measured on jq-1.7.1-apple and jq-1.6, 2026-09-02.
+#
+# THIS SCAN IS THE SAME CODE TWICE. Its twin is in hooks/precompact.sh, and the two must
+# never diverge: the normalised text is what gets hashed, the hash is the name each hook
+# looks the other's record up under, and one sentence scanned two ways becomes two rows
+# under two digests instead of one row and a counted duplicate. Change one, change both.
 candidates="$(jq -r -n --arg t "$text" '
   def normalise: gsub("\\s+"; " ") | sub("^ +"; "") | sub(" +$"; "") | sub("\\.$"; "");
   # The plugin injects its instruction verbatim, placeholder text and all. If a copy
@@ -546,7 +557,7 @@ candidates="$(jq -r -n --arg t "$text" '
     | ($raw | normalise) as $n
     | select(($n | length) >= 24 and (($n | injected) | not))
     | src + "\t" + $n + "\t" + ($raw | @json);
-  ( [ $t | scan("(?:^|\\n)[ \\t]*(?:★ Skill candidate:|SKILL-CANDIDATE:)[ \\t]*([\\s\\S]*?)(?:\\n[ \\t]*\\n|\\z)") | .[0] ]
+  ( [ $t | scan("(?:^|\\n)[ \\t]*(?:★ Skill candidate:|SKILL-CANDIDATE:)[ \\t]*([\\s\\S]*?)(?=\\n[ \\t]*\\n|\\z)") | .[0] ]
     | .[] | emit("marker") ),
   ( [ $t | scan("`?★ Insight[ ─]*`?\\n([\\s\\S]*?)\\n`?─{5,}`?") | .[0] ]
     | .[] | emit("star-insight") )

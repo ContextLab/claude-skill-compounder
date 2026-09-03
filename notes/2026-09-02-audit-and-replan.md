@@ -316,3 +316,49 @@ Execution waves (independent within a wave):
 - ~22:20 PreToolUse arm re-tested live through the installed symlink (2.1.259): 3/3 hits,
   3/3 replies quote the reminder verbatim; UserPromptSubmit 0/3 (the prompt had no keyword
   row), so the arms are distinct. Tier 1 now works end to end where the user will use it.
+- ~22:40 Wave 3 committed 15b3b28, pushed. Suite: 47 files, 0 failures, 2 documented skips.
+- ~22:42 Wave 4 dispatched: #8 PreCompact capture (one agent, whole repo, ends with install +
+  doctor). Issue-comment agent dispatched for #20-#23, #27, #28, #31, #19.
+  After W4: final whole-suite check by orchestrator, commit, push, decide main merge, final report.
+- ~23:40 W4 done: #8 built. `hooks/precompact.sh` + `tests/test_precompact.py` (47 tests),
+  wired on BOTH paths (installer + hooks.json) with **no matcher** -- `PreCompact`'s matcher
+  selects the trigger and `manual`/`auto` name the same loss. Payload re-measured on 2.1.259
+  and written up at docs/CLAUDE-CODE-BEHAVIOR.md:510, including the previously unconfirmed
+  `"trigger":"auto"`: seven keys, the field is `trigger` and NOT the documented
+  `compaction_trigger`, `permission_mode` is absent, and there is **no
+  `last_assistant_message`** -- so the bounded transcript read is mandatory here, not the
+  fallback it is on Stop. No model in the hook: #8 had measured that a PreCompact hook blocks
+  compaction with no default timeout (300 s hook -> 300.9 s stall) and that setting a timeout
+  instead truncates the writer mid-write, silently. Cost 27 ms / 86 ms median (no candidate /
+  one) on the system jq at the 256 KB bound; the budget is process starts, not bytes, so
+  ProcessCountTest pins the exec count instead of a stopwatch.
+- ~23:40 Two defects found and fixed in W4, and neither was in the new code's happy path.
+  (1) THE TAB-IFS DEFECT, found by a test rather than by review. The four payload fields were
+  read with one `IFS=$'\t' read -r a b c d` over an `@tsv` line. **Tab is an IFS whitespace
+  character**, so a run of tabs collapses into ONE delimiter: `["s1","","/t","/c"]` puts the
+  transcript path in the variable holding the claim key and every field after the empty one
+  shifts left. The field most likely to be empty is `prompt_id`, which is undocumented, so
+  the failure was "a build stops sending prompt_id -> `[ -f "$tp" ]` tests the cwd -> the
+  hook captures nothing, for ever, and nothing looks wrong". Fixed to four `IFS= read` on
+  four lines. (2) THE SHARED REGEX. The marker scan's paragraph terminator was a CONSUMING
+  group, so it ate the blank line ending each candidate and every SECOND marker was dropped
+  -- adjacent markers lost one, three in a row lost the middle. Two markers with prose
+  between them were found normally, which is exactly why it survived review of both hooks.
+  W4 verified the fix and pinned the defect in both test files rather than applying it; it is
+  now APPLIED, as the lookahead `(?=\n[ \t]*\n|\z)`, byte-identically in
+  hooks/insight-capture.sh:560 and hooks/precompact.sh:314, each carrying a comment naming
+  the twin. Both pinned tests flipped from asserting 1 to asserting 2, and a
+  three-marker test added to each -- two adjacent markers alone would pass on a scan that
+  still skipped every other one. Measured on jq-1.7.1-apple and jq-1.6.
+- ~23:40 Counts after W4, all re-derived rather than carried: **15 hook entries over 6
+  events** (`PreCompact` is the sixth; `python3 -c` over hooks/hooks.json, and
+  installer.OUR_EVENT_MARKERS agrees), **12 clocks** (`_NOW` names; `PRECOMPACT_NOW`
+  deliberately does not fall back to `INSIGHT_NOW`/`CI_NOW`), **116 env names over 18
+  prefixes**, **48 test files**. The env-prefix alternation in .claude/CLAUDE.md needed
+  PRECOMPACT added or it could not produce its own list -- the fourth time that command has
+  been narrower than the paragraph it introduces, and the first time a test
+  (test_doctrine_sync) forced it in the same change rather than a later one.
+- ~23:45 One claim of ours falsified by our own fix and corrected: .claude/CLAUDE.md:244
+  described the extractor defect as "known, pinned in both test files rather than fixed
+  here". It is fixed, so that paragraph now states the lookahead as the invariant and names
+  the two regression tests that hold it. This is the CLAUDE.md rule applied to CLAUDE.md.
