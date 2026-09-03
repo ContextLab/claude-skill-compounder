@@ -78,15 +78,16 @@ curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/
 Pinned to a release, which is the form to prefer once a tag exists:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/v0.3.0/install.sh | SKILL_COMPOUNDER_REF=v0.3.0 bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/v0.3.1/install.sh | SKILL_COMPOUNDER_REF=v0.3.1 bash
 ```
 
-`v0.3.0` is the first tagged release, cut on 2026-09-03 from commit `a2aa2d4`;
+`v0.3.1` is the latest tag (v0.3.0 was cut on 2026-09-03 from `a2aa2d4`; v0.3.1 fixes
+`install.sh --update` from the managed checkout's own copy);
 `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists the
 tags that exist right now. With `SKILL_COMPOUNDER_REF` unset the installer takes `main`,
 which is whatever was last pushed to it, so two people running the plain one-liner on the
-same day can end up on different code. `--ref v0.3.0` is the flag form, and over the pipe
-it needs `bash -s -- --ref v0.3.0`.
+same day can end up on different code. `--ref v0.3.1` is the flag form, and over the pipe
+it needs `bash -s -- --ref v0.3.1`.
 
 Or from a clone:
 
@@ -175,7 +176,7 @@ Re-running it **re-wires that checkout without moving it**. Moving it is a separ
 
 ```bash
 ./install.sh --update                 # fetch and move to SKILL_COMPOUNDER_REF (default main)
-./install.sh --update --ref v0.3.0    # or to a tag you name
+./install.sh --update --ref v0.3.1    # or to a tag you name
 ./install.sh --rollback               # back to the ref recorded before that update
 ```
 
