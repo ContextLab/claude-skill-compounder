@@ -461,3 +461,13 @@ supported versions, upgrade/rollback test). P4 cannot be done in a session.
   command; suite 48 files / 2338 tests OK / 2 skips. Owed: tests/test_forge_apply.py:1605
   stale comment says default "1"; install.sh opt-in flag (#39 bullets 2-3) not done.
   Watcher lesson: `gh run list --commit` returned nothing; filter on headSha instead.
+- ~02:35 (Sep 3) CI round 2: only one Ubuntu failure remained, the new argv-cap shim test
+  itself (execve refused the oversized argument before the shim loaded); fixed with a
+  layer-reporting probe and a kernel-refuser variant that runs on macOS. Committed cfb2bc6
+  with #39 (review opt-in), pushed to branch and main; CI watch armed on headSha.
+  Dispatched: #40 docs split (README -> ~400 lines + docs/architecture, operations,
+  measurement, development; tests re-pointed) and #39 install flags (--enable-review /
+  --disable-review via installer set_env/unset_env, manifest review_env_set).
+  Next: on CI green, tag v0.3.0 per docs/releasing.md, GitHub release, verify pinned install
+  into a temp claude dir, --update/--rollback between two refs.
+- ~03:10 (Sep 3) CI GREEN on main at cfb2bc6 (run 33719557434), all jobs. First green run since before Sep 1.

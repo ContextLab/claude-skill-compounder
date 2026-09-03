@@ -52,7 +52,11 @@ install.sh [--ref <tag|branch|sha>] [--update] [--rollback] [setup.py options...
 
 A plain re-run re-wires the current checkout and does NOT move it. Every other option is
 passed straight through to scripts/setup.py: --uninstall, --claude-dir, --bin-dir,
---state-dir, --no-doctrine.
+--state-dir, --no-doctrine, --enable-review, --disable-review.
+
+Session review (a detached `claude -p` call after long sessions) is OFF by default, even
+piped through bash with no tty. Turn it on explicitly with --enable-review (or
+SKILL_COMPOUNDER_ENABLE_REVIEW=1); --disable-review turns it back off.
 USAGE
 }
 

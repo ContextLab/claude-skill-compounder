@@ -263,29 +263,6 @@ on its own — `doctor` and `reap` are both commands somebody has to run. The mi
 use is that briefs and round records go to disk at the moment they are decided, which is
 what made the second attempt cheap. A forge whose orchestrator dies still costs its rounds.
 
-## Open: one live counter file is written in both forms and only a person can repair it
-
-`skillforge doctor` reports **FAIL counters** on this machine and will keep doing so until
-somebody fixes the file by hand:
-
-```bash
-f=~/.claude/skill-compounder/reminders/f0feae4c-834a-409b-8e25-9a2894341168.edits
-wc -c < "$f"        # 902
-head -c 4 "$f"      # 36xx
-```
-
-It holds `36` and then 900 `x` bytes: one session counted as a decimal number, then
-appended to as a unary tally when the hook changed form under it. Neither reader can add
-the halves up — one sees a non-number, the other counts 902 bytes for 936 edits — so those
-edits are lost to every count that uses them. `doctor` reports it rather than repairing it,
-deliberately: the correct total is a judgement about which half is which, and a command
-that guessed would destroy the evidence. What is open is the repair itself and whether
-anything should ever write the other form again.
-
-The branch is reproducible without touching live state — write `36` and 900 `x` bytes into
-`<dir>/reminders/<id>.edits` and run `SKILL_COMPOUNDER_STATE=<dir> skillforge doctor`; it
-prints `FAIL  counters ... these hold a decimal count with a tally appended after it`.
-
 ## Open: the `PostToolUseFailure` and `Skill` arms have never been exercised in the wild
 
 `hooks/skill-use.sh` and `hooks/repeat-gate.sh` are both wired on `PostToolUseFailure`, and
@@ -391,7 +368,12 @@ record CI as green on the strength of the local suite; read the run.
 
 Next after this: **#39**, the paid session review's default (it is on by default and
 spends money, and stage 2 cannot finish its own gate — see above), then **#40**, the docs
-split.
+split. #39 landed on 2026-09-03 (the review ships off, and `install.sh --enable-review`
+is the explicit opt-in). #40 landed the same day: `README.md` is the front door and
+`docs/architecture.md`, `docs/operations.md`, `docs/measurement.md` and
+`docs/development.md` carry what it used to. The one thing to know before editing any of
+them is that the doctrine anchors moved to `docs/architecture.md`, which
+`tests/test_doctrine_sync.py` now reads as `PROTOCOL_DOC`.
 
 ## Closed
 
@@ -532,3 +514,23 @@ its record without anyone noticing — and then dropped it on the floor between 
 and the queue, while stamping the cooldown that stopped it from trying again. Producing the
 record is necessary. It is not sufficient; the handoff has to be verified too, and until a
 live dispatch shows one arriving, it has not been.
+
+## This machine
+
+Operational debt on the author's box, kept apart from everything above so that a reader
+does not take a local mess for a property of the code. Nothing above this heading is
+machine-local; nothing below it should be read as a repo-wide defect.
+
+- **The mixed counter file is repaired.** One session's `.edits` counter held `36` and then
+  900 `x` bytes — a decimal count written by one form of the hook and appended to as a
+  unary tally by the next — so neither reader could add the halves up and 936 edits were
+  lost to every count that used them. `doctor` reported it rather than guessing, because
+  the correct total is a judgement about which half is which. It is now 936 bytes of `x`
+  and nothing else, and `skillforge doctor` reports `PASS counters` (2026-09-03:
+  `tr -d x < ~/.claude/skill-compounder/reminders/f0feae4c-834a-409b-8e25-9a2894341168.edits | wc -c`
+  prints 0). What stays open is the general question, and it is in the list above, not
+  here: whether anything should ever write the other form again.
+- **How to check this box.** `skillforge doctor` is the whole check, one line per item and
+  exit 1 on any FAIL. The branch above is reproducible without touching live state: write
+  `36` and 900 `x` bytes into `<dir>/reminders/<id>.edits` and run
+  `SKILL_COMPOUNDER_STATE=<dir> skillforge doctor`.

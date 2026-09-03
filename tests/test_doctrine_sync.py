@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """The forging doctrine is stated in three places. They must not drift apart.
 
-`.claude/CLAUDE.md` carries the rule in prose: "Its doctrine is mirrored in README.md and
-in the user's global ~/.claude/CLAUDE.md stanza. Changing the protocol means updating all
-three." That rule has been violated twice, both times the same way: the skill changed and
-the prose describing it did not, so the README documented a round cap and a duration
-threshold the skill no longer had. A fresh session reading the README would have applied
-a rule that does not exist.
+`.claude/CLAUDE.md` carries the rule in prose: "Its doctrine is mirrored in
+docs/architecture.md and in the user's global ~/.claude/CLAUDE.md stanza. Changing the
+protocol means updating all three." That rule has been violated twice, both times the same
+way: the skill changed and the prose describing it did not, so the long-form document
+carried a round cap and a duration threshold the skill no longer had. A fresh session
+reading it would have applied a rule that does not exist. The long-form mirror was
+`README.md` until the docs split of 2026-09-03 moved the forging protocol to
+`docs/architecture.md`; the mirror set is the same four files it always was.
 
 WHAT THIS FILE ENFORCES, AND WHAT IT DOES NOT.
 
@@ -86,6 +88,14 @@ sys.path.insert(0, str(ROOT))
 from skill_compounder.installer import DOCTRINE_TEXT  # noqa: E402
 SKILL = (ROOT / "skills" / "skill-compounder" / "SKILL.md").read_text()
 README = (ROOT / "README.md").read_text()
+# The four pages the docs split of 2026-09-03 carved out of the README. The forging
+# protocol, the doctrine anchors and the two diagrams went to `architecture.md`; the knob
+# tables and the derivation command went to `operations.md`. Every assertion below that
+# used to read the README reads the page its text is now in.
+ARCH = (ROOT / "docs" / "architecture.md").read_text()
+OPERATIONS = (ROOT / "docs" / "operations.md").read_text()
+MEASUREMENT = (ROOT / "docs" / "measurement.md").read_text()
+DEVELOPMENT = (ROOT / "docs" / "development.md").read_text()
 REPO_CLAUDE = (ROOT / ".claude" / "CLAUDE.md").read_text()
 HOOK = (ROOT / "hooks" / "compound-improvement.sh").read_text()
 DESIGN = (ROOT / "docs" / "DESIGN.md").read_text()
@@ -132,13 +142,17 @@ SKILL_PATH = "skills/skill-compounder/SKILL.md"
 # way `render_doctrine` substitutes it.
 STANZA_PATH = "skill_compounder/installer.py (DOCTRINE_TEXT)"
 STANZA = DOCTRINE_TEXT.replace("{app_home}", "<the checkout>")
-MIRRORS = {SKILL_PATH: SKILL, "README.md": README, ".claude/CLAUDE.md": REPO_CLAUDE,
+# The long-form mirror: the one document that states the doctrine at length, with an
+# anchor comment against each pinned sentence. It was `README.md` until the docs split.
+PROTOCOL_DOC = "docs/architecture.md"
+PROTOCOL = ARCH
+MIRRORS = {SKILL_PATH: SKILL, PROTOCOL_DOC: PROTOCOL, ".claude/CLAUDE.md": REPO_CLAUDE,
            STANZA_PATH: STANZA}
 
 # Where an anchor comment is required alongside the sentence. `.claude/CLAUDE.md` and the
 # installed stanza are excluded on purpose: both are condensed restatements with no room
 # for an anchor per sentence. See the module docstring.
-ANCHORED = (SKILL_PATH, "README.md")
+ANCHORED = (SKILL_PATH, PROTOCOL_DOC)
 
 
 def flatten(text):
@@ -187,7 +201,7 @@ DOCTRINE = (
     ("no-forked-reviewer",
      "The red-teamer must never be a fork of either layer — not of the orchestrator that "
      "dispatches it, and not of the session that dispatched the orchestrator.",
-     (SKILL_PATH, "README.md", ".claude/CLAUDE.md", STANZA_PATH),
+     (SKILL_PATH, PROTOCOL_DOC, ".claude/CLAUDE.md", STANZA_PATH),
      "A fresh reviewer is the one thing the loop cannot work without: a fork already knows "
      "what the skill was meant to say."),
 
@@ -201,7 +215,7 @@ DOCTRINE = (
     ("forge-runs-in-the-background",
      "Every agent a forge dispatches runs in the background, and the session that starts "
      "one never blocks on it.",
-     (SKILL_PATH, "README.md", STANZA_PATH),
+     (SKILL_PATH, PROTOCOL_DOC, STANZA_PATH),
      "The reason the loop was moved off the main thread was never blocking -- the agents "
      "always ran in the background -- it was review traffic landing in the thread the user "
      "is talking to. Stated as 'someone else runs it', the rule died with the orchestrator; "
@@ -210,7 +224,7 @@ DOCTRINE = (
     ("tier-before-forge",
      "A procedure earns a skill only when it has steps a model gets wrong without them AND "
      "a trigger a description can route; otherwise it is a note or a reminder.",
-     (SKILL_PATH, "README.md", STANZA_PATH),
+     (SKILL_PATH, PROTOCOL_DOC, STANZA_PATH),
      "The threshold said only costly-and-recurring, which a note also passes. Ten days of "
      "the cheap branch being taken zero times is what a missing rule looks like: with one "
      "output path, everything that cleared the bar got a forge."),
@@ -218,7 +232,7 @@ DOCTRINE = (
     ("cheap-branch",
      "The cheap branch is a command, not an intention: `skillnote add` records the note or "
      "the reminder, and a lesson nobody ran a command for was not kept.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "The sentence this replaced -- 'write a note or update the project's CLAUDE.md' -- "
      "named no path, no CLI and no ledger row, and was taken zero times in ten days. A "
      "branch with no command behind it is a branch nobody can be shown to have taken."),
@@ -226,13 +240,13 @@ DOCTRINE = (
     ("hard-round-cap",
      "A third round is earned by a falling blocking count, and `skillforge` refuses the "
      "round without one.",
-     (SKILL_PATH, "README.md", STANZA_PATH),
+     (SKILL_PATH, PROTOCOL_DOC, STANZA_PATH),
      "Three of ten forges ran past an advisory cap that refused nothing, and rounds 3 and "
      "beyond were roughly 60% of the wall clock. A budget nothing enforces is a suggestion."),
 
     ("close-ownership",
      "You own `start`, `done` and `fail`; every agent you dispatch owns everything between.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "Exactly one party may close a forge; the CLI discards the second close at exit 0. "
      "Renamed from 'the orchestrator owns everything between' on 2026-09-02: the default "
      "forge has no orchestrator, and a rule naming a stage that is not there reads as "
@@ -248,26 +262,26 @@ DOCTRINE = (
 
     ("no-leading-prompt",
      "Never hand a reviewer a list of what not to flag.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "A brief that pre-classifies the allowed cases returns your own judgement with a "
      "second name on it."),
 
     ("neutral-retirement-question",
      'Ask a second fresh agent the neutral question, "should this be kept, fixed, or '
      'retired?", never "confirm this deletion".',
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "The retirement check has the same shape as the red-team check, and a leading prompt "
      "defeats both."),
 
     ("archive-the-source",
      "Archive the source, not the link.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "Skills are symlinks into a checkout: moving the link leaves the real directory for "
      "the next install to resurrect, and writes the tombstone into live source."),
 
     ("both-conditions",
      "Both must hold, or it gets a note rather than a skill.",
-     (SKILL_PATH, "README.md", STANZA_PATH),
+     (SKILL_PATH, PROTOCOL_DOC, STANZA_PATH),
      "Costly OR recurring says yes to nearly any non-trivial work, and a threshold that "
      "always resolves to yes is worse than none."),
 
@@ -320,33 +334,33 @@ DOCTRINE = (
 
     ("no-silent-workaround",
      "Never silently work around a skill that misfired.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "The workaround costs the same time again in every future session, and nothing "
      "records that the skill is broken."),
 
     ("never-rm-rf",
      "Never `rm -rf` a skill.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "Retirement can be wrong, so it has to be recoverable."),
 
     ("routing-gate-on-completion",
      "A forge cannot be reported clean while the skill's own must-fire prompts do not "
      "fire it.",
-     (SKILL_PATH, "README.md", STANZA_PATH),
+     (SKILL_PATH, PROTOCOL_DOC, STANZA_PATH),
      "Every seed skill passed a full red-team loop on a `## Trigger precision` section "
      "nobody ran; three of the claims were then false. A reviewer agreeing a description "
      "reads well is not a measurement of the router."),
 
     ("must-not-half-is-a-gate",
      "A skill that fires on everything is worse than no skill.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "Half a routing gate is not a gate: a skill that wins every prompt displaces the "
      "neighbour that would have handled it, which is the failure `stale-artifact-check` "
      "suffered from the other side."),
 
     ("unmeasured-is-not-verified",
      "A probe that could not run is never a pass.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, PROTOCOL_DOC),
      "Without this the gate degrades to nothing the first time there is no auth or no "
      "quota: an unrun probe silently promoted to verified is the exact record this gate "
      "exists to end."),
@@ -500,17 +514,18 @@ class DoctrineMirrorTest(unittest.TestCase):
 
 
 class RoundCapTest(unittest.TestCase):
-    """The cap moved 3 -> 5 in the skill and stayed 3 in the README for a full release."""
+    """The cap moved 3 -> 5 in the skill and stayed 3 in the long-form doc for a release."""
 
     def cap(self):
         m = re.search(r"Cap at (\d+) rounds", SKILL)
         self.assertIsNotNone(m, "SKILL.md no longer states a round cap in a parseable form")
         return int(m.group(1))
 
-    def test_readme_states_the_same_cap(self):
+    def test_the_protocol_doc_states_the_same_cap(self):
         self.assertRegex(
-            README, r"cap at %d rounds" % self.cap(),
-            "README's forging diagram disagrees with SKILL.md about the round cap",
+            PROTOCOL, r"cap at %d rounds" % self.cap(),
+            "%s's forging diagram disagrees with SKILL.md about the round cap"
+            % PROTOCOL_DOC,
         )
 
     def test_escalated_cap_agrees(self):
@@ -518,12 +533,12 @@ class RoundCapTest(unittest.TestCase):
         skill_hi = re.search(r"or (\d+) for a skill that is complex", SKILL)
         self.assertIsNotNone(skill_hi, "SKILL.md no longer states an escalated cap")
         self.assertIn(
-            "(%s for a complex" % skill_hi.group(1), README,
-            "README and SKILL.md disagree about the escalated round cap",
+            "(%s for a complex" % skill_hi.group(1), PROTOCOL,
+            "%s and SKILL.md disagree about the escalated round cap" % PROTOCOL_DOC,
         )
 
     def test_status_line_example_budgets_the_documented_cap(self):
-        """SKILL.md budgets steps as 2 + 2 x rounds. The README's examples must show that.
+        """SKILL.md budgets steps as 2 + 2 x rounds. The doc's examples must show that.
 
         Defeated twice. First: `re.search` took the FIRST bar in the file, so adding a
         second example with a different budget ("the usual 5-round cap is a 6-step forge")
@@ -533,13 +548,17 @@ class RoundCapTest(unittest.TestCase):
         the real glyph was not a bar as far as this test was concerned. `BAR` is built from
         the renderer now.
         """
-        bars = BAR.findall(README)
-        self.assertTrue(bars, "README's status-line example is no longer parseable")
-        for step, total in bars:
+        # Both documents are read, not only the one the example sits in: a second bar
+        # written into the README would otherwise teach a budget nothing checks.
+        bars = [(doc, b) for doc, text in (("README.md", README), (PROTOCOL_DOC, PROTOCOL))
+                for b in BAR.findall(text)]
+        self.assertTrue(bars, "the status-line example is no longer parseable in %s"
+                        % PROTOCOL_DOC)
+        for doc, (step, total) in bars:
             self.assertEqual(
                 int(total), 2 + 2 * self.cap(),
-                "a README example forge budgets %s steps, which is not 2 + 2 x the "
-                "%d-round cap SKILL.md states" % (total, self.cap()))
+                "an example forge in %s budgets %s steps, which is not 2 + 2 x the "
+                "%d-round cap SKILL.md states" % (doc, total, self.cap()))
 
 
 class OrphanedConstantTest(unittest.TestCase):
@@ -555,7 +574,10 @@ class OrphanedConstantTest(unittest.TestCase):
         the README and the skill at once, which is exactly the pair that drifts.
         """
         pattern = re.compile(r"(?:>|under )\s?(\d+)\s?min")
-        for name, text in (("README.md", README), (".claude/CLAUDE.md", REPO_CLAUDE)):
+        for name, text in (("README.md", README), (".claude/CLAUDE.md", REPO_CLAUDE),
+                           (PROTOCOL_DOC, PROTOCOL), ("docs/operations.md", OPERATIONS),
+                           ("docs/measurement.md", MEASUREMENT),
+                           ("docs/development.md", DEVELOPMENT)):
             for cited in pattern.findall(text):
                 self.assertRegex(
                     SKILL, r"(?:>|under )\s?%s\s?min" % cited,
@@ -565,7 +587,7 @@ class OrphanedConstantTest(unittest.TestCase):
 
 
 # --------------------------------------------------------------------- counted claims
-# A README sentence may state how many knobs there are. The check that reads those
+# A sentence may state how many knobs there are. The check that reads those
 # sentences used to carry a `words` map that stopped at "ten", which made a true sentence
 # unwritable the moment a second table pushed the real total to fifteen: the cheap way out
 # was to leave the new rows out of every assertion in this file rather than state a number
@@ -579,7 +601,7 @@ _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
 
 
 def count_word(word):
-    """The integer a README numeral denotes, or None if it does not denote one.
+    """The integer a numeral in the docs denotes, or None if it does not denote one.
 
     Digits are read too, so *any* count is expressible however large; spelled numbers are
     read to ninety-nine, which is far past any table this repo will grow. A count this
@@ -611,13 +633,19 @@ COUNTED_CLAIM = re.compile(
     r"\b(%s)\s+(?:\w+\s+){0,2}?(knobs?|tunables?|environment variables?|variables?)\b"
     % _NUMERAL, re.I)
 
-# A table of knobs, wherever in the README it sits: the two leading columns are the
+# A table of knobs, wherever in a document it sits: the two leading columns are the
 # signature. Anything matching this is checked, so a third table needs no test edit.
 VAR_TABLE = re.compile(r"^\|Variable\|Default\|[^\n]*\n\|(?:-\|)+\n((?:\|[^\n]*\n)+)", re.M)
 
+# Every document that carries a knob table. The main tuning table moved to
+# `docs/operations.md` with the docs split; the session review's five rows stayed in the
+# README, beside the disclosure that says the review spends money, which is the only place
+# its off switch is any use. Both are read, so a row cannot hide by being in the other file.
+KNOB_DOCS = (("README.md", README), ("docs/operations.md", OPERATIONS))
+
 
 class TuningTableTest(unittest.TestCase):
-    """Every knob the hook actually reads has to be findable in the README."""
+    """Every knob the hook actually reads has to be findable in the documentation."""
 
     def hook_vars(self):
         found = {v for v in re.findall(r"CI_[A-Z_]+", HOOK) if not PIN.search(v)}
@@ -625,50 +653,67 @@ class TuningTableTest(unittest.TestCase):
         return found
 
     def tables(self):
-        """Every knob table in the README, as (position, rows), rows being (var, default).
+        """Every knob table in every knob document, as (doc, position, rows).
 
         Not just the one under `## Tuning`. The session review documents its knobs beside
-        the disclosure that says it calls an API and is on by default, which is the only
-        place its off switch is any use; merging them into the tuning table would move
-        that switch three screens away from the paragraph a reader needs it in. The
-        document keeps the shape it needs and the test follows it, rather than the five
+        the disclosure that says it calls an API and costs money, which is the only place
+        its off switch is any use; merging them into the tuning table would move that
+        switch into a different file from the paragraph a reader needs it in. The
+        documents keep the shape they need and the test follows them, rather than the five
         review rows sitting outside every assertion here because one table was all this
-        knew how to read.
+        knew how to read. Position is per document, since that is what `section_of` reads.
         """
         out = []
-        for m in VAR_TABLE.finditer(README):
-            rows = re.findall(r"^\|`([^`|]+)`\|([^|]*)\|", m.group(1), re.M)
-            self.assertEqual(
-                len(rows), len(m.group(1).strip().splitlines()),
-                "a README knob table has a row this cannot read: every row must open "
-                "`|`NAME`|` and its default cell must not contain a `|`")
-            out.append((m.start(), rows))
-        self.assertTrue(out, "README has no |Variable|Default| knob table")
+        for doc, text in KNOB_DOCS:
+            for m in VAR_TABLE.finditer(text):
+                rows = re.findall(r"^\|`([^`|]+)`\|([^|]*)\|", m.group(1), re.M)
+                self.assertEqual(
+                    len(rows), len(m.group(1).strip().splitlines()),
+                    "a knob table in %s has a row this cannot read: every row must open "
+                    "`|`NAME`|` and its default cell must not contain a `|`" % doc)
+                out.append((doc, m.start(), rows))
+        self.assertTrue(out, "no |Variable|Default| knob table in %s"
+                        % " or ".join(d for d, _ in KNOB_DOCS))
         return out
 
     def all_rows(self):
-        return [row for _, rows in self.tables() for row in rows]
+        return [row for _doc, _pos, rows in self.tables() for row in rows]
 
     def table_rows(self):
-        """Just the names, from every table."""
+        """Just the names, from every table in every knob document."""
         return [var for var, _ in self.all_rows()]
 
-    def section_of(self, pos):
-        """The `##` section containing `pos`, as (start, end)."""
-        starts = [m.start() for m in re.finditer(r"^## ", README, re.M)]
+    def section_of(self, doc, pos):
+        """The `##` section of `doc` containing `pos`, as (start, end)."""
+        text = dict(KNOB_DOCS)[doc]
+        starts = [m.start() for m in re.finditer(r"^## ", text, re.M)]
         lo = max([s for s in starts if s <= pos], default=0)
-        hi = min([s for s in starts if s > pos], default=len(README))
+        hi = min([s for s in starts if s > pos], default=len(text))
         return lo, hi
 
-    def tables_near(self, pos):
-        """Rows of every knob table in the same `##` section as `pos`."""
-        lo, hi = self.section_of(pos)
-        return [rows for start, rows in self.tables() if lo <= start < hi]
+    def tables_near(self, doc, pos):
+        """Rows of every knob table in the same `##` section of the same document."""
+        lo, hi = self.section_of(doc, pos)
+        return [rows for d, start, rows in self.tables() if d == doc and lo <= start < hi]
+
+    def find_once(self, pattern, what):
+        """(doc, match) for a counted sentence that must sit in exactly one knob document.
+
+        Stated in neither, nothing is checked; stated in both, two numbers drift against
+        one table. Either way this fails and names which.
+        """
+        hits = [(doc, m) for doc, text in KNOB_DOCS
+                for m in [re.search(pattern, text)] if m]
+        self.assertEqual(
+            len(hits), 1,
+            "the sentence stating %s must appear in exactly one knob document; found it "
+            "in %s" % (what, ", ".join(d for d, _ in hits) or "none of them"))
+        return hits[0]
 
     def test_every_tunable_the_hook_reads_is_documented(self):
         for var in sorted(self.hook_vars() - set(self.table_rows())):
-            self.fail("hooks/compound-improvement.sh reads %s but no README "
-                      "tuning table lists it" % var)
+            self.fail("hooks/compound-improvement.sh reads %s but no tuning table in %s "
+                      "lists it" % (var, " or ".join(d for d, _ in KNOB_DOCS)))
 
     def test_no_documented_tunable_is_imaginary(self):
         """A row for a variable nothing reads is worse than no row.
@@ -685,7 +730,7 @@ class TuningTableTest(unittest.TestCase):
             # to `..._COOLDOWN_SECS`, which is the exact drift this is here to catch.
             self.assertIsNotNone(
                 re.search(r"\b%s\b" % re.escape(var), SCRIPTS),
-                "README documents %s but nothing in bin/, hooks/ or statusline/ "
+                "the docs document %s but nothing in bin/, hooks/ or statusline/ "
                 "reads it" % var)
 
     def test_no_knob_is_documented_in_two_places(self):
@@ -694,8 +739,9 @@ class TuningTableTest(unittest.TestCase):
         seen = self.table_rows()
         for var in sorted(set(seen)):
             self.assertEqual(seen.count(var), 1,
-                             "%s has %d README rows; a knob gets exactly one"
-                             % (var, seen.count(var)))
+                             "%s has %d documented rows across %s; a knob gets exactly one"
+                             % (var, seen.count(var),
+                                " and ".join(d for d, _ in KNOB_DOCS)))
 
     def test_documented_defaults_are_the_defaults(self):
         """A row naming the right variable and the wrong number is drift with a citation.
@@ -712,12 +758,12 @@ class TuningTableTest(unittest.TestCase):
         for var, cell in self.all_rows():
             real = re.search(r"\$\{%s:-([^}]*)\}" % re.escape(var), SCRIPTS)
             self.assertIsNotNone(
-                real, "README documents a default for %s but no script defaults it" % var)
+                real, "the docs document a default for %s but no script defaults it" % var)
             literal = re.fullmatch(r"`([^`]+)`", cell.strip())
             if literal is None:
                 self.assertEqual(
                     real.group(1), "",
-                    "README describes %s's default in prose (%r) but the script defaults "
+                    "the docs describe %s's default in prose (%r) but the script defaults "
                     "it to %r; state a real default as a backticked literal"
                     % (var, cell.strip(), real.group(1)))
                 continue
@@ -726,58 +772,60 @@ class TuningTableTest(unittest.TestCase):
             norm = lambda s: s.replace("$HOME", "~").replace("${HOME}", "~")
             self.assertEqual(
                 norm(literal.group(1)), norm(real.group(1)),
-                "README says %s defaults to %s; the script defaults it to %s"
+                "the docs say %s defaults to %s; the script defaults it to %s"
                 % (var, literal.group(1), real.group(1)))
 
     def test_stated_counts_match_the_table(self):
         tables = self.tables()
-        total = re.search(r"All ([\w-]+) are environment variables", README)
-        self.assertIsNotNone(total, "README no longer states how many tunables there are")
+        doc, total = self.find_once(r"All ([\w-]+) are environment variables",
+                                    "how many tunables there are")
         stated = count_word(total.group(1))
         self.assertIsNotNone(
-            stated, "README states a tunable count as %r, which is not a number "
-            "`count_word` can read" % total.group(1))
-        local = self.tables_near(total.start())
+            stated, "%s states a tunable count as %r, which is not a number "
+            "`count_word` can read" % (doc, total.group(1)))
+        local = self.tables_near(doc, total.start())
         self.assertEqual(len(local), 1,
                          "the sentence stating how many tunables there are is no longer in "
                          "a section with exactly one knob table, so nothing knows which "
                          "table it counts")
         self.assertEqual(stated, len(local[0]),
-                         "README says there are %s tunables; the table in that section "
-                         "lists %d" % (total.group(1), len(local[0])))
-        ci = re.search(r"Only the ([\w-]+) `CI_\*` variables", README)
-        self.assertIsNotNone(ci, "README no longer states how many CI_* vars the hook reads")
-        local = self.tables_near(ci.start())
+                         "%s says there are %s tunables; the table in that section "
+                         "lists %d" % (doc, total.group(1), len(local[0])))
+        doc, ci = self.find_once(r"Only the ([\w-]+) `CI_\*` variables",
+                                 "how many CI_* vars the hook reads")
+        local = self.tables_near(doc, ci.start())
         self.assertEqual(len(local), 1,
                          "the CI_* count sentence is no longer in a section with exactly "
                          "one knob table")
         self.assertEqual(count_word(ci.group(1)),
                          len([v for v, _ in local[0] if v.startswith("CI_")]),
-                         "README's CI_* count disagrees with the table beside it")
+                         "%s's CI_* count disagrees with the table beside it" % doc)
         # Defeated before: both counts above are pinned to one sentence each, so a THIRD
         # sentence with a different number ("Six knobs actually do anything") contradicted
         # the table with the suite green. Any counted claim about the knobs has to agree
         # with the table in its own section -- and with some real count anywhere else,
         # which is the weaker half of this and the reason a claim about knobs belongs in
         # the section whose table it counts.
-        every = [len(rows) for _, rows in tables]
-        for m in COUNTED_CLAIM.finditer(README):
-            stated = count_word(m.group(1))
-            self.assertIsNotNone(stated, "unreadable numeral %r" % m.group(1))
-            local = self.tables_near(m.start())
-            allowed = ([len(rows) for rows in local] if local
-                       else every + [sum(every)])
-            self.assertIn(
-                stated, allowed,
-                "README says %s %s; the knob table(s) it is counting list %s rows"
-                % (m.group(1), m.group(2), " or ".join(str(n) for n in sorted(set(allowed)))))
+        every = [len(rows) for _d, _p, rows in tables]
+        for doc, text in KNOB_DOCS:
+            for m in COUNTED_CLAIM.finditer(text):
+                stated = count_word(m.group(1))
+                self.assertIsNotNone(stated, "unreadable numeral %r" % m.group(1))
+                local = self.tables_near(doc, m.start())
+                allowed = ([len(rows) for rows in local] if local
+                           else every + [sum(every)])
+                self.assertIn(
+                    stated, allowed,
+                    "%s says %s %s; the knob table(s) it is counting list %s rows"
+                    % (doc, m.group(1), m.group(2),
+                       " or ".join(str(n) for n in sorted(set(allowed)))))
 
 
 class DerivationCommandTest(unittest.TestCase):
-    """The README hands the reader a command and claims it prints every name any shipped
-    script reads. That is a completeness claim, and unlike a claim about prose it is
-    decidable: run the command the README actually carries -- not a copy retyped here --
-    and compare it against the names the scripts really read.
+    """`docs/operations.md` hands the reader a command and claims it prints every name any
+    shipped script reads. That is a completeness claim, and unlike a claim about prose it
+    is decidable: run the command the document actually carries -- not a copy retyped
+    here -- and compare it against the names the scripts really read.
 
     This is what stands in for listing every knob in the tables. The tables are explicitly
     not the whole set; the command is, so the command is what gets checked.
@@ -797,22 +845,26 @@ class DerivationCommandTest(unittest.TestCase):
                # here rather than in a tuning table nobody could act on.
                "CLAUDE_CODE_SESSION_ID"}
 
+    DOC = "docs/operations.md"
+
     def command(self):
-        i = README.find("prints every")
+        i = OPERATIONS.find("prints every")
         self.assertNotEqual(
-            i, -1, "README no longer offers a command that prints every name a script reads")
-        m = re.search(r"```bash\n(.*?)```", README[i:], re.S)
-        self.assertIsNotNone(m, "the README's derivation command is no longer in a "
-                                "```bash fence right after the sentence promising it")
+            i, -1,
+            "%s no longer offers a command that prints every name a script reads" % self.DOC)
+        m = re.search(r"```bash\n(.*?)```", OPERATIONS[i:], re.S)
+        self.assertIsNotNone(m, "%s's derivation command is no longer in a ```bash fence "
+                                "right after the sentence promising it" % self.DOC)
         return m.group(1)
 
     def test_the_documented_command_runs_and_prints_names(self):
         out = subprocess.run(["bash", "-c", self.command()], cwd=str(ROOT),
                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
         self.assertEqual(out.returncode, 0,
-                         "the README's derivation command fails from the repo root: %s"
-                         % out.stderr.strip())
-        self.assertTrue(out.stdout.split(), "the README's derivation command prints nothing")
+                         "%s's derivation command fails from the repo root: %s"
+                         % (self.DOC, out.stderr.strip()))
+        self.assertTrue(out.stdout.split(),
+                        "%s's derivation command prints nothing" % self.DOC)
 
     def printed(self):
         out = subprocess.run(["bash", "-c", self.command()], cwd=str(ROOT),
@@ -827,26 +879,26 @@ class DerivationCommandTest(unittest.TestCase):
         knobs = {n for n in read - assigned if n not in self.AMBIENT}
         self.assertTrue(knobs, "no knobs found in the shipped scripts at all")
         for name in sorted(knobs - self.printed()):
-            self.fail("the README says its command prints every name any shipped script "
-                      "reads, but %s is read by a script and the command does not print "
-                      "it" % name)
+            self.fail("%s says its command prints every name any shipped script reads, "
+                      "but %s is read by a script and the command does not print it"
+                      % (self.DOC, name))
 
     def test_the_documented_command_finds_every_documented_knob(self):
         printed = self.printed()
         for var in TuningTableTest("test_no_documented_tunable_is_imaginary").table_rows():
             self.assertIn(var, printed,
-                          "README documents %s in a table but the command it offers as the "
-                          "full list does not print it" % var)
+                          "the docs document %s in a table but the command %s offers as "
+                          "the full list does not print it" % (var, self.DOC))
 
 
 class ForgeDiagramTest(unittest.TestCase):
-    """The README's forging diagrams are structure, not prose, so their shape is decidable.
+    """The forging diagrams are structure, not prose, so their shape is decidable.
 
-    This is the only guard in this file that reads the README's account of the protocol
-    beyond a pinned sentence, and it can be, because ASCII tree indentation has a parse.
-    The first version asserted only that the word "orchestrator" appeared somewhere in the
-    README, which passes against a diagram that still hangs the builder off the main
-    session. Bind the nesting instead.
+    This is the only guard in this file that reads the long-form document's account of the
+    protocol beyond a pinned sentence, and it can be, because ASCII tree indentation has a
+    parse. The first version asserted only that the word "orchestrator" appeared somewhere
+    in the document, which passes against a diagram that still hangs the builder off the
+    main session. Bind the nesting instead.
 
     There are TWO diagrams since the forge diet: the default shape, where the session
     dispatches the builder and the reviewer itself, and the escalated shape, where an
@@ -857,11 +909,11 @@ class ForgeDiagramTest(unittest.TestCase):
     """
 
     def diagrams(self):
-        found = re.findall(r"```\nskillforge start.*?```", README, re.S)
+        found = re.findall(r"```\nskillforge start.*?```", PROTOCOL, re.S)
         self.assertEqual(
             len(found), 2,
-            "README no longer carries exactly two `skillforge start` diagrams (the default "
-            "forge and the escalated one); found %d" % len(found))
+            "%s no longer carries exactly two `skillforge start` diagrams (the default "
+            "forge and the escalated one); found %d" % (PROTOCOL_DOC, len(found)))
         return found
 
     @staticmethod
@@ -877,8 +929,9 @@ class ForgeDiagramTest(unittest.TestCase):
         lines = self.diagrams()[0].splitlines()
         self.assertNotIn(
             "orchestrator", self.diagrams()[0],
-            "the README's FIRST forging diagram still shows an orchestrator; the default "
-            "forge dispatches the builder and the reviewer from the session itself")
+            "the FIRST forging diagram in %s still shows an orchestrator; the default "
+            "forge dispatches the builder and the reviewer from the session itself"
+            % PROTOCOL_DOC)
         session = self._index(lines, "A: this session", self.fail)
         depth = len(lines[session]) - len(lines[session].lstrip())
         for role in ("builder", "red-team", "loop"):
@@ -907,13 +960,12 @@ class ForgeDiagramTest(unittest.TestCase):
             i = line_of(role)
             self.assertGreater(
                 i, orch_i,
-                "the README's escalated diagram must place %r after the orchestrator that "
+                "the escalated diagram must place %r after the orchestrator that "
                 "dispatches it" % role)
             child = len(lines[i]) - len(lines[i].lstrip())
             self.assertGreater(
                 child, orch,
-                "the README's escalated diagram must nest %r *under* the orchestrator"
-                % role)
+                "the escalated diagram must nest %r *under* the orchestrator" % role)
             for between in lines[orch_i + 1:i]:
                 if not between.strip():
                     continue
@@ -1088,7 +1140,10 @@ class SkillforgeContractTest(unittest.TestCase):
 
         for name, text in ((SKILL_PATH, SKILL), ("docs/DESIGN.md", DESIGN),
                            ("docs/CLAUDE-CODE-BEHAVIOR.md", PLATFORM),
-                           ("README.md", README)):
+                           ("README.md", README), (PROTOCOL_DOC, PROTOCOL),
+                           ("docs/operations.md", OPERATIONS),
+                           ("docs/measurement.md", MEASUREMENT),
+                           ("docs/development.md", DEVELOPMENT)):
             for sentence in sentences(text):
                 if not re.search(r"skillforge|forge/", sentence, re.I):
                     continue
@@ -1118,7 +1173,10 @@ class RetiredWordingTest(unittest.TestCase):
     def test_no_doc_reverts_to_a_retired_sentence(self):
         for name, text in ((SKILL_PATH, SKILL), ("docs/DESIGN.md", DESIGN),
                            ("docs/CLAUDE-CODE-BEHAVIOR.md", PLATFORM),
-                           ("README.md", README), (".claude/CLAUDE.md", REPO_CLAUDE)):
+                           ("README.md", README), (".claude/CLAUDE.md", REPO_CLAUDE),
+                           (PROTOCOL_DOC, PROTOCOL), ("docs/operations.md", OPERATIONS),
+                           ("docs/measurement.md", MEASUREMENT),
+                           ("docs/development.md", DEVELOPMENT)):
             for retired in RETIRED_WORDING:
                 self.assertNotIn(
                     retired, text,
@@ -1129,11 +1187,18 @@ class RetiredWordingTest(unittest.TestCase):
 
 
 class SeedPoolTest(unittest.TestCase):
-    """Adding a skill to skills/ without adding its README row is the same drift.
+    """Adding a skill to skills/ without adding its inventory row is the same drift.
 
-    It happened: `ai-tell-audit` shipped, and the README kept describing four seed skills
-    and a pool that did not contain it.
+    It happened: `ai-tell-audit` shipped, and the pool section kept describing four seed
+    skills and a pool that did not contain it. Both inventory tables moved to
+    `docs/architecture.md` with the docs split; the counted claims are read from the README
+    as well, because the README still describes the pool in passing and a second number
+    there would drift against the table just as easily.
     """
+
+    # Where the two inventory tables live, and every document that may state their size.
+    INVENTORY = PROTOCOL_DOC
+    COUNTED_IN = (("README.md", README), (PROTOCOL_DOC, PROTOCOL))
 
     def shipped(self):
         return sorted(d.name for d in (ROOT / "skills").iterdir()
@@ -1141,22 +1206,23 @@ class SeedPoolTest(unittest.TestCase):
 
     def table_rows(self):
         m = re.search(r"\|Skill\|Fires when\|The failure it prevents\|\n\|-\|-\|-\|\n((?:\|.*\n)+)",
-                      README)
-        self.assertIsNotNone(m, "README seed-pool table is missing or reshaped")
+                      PROTOCOL)
+        self.assertIsNotNone(m, "%s's seed-pool table is missing or reshaped" % self.INVENTORY)
         return re.findall(r"^\|`([^`]+)`\|", m.group(1), re.M)
 
     def install_table_rows(self):
         """The `skills/<name>/` entries in the "What gets installed" table."""
-        m = re.search(r"\|Piece\|What it does\|\n\|-\|-\|\n((?:\|.*\n)+)", README)
-        self.assertIsNotNone(m, "README's 'What gets installed' table is missing or reshaped")
+        m = re.search(r"\|Piece\|What it does\|\n\|-\|-\|\n((?:\|.*\n)+)", PROTOCOL)
+        self.assertIsNotNone(
+            m, "%s's 'What gets installed' table is missing or reshaped" % self.INVENTORY)
         return re.findall(r"^\|`skills/([^/`]+)/`\|", m.group(1), re.M)
 
     def test_every_shipped_skill_is_documented(self):
         """A skill nobody mentions is a skill nobody finds.
 
-        This assertion was weakened once, and wrongly: it failed because the README said
+        This assertion was weakened once, and wrongly: it failed because the docs said
         "Five skills ship" while seven directories shipped, and the response was to relax
-        it to "the name appears somewhere in the README" instead of asking whether the
+        it to "the name appears somewhere in the document" instead of asking whether the
         prose was right. A bare substring passes on an incidental mention in a code
         sample. Every shipped skill has to be documented in one of the two places a reader
         looks for the inventory: a row in the seed-pool table, or its own row in "What
@@ -1166,20 +1232,21 @@ class SeedPoolTest(unittest.TestCase):
         """
         documented = set(self.table_rows()) | set(self.install_table_rows())
         for name in self.shipped():
-            # assertIn against README would print the whole file on failure. A 20 KB dump
-            # for a one-word finding is output nobody reads.
+            # assertIn against the document would print the whole file on failure. A
+            # 20 KB dump for a one-word finding is output nobody reads.
             self.assertIn(
                 name, documented,
-                "skills/%s ships but no README table lists it: put it in the seed-pool "
+                "skills/%s ships but no table in %s lists it: put it in the seed-pool "
                 "table if a fresh install should reach for it on day one, or give it a "
                 "`skills/%s/` row in 'What gets installed' if it is machinery"
-                % (name, name))
+                % (name, self.INVENTORY, name))
 
     def test_no_row_describes_a_skill_that_does_not_ship(self):
         shipped = set(self.shipped())
         for name in self.table_rows():
             self.assertIn(name, shipped,
-                          "README documents a seed skill `%s` that does not ship" % name)
+                          "%s documents a seed skill `%s` that does not ship"
+                          % (self.INVENTORY, name))
 
     def test_the_stated_pool_size_matches(self):
         """And it is stated once.
@@ -1188,21 +1255,26 @@ class SeedPoolTest(unittest.TestCase):
         intro, "(five more)" in the install table, "Five skills ship with the package" in
         the pool section) while seven skill directories shipped, which is both ambiguous
         -- five of what? -- and three chances to drift. So: every counted claim about how
-        many skills ship has to agree with the pool table, wherever it is written.
+        many skills ship has to agree with the pool table, wherever it is written. The
+        docs split gave the count a second document to drift in, so both are scanned.
         """
         words = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
                  "nine": 9, "ten": 10}
-        counted = re.findall(
-            r"\b(three|four|five|six|seven|eight|nine|ten)\s+(?:more\s+|seed\s+)*"
-            r"(?:skills?\b|of\s+the\s+(?:entries|rows|skills)\b)",
-            README, re.I)
-        self.assertTrue(counted, "README no longer states the seed-pool size")
-        for word in counted:
-            self.assertEqual(
-                words.get(word.lower()), len(self.table_rows()),
-                "README says %s skills; the seed-pool table lists %d. State the count "
-                "once, in the pool section, and say what it counts"
-                % (word, len(self.table_rows())))
+        found = 0
+        for doc, text in self.COUNTED_IN:
+            counted = re.findall(
+                r"\b(three|four|five|six|seven|eight|nine|ten)\s+(?:more\s+|seed\s+)*"
+                r"(?:skills?\b|of\s+the\s+(?:entries|rows|skills)\b)",
+                text, re.I)
+            found += len(counted)
+            for word in counted:
+                self.assertEqual(
+                    words.get(word.lower()), len(self.table_rows()),
+                    "%s says %s skills; the seed-pool table lists %d. State the count "
+                    "once, in the pool section, and say what it counts"
+                    % (doc, word, len(self.table_rows())))
+        self.assertTrue(found, "neither %s states the seed-pool size"
+                        % " nor ".join(d for d, _ in self.COUNTED_IN))
 
 
 class HeldOutIsConstructionNotInstructionTest(unittest.TestCase):

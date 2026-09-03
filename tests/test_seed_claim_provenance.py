@@ -600,22 +600,28 @@ class ClaimsThisSkillMakesTest(unittest.TestCase):
                          "the sentence says %r but the command counts %r"
                          % (filename, counted.group(1)))
 
-    def seed_pool_rows(self, readme):
-        """Rows of the seed-pool table in whatever text of the README is handed over.
+    # Where the seed-pool table lives today. It was in `README.md` until the docs split of
+    # 2026-09-03 moved the inventory to `docs/architecture.md`; `seed_pool_rows` still takes
+    # its text as an argument, because the worked example below checks a PAST revision of
+    # `README.md`, where the table really was.
+    INVENTORY = ("docs", "architecture.md")
+
+    def seed_pool_rows(self, text):
+        """Rows of the seed-pool table in whatever document text is handed over.
 
         Taking the text as an argument rather than reading the working tree is what lets
         the same derivation run against a past revision of the file, which is the only
         way to check a claim about a past state without believing it.
         """
         table = re.search(r"\|Skill\|Fires when\|The failure it prevents\|\n\|-\|-\|-\|\n"
-                          r"((?:\|.*\n)+)", readme)
-        self.assertIsNotNone(table, "the README seed-pool table reshaped; re-derive by hand")
+                          r"((?:\|.*\n)+)", text)
+        self.assertIsNotNone(table, "the seed-pool table reshaped; re-derive by hand")
         return len(re.findall(r"^\|`([^`]+)`\|", table.group(1), re.M))
 
     def seed_pool_size(self):
         """The pool as this repository defines it right now, derived the way `SeedPoolTest`
-        does: rows of the README's seed-pool table, which excludes the machinery skills."""
-        return self.seed_pool_rows((REPO / "README.md").read_text())
+        does: rows of the seed-pool table, which excludes the machinery skills."""
+        return self.seed_pool_rows((REPO.joinpath(*self.INVENTORY)).read_text())
 
     @staticmethod
     def contested_noun_findings(text, pool):

@@ -471,7 +471,8 @@ be kept, fixed, or retired?" is a question the agent can actually answer against
 
 ## A test cannot read prose for meaning, so `test_doctrine_sync.py` stopped trying
 
-The rule above is mirrored into `README.md` and `.claude/CLAUDE.md`, and it has been
+The rule above is mirrored into `docs/architecture.md` and `.claude/CLAUDE.md`, and it
+has been
 silently deleted from a mirror before, so `tests/test_doctrine_sync.py` guards it. Three
 versions of that guard tried to enforce it by scanning the prose for the rule, and each was
 defeated on first contact by a fresh reviewer — not by a bug in a pattern, by a rewording:
@@ -493,7 +494,8 @@ not provide is worse than reporting none.
 What replaced it: each doctrine rule is pinned in `DOCTRINE` as one exact sentence, and
 every mirror must contain that sentence verbatim (whitespace collapsed, `*` emphasis
 stripped, nothing else). `<!-- doctrine: <id> -->` anchors mark the pinned sentences in
-`SKILL.md` and `README.md`; they render as nothing and warn the next editor that the
+`SKILL.md` and `docs/architecture.md`; they render as nothing and warn the next editor
+that the
 sentence is pinned. Presence of a known string is decidable; "does this paragraph mean the
 rule" is not.
 
@@ -520,7 +522,7 @@ The line that decides this package: a plugin cannot install a `statusLine`.
 requirement, and the animation is the most visible thing the package does; losing it
 to gain a version pin is a bad trade. The plugin manifest ships alongside so the repo
 can be loaded with `--plugin-dir`, submitted to a marketplace, and validated in CI.
-The README says plainly that the plugin path has no status line.
+`docs/architecture.md` says plainly that the plugin path has no status line.
 
 ### Idempotence rather than a rule about running one wiring
 
@@ -1133,7 +1135,7 @@ launch site in `hooks/insight-capture.sh` decides whether to spawn anything; the
 `bin/skillforge` tells the user which way it is set, and is the only surface that does, since
 the script is in neither wiring. A `doctor` that read the default differently from the script
 would report a state nothing is in -- which is worse than not reporting, because it is
-believed. `tests/test_doctrine_sync.py` derives the README's documented default from the
+believed. `tests/test_doctrine_sync.py` derives the documented default from the
 `${VAR:-default}` in the scripts, so the fourth copy, the one in prose, cannot drift either.
 
 **The gate stays at position 10, and that is deliberate.** It is still first,

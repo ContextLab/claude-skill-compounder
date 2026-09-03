@@ -1535,6 +1535,132 @@ def adopt_origins(app_home, claude_dir, state_dir, manifest=None):
     return note
 
 
+# -------------------------------------------------------------------- review opt-in
+#
+# Issue #39: the curl|bash installer must never spend the user's Anthropic quota by
+# default. `install()` above never touches the env block; turning paid session review on
+# is a separate, explicit act -- `install.sh --enable-review` / `SKILL_COMPOUNDER_ENABLE_
+# REVIEW=1` -- and `hooks/session-review.sh` reads the key this writes.
+
+REVIEW_ENV_KEY = "SKILL_COMPOUNDER_REVIEW"
+REVIEW_ENV_VALUE = "1"
+# The one line install.sh prints when review is switched on, and the sentence the README
+# should carry under "Switching it on" -- one copy, not two that can drift apart.
+REVIEW_DATA_BOUNDARY = (
+    "Data boundary: a bounded digest of the session transcript is sent to Claude once "
+    "per session at most, cooldown 21h. Measured median cost: $0.17 per review."
+)
+
+
+def _env_map(settings, strict):
+    """The top-level ``env`` object, or a clear error naming the key that is wrong.
+
+    Same shape as ``_hooks_map``: ``null`` means "no env" and is accepted; anything that
+    is not an object is not something we can merge a key into.
+    """
+    env = settings.get("env")
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        if not strict:
+            return None
+        raise SettingsShapeError(
+            'settings.json: "env" must be an object mapping names to values, but it is '
+            '%s. Nothing was changed; fix or remove that key.' % _jsontype(env))
+    return env
+
+
+def set_env(claude_dir, key, value):
+    """Set settings.json's ``env.<key> = value``, preserving every other env key.
+
+    Through the same backup/atomic/symlink-safe writer as ``write_settings`` elsewhere in
+    this file. Idempotent: writing the same value a second time changes nothing on disk
+    (no write, no backup slot spent), so enabling review twice leaves settings.json
+    byte-identical.
+    """
+    settings_path = Path(claude_dir) / "settings.json"
+    settings = read_settings(settings_path)
+    env = _env_map(settings, strict=True)
+    if env.get(key) == value:
+        return {"changed": False, "settings": str(settings_path)}
+    backup = backup_file(settings_path)
+    env = dict(env)
+    env[key] = value
+    settings["env"] = env
+    write_settings(settings_path, settings)
+    return {"changed": True, "settings": str(settings_path), "backup": backup}
+
+
+def unset_env(claude_dir, key):
+    """Remove settings.json's ``env.<key>``, leaving every other env key untouched.
+
+    Never raises on a shape it cannot read, the same judgement ``remove_hooks`` makes:
+    refusing to remove a key because some *other* part of ``env`` is malformed would trap
+    a user who is trying to turn a paid feature off.
+    """
+    settings_path = Path(claude_dir) / "settings.json"
+    settings = read_settings(settings_path)
+    env = _env_map(settings, strict=False)
+    if env is None:
+        return {"changed": False, "settings": str(settings_path),
+                "note": 'settings.json: "env" is not an object, so it holds no key of '
+                        "ours (fix that key by hand if you did not mean it)"}
+    if key not in env:
+        return {"changed": False, "settings": str(settings_path)}
+    backup = backup_file(settings_path)
+    env = dict(env)
+    del env[key]
+    if env:
+        settings["env"] = env
+    else:
+        settings.pop("env", None)
+    write_settings(settings_path, settings)
+    return {"changed": True, "settings": str(settings_path), "backup": backup}
+
+
+def enable_review(claude_dir, state_dir=None):
+    """Turn paid session review on: writes env.SKILL_COMPOUNDER_REVIEW=1 and records in
+    the manifest that WE set it, so ``disable_review`` and ``uninstall`` only ever remove
+    a value this package wrote.
+
+    A value already sitting at env.SKILL_COMPOUNDER_REVIEW that the manifest does not
+    attribute to us is the user's own choice -- set by hand, or by a tool that got there
+    first -- and is left alone and reported, the same judgement ``install_doctrine`` makes
+    for a hand-written stanza. Idempotent on our own value: a second call changes nothing.
+    """
+    state_dir = str(state_dir or DEFAULT_STATE)
+    settings_path = Path(claude_dir) / "settings.json"
+    manifest = read_manifest(state_dir)
+    env = _env_map(read_settings(settings_path), strict=True)
+    if REVIEW_ENV_KEY in env and not manifest.get("review_env_set"):
+        return {"changed": False, "settings": str(settings_path),
+                "note": "left alone: settings.json already sets env.%s=%r on its own "
+                        "(not something this package set)" % (REVIEW_ENV_KEY, env[REVIEW_ENV_KEY])}
+    result = set_env(claude_dir, REVIEW_ENV_KEY, REVIEW_ENV_VALUE)
+    if not manifest.get("review_env_set"):
+        manifest["review_env_set"] = True
+        write_manifest(state_dir, manifest)
+    return result
+
+
+def disable_review(claude_dir, state_dir=None):
+    """Undo enable_review: removes env.SKILL_COMPOUNDER_REVIEW only when the manifest
+    says this package is the one that set it."""
+    state_dir = str(state_dir or DEFAULT_STATE)
+    manifest = read_manifest(state_dir)
+    if not manifest.get("review_env_set"):
+        settings_path = Path(claude_dir) / "settings.json"
+        env = _env_map(read_settings(settings_path), strict=False) or {}
+        if REVIEW_ENV_KEY in env:
+            return {"changed": False, "settings": str(settings_path),
+                    "note": "left alone: env.%s was not set by this package" % REVIEW_ENV_KEY}
+        return {"changed": False, "settings": str(Path(claude_dir) / "settings.json")}
+    result = unset_env(claude_dir, REVIEW_ENV_KEY)
+    manifest.pop("review_env_set", None)
+    write_manifest(state_dir, manifest)
+    return result
+
+
 # ------------------------------------------------------------------- install/uninstall
 
 def install(app_home, claude_dir, bin_dir, state_dir=None, doctrine=None):
@@ -1612,6 +1738,11 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
     report["backup"] = backup_file(settings_path) or "(no existing settings.json)"
     problems = []
 
+    # Read once and reused throughout, rather than the pre-#39 pattern of a second
+    # read_manifest() lower down: the env-block removal below needs to know, before the
+    # settings write, whether THIS package set env.SKILL_COMPOUNDER_REVIEW.
+    manifest = read_manifest(state_dir)
+
     if _real_file_path(settings_path).exists():
         try:
             settings = read_settings(settings_path)
@@ -1624,13 +1755,29 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
             problems.append("our hook and statusLine entries are still in %s, because "
                             "it could not be parsed" % settings_path)
         if settings is not None:
-            pre = read_manifest(state_dir).get("preexisting_hook_events") or ()
+            pre = manifest.get("preexisting_hook_events") or ()
             report["hooks"] = remove_hooks(settings, pre)
             report["statusline"] = remove_statusline(settings, state_dir, app_home)
+            # The env key from #39's --enable-review only ever comes off when the
+            # manifest records that THIS package set it -- never a value the user (or
+            # some other tool) put there themselves. See enable_review/disable_review.
+            if manifest.get("review_env_set"):
+                env = _env_map(settings, strict=False) or {}
+                if REVIEW_ENV_KEY in env:
+                    env = dict(env)
+                    del env[REVIEW_ENV_KEY]
+                    if env:
+                        settings["env"] = env
+                    else:
+                        settings.pop("env", None)
+                    report["review"] = "removed env.%s" % REVIEW_ENV_KEY
+                else:
+                    report["review"] = ("manifest recorded env.%s but it was not present "
+                                        "in settings.json" % REVIEW_ENV_KEY)
+                manifest.pop("review_env_set", None)
             write_settings(settings_path, settings)
             report["settings"] = str(settings_path)
 
-    manifest = read_manifest(state_dir)
     report["doctrine"] = remove_doctrine(claude_dir, manifest)
     skills = _skill_dirs(app_home)
     clis = _cli_files(app_home)

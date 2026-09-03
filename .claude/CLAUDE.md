@@ -13,8 +13,11 @@ launched rather than wired; derive them from
 `OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
 There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
-`README.md` is the user-facing description. The two documents under `docs/` are split by
-audience, and the split is load-bearing:
+`README.md` is the front door only: value, install, cost, the five-minute path, supported
+versions, updating and a Status block. It was the whole documentation until the split of
+2026-09-03 (issue #40) cut it from 1245 lines to what `wc -l README.md` now reports.
+Eight documents under `docs/` carry the rest. Six have an audience of their own and are
+listed here; the other two are procedures reached from `docs/development.md`:
 
 - `docs/CLAUDE-CODE-BEHAVIOR.md` is verified behavior of **Claude Code itself**, useful to
   a project that shares no code with this one. Every entry names the finding, how it was
@@ -22,10 +25,24 @@ audience, and the split is load-bearing:
   platform finding there, not to `DESIGN.md`, and carry its measured limits with it.
 - `docs/DESIGN.md` is the **local rationale**: why each piece of this package is shaped the
   way it is. It links to the platform file rather than restating a finding.
+- `docs/architecture.md` is **what the parts are**: the component table, the two install
+  paths, the seed pool, the three habits, the forging protocol with its two diagrams, the
+  claim gate, the status line, and what the ledger records. It is also the **long-form
+  doctrine mirror** — the `<!-- doctrine: <id> -->` anchors moved here from `README.md`,
+  so `tests/test_doctrine_sync.py` reads it as `PROTOCOL_DOC`.
+- `docs/operations.md` is **what you type**: `skillforge doctor` and `reap`, the candidate
+  queue, the installer's `CLAUDE.md` block, the state layout, proposing a skill upstream,
+  and the tuning table with every knob. The knob tables and the derivation command that
+  claims to print every name a script reads both live here now.
+- `docs/measurement.md` is **what is counted and what it is worth**: `skillreport`'s
+  blocks, the destructive-op trial, and the three limits on every figure in the repo.
+- `docs/development.md` is **working on the repo**: the suite, the rules it is written
+  under, and pointers to `docs/e2e.md` and `docs/releasing.md`.
 
-Read both before changing anything in `bin/`, `statusline/`, or `hooks/`. Several of the
-constraints there look arbitrary. They are not. Nothing may live in both files: a moved
-claim that reappears in `DESIGN.md` fails `tests/test_docs_split.py`.
+Read the first two before changing anything in `bin/`, `statusline/`, or `hooks/`. Several
+of the constraints there look arbitrary. They are not. Nothing may live in both of those
+two files: a moved claim that reappears in `DESIGN.md` fails `tests/test_docs_split.py`,
+which also asserts that every relative link in every shipped document resolves.
 
 ## Commands
 
@@ -339,10 +356,14 @@ protocol. The tier rule comes first and it is a gate, not advice: a procedure ea
 only when it has steps a model gets wrong without them AND a trigger a description can route,
 and otherwise it gets a note or a reminder from `bin/skillnote`. Ten days with one output path
 produced zero notes, which is what a missing cheap branch looks like.
-Its doctrine is mirrored in `README.md` and in the global `~/.claude/CLAUDE.md` stanza, which
+Its doctrine is mirrored in `docs/architecture.md` and in the global `~/.claude/CLAUDE.md`
+stanza, which
 `skill_compounder/installer.py` now writes from `DOCTRINE_TEXT` — so the third mirror is a
 constant in this repo rather than a file on somebody's machine, and
 `tests/test_doctrine_sync.py` reads all three. Changing the protocol means updating all three.
+The long-form mirror was `README.md` until the docs split moved the protocol out of it; the
+mirror set is the same four files it always was, and `PROTOCOL_DOC` in that test file is the
+one name to change if it moves again.
 
 ## Constraints specific to this repo
 
@@ -486,12 +507,17 @@ cheap tier under it, `2026-09-02-tiers-design.md` for the two cheap tiers it ans
 rounds (issue #22), and
 `notes/research/` for the evidence behind the seed-pool selection, the
 insight queue, and the contribution mechanics. `notes/OPEN-THREADS.md` is the one file
-there that tracks current state rather than history. Read the dated ones for reasoning,
-not for the current state of the code.
+there that tracks current state rather than history, and its last section, "This machine",
+is operational debt on the author's box rather than a property of the code — nothing above
+that heading is machine-local, and nothing below it should be read as a repo-wide defect.
+Read the dated ones for reasoning, not for the current state of the code.
 
 The two hook constants (12 edits, 20 minutes) are unvalidated. `bin/skillreport` is the
 instrument that would settle them, and it needs real usage across several repositories
-over real time. Do not tune them before that data exists. The skill's own threshold is
+over real time. Do not tune them before that data exists. That limit, and the two others
+on every figure this repo quotes, are written up for a reader in
+`docs/measurement.md`; state them there rather than a fourth time somewhere else. The
+skill's own threshold is
 deliberately not a number — it asks for a nameable dead end and a second occurrence — so
 there is nothing there to tune.
 
@@ -502,4 +528,5 @@ there is nothing there to tune.
 - **2026-09-02** A mechanism meant to catch a pattern across a session must write the record itself: a checkpoint that depends on the session noticing it fired three times in one session and was disregarded three times. <!-- id:n735026689x210 source:session why:"marker record, session f0feae4c, 2026-08-25T20:05:19Z" -->
 - **2026-09-02** A session audit's 'distinct files touched' is a floor, not a total: most edits here were shell writes the hook records no path for. <!-- id:n1166131302x139 source:session why:"215 of 288 edits had no visible target (skillinsight 2851595b, 2026-08-26T19:12:28Z)" -->
 - **2026-09-02** When a writer and a reader share a format (a hook's counter file and the CLI that reads it, a CLI's stored signature and the hook that compares it), the test must drive the real writer into the real reader; a hand-written fixture pins whichever side its author was looking at and lets the other drift. <!-- id:n2647857843x309 source:session why:"twice on 2026-09-02: test_ledger pinned digit counters the hook never writes (skillreport dead for its whole life); test_skillnote pinned a Bash-prefixed signature remind.sh never compares (every command reminder silent)" -->
+- **2026-09-03** To watch a GitHub Actions run for a commit, filter 'gh run list --json headSha,status,conclusion' on a headSha prefix; 'gh run list --commit <sha>' returned nothing here and a watcher built on it timed out silently. <!-- id:n1407736601x223 source:session why:"2026-09-03: first CI watcher waited 27 minutes on an empty result; the headSha filter reported the verdict in one poll" -->
 <!-- skillnote:end -->

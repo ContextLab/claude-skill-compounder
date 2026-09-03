@@ -22,10 +22,11 @@ one at all, and why `--update` is a separate ask, is in
    `python3 tests/e2e/journey.py --out <a fresh dir>`. It spends real `claude -p` calls,
    so CI cannot run it and nothing else covers what it covers. [e2e.md](e2e.md) says what
    each step proves and what a `SKIPPED` row means.
-4. **Every counted claim in `README.md` still derives.** The `claim-provenance` skill is
-   the procedure; the point is that a count in prose has no compiler behind it, and the
-   README carries several with their derivation commands beside them. Re-run those
-   commands rather than reading the numbers.
+4. **Every counted claim in `README.md` and under `docs/` still derives.** The
+   `claim-provenance` skill is the procedure; the point is that a count in prose has no
+   compiler behind it, and several of them ship with their derivation commands beside
+   them — the knob counts in `docs/operations.md`, the review costs in `README.md`.
+   Re-run those commands rather than reading the numbers.
 
 ## Cutting it
 

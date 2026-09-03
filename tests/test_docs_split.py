@@ -242,6 +242,56 @@ class DocPathTest(unittest.TestCase):
         self.assertGreater(checked, 0, "no document deep-links into another; vacuous")
 
 
+class InternalLinkTest(unittest.TestCase):
+    """Every relative link target a shipped document names resolves on disk.
+
+    `DocPathTest` above stops at `.md`, because it also checks heading fragments and a
+    fragment only means something in markdown. That left every other relative target
+    outside the guard: the animation under `docs/media/`, `LICENSE`, a script under
+    `tests/`. The docs split of 2026-09-03 moved prose between `README.md` and four new
+    pages under `docs/`, and every link that travelled with it had to be rewritten by
+    hand -- one `docs/x.md` becoming `x.md` from inside `docs/`, another becoming
+    `../README.md`. A rewrite that was missed points at nothing, and markdown does not
+    complain.
+
+    Image links count: `![alt](path)` matches the same pattern, and a moved screenshot is
+    the commonest dead link in a README.
+    """
+
+    def targets(self):
+        """(document, target, resolved) for every relative link in every shipped doc."""
+        out = []
+        for path in DOCS:
+            for target in MD_LINK.findall(body(path.read_text())):
+                if "://" in target or target.startswith(("#", "mailto:")):
+                    continue
+                base, _, _frag = target.partition("#")
+                if not base or any(c in base for c in UNRESOLVABLE):
+                    continue
+                out.append((path, target, (path.parent / base).resolve()))
+        return out
+
+    def test_every_relative_link_target_exists(self):
+        found = self.targets()
+        self.assertTrue(found, "no shipped document carries a relative link; vacuous")
+        for path, target, resolved in found:
+            self.assertTrue(
+                resolved.exists(),
+                "%s links to `%s`, which resolves to %s and is not there. A link rewritten "
+                "when its text moved between files points at nothing, silently."
+                % (rel(path), target, resolved))
+
+    def test_the_link_check_reaches_targets_that_are_not_markdown(self):
+        """The reason this class exists beside `DocPathTest`. If every relative link in the
+        tree is a `.md` file, this adds nothing over the guard above and should say so
+        rather than pass quietly."""
+        others = [(rel(p), t) for p, t, _r in self.targets() if not t.partition("#")[0].endswith(".md")]
+        self.assertTrue(
+            others,
+            "no shipped document links to a non-markdown path any more, so this class "
+            "duplicates DocPathTest. Retire one of them rather than keeping both.")
+
+
 class DocsSplitTest(unittest.TestCase):
     def test_no_claim_lives_in_both_docs_files(self):
         """A ten-word run in both files is a claim that was moved and then restated."""
