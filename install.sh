@@ -137,6 +137,14 @@ have_ref() {
 # branch comes before the bare name so a long-lived clone follows origin rather than a
 # stale local branch of the same name.
 checkout_ref() {
+  # A managed checkout is never edited by hand, so local changes here mean something went
+  # wrong before now, and `git checkout` refusing them would otherwise be reported below as
+  # "$1 is not a tag, branch or commit", which is the wrong diagnosis.
+  if [ -n "$(git_at status --porcelain 2>/dev/null)" ]; then
+    echo "error: $APP_HOME has local changes, so it will not be moved." >&2
+    echo "       'git -C \"$APP_HOME\" status' shows them; a managed checkout should have none." >&2
+    return 2
+  fi
   if git_at rev-parse --verify --quiet "refs/tags/$1^{commit}" >/dev/null 2>&1; then
     git_at checkout --quiet "refs/tags/$1"
   elif git_at rev-parse --verify --quiet "refs/remotes/origin/$1^{commit}" >/dev/null 2>&1; then
@@ -229,7 +237,11 @@ if [ "$MANAGED" = 0 ]; then
   fi
 fi
 
-if [ -z "$APP_HOME" ]; then
+# Entered both for the curl|bash form (no APP_HOME yet) and when this script is the copy
+# living inside the managed checkout itself: found 2026-09-03, `<managed>/install.sh
+# --update` exited 0, printed "Installed", and moved nothing, because the gate here read
+# only the first case. A user's own clone (MANAGED=0) was refused above and never gets here.
+if [ -z "$APP_HOME" ] || [ "$APP_HOME" = "$MANAGED_HOME" ]; then
   APP_HOME="$MANAGED_HOME"
   if [ -d "$APP_HOME/.git" ]; then
     was_ref="$(current_ref)"
@@ -263,7 +275,9 @@ if [ -z "$APP_HOME" ]; then
         echo "error: could not fetch $REF from $REPO_URL." >&2
         exit 3
       fi
-      if ! checkout_ref "$REF"; then
+      checkout_ref "$REF"; cr=$?
+      if [ "$cr" = 2 ]; then exit 3; fi   # dirty tree: checkout_ref already said so
+      if [ "$cr" != 0 ]; then
         echo "error: $REF is not a tag, branch or commit in $APP_HOME." >&2
         exit 3
       fi

@@ -52,6 +52,13 @@ the tag and no `v` in the JSON, which is the split this repository already has.
 
 ## Verifying the tag, in a throwaway config
 
+Run `--update` and `--rollback` from the standalone `install.sh` (the copy `curl` fetched, or
+`$SCRATCH/install.sh`), not from the copy inside the managed checkout at a ref older than
+v0.3.1: through v0.3.0 that copy detected itself as a clone and skipped the move with exit 0
+and no message, a defect found in exactly this verification on 2026-09-03. From v0.3.1 both
+copies move the checkout, and a managed checkout with local changes is refused by name.
+
+
 Never against your own `~/.claude`. Every one of these takes a `--claude-dir`, `--bin-dir`
 and `--state-dir` under a scratch directory, and `CLAUDE_SKILL_COMPOUNDER_APP` decides
 where the managed checkout lands.

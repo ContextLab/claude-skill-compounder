@@ -476,3 +476,7 @@ supported versions, upgrade/rollback test). P4 cannot be done in a session.
   CI watch armed. On green: tag v0.3.0, GitHub release, verify pinned install + update/rollback.
 - ~04:05 (Sep 3) E2E journey on a2aa2d4: 12/12 PASS, 6 calls, 41 s; plugin validate strict
   exit 0; plugin version 0.3.0. Waiting on CI for a2aa2d4, then tag v0.3.0.
+- ~04:40 (Sep 3) CI green on a2aa2d4; v0.3.0 tagged there and released
+  (https://github.com/ContextLab/claude-skill-compounder/releases/tag/v0.3.0). README pinned
+  line now fetches install.sh from the tag (e77c1b2). Verification of the tag in a throwaway
+  config and issue closure (#35, #36, #38, #39, #40, #41) dispatched.
