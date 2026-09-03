@@ -362,3 +362,14 @@ Execution waves (independent within a wave):
   described the extractor defect as "known, pinned in both test files rather than fixed
   here". It is fixed, so that paragraph now states the lookahead as the invariant and names
   the two regression tests that hold it. This is the CLAUDE.md rule applied to CLAUDE.md.
+
+## Session close (2026-09-02, ~23:30 EDT)
+
+Four commits on issue-19-close-the-gap: 03773ad (W1), 7507a0b (W2), 15b3b28 (W3), c06eb6c (W4).
+Whole suite green at each commit; the last run had 48 files, 0 failures. Installed for real;
+`skillforge doctor` all PASS. main fast-forwarded to c06eb6c if the push succeeded (see git log).
+Open (also in OPEN-THREADS.md): remind.sh claim/stamp prune; REMIND_MAX / cooldown unvalidated;
+100 ms PreCompact target holds on system jq only; #19 point 4 (deeper composition); #30 to be
+re-measured once the tiers have data; ai-tell-audit reports pre-existing README rows over
+threshold (`names`, `lives`, bolded-term-colon) outside this session's prose.
+Resume: read this note top to bottom, then `gh issue view 31`.
