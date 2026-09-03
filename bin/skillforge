@@ -441,8 +441,9 @@ update() { # <file> <jq args...>
   # The whole group is wrapped, not just jq. A redirect that cannot open its target is
   # reported by the SHELL, not by jq, so the unwrapped form printed bash's own
   # "Permission denied" above the tidy message below it. `start` already does this.
-  { jq "$@" "$u_file" > "$u_tmp"; } 2>/dev/null && mv "$u_tmp" "$u_file" \
-    || { rm -f "$u_tmp" 2>/dev/null; die "could not update $u_file"; }
+  if ! { { jq "$@" "$u_file" > "$u_tmp"; } 2>/dev/null && mv "$u_tmp" "$u_file"; }; then
+    rm -f "$u_tmp" 2>/dev/null; die "could not update $u_file"
+  fi
 }
 
 # Orphan temp files. `start` writes its record to ".start.<pid>.<ts>.tmp" before it
@@ -580,6 +581,7 @@ new_forge_id() {
 # `stat -f` selects a format on BSD and reports on the FILESYSTEM on GNU coreutils
 # (docs/DESIGN.md), so it is unusable here. `ls -i` prints the inode number first on both.
 inode_of() { # <file>
+  # shellcheck disable=SC2012 # find has no portable inode format; only field 1 of one named file is read
   i_n="$(ls -di "$1" 2>/dev/null | awk 'NR == 1 { print $1 }')"
   case "${i_n:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$i_n" ;; esac
 }
@@ -2139,7 +2141,7 @@ SLOTS
     ;;
 
   done)
-    require_active done quiet
+    require_active 'done' quiet
     FILE="$RESOLVED"
     msg="${*:-clean red-team pass}"
     # Asked BEFORE the close, because close_forge builds the ledger row and the row is
@@ -2154,7 +2156,7 @@ SLOTS
     # `done` fills the bar, but it must not REWIND a forge that ran past its budget:
     # the ledger's rounds-completed count is derived from the step reached. close_forge
     # carries that rule, and decides which of several racing closers writes the row.
-    if close_forge "$FILE" done done "$msg"; then
+    if close_forge "$FILE" 'done' 'done' "$msg"; then
       echo "skillforge: '$CLOSED_NAME' complete — $msg"
       # BEFORE the install, not after: the origin row describes what this forge produced
       # and why, and it is true whether or not the link into the skills directory
@@ -2373,7 +2375,7 @@ SLOTS
     # step and a revision step per round -- so any other number would grant a fraction of
     # a round and leave `rounds_planned` disagreeing with the budget it was derived from.
     e_after=$(( e_steps + 2 ))
-    [ "$e_after" -le 9999 ] || die "'$e_name' is budgeted $e_steps steps and raising it would pass the 9999-step bound `start` enforces"
+    [ "$e_after" -le 9999 ] || die "'$e_name' is budgeted $e_steps steps and raising it would pass the 9999-step bound 'start' enforces"
     e_grant=$(( e_grants + 1 ))
     e_narrow_after="$e_narrowings"
     [ "$e_kind" = "narrowed" ] && e_narrow_after=$(( e_narrowings + 1 ))
@@ -2574,8 +2576,8 @@ SLOTS
 
     case "$cmd" in
       origin)
-        case " forged workflow seeded adopted unknown " in
-          *" ${v_origin:-} "*) : ;;
+        case "${v_origin:-}" in
+          forged|workflow|seeded|adopted|unknown) : ;;
           *) die "--origin must be one of: forged workflow seeded adopted unknown" ;;
         esac
         if [ -n "$v_tkind" ]; then

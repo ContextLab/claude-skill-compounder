@@ -170,12 +170,11 @@ fmt_date() { # <epoch> -> YYYY-MM-DD, local time
 }
 
 fmt_stamp() { # <epoch> -> YYYYmmdd-HHMMSS, matching _stamp() in installer.py
-  fs_ok='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
   case "${1:-}" in ''|*[!0-9]*) date '+%Y%m%d-%H%M%S'; return 0 ;; esac
   fs="$(date -d "@$1" '+%Y%m%d-%H%M%S' 2>/dev/null)"
-  case "$fs" in $fs_ok) printf '%s' "$fs"; return 0 ;; esac
+  case "$fs" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) printf '%s' "$fs"; return 0 ;; esac
   fs="$(date -r "$1" '+%Y%m%d-%H%M%S' 2>/dev/null)"
-  case "$fs" in $fs_ok) printf '%s' "$fs"; return 0 ;; esac
+  case "$fs" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) printf '%s' "$fs"; return 0 ;; esac
   date '+%Y%m%d-%H%M%S'
 }
 

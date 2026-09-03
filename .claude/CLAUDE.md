@@ -116,7 +116,15 @@ Nothing streams, which is what lets a forge animate across subagent dispatches.
 make it session-keyed without reading `docs/DESIGN.md` first. `hooks/compound-improvement.sh`
 *does* key its reminder counters per session, which is correct: it both reads and writes the
 payload's `.session_id`. So does `hooks/remind.sh`, for its own claims and cooldown stamps --
-name the script, because since Wave 2 "the reminder hook" is two of them.
+name the script, because since Wave 2 "the reminder hook" is two of them. Since 2026-09-03
+(#33) `hooks/remind.sh` also sweeps that per-session tree itself, in `prune_stale_sessions()`
+(`hooks/remind.sh:266`): on a 1-in-`REMIND_PRUNE_EVERY` draw it removes any other session's
+`<sid>/` and `<sid>.seen/` whose mtime is more than `REMIND_PRUNE_TTL` behind `REMIND_NOW`,
+and never the sweeping session's own pair, so a claim or a cooldown stamp cannot vanish from
+under a live session. It walks one level under `<state>/remind/` only, so `reminders.jsonl`
+and the counters directory are out of its reach by construction, and `tests/test_remind.py`'s
+`PruneTest` pins both. The same change trims `hits.jsonl` to its last `REMIND_MAX_ROWS` on
+the delivery path (`HitsCapTest`); before it the cap bounded only the read.
 
 **Installation is marker-based and surgical.** `installer.py` identifies its own hook
 entries by marker substring (`HOOK_MARKER`, `INSIGHT_MARKER`, `REMIND_MARKER`), and its
@@ -190,7 +198,7 @@ never firing was the arm carrying the difference.
 
 **Of the other three, one refuses nothing by default and one is configured differently in
 this repo.** `hooks/repeat-gate.sh` has three arms -- learn, recover, refuse -- and only
-the first two run unless `REPEAT_GATE_REFUSE=1` (`hooks/repeat-gate.sh:379`). The default
+the first two run unless `REPEAT_GATE_REFUSE=1` (`hooks/repeat-gate.sh:412`). The default
 is measured rather than cautious: on the live store of 2026-09-02 the arm had been wired
 across 81 distinct sessions and had never refused anything, and driving the real hook
 against all ten signatures that had reached `REPEAT_MIN_SESSIONS` denied none of them,
@@ -207,6 +215,18 @@ them are what that drift looks like from outside: a number nobody can act on. Ea
 back to the checkout, since both install paths put a link in the user's bin directory;
 `SKILLREPEAT_GATE` and `SKILLREPORT_GATE` override, and are separate names because the two
 CLIs install independently of each other.
+
+`hooks/repeat-gate.sh` closes its own stderr with a builtin `exec 2>/dev/null` before its
+first process start (`hooks/repeat-gate.sh:406`; `REPEAT_GATE_STDERR=1` leaves it attached).
+`execve` charges the environment against `ARG_MAX`, so in a band of about 200 bytes under
+the launch ceiling the hook itself starts, `jq` with its 30-byte argv starts, and every `sed`
+in the normaliser, each carrying a 100-250 byte regex argv, dies with `Argument list too
+long` on the hook's stderr -- measured at 891800-891960 bytes of environment, with the
+payload `cat` dying at the 892000 ceiling. The command text is not the variable: it reaches
+`sed` by pipe from a builtin `printf`, and a 12-byte command died in the same band as a
+600-byte one, so no cap on it could fix this and none was added.
+`tests/test_repeat_gate.py::ExecNoiseTest` drives the band at one environment size with the
+knob off and on, and `--norm-of` was byte-identical over all 435 live store rows.
 
 `hooks/doc-gate.sh` classifies a root-level `notes/` path by `DOC_GATE_NOTES`
 (`hooks/doc-gate.sh:461`): `doc`, the default, means a notes-only push satisfies the gate;
@@ -397,12 +417,12 @@ the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
 `grep -rhoE '\b(CI|CLAUDE_SKILL_COMPOUNDER|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **120** names, over
-**19** prefixes, as of 2026-09-02. A grep
+hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **126** names, over
+**19** prefixes, as of 2026-09-03. A grep
 that reads gitignored `.pyc` files as source adds a `Binary file
 skill_compounder/__pycache__/installer.cpython-NN.pyc matches` line per cached bytecode
-file -- two on this checkout, so `/usr/bin/grep` answers 122 where the ugrep an agent
-shell gets answers 120; that is
+file -- two on this checkout, so `/usr/bin/grep` answers 128 where the ugrep an agent
+shell gets answers 126; that is
 the same split that makes the `skipTest` count above depend on which grep you have. Each
 hit was then read; re-run the command rather than trusting the list above if the two have
 drifted. **Five

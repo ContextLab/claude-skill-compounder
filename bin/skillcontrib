@@ -140,14 +140,13 @@ require_gh() {
   command -v jq >/dev/null 2>&1 || fail 6 "jq is required."
   # A network outage and a missing login both make this call fail. Reporting the wrong
   # one sends the user off to re-authenticate a session that was never broken.
-  authout=$(gh auth status 2>&1)
-  if [ $? -ne 0 ]; then
+  if ! authout=$(gh auth status 2>&1); then
     # gh's own message is the evidence, so pass it through whole rather than guessing.
     detail=$(printf '%s' "$authout" | tr '\n' ' ' | sed 's/  */ /g')
     case "$authout" in
       *"GH_TOKEN is invalid"*|*"GITHUB_TOKEN is invalid"*|*"Bad credentials"*|*"invalid token"*)
         fail 7 "the token in the environment is rejected by GitHub. Unset GH_TOKEN or GITHUB_TOKEN, or replace it. gh said: $detail" ;;
-      *"not logged in"*|*"You are not logged into"*|*"gh auth login"*)
+      *"not logged in"*|*"gh auth login"*)
         fail 7 "gh is not authenticated. Run 'gh auth login' yourself, then retry. gh said: $detail" ;;
       *)
         fail 8 "gh could not reach GitHub, which looks like a network problem rather than a login problem. gh said: $detail" ;;
@@ -221,8 +220,7 @@ cmd_whoami() {
   # A failed lookup here is not the same as "no permission". 403 and 404 are real
   # answers (no push access, not a collaborator); anything else means the question was
   # never answered, and guessing "contributor" is how a maintainer gets sent to fork.
-  permout=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>&1)
-  if [ $? -eq 0 ]; then
+  if permout=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>&1); then
     perm="$permout"
   else
     case "$permout" in

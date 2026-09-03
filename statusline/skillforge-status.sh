@@ -463,7 +463,7 @@ reap_and_read() {
     case "$line" in
       X"$SEP"*) rm -f "$f" 2>/dev/null; continue ;;
     esac
-    printf '%s\n' "${line#-$SEP}"
+    printf '%s\n' "${line#-"$SEP"}"
   done | sort -t"$SEP" -k1,1n -k2,2
 }
 
@@ -613,7 +613,7 @@ if [ "$running" -eq 1 ] && [ "$pct" -gt 99 ]; then pct=99; fi
 bar=""
 i=0
 while [ $i -lt "$WIDTH" ]; do
-  if [ $i -lt $filled ]; then
+  if [ $i -lt "$filled" ]; then
     # Pulse the leading edge so the bar reads as live even between steps -- and stop
     # pulsing once the forge is quiet, so the shimmer never outlives the stepping.
     # NOTE: braces are required — bash folds the multibyte glyph into the var name.

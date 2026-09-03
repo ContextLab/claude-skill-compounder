@@ -100,7 +100,19 @@
 #
 # HITS. The store is never rewritten, so a delivery appends
 # {"id","ts","session","event"} to <state>/remind/hits.jsonl and `skillnote list` derives
-# the live count from that log.
+# the live count from that log. The log is bounded on WRITE as well as on read: once it
+# holds more than REMIND_MAX_ROWS lines it is rewritten to its last REMIND_MAX_ROWS, on
+# the delivery path only and atomically (issue #33). It was bounded only on read, which
+# kept every reader cheap while the file grew without limit.
+#
+# PRUNE. <state>/remind/<sid>/ and <state>/remind/<sid>.seen/ are one pair per session
+# that heard a reminder, and the sweep in hooks/compound-improvement.sh cannot reach them
+# (see the near-collision above). This script sweeps its own tree: on a 1-in-
+# REMIND_PRUNE_EVERY draw it removes every session directory whose mtime is more than
+# REMIND_PRUNE_TTL seconds behind its own clock, and NEVER the current session's pair,
+# whatever their age -- a stamp removed from under a live session re-arms every cooldown
+# in it. Age is measured against REMIND_NOW, not by `find -mtime`, which reads the wall
+# clock and would put the sweep beyond a pinned test.
 #
 # COST, MEASURED. One `cat`, two `jq` for payload fields, one `tail` per file, one `jq`
 # for selection, one `jq` for the emit, plus -- on a Bash call only -- one fork of
@@ -109,14 +121,20 @@
 # a Bash call, 66 ms on a Write, median of five, macOS, 2026-09-02. Printed by
 # tests/test_remind.py::CostTest on every run, so the figure is one that was measured
 # rather than guessed. REMIND_MAX_ROWS bounds every read at the last 2000 lines of each
-# file. The common case is a missing store, which costs one `cat` and one `[ -s ]`.
+# file. The common case is a missing store, which costs one `cat` and one `[ -s ]`. The
+# prune adds one `stat` over the session directories on one event in REMIND_PRUNE_EVERY,
+# and the hits cap adds one `wc` per delivery, never per event.
 #
 # ENVIRONMENT
 #   SKILL_COMPOUNDER_REMIND  (1)     0 disables the whole script.
 #   REMIND_MAX               (2)     most reminders in one emit.
 #   REMIND_COOLDOWN          (0)     seconds before a reminder may fire again; 0 = once
 #                                    per session.
-#   REMIND_MAX_ROWS          (2000)  lines read from the tail of the store and hits log.
+#   REMIND_MAX_ROWS          (2000)  lines read from the tail of the store and hits log,
+#                                    and the length the hits log is trimmed to on write.
+#   REMIND_PRUNE_TTL         (604800) seconds a session directory under <state>/remind/
+#                                    may go unchanged before a sweep removes it.
+#   REMIND_PRUNE_EVERY       (25)    events between sweeps; 0 switches the sweep off.
 #   REMIND_NOW               ()      pinned clock, epoch seconds. Its own, not borrowed:
 #                                    pinning another script's clock does nothing to this
 #                                    one.
@@ -148,6 +166,8 @@ HITS="$DIR/hits.jsonl"
 MAX="${REMIND_MAX:-2}"
 COOLDOWN="${REMIND_COOLDOWN:-0}"
 MAX_ROWS="${REMIND_MAX_ROWS:-2000}"
+PRUNE_TTL="${REMIND_PRUNE_TTL:-604800}"
+PRUNE_EVERY="${REMIND_PRUNE_EVERY:-25}"
 # One reminder is one sentence. The cap bounds what a single malformed row can push into
 # the model's context, and it is applied in jq so a multibyte text is cut on codepoints.
 TEXT_CAP=300
@@ -159,6 +179,8 @@ TEXT_CAP=300
 case "$MAX"      in ''|*[!0-9]*) MAX=2 ;; esac
 case "$COOLDOWN" in ''|*[!0-9]*) COOLDOWN=0 ;; esac
 case "$MAX_ROWS" in ''|*[!0-9]*) MAX_ROWS=2000 ;; esac
+case "$PRUNE_TTL"   in ''|*[!0-9]*) PRUNE_TTL=604800 ;; esac
+case "$PRUNE_EVERY" in ''|*[!0-9]*) PRUNE_EVERY=25 ;; esac
 [ "$MAX" -lt 1 ] && exit 0
 [ "$MAX_ROWS" -lt 1 ] && MAX_ROWS=1
 
@@ -222,6 +244,50 @@ sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
 [ -n "$eid" ] && eid="$(printf '%s' "$eid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
 
 SDIR="$DIR/$sid"
+
+# ------------------------------------------------------------------- prune
+# Sampled, the way hooks/compound-improvement.sh and the status-line cache sample theirs,
+# because this runs before every Bash, Write and Edit call. It walks ONE level of
+# directories under $DIR and nothing else: <state>/reminders.jsonl and <state>/reminders/
+# are siblings of $DIR and out of reach by construction -- tests/test_remind.py pins that
+# the way tests/test_hook.py pins the same relationship from the other side -- and
+# hits.jsonl is a file, which the directory-only glob never lists.
+#
+# The current session's own <sid>/ and <sid>.seen/ are skipped whatever their age. The
+# stamp is what "once per session" means, and the claim is what stops the second wiring
+# delivering the same event twice; removing either from under a live session is the trap
+# hooks/session-review.sh shipped in the other direction, a record whose absence is
+# indistinguishable from never-fired.
+#
+# One `stat` over every directory, GNU form first and VALIDATED, then BSD: on GNU `-f`
+# means --file-system, the bogus `%m` there still prints the valid part of the format,
+# and a bare `A || B` chain would capture it (statusline/statusline.sh has the same note).
+# A directory whose mtime does not parse is left alone, and so is one from the future.
+prune_stale_sessions() {
+  [ "$PRUNE_EVERY" -ge 1 ] || return 0
+  [ $(( ${RANDOM:-0} % PRUNE_EVERY )) -eq 0 ] || return 0
+  [ -d "$DIR" ] || return 0
+  set -- "$DIR"/*/
+  [ -d "$1" ] || return 0
+  ps_lines="$(stat -c '%Y %n' "$@" 2>/dev/null)"
+  ps_first="${ps_lines%% *}"
+  case "$ps_first" in
+    ''|*[!0-9]*) ps_lines="$(stat -f '%m %N' "$@" 2>/dev/null)" ;;
+  esac
+  [ -n "$ps_lines" ] || return 0
+  printf '%s\n' "$ps_lines" | while read -r ps_m ps_p; do
+    case "$ps_m" in ''|*[!0-9]*) continue ;; esac
+    ps_p="${ps_p%/}"
+    case "$ps_p" in "$DIR"/*) ;; *) continue ;; esac
+    [ "$ps_p" = "$SDIR" ] && continue
+    [ "$ps_p" = "$SDIR.seen" ] && continue
+    ps_age=$(( now - ps_m ))
+    [ "$ps_age" -gt "$PRUNE_TTL" ] || continue
+    rm -rf "$ps_p" 2>/dev/null
+  done
+  return 0
+}
+prune_stale_sessions
 
 TMP="$(mktemp -d 2>/dev/null)" || exit 0
 cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
@@ -297,6 +363,7 @@ if [ "$mode" = "path" ] && [ -n "$fpath" ]; then
       [ -z "$g_glob" ] && continue
       # UNQUOTED on purpose: an unquoted variable in a `case` pattern is expanded AS a
       # pattern, which is the only portable way to match a glob held in a variable.
+      # shellcheck disable=SC2254  # the glob is the point; quoting it would match literally
       case "$g_path" in
         $g_glob) PATHIDS="$PATHIDS $g_id" ;;
       esac
@@ -440,6 +507,35 @@ while IFS=" " read -r p_id p_date p_kind p_text; do
   if [ -z "$CTX" ]; then CTX="$p_line"; else CTX="$CTX
 $p_line"; fi
 done < "$TMP/pick"
+
+# ------------------------------------------------------------------- hits cap
+# Bounded on write as well as on read. One `wc` per emit -- this is the delivery path,
+# reached once per reminder per session, never once per event -- and when the log holds
+# more than REMIND_MAX_ROWS lines it is rewritten to its last REMIND_MAX_ROWS the way
+# bin/skillnote rewrites a CLAUDE.md: mktemp in the log's OWN directory so the `mv` is a
+# rename(2), never a truncate in place. A concurrent appender can lose one row to that
+# rename, and that row is one delivery's count rather than a rule; the store itself is
+# still never rewritten. The spaces are stripped because BSD `wc` pads its count with
+# them and the numeric guard would read a space as non-numeric -- the defect that made
+# hooks/claim-gate.sh's byte cap dead code -- and stripped with a parameter expansion
+# rather than `tr`, which would be one more exec on a path measured in milliseconds.
+hits_n="$(wc -l < "$HITS" 2>/dev/null)"
+hits_n="${hits_n// /}"
+case "$hits_n" in
+  ''|*[!0-9]*) ;;
+  *)
+    if [ "$hits_n" -gt "$MAX_ROWS" ]; then
+      hits_tmp="$(mktemp "$DIR/.hits.XXXXXX" 2>/dev/null)" || hits_tmp=""
+      if [ -n "$hits_tmp" ]; then
+        if tail -n "$MAX_ROWS" "$HITS" > "$hits_tmp" 2>/dev/null; then
+          mv -f "$hits_tmp" "$HITS" 2>/dev/null || rm -f "$hits_tmp" 2>/dev/null
+        else
+          rm -f "$hits_tmp" 2>/dev/null
+        fi
+      fi
+    fi
+    ;;
+esac
 
 [ -n "$CTX" ] || exit 0
 

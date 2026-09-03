@@ -1,7 +1,7 @@
 # Open threads
 
-What is actually open, as of **2026-09-03**, at commit `c9803bc` on `main` (tag `v0.3.0` is
-`a2aa2d4`, one install.sh fix behind it). CI is green on both platforms from `cfb2bc6`
+What is actually open, as of **2026-09-03**, on `resume/after-v0.3.1` after `cec109c` (tags
+`v0.3.0` = `a2aa2d4`, `v0.3.1` = `b7f6a47`). CI is green on both platforms from `cfb2bc6`
 onward, the end-to-end journey passed 12/12 on `a2aa2d4`, and the paid review is opt-in.
 Issue #31 carries the status table; this file carries the threads behind it.
 
@@ -150,6 +150,21 @@ decision rather than a defect: prune on age the way the counters are pruned, pru
 sampled invocation the way the status-line cache is, or leave it and say so. The trap to
 avoid if it is pruned is the one `hooks/session-review.sh` shipped: a claim taken before the
 action is really going to happen can never be retried. Record the answer here.
+
+**Answered 2026-09-03 (#33): pruned on a sampled invocation.** `prune_stale_sessions()`
+(`hooks/remind.sh:266`) runs on a 1-in-`REMIND_PRUNE_EVERY` (25) draw and removes `<sid>/`
+and `<sid>.seen/` whose mtime is more than `REMIND_PRUNE_TTL` (604800 s) behind `REMIND_NOW`;
+the sweeping session's own pair is never removed, whatever its age, so a claim or stamp
+cannot vanish from under a live session, and the sweep walks one level under `<state>/remind/`
+only, so `reminders.jsonl` and the counters directory are unreachable by construction.
+`hits.jsonl` is trimmed to its last `REMIND_MAX_ROWS` on the delivery path (`:510`).
+`tests/test_remind.py::PruneTest` builds the stale tree from real deliveries and proves a
+cooldown is not re-armed in the session that sweeps; `::HitsCapTest` writes past the cap.
+Two limits stated rather than fixed: after the first trim `hits.jsonl` carries mktemp's
+`0600`; and a session idle for longer than the TTL whose `REMIND_COOLDOWN` is positive can
+have its stamps swept by another session, because rewriting a stamp does not bump the
+directory mtime — at the default cooldown of 0 nothing is ever rewritten. What is still
+open in #33 is only the two constants, and that waits on data (see "unvalidated constants").
 
 ## Open: the user's own `~/.claude/CLAUDE.md` stanza is hand-written and the installer will not touch it
 
@@ -313,28 +328,23 @@ editing the prose alone.
 
 ## Open: what the CI-fix wave found and did not fix
 
-- **`hooks/repeat-gate.sh:553` dies `E2BIG` at about 890 KB of hook environment.**
-  `norm_bash`'s first `sed` is the hook's first `exec`, and `execve` counts the
-  environment as well as the argument vector, so in a narrow band just under the padding
-  at which the hook cannot be launched at all it launches and that `sed` cannot: bash
-  writes `/usr/bin/sed: Argument list too long` to the hook's stderr, which the hook does
-  not redirect and cannot suppress. **Measured at 891800 bytes of environment**, one unit
-  under the launch ceiling, while calibrating the deny-emit test in
-  `tests/test_repeat_gate.py` (`_probe_the_real_hook`, the `noisy` band). The exit status
-  was 0 at every padding — no turn was broken — so it was classified and stepped over
-  rather than repaired. The fix is to stop making a fresh `exec` of the whole `sed`
-  pipeline per call: bound what `norm_bash` hands out, or do the normalisation without
-  spawning under a large environment.
-- **19 shellcheck findings at warning/style.** Zero at `--severity=error`, which is where
-  the CI job's floor sits; the 19 are the ones left after the three codes `.shellcheckrc`
-  disables with reasons. Both counts and the path to raising the floor are in the "Lint
-  every shell script" step of `.github/workflows/ci.yml` and in `.shellcheckrc`'s
-  comments; re-derive with
-  `shellcheck -f gcc hooks/*.sh bin/* statusline/*.sh | grep -oE 'SC[0-9]+' | sort | uniq -c`.
-  **`install.sh` is not in that job's file list**, and it is now a script users pipe
-  straight into `bash`. Linted by hand on 2026-09-02 it has 0 findings at every severity
-  (`shellcheck -f gcc install.sh | wc -l` → 0), so adding it to the CI globs costs nothing
-  today and stops the next edit going unchecked. `uninstall.sh` is outside it too.
+- **Fixed 2026-09-03: `hooks/repeat-gate.sh` closes its stderr before its first exec**
+  (`:406`, `REPEAT_GATE_STDERR=1` leaves it attached). The mechanism was not the one
+  recorded here earlier. The command text never touches an argv — it reaches `sed` by pipe
+  from a builtin `printf`, and a 12-byte command died in the same band as a 600-byte one —
+  so a cap on it was a dead guard and was not added. What dies is each `sed` stage's own
+  100-250 byte regex argv where `jq`'s 30-byte argv fits: measured at 891800-891960 bytes of
+  environment, up to seven `Argument list too long` lines per call, and the payload `cat` at
+  the 892000 ceiling. `tests/test_repeat_gate.py::ExecNoiseTest` binary-searches the ceiling
+  and drives the real hook at one environment size with the knob off and on; both new tests
+  fail against the old script. `--norm-of` was byte-identical over all 435 live store rows.
+- **Closed 2026-09-03: the 19 shellcheck findings are gone and the CI floor is `warning`.**
+  Each was fixed or given a one-line `# shellcheck disable=` with its reason on the line;
+  shellcheck 0.11.0 prints nothing over `hooks/*.sh bin/* statusline/*.sh install.sh
+  uninstall.sh` at any severity. The job stops at `warning` rather than `style` because apt
+  and brew ship different versions and a note-level check added upstream must not turn it
+  red alone. `install.sh` and `uninstall.sh`, which were outside the job's globs, are now in
+  both the smoke step and the lint step.
 - **`hooks/doc-gate.sh:966` may carry the same argv shape and nobody has measured it.**
   The override row's file list goes in as `--arg files "$(cat "$TMP/code.txt")"`, and
   `code.txt` grows with the number of changed code files across up to

@@ -739,6 +739,202 @@ class FailOpenTest(RemindCase):
         self.assertIn("Newest.", ctx)
 
 
+# ==================================================================== the prune
+class PruneTest(RemindCase):
+    """<state>/remind/ grows by a <sid>/ and a <sid>.seen/ per session that heard a
+    reminder, and nothing else sweeps it (issue #33): `prune_stale_state()` in
+    hooks/compound-improvement.sh walks <state>/reminders/, which is deliberately a
+    different directory. So the hook sweeps its own tree, on a sampled event, by age
+    against its own clock.
+
+    THE TREE IS BUILT BY THE HOOK, never by hand: every directory below was written by a
+    real delivery, so the sweep is tested against the shape the writer really produces.
+    Age is then set with os.utime, which is the one thing a delivery cannot do.
+    """
+
+    DAY = 86400
+    TTL = 7 * 86400
+
+    def setUp(self):
+        super().setUp()
+        self.write_rows(self.row("np", "Sweep me.", keywords=["alpha"]))
+
+    def dirs(self, sid):
+        return (os.path.join(self.state, "remind", sid),
+                os.path.join(self.state, "remind", sid + ".seen"))
+
+    def deliver(self, sid, pid="p1"):
+        """A real delivery, with the sweep switched off so the tree only grows."""
+        self.context_of(self.run_hook(self.prompt("alpha", session=sid, pid=pid),
+                                      REMIND_PRUNE_EVERY="0"))
+        for d in self.dirs(sid):
+            self.assertTrue(os.path.isdir(d), "the delivery did not write %s" % d)
+
+    def age(self, sid, seconds):
+        t = self.clock - seconds
+        for d in self.dirs(sid):
+            os.utime(d, (t, t))
+
+    def sweep(self, sid="cur", pid="sweep"):
+        """A forced sweep from session `sid`, on a prompt that matches nothing: the sweep
+        runs before selection, so an event that delivers nothing still sweeps."""
+        self.assert_silent(self.run_hook(self.prompt("nothing here", session=sid, pid=pid),
+                                         REMIND_PRUNE_EVERY="1"))
+
+    def test_a_real_stale_tree_is_swept_and_what_should_survive_survives(self):
+        for sid in ("stale1", "stale2", "fresh", "future", "cur"):
+            self.deliver(sid)
+        self.age("stale1", 9 * self.DAY)          # well past the TTL
+        self.age("stale2", self.TTL + 1)          # one second past it
+        self.age("fresh", self.TTL - 1)           # one second inside it
+        self.age("future", -10 * self.DAY)        # a clock that ran ahead
+        self.age("cur", 30 * self.DAY)            # the sweeping session, ancient
+        # CANARIES that must survive whatever the sweep does: the store, the checkpoint
+        # hook's counter directory, and the hit log -- every one as old as the stale
+        # sessions, so "it survived" cannot also mean "nothing was that old".
+        counters = os.path.join(self.state, "reminders")
+        os.makedirs(counters)
+        canary = os.path.join(counters, "old.edits")
+        with open(canary, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        old = self.clock - 30 * self.DAY
+        for p in (self.store, canary, self.hits):
+            os.utime(p, (old, old))
+        store_before = open(self.store, "rb").read()
+        hits_before = open(self.hits, "rb").read()
+
+        self.sweep("cur")
+
+        for sid in ("stale1", "stale2"):
+            for d in self.dirs(sid):
+                self.assertFalse(os.path.exists(d), "%s should have been swept" % d)
+        for sid in ("fresh", "future", "cur"):
+            for d in self.dirs(sid):
+                self.assertTrue(os.path.isdir(d), "%s should have survived" % d)
+        self.assertEqual(open(self.store, "rb").read(), store_before,
+                         "the sweep must never touch reminders.jsonl")
+        self.assertTrue(os.path.exists(canary),
+                        "the sweep reached <state>/reminders/, which is not its tree")
+        self.assertEqual(open(self.hits, "rb").read(), hits_before,
+                         "the sweep must never touch hits.jsonl")
+
+    def test_the_sweep_is_sampled_and_zero_switches_it_off(self):
+        self.deliver("stale1")
+        self.deliver("cur")
+        self.age("stale1", 30 * self.DAY)
+        self.assert_silent(self.run_hook(self.prompt("nothing here", session="cur",
+                                                     pid="p2"),
+                                         REMIND_PRUNE_EVERY="0"))
+        for d in self.dirs("stale1"):
+            self.assertTrue(os.path.isdir(d), "REMIND_PRUNE_EVERY=0 must not sweep")
+        self.sweep("cur")
+        for d in self.dirs("stale1"):
+            self.assertFalse(os.path.exists(d))
+
+    def test_the_ttl_is_a_knob_and_reads_the_hooks_own_clock(self):
+        self.deliver("s1")
+        self.deliver("cur")
+        self.age("s1", 100)
+        self.assert_silent(self.run_hook(self.prompt("nothing here", session="cur",
+                                                     pid="p2"),
+                                         REMIND_PRUNE_EVERY="1", REMIND_PRUNE_TTL="99"))
+        for d in self.dirs("s1"):
+            self.assertFalse(os.path.exists(d), "a 100 s old directory beats a 99 s TTL")
+
+    def test_a_sweep_never_re_arms_a_cooldown_in_the_session_that_runs_it(self):
+        """The trap: a stamp removed from under a live session re-arms every cooldown in
+        it, and a claim removed re-opens the double delivery. So the sweeping session's
+        own pair is skipped whatever its age -- here, thirty days."""
+        self.deliver("s1", pid="p1")
+        self.age("s1", 30 * self.DAY)
+        self.sweep("s1", pid="p2")
+        for d in self.dirs("s1"):
+            self.assertTrue(os.path.isdir(d), "the sweep removed its own session's %s" % d)
+        # The cooldown still holds ...
+        self.assert_silent(self.run_hook(self.prompt("alpha", session="s1", pid="p3"),
+                                         REMIND_PRUNE_EVERY="1"))
+        # ... and so does the claim on the event that already delivered.
+        self.assert_silent(self.run_hook(self.prompt("alpha", session="s1", pid="p1"),
+                                         REMIND_PRUNE_EVERY="1"))
+        self.assertEqual(len(self.hit_rows()), 1, "the reminder was delivered twice")
+
+    def test_another_sessions_sweep_does_reach_it_by_age(self):
+        """The same pair, the same age, swept from a different session: gone, and the
+        reminder fires again in the old session afterwards. That is what the sweep is
+        for; the previous test is what bounds it."""
+        self.deliver("s1", pid="p1")
+        self.age("s1", 30 * self.DAY)
+        self.sweep("s2")
+        for d in self.dirs("s1"):
+            self.assertFalse(os.path.exists(d))
+        self.context_of(self.run_hook(self.prompt("alpha", session="s1", pid="p4"),
+                                      REMIND_PRUNE_EVERY="0"))
+
+
+# ==================================================================== the hits cap
+class HitsCapTest(RemindCase):
+    """hits.jsonl was bounded on read and unbounded on write (issue #33). Now a delivery
+    that pushes it past REMIND_MAX_ROWS rewrites it to its last REMIND_MAX_ROWS rows.
+
+    The log is written past the cap by REAL deliveries and read back by the REAL reader:
+    the hook's own tie-break on live hits. A hand-written log would pin whichever shape
+    its author was looking at and let the other side drift.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_rows(self.row("na", "A.", keywords=["alpha"]),
+                        self.row("nb", "B.", keywords=["alpha"]),
+                        self.row("nc", "C.", keywords=["alpha"]))
+
+    def test_writing_past_the_cap_keeps_exactly_the_newest_max_rows(self):
+        for i, sid in enumerate(("s1", "s2", "s3")):
+            ctx = self.context_of(self.run_hook(self.prompt("alpha", session=sid),
+                                                REMIND_MAX="3", REMIND_MAX_ROWS="5",
+                                                REMIND_NOW=self.clock + i))
+            self.assertEqual(ctx.count("Reminder recorded"), 3)
+        # 9 rows were appended; the file holds the last 5, every one of which parses.
+        with open(self.hits, encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertTrue(raw.endswith("\n"), "the trimmed log lost its final newline")
+        rows = [json.loads(l) for l in raw.splitlines() if l.strip()]
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([r["ts"] for r in rows],
+                         [self.clock + 1, self.clock + 1,
+                          self.clock + 2, self.clock + 2, self.clock + 2],
+                         "the rows kept are not the newest five")
+        self.assertEqual([r["session"] for r in rows], ["s2", "s2", "s3", "s3", "s3"])
+        self.assertFalse([f for f in os.listdir(os.path.dirname(self.hits))
+                          if f.startswith(".hits.")],
+                         "the rewrite left its temp file behind")
+
+    def test_at_the_cap_nothing_is_rewritten(self):
+        self.context_of(self.run_hook(self.prompt("alpha", session="s1"),
+                                      REMIND_MAX="3", REMIND_MAX_ROWS="3"))
+        self.assertEqual(len(self.hit_rows()), 3)
+        self.assertEqual([r["id"] for r in self.hit_rows()], ["na", "nb", "nc"])
+
+    def test_the_hook_still_reads_the_trimmed_log(self):
+        """The real reader over the real writer's trimmed output. After the trim, only
+        the newest rows count as hits, and the tie-break sees exactly those."""
+        for i, sid in enumerate(("s1", "s2")):
+            self.context_of(self.run_hook(self.prompt("alpha", session=sid),
+                                          REMIND_MAX="3", REMIND_MAX_ROWS="5",
+                                          REMIND_NOW=self.clock + i))
+        # Six appended, five kept: s1's `na` row went; s1's `nb`, `nc` and all of s2 stay.
+        self.assertEqual([(r["session"], r["id"]) for r in self.hit_rows()],
+                         [("s1", "nb"), ("s1", "nc"), ("s2", "na"), ("s2", "nb"),
+                          ("s2", "nc")])
+        # `na` now has one live hit and `nb`, `nc` have two, so on a fresh session `na`
+        # outranks both. That ordering exists only if the trimmed log was read: on the
+        # untrimmed six every id has two hits and the tie falls to `created`, which is
+        # equal, and nothing puts `na` first.
+        ctx = self.context_of(self.run_hook(self.prompt("alpha", session="s3"),
+                                            REMIND_MAX="1", REMIND_MAX_ROWS="5"))
+        self.assertIn("A.", ctx)
+        self.assertNotIn("B.", ctx)
+
+
 # ==================================================================== cost
 class CostTest(RemindCase):
     """This runs before EVERY Bash, Write and Edit call and on every prompt, so its cost

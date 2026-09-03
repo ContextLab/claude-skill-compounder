@@ -231,8 +231,8 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](../README.md#what-runs-against-the-api).
-All thirty-four are environment variables, and they are not the whole set — this
-prints every name the hooks, the six CLIs, the status line and `install.sh` read, 112 of
+All thirty-seven are environment variables, and they are not the whole set — this
+prints every name the hooks, the six CLIs, the status line and `install.sh` read, 116 of
 them as of 2026-09-03 (`uninstall.sh` and `scripts/` are outside it):
 
 ```bash
@@ -283,6 +283,7 @@ place in `~/.claude/settings.json`:
 |`REPEAT_GATE_REFUSE`|`0`|the top-level `env` block|Set to `1` to arm the refusal. Off by default: across 81 recorded sessions it refused nothing, and every signature that reached the threshold was one the gate's own head rules exempt anyway ([#27](https://github.com/ContextLab/claude-skill-compounder/issues/27)). Learning and recovery are unaffected either way. **Two components read it** — the gate, and `bin/skillrepeat`, which says on its own output whether the arm is armed|
 |`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Earlier sessions a call must have failed in, the same way, before the next attempt is denied. **Three components read it** — set it anywhere narrower and they disagree|
 |`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful `Bash`/`Skill` calls — the only ones this hook is delivered — after which an armed failure stops looking for the call that fixed it|
+|`REPEAT_GATE_STDERR`|`0`|the hook entries|Set to `1` to leave the repeat gate's stderr connected, for `bash -x`. By default the gate closes it with a builtin `exec` before its first process start: `execve` charges the environment against `ARG_MAX`, and in a 200-byte band of environment size just under the one at which the hook cannot launch at all, `jq` launched and every `sed` in the normaliser could not, so bash printed `Argument list too long` up to seven times per tool call on the terminal. Exit status and the store are unaffected either way|
 |`SKILLREPEAT_GATE`|*(resolved from the CLI's own path)*|the top-level `env` block|Where `bin/skillrepeat` finds `hooks/repeat-gate.sh`, so its `GATE` column asks the gate which calls it would exempt instead of keeping a second copy of the rules. Resolved by following the CLI's own symlinks to the checkout; set it only where that fails|
 |`SKILLREPORT_GATE`|*(resolved from the CLI's own path)*|the top-level `env` block|The same, for `bin/skillreport`'s `GATES` block. Separately named because the two CLIs install independently of each other|
 |`SKILL_COMPOUNDER_DOC_GATE`|`1`|the hook entries|Set to `0` to switch the documentation gate off entirely — `git push` is never denied|
@@ -294,7 +295,9 @@ place in `~/.claude/settings.json`:
 |`SKILL_COMPOUNDER_REMIND`|`1`|the hook entries|Set to `0` to switch reminder delivery off entirely — recorded reminders stay on disk and nothing states them back|
 |`REMIND_MAX`|`2`|the hook entries|Most reminders delivered in one event, highest-scoring first|
 |`REMIND_COOLDOWN`|`0`|the hook entries|Seconds before a reminder that has fired may fire again in the same session. `0` means once per session|
-|`REMIND_MAX_ROWS`|`2000`|the hook entries|Lines read from the tail of the reminder store and of the hit log|
+|`REMIND_MAX_ROWS`|`2000`|the hook entries|Lines read from the tail of the reminder store and of the hit log, and the length the hit log is trimmed back to when a delivery pushes it past that|
+|`REMIND_PRUNE_TTL`|`604800`|the hook entries|Seconds a session's cooldown-stamp or delivery-claim directory under `remind/` may go unchanged before a sweep removes it. The sweeping session's own pair is never removed, whatever its age|
+|`REMIND_PRUNE_EVERY`|`25`|the hook entries|Hook invocations between sweeps of `remind/`. `0` switches the sweep off|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILLFORGE_IDLE_SECS`|`2700`|the top-level `env` block|Age past which a forge nothing has stepped is called idle. **Two components read it** — the status line and `skillforge list` — so setting it anywhere narrower makes them disagree about whether a forge is dead|
 |`SKILLFORGE_ACTIVE_TTL`|`21600`|the top-level `env` block|Seconds of **idle** time, measured since the last `step`, past which an `active` forge is presumed dead: `skillforge doctor` says WARN, `skillforge reap` writes it the `fail` row it never got, and `start` on that name reaps it rather than refusing|
@@ -309,8 +312,8 @@ by exactly one script — `hooks/claim-gate.sh`,
 `hooks/doc-gate.sh`, `hooks/apply-gate.sh`, `hooks/repeat-gate.sh` — so each belongs on
 that script's own hook entries and nowhere else. Each of the four gates also takes an off
 switch, and setting one to `0` disables that gate completely rather than making it quieter.
-`REMIND_MAX`, `REMIND_COOLDOWN`, `REMIND_MAX_ROWS` and `SKILL_COMPOUNDER_REMIND` follow the
-same rule, with `hooks/remind.sh` as their only reader, so they go on both of its entries —
+`REMIND_MAX`, `REMIND_COOLDOWN`, `REMIND_MAX_ROWS`, `REMIND_PRUNE_TTL`, `REMIND_PRUNE_EVERY`
+and `SKILL_COMPOUNDER_REMIND` follow the same rule, with `hooks/remind.sh` as their only reader, so they go on both of its entries —
 the `UserPromptSubmit` one and the `PreToolUse` one — and nowhere else.
 
 **`REPEAT_MIN_SESSIONS` is the exception, and it is the one to get wrong.** Three

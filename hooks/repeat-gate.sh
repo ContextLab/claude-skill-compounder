@@ -348,6 +348,10 @@
 #                                     figures are printed on every test run, so neither
 #                                     can quietly stop being true.
 #   REPEAT_GATE_DEBUG_DUMP        ()  append the raw stdin payload here.
+#   REPEAT_GATE_STDERR            (0) 1 leaves this script's stderr connected, for `bash -x`
+#                                     and for the test that proves the default is doing
+#                                     something. Any other value closes it before the first
+#                                     exec; the stanza under `set -uo pipefail` says why.
 #   SKILL_COMPOUNDER_STATE        ()  state root ($HOME/.claude/skill-compounder).
 #
 # EVERY failure path exits 0 and prints nothing: no jq, no session id, no tool name, an
@@ -371,6 +375,35 @@ set -uo pipefail
 # HOME can be unset (cron, a stripped env, a container). Under `set -u` reading it aborts
 # the script non-zero, which is the one thing a hook may never do.
 : "${HOME:=/tmp}"
+
+# STDERR IS CLOSED HERE, BEFORE THE FIRST EXEC, AND BY A BUILTIN. The header's promise
+# that every failure path prints nothing was false in one band, and it was measured
+# rather than reasoned about. `execve` charges the ENVIRONMENT against ARG_MAX along with
+# the argument vector, and a hook is launched with whatever environment the session has
+# grown. Just under the padding at which this script cannot be launched at all -- a band
+# 200 bytes wide, 891800-891960 bytes of environment on macOS 25.6 with ARG_MAX 1 MB --
+# it launches, `jq` execs (a 30-byte argv), and every `sed` in the normaliser cannot
+# (each carries a 100-250-byte regex program on its argv). bash then writes
+# `line NNN: /usr/bin/sed: Argument list too long` to fd 2 for each of them, up to seven
+# lines, from a hook that the harness wired to be silent. The exit status stayed 0 at
+# every padding and the store query ahead of any deny had already failed open, so no
+# turn broke and no deny was lost; what leaked was noise on the user's terminal.
+#
+# Capping the command text cannot fix it and was tried on paper first: the command
+# travels to `sed` through a pipe from a builtin `printf`, never on an argv, and a
+# five-byte `gh pr view 7` died in the same band as a 600-byte one. What is on the argv
+# is the regex program, which is the normaliser itself. So the fix is the belt: `exec`
+# with a redirection and no command is a builtin, costs no process, and moves fd 2 for
+# this shell and every child it forks -- the message a forked bash prints when ITS exec
+# fails goes to the fd it inherited. A per-pipeline `2>/dev/null` would cover the seven
+# lines found and not the eighth someone adds. Nothing here ever wrote to stderr on
+# purpose, so nothing is lost; REPEAT_GATE_STDERR=1 leaves it connected for a developer
+# running `bash -x` and for tests/test_repeat_gate.py, which drives the same band with
+# the knob on and off at an identical environment size and requires the noise back on
+# the first run -- a guard nobody has seen fire is the defect the whole package is
+# about. `|| :` because a failed redirection makes `exec` return 1, not exit, and this
+# script must reach its own `exit 0` whatever /dev/null is on the machine.
+case "${REPEAT_GATE_STDERR:-0}" in 1) ;; *) exec 2>/dev/null || : ;; esac
 
 ENABLED="${SKILL_COMPOUNDER_REPEAT_GATE:-1}"
 # Exactly `1` switches the refuse arm on; a typo, an empty export or a `true` is OFF. The
@@ -547,6 +580,9 @@ EVAL_FLAGS='-[A-Za-z]*[ceE]|--command|--eval|--execute|--expression'
 
 squeeze() { sed -E -e 's/[[:space:]]+/ /g' -e 's/^ //' -e 's/ $//'; }
 
+# Every stage past the builtin `printf` is an exec carrying a regex on its argv, and
+# under a near-ARG_MAX environment each of them can be the one that cannot launch;
+# the `exec 2>/dev/null` at the top of the brace group is what keeps that silent.
 norm_bash() {
   printf '%s' "$1" \
     | tr '\n\t' '  ' \
@@ -866,7 +902,7 @@ runner_head() {
       return 0 ;;
     make|cmake|ctest|ninja|bazel|buck|gradle|gradlew|mvn|ant|sbt|rake|just|dune)
       return 0 ;;
-    *test*|*tests*|*spec*|*check*|*lint*|*build*)
+    *test*|*spec*|*check*|*lint*|*build*)
       return 0 ;;
   esac
   # MULTI-PURPOSE DRIVERS ARE GATED ON THEIR SUBCOMMAND, and that distinction is the point

@@ -299,7 +299,11 @@ judged_json() {
 
 all_files() {
   [ -d "$DIR" ] || return 0
-  ls -1 "$DIR"/*.jsonl 2>/dev/null | sort
+  # The glob stays literal when nothing matches; the existence test drops that one word.
+  for af_f in "$DIR"/*.jsonl; do
+    [ -e "$af_f" ] || [ -L "$af_f" ] || continue
+    printf '%s\n' "$af_f"
+  done | sort
 }
 
 # bin/skillnote, which owns every decision about where a note lands and what it looks

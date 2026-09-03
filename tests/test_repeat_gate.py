@@ -1862,15 +1862,21 @@ class DenyEmitFailureTest(GateCase):
 
         `noisy` is a band this walk found rather than predicted, and it is why the
         classification here does not assert. Just under the padding at which the hook
-        cannot be launched at all there is a band where it launches and its FIRST exec
-        cannot: `norm_bash`'s `sed` at hooks/repeat-gate.sh:553 dies E2BIG and bash
-        writes `/usr/bin/sed: Argument list too long` to the hook's stderr, which the
-        hook does not redirect and cannot suppress. Measured here at 891800 bytes of
-        environment, one UNIT under the launch ceiling. A padding in that band is
-        useless to this test whatever else it does, so it is CLASSIFIED and stepped
-        over -- the silence-on-stderr claim is asserted where it belongs, on the one
-        run the walk selects, below. The exit status is asserted at every padding
-        instead: no environment size excuses a hook breaking the turn, and none did.
+        cannot be launched at all there is a band where it launches and the sed stages
+        of `norm_bash` cannot: each carries a regex program on its argv that `jq`'s
+        30-byte argv does not, so `execve` refuses them first and bash writes
+        `/usr/bin/sed: Argument list too long` to the hook's stderr, up to seven lines
+        per call. Measured at 891800-891960 bytes of environment, one UNIT under the
+        launch ceiling. The hook now closes its stderr with a builtin `exec` before its
+        first exec, so this outcome is not expected to occur again; it is kept because
+        a walk that could no longer name it would silently fold it into `failed-open`,
+        and `ExecNoiseTest` below is where the silence is asserted, with the redirect
+        switched off on one run to prove there is still something to silence. A padding
+        in that band is useless to this test whatever else it does, so it is CLASSIFIED
+        and stepped over -- the silence-on-stderr claim is asserted where it belongs, on
+        the one run the walk selects, below. The exit status is asserted at every
+        padding instead: no environment size excuses a hook breaking the turn, and
+        none did.
         """
         self.tick()
         sid = self._probe_sid()
@@ -1966,6 +1972,167 @@ class DenyEmitFailureTest(GateCase):
         # The consequence that matters: the next attempt in the SAME session refuses.
         self.tick()
         self.assert_denied(self.run_hook(self.attempt(self.LONG_CMD, "s3")))
+
+
+# ============================================ the band where the normaliser cannot exec
+class ExecNoiseTest(GateCase):
+    """A hook may never speak on stderr, and for one band of environment size this one
+    did. `execve` charges the environment against ARG_MAX along with the argument vector,
+    so just under the padding at which `bash hooks/repeat-gate.sh` cannot be launched at
+    all there is a band where it launches, `jq` execs on its 30-byte argv, and every
+    `sed` in the normaliser -- each carrying a 100-250-byte regex program -- cannot. bash
+    then wrote `line NNN: /usr/bin/sed: Argument list too long` for each of them, up to
+    seven lines per tool call, to a terminal the hook is wired to leave alone. Exit
+    status was 0 throughout and the store query ahead of any deny had already failed
+    open, so nothing broke and nothing was lost except the silence.
+
+    The hook now closes fd 2 with a builtin `exec` before its first exec, unless
+    `REPEAT_GATE_STDERR=1`. These tests find the band on the platform they run on and
+    drive the real hook through it twice at an IDENTICAL environment size -- the knob is
+    `0` on one run and `1` on the other, one byte either way -- so the run with the
+    redirect off has to show the noise the default run is asserted not to. Without that
+    second run a hook that had never been noisy would pass the first assertion, and a
+    redirect nobody has seen do anything is the kind of guard this package exists to
+    catch.
+
+    The second test is the reason no command-length cap was added instead: the command
+    reaches `sed` through a pipe from a builtin `printf` and is never on an argv, so a
+    twelve-byte command dies in the same band as a six-hundred-byte one. What is on the
+    argv is the regex, which is the normaliser itself.
+
+    Padding here is in BYTES, not the parent's 200-byte units: the band is about as wide
+    as one unit, so a unit walk can step over it. The search starts from the largest
+    padding the hook can be launched with at all, found by binary search on `OSError`,
+    and walks down from there.
+    """
+
+    # Borrowed from the sibling rather than inherited: inheriting its test methods
+    # would run its calibration a second time under this name.
+    UNIT = DenyEmitFailureTest.UNIT
+    LONG_CMD = DenyEmitFailureTest.LONG_CMD
+    LONG_ERR = DenyEmitFailureTest.LONG_ERR
+    FIX_CMD = DenyEmitFailureTest.FIX_CMD
+    _probes = 0
+    _teach_a_big_refusal = DenyEmitFailureTest._teach_a_big_refusal
+    _probe_sid = DenyEmitFailureTest._probe_sid
+
+    STEP = 20                       # bytes between probes; the band is ~200 wide
+    REACH = 1200                    # bytes below the launch ceiling to search
+    SHORT_CMD = "gh pr view 7"      # not allowlisted, and 12 bytes long
+
+    def _pad_bytes(self, total, **extra):
+        e = self.env(**extra)
+        i = 0
+        while total > 0:
+            n = min(self.UNIT, total)
+            e["REPEAT_GATE_TEST_PAD%05d" % i] = "x" * n
+            total -= n
+            i += 1
+        return e
+
+    def _run(self, total, cmd, stderr_knob):
+        """One real delivery at `total` bytes of padding; None if execve refused the
+        hook itself."""
+        self.tick()
+        sid = self._probe_sid()
+        try:
+            return subprocess.run(
+                ["bash", HOOK], input=json.dumps(self.attempt(cmd, sid)),
+                capture_output=True, text=True, timeout=180,
+                env=self._pad_bytes(total, REPEAT_GATE_NOW=str(self.clock),
+                                    REPEAT_GATE_STDERR=stderr_knob))
+        except OSError:
+            return None
+
+    def _launch_ceiling(self):
+        """The largest padding at which the hook can be launched at all."""
+        lo, hi = 0, 4_000_000
+        if self._run(lo, self.LONG_CMD, "1") is None:
+            self.skipTest("the hook cannot be launched with no padding at all")
+        while self._run(hi, self.LONG_CMD, "1") is not None:
+            hi *= 2
+            if hi > 64_000_000:
+                self.skipTest("no environment size below 64 MB stops the hook launching")
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if self._run(mid, self.LONG_CMD, "1") is not None:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
+    def _noisy_padding(self, cmd, stage):
+        """A padding at which the hook, with its redirect switched OFF, is observed
+        writing E2BIG noise naming `stage` for this command. Measured, never assumed;
+        and skipped with the measurement if this platform's accounting has no such band.
+
+        There are two bands, not one, and `stage` picks between them. At the launch
+        ceiling itself the FIRST exec, the `cat` that reads the payload, is the one that
+        cannot start, so bash prints `/bin/cat: Argument list too long` and the hook
+        exits 0 with an empty payload. Below that, `cat` and `jq` fit and the `sed`
+        stages do not. Both were silenced by the same redirect; the sibling test needs
+        the `sed` band, because its claim is about what happens AFTER the command has
+        been read."""
+        ceiling = self._launch_ceiling()
+        seen = {}
+        for total in range(ceiling, max(ceiling - self.REACH, 0) - 1, -self.STEP):
+            r = self._run(total, cmd, "1")
+            self.assertIsNotNone(r, "the hook launched at %d bytes and not at %d"
+                                    % (ceiling, total))
+            self.assertEqual(r.returncode, 0,
+                             "the hook exited %d at %d bytes of padding with its "
+                             "stderr connected" % (r.returncode, total))
+            if "Argument list too long" in r.stderr and stage in r.stderr:
+                return total, r
+            seen[total] = r.stderr.strip().split("\n")[-1][-40:]
+        self.skipTest("no padding within %d bytes under the launch ceiling (%d bytes) "
+                      "made a %s exec inside the hook die E2BIG on this platform; last "
+                      "stderr line seen at each: %s"
+                      % (self.REACH, ceiling, stage, sorted(seen.items())))
+
+    def test_the_band_where_the_normaliser_cannot_exec_is_silent_by_default(self):
+        self._teach_a_big_refusal()
+        total, loud = self._noisy_padding(self.LONG_CMD, "Argument list too long")
+        # The run that proves the default is doing something: redirect off, noise on.
+        self.assertIn(HOOK, loud.stderr,
+                      "the noise at %d bytes did not come from inside the hook: %r"
+                      % (total, loud.stderr))
+        self.assertEqual(loud.stdout, "", "a deny was emitted from inside the band")
+
+        r = self._run(total, self.LONG_CMD, "0")
+        self.assertIsNotNone(r, "the hook launched at %d bytes with the knob on and "
+                                "not with it off, at the same environment size" % total)
+        self.assertEqual(r.returncode, 0, "the hook exited %d" % r.returncode)
+        self.assertEqual(r.stderr, "", "the hook wrote to stderr at %d bytes of "
+                                       "padding: %r" % (total, r.stderr))
+        # And nothing it would have printed is lost: in this band the store query ahead
+        # of any deny cannot exec either, so the hook had nothing to say on stdout.
+        self.assertEqual(r.stdout, "", "a deny was emitted from inside the band: %r"
+                                       % r.stdout)
+
+    def test_a_short_command_dies_in_the_same_band_so_no_cap_could_have_fixed_it(self):
+        self._teach_a_big_refusal()
+        total, loud = self._noisy_padding(self.SHORT_CMD, "sed")
+        self.assertIn("sed: Argument list too long", loud.stderr)
+        r = self._run(total, self.SHORT_CMD, "0")
+        self.assertIsNotNone(r)
+        self.assertEqual(r.returncode, 0, "the hook exited %d" % r.returncode)
+        self.assertEqual(r.stderr, "", "the hook wrote to stderr for a %d-byte command "
+                                       "at %d bytes of padding: %r"
+                                       % (len(self.SHORT_CMD), total, r.stderr))
+
+    def test_the_redirect_costs_nothing_where_the_deny_is_emitted(self):
+        """Below the band the hook still refuses, and identically with the knob either
+        way: the redirect moves fd 2 and touches nothing else."""
+        self._teach_a_big_refusal()
+        self.tick()
+        off = self.run_hook(self.attempt(self.LONG_CMD, "s3"), REPEAT_GATE_STDERR="0")
+        self.tick()
+        on = self.run_hook(self.attempt(self.LONG_CMD, "s4"), REPEAT_GATE_STDERR="1")
+        for r in (off, on):
+            self.assertEqual(r.returncode, 0)
+            self.assertEqual(r.stderr, "")
+        self.assertEqual(self.assert_denied(off), self.assert_denied(on))
 
 
 # ====================================================== the refuse arm's shipped default

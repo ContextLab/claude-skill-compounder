@@ -65,7 +65,7 @@ jobs:
       - name: Parse and smoke every shell script under both shells
         run: |
           set -e
-          for f in hooks/*.sh statusline/*.sh bin/*; do
+          for f in hooks/*.sh statusline/*.sh bin/* install.sh uninstall.sh; do
             case "$f" in *.json) continue ;; esac
             head -1 "$f" | grep -q '^#!' || continue
             bash -n "$f"
@@ -118,17 +118,15 @@ jobs:
           shellcheck --version
 
       - name: Lint every shell script
-        # `--severity=error` is a deliberate floor, not the target. As of 2026-09-02
-        # the tree has 0 error-level findings and 19 at warning/note after the three
-        # codes .shellcheckrc disables (SC2016, SC2034, SC2329 -- each with its reason
-        # there). Starting at `error` means this job fails only on something that will
-        # actually misbehave, and cannot go red on style while the 19 are triaged.
-        #
-        # Path to raising it: fix or individually `# shellcheck disable=` the remaining
-        # findings in the scripts, then lower this to `--severity=warning`, then to
-        # `--severity=style` (the default). Do NOT reach that floor by widening
-        # .shellcheckrc: its bar is that every instance of a code is an intentional
-        # documented pattern, and none of the 19 clears it.
+        # `--severity=warning` is the floor as of 2026-09-03. The job started at `error`
+        # on 2026-09-02 with 19 findings at warning/note left after the three codes
+        # .shellcheckrc disables (SC2016, SC2034, SC2329 -- each with its reason there);
+        # those 19 were fixed or individually `# shellcheck disable=`d with a reason on
+        # the line, and shellcheck 0.11.0 now prints nothing over these files at any
+        # severity. `warning` rather than `style` because apt and brew ship different
+        # versions and a note-level check added upstream must not turn the job red on
+        # its own. Do NOT reach a floor by widening .shellcheckrc: its bar is that
+        # every instance of a code is an intentional documented pattern.
         #
         # The file list mirrors the "Parse and smoke" step above rather than passing the
         # globs straight through, so a non-script dropped into bin/ makes that step fail
@@ -143,12 +141,12 @@ jobs:
         run: |
           set -e
           set --
-          for f in hooks/*.sh bin/* statusline/*.sh; do
+          for f in hooks/*.sh bin/* statusline/*.sh install.sh uninstall.sh; do
             case "$f" in *.json) continue ;; esac
             head -1 "$f" | grep -q '^#!' || continue
             set -- "$@" "$f"
           done
           [ "$#" -gt 0 ] || { echo "no scripts matched; the globs moved" >&2; exit 1; }
           echo "linting $# files:" "$@"
-          shellcheck --severity=error "$@"
-          echo "no error-level shellcheck findings"
+          shellcheck --severity=warning "$@"
+          echo "no warning-level shellcheck findings"
