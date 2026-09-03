@@ -30,9 +30,17 @@ the tier gate's routing half, so it became reminder `n2288836221x440` keyed on `
   `n195966769x406` (the first, `n2288836221x440`, embedded the stale 120 and is tombstoned).
 - Full suite on the quiet tree: 50 files, ALL TESTS PASSED, 2 skips.
 
+## Landed in `47801b6`
+
+- #19 composition half: the three limits on the depth-4 entry were re-measured on 2.1.259
+  with 18 sonnet runs (transformation 6/6, ordinary and passive wording 3/3 each, three-way
+  discrimination 3/3 in both arms). New entry in `docs/CLAUDE-CODE-BEHAVIOR.md`; comment on
+  #19. Raw transcripts were under the session scratchpad (`compose/<condition>/out/*.jsonl`)
+  and are not kept; the entry carries the method to regenerate them.
+
 ## Still to do from the handoff
 
 2. Measurement campaign (#30, #37): needs a week of ordinary use; not startable today.
 6. #42 fresh-config journey: needs `CLAUDE_CODE_OAUTH_TOKEN` handed in.
-7. #19: the composition half and the "forged skill actually used" half (blocked on #34's
-   second occurrence for the latter).
+7. #19: a two-level composition in the shipped pool (not manufactured; wait for a real one),
+   and the "forged skill actually used" half (blocked on #34's second occurrence).
