@@ -38,6 +38,14 @@ the tier gate's routing half, so it became reminder `n2288836221x440` keyed on `
   #19. Raw transcripts were under the session scratchpad (`compose/<condition>/out/*.jsonl`)
   and are not kept; the entry carries the method to regenerate them.
 
+## CI after the push
+
+`c9150de` and `507a6ee` went red on one job, shellcheck (ubuntu-latest): apt's 0.9.0 reports
+SC2120 on `bin/skillinsight`'s `record_nudge` (an optional argument no caller passed) where
+brew's 0.11.0 is silent. Fixed in `ec6acc0` by dropping the dead parameter, checked locally
+with the `shellcheck-py==0.9.0.6` wheel at the warning floor over every script (0 findings).
+Recorded as a project note in `.claude/CLAUDE.md`. #33 closes once `ec6acc0` is green.
+
 ## Still to do from the handoff
 
 2. Measurement campaign (#30, #37): needs a week of ordinary use; not startable today.
