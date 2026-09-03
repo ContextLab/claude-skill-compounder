@@ -5,7 +5,7 @@
 ```bash
 cd "/Users/jmanning/claude-skill-compounder"
 git stash push --message "before resuming 2026-09-03" || true
-git checkout -B resume/after-v0.3.1 ad9857770a28e5c6d186898ab7b7831ee32c7c15
+git checkout -B resume/after-v0.3.1 269b462ff71f549919af69d10fbf68b7bc6bf32f
 ```
 
 Then, before anything else: read `notes/2026-09-02-audit-and-replan.md` (the audit, the
@@ -17,7 +17,7 @@ green commit, no PRs.
 ## State
 
 branch: issue-19-close-the-gap
-commit: ad9857770a28e5c6d186898ab7b7831ee32c7c15
+commit: 269b462ff71f549919af69d10fbf68b7bc6bf32f
 uncommitted work: none
 
 ```
@@ -27,7 +27,7 @@ $ git status --porcelain
 Tags: `v0.3.0` = a2aa2d4, `v0.3.1` = b7f6a47, both released on GitHub. CI green on both
 platforms for every commit from cfb2bc6 onward (last checked run 33731348166 on b7f6a47).
 The live install on this machine points at this checkout (`git describe --tags` printed
-`v0.3.1-1-gad98577`); `skillforge doctor` printed `9 pass, 0 warn, 0 fail`.
+`v0.3.1-2-g269b462`); `skillforge doctor` printed `9 pass, 0 warn, 0 fail`.
 
 ## Done and verified
 
