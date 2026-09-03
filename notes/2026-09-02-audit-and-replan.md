@@ -480,3 +480,18 @@ supported versions, upgrade/rollback test). P4 cannot be done in a session.
   (https://github.com/ContextLab/claude-skill-compounder/releases/tag/v0.3.0). README pinned
   line now fetches install.sh from the tag (e77c1b2). Verification of the tag in a throwaway
   config and issue closure (#35, #36, #38, #39, #40, #41) dispatched.
+- ~05:20 (Sep 3) tag verification in a throwaway: install/enable/disable/uninstall PASS;
+  --update/--rollback PASS from the standalone copy but silently a no-op from the managed
+  checkout's own copy (gate read only the curl case). Fixed in c9803bc with a dirty-tree
+  refusal by name; docs/releasing.md says which copy to verify with at refs before v0.3.1.
+  Plan: CI green on c9803bc -> tag v0.3.1 -> verify update v0.3.0 -> v0.3.1 -> rollback.
+
+## Session close (2026-09-03, ~05:30 EDT)
+
+Since the review: commits 89ca608 (CI wave, E2E, packaging, doctor --json), cfb2bc6 (review
+opt-in, argv-cap test), a2aa2d4 (docs split, install flags) = v0.3.0, e77c1b2 (README tag
+line), c9803bc (install.sh managed-copy fix). CI green from cfb2bc6. Issues: #8, #20-#29
+closed; #32-#41 opened; #35/#36/#38/#39/#40/#41 being closed with evidence.
+Open after this session: #19, #30, #32, #33, #34, #37; ShellCheck warning-level findings;
+repeat-gate sed E2BIG; REMIND constants unvalidated; stage-2 auto-forge blocked on its own
+routing gate; usage evidence is one machine. Resume: this note, then `gh issue view 31`.

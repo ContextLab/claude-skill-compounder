@@ -1,19 +1,9 @@
 # Open threads
 
-What is actually open, as of **2026-09-02**, on the CI-fix commit following `385624f` —
-the one the close-out orchestrator makes next, carrying the CI-fix wave (apply-gate
-streaming, the `stat` order, the four test files, `ci.yml` and `.shellcheckrc`), the
-release packaging in `install.sh`, the E2E harness under `tests/e2e/`, and
-`skillforge doctor --json`. Everything through `385624f` is committed: Waves 1 through 3
-(the forge-diet rewrite of `skills/skill-compounder/SKILL.md`, `skillinsight
-promote`/`decline --source`, the repeat gate's default-off refusal arm, the doc-gate
-fixes) and Wave 4 (`hooks/precompact.sh` and `tests/test_precompact.py` for issue #8,
-their wiring on both install paths, the shared marker-extractor fix in
-`hooks/insight-capture.sh`). Written so nothing here depends
-on a session remembering it: every entry carries the command or the path that establishes
-it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
-close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
-outright — this is a working list, not a changelog.
+What is actually open, as of **2026-09-03**, at commit `c9803bc` on `main` (tag `v0.3.0` is
+`a2aa2d4`, one install.sh fix behind it). CI is green on both platforms from `cfb2bc6`
+onward, the end-to-end journey passed 12/12 on `a2aa2d4`, and the paid review is opt-in.
+Issue #31 carries the status table; this file carries the threads behind it.
 
 The GitHub issues are the other half of this picture and they do not duplicate it:
 `gh issue list --repo ContextLab/claude-skill-compounder --state open` is the authority on
