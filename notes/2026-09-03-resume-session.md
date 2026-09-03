@@ -62,3 +62,23 @@ Open issues after this session: #19, #30, #31 (epic), #32, #34, #37, #42. #9 and
 6. #42 fresh-config journey: needs `CLAUDE_CODE_OAUTH_TOKEN` handed in.
 7. #19: a two-level composition in the shipped pool (not manufactured; wait for a real one),
    and the "forged skill actually used" half (blocked on #34's second occurrence).
+
+## Phase 2: the restated vision (#43)
+
+The maintainer restated the vision (scenario 1: remind with the user's own words at five
+moments, into subagents too; scenario 2: force the write-down after a fail-then-fix, with
+code attached; levels A/B/C for both search and placement; single source of truth; never
+rely on remembering). Research (five agents, all reports verified where a number was reused):
+history-surfer stores prompts once per project and searches in 0.2 s; OMC blocks Stop with
+`stop_hook_active` guard and re-injects the original prompt on SessionStart; measured on
+2.1.259 that SessionStart `source=compact` reaches the model, SubagentStart context reaches
+the subagent only, PreToolUse on Agent carries the subagent prompt and `updatedInput`
+rewrites it, Stop blocks nine times without a CLI cap. Design:
+`notes/2026-09-03-mission-and-lessons-design.md` = issue #43.
+
+Wave 1 in flight, five builders on disjoint files: `hooks/mission.sh` + test;
+`hooks/repeat-gate.sh` lesson arms + `bin/skillrepeat dismiss`; `bin/skillnote --lesson
+--attach promote`; `bin/skillcontrib propose` + contribute-skill SKILL.md;
+installer/hooks.json/doctor + history-surfer dependency. Orchestrator owns every doc.
+Wave 2: docs (all), behavior entries for today's measurements (raw logs under the session
+scratchpad `research/hookprobe/`), E2E steps, full suite, live verification.
