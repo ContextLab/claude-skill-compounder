@@ -495,3 +495,8 @@ closed; #32-#41 opened; #35/#36/#38/#39/#40/#41 being closed with evidence.
 Open after this session: #19, #30, #32, #33, #34, #37; ShellCheck warning-level findings;
 repeat-gate sed E2BIG; REMIND constants unvalidated; stage-2 auto-forge blocked on its own
 routing gate; usage evidence is one machine. Resume: this note, then `gh issue view 31`.
+- ~06:40 (Sep 3) b43eca7 (offline install.sh test; found and fixed a set -e dead branch in my
+  c9803bc patch), b7f6a47 = v0.3.1 (bump + README pinned line). CI green on both. Tagged and
+  released v0.3.1. Verified between real tags in a throwaway: v0.3.0 -> v0.3.1 (standalone)
+  -> v0.3.0 (rollback from the managed v0.3.1 copy) -> managed v0.3.0 copy no-op as
+  documented -> v0.3.1; doctor 9/9; install-ref current v0.3.1 / previous v0.3.0.
