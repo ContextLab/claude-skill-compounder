@@ -68,7 +68,7 @@ at the default `--runs 3`), twelve pinned skills at six prompts each, re-derivab
 print(sum(len(s['must_fire'])+len(s['must_not_fire']) for s in rc.all_skills()))"`. Derive
 the skips by reading the run rather than from this sentence:
 `grep -c '\.\.\. skipped' <the run's output>`. `grep -rln skipTest tests/*.py | wc -l` returns
-**13** files, most of whose guards never fire. The `*.py` is load-bearing: over `tests/`
+**14** files, most of whose guards never fire. The `*.py` is load-bearing: over `tests/`
 the answer depends on which grep you have, because `/usr/bin/grep` counts gitignored
 `__pycache__/*.pyc` as source and the ugrep an agent shell gets does not.
 
@@ -368,17 +368,20 @@ forge whose orchestrator died -- by appending the `fail` row it never got, never
 the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the one
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
-`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ | sort -u` -- **116** names, over **18**
-prefixes. A grep
-that reads a gitignored `.pyc` as source adds one more line, `Binary file
-skill_compounder/__pycache__/installer.cpython-39.pyc matches`, and answers 117; that is
+`grep -rhoE '\b(CI|CLAUDE_SKILL_COMPOUNDER|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
+hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **120** names, over
+**19** prefixes, as of 2026-09-02. A grep
+that reads gitignored `.pyc` files as source adds a `Binary file
+skill_compounder/__pycache__/installer.cpython-NN.pyc matches` line per cached bytecode
+file -- two on this checkout, so `/usr/bin/grep` answers 122 where the ugrep an agent
+shell gets answers 120; that is
 the same split that makes the `skipTest` count above depend on which grep you have. Each
 hit was then read; re-run the command rather than trusting the list above if the two have
-drifted. **Four
+drifted. **Five
 times now the command has been narrower than the list it introduces**: it named three prefixes when seven were in use,
-seven when fourteen were, fourteen when sixteen were, and sixteen when seventeen were, so
-on all four occasions it could not produce the list it introduces. The third was Wave 2
+seven when fourteen were, fourteen when sixteen were, sixteen when seventeen were, and
+eighteen when nineteen were, so
+on all five occasions it could not produce the list it introduces. The third was Wave 2
 adding `SKILLNOTE_NOW`, `SKILLNOTE_CLAUDE_DIR` and the six `REMIND_*` names to scripts
 while leaving the alternation at fourteen prefixes; the fourth was Wave 3 adding
 `SKILLREPORT_GATE` to `bin/skillreport` and leaving it at sixteen. `PRECOMPACT` broke the
@@ -386,7 +389,18 @@ run: `hooks/precompact.sh` and the eighteenth prefix landed in one change, becau
 `tests/test_doctrine_sync.py` fails the moment a script reads a name this command cannot
 print, and it did. That test is the reason, not diligence, which is the argument for
 re-running the command instead of reading this paragraph. A prefix added to a new script
-has to be added here too.
+has to be added here too. **The paths are the other half of the same defect and the fifth
+occasion is both halves at once.** `install.sh` was outside the path list entirely, and
+adding it exposed the nineteenth prefix: two of its four knobs are
+`SKILL_COMPOUNDER_REF` and `SKILL_COMPOUNDER_UPDATE`, which the alternation already
+covered, but the other two are `CLAUDE_SKILL_COMPOUNDER_APP` and
+`CLAUDE_SKILL_COMPOUNDER_STATE`, and the leading `\b` cannot match inside
+`CLAUDE_SKILL_COMPOUNDER` -- the position before `SKILL` sits between two word
+characters. So widening the paths without widening the alternation would have shipped a
+completeness claim that was newly false. A new file that reads a knob has to be added
+here whether or not its prefix looks new, and `uninstall.sh` and `scripts/` are still
+outside both lists, which is why the README's sentence names the four path groups it
+covers rather than every script in the repository.
 If new behavior is hard to test without a mock, add a pin like those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 
@@ -400,6 +414,16 @@ temp dir, so scripts must not depend on the ambient environment.
   statement for this reason; keep it.
 - A literal `%` inside an *argument* to `printf '%s'` needs no escaping. Doubling it prints
   a visible `%%`.
+- `stat -f %m FILE || stat -c %Y FILE` is wrong on GNU: there `-f` means `--file-system`, the
+  bogus `%m` exits 1 but the valid part of the format still prints to stdout, `$( )` captures
+  it, and the digits guard then silently falls back. Query the GNU form first and validate
+  digits, then the BSD form, as `statusline/statusline.sh` does. Three scripts shipped the
+  wrong order on 2026-09-02 and CI on Ubuntu was the only thing that noticed.
+- Linux caps a **single** argv element at `MAX_ARG_STRLEN`, a hard 131072 bytes that a
+  larger `ARG_MAX` does not raise; macOS has no per-argument cap. So a value that can grow
+  -- a rendered reason, a transcript excerpt -- travels through a file or stdin
+  (`jq --rawfile`, `grep -f`), never `--arg`. `hooks/apply-gate.sh` emitted nothing at its
+  own documented ceiling on Ubuntu until it did.
 - Bash reads a script lazily, by byte offset. Rewrite the file while it is running and bash
   resumes at its saved offset in whatever the file now holds, executing the middle of
   unrelated text. This cost us a paid-for review verdict, silently.

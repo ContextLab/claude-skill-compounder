@@ -17,10 +17,24 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
+          # Full history, not the action's default depth of 1. Two tests re-derive a
+          # claim from git and a shallow clone answers them wrongly rather than not at
+          # all: `test_seed_authoring.py::WhyTheseRulesTest` cites a commit that is on
+          # origin/main but outside the shallow boundary, and
+          # `test_seed_claim_provenance.py` derives the repository's first commit date
+          # as its lower bound for an as-of date -- at depth 1 the "first" commit is
+          # whatever HEAD is, so every real as-of date looks like it predates the repo.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          # 3.9 is the floor this suite supports and is deliberately the only leg: the
+          # suite is shell-driven through `subprocess`, so a second Python leg re-runs
+          # the same shell scripts for no new information at 9.5min (ubuntu) and
+          # 20.5min (macos) apiece, measured on run 33704550609. Add 3.12 only if
+          # something here starts depending on Python version behavior.
           python-version: '3.9'
 
       - name: Install jq
@@ -68,10 +82,13 @@ jobs:
     # needs no credentials.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
+          # The runtime the CLI runs on, not the runtime the actions run on. The Node 20
+          # deprecation notice on run 33704550609 named `actions/setup-node@v4` itself,
+          # which the version bump above fixes; this value is untouched.
           node-version: '20'
 
       - name: Install the Claude Code CLI
@@ -79,3 +96,59 @@ jobs:
 
       - name: Validate the plugin
         run: claude plugin validate . --strict
+
+  shellcheck:
+    # Both runners, because apt and brew ship different shellcheck versions and a
+    # finding that exists in only one of them is still a finding. The version each one
+    # resolved is printed below so a disagreement is readable in the log.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update && sudo apt-get install -y shellcheck
+            else brew install shellcheck; fi
+          fi
+          shellcheck --version
+
+      - name: Lint every shell script
+        # `--severity=error` is a deliberate floor, not the target. As of 2026-09-02
+        # the tree has 0 error-level findings and 19 at warning/note after the three
+        # codes .shellcheckrc disables (SC2016, SC2034, SC2329 -- each with its reason
+        # there). Starting at `error` means this job fails only on something that will
+        # actually misbehave, and cannot go red on style while the 19 are triaged.
+        #
+        # Path to raising it: fix or individually `# shellcheck disable=` the remaining
+        # findings in the scripts, then lower this to `--severity=warning`, then to
+        # `--severity=style` (the default). Do NOT reach that floor by widening
+        # .shellcheckrc: its bar is that every instance of a code is an intentional
+        # documented pattern, and none of the 19 clears it.
+        #
+        # The file list mirrors the "Parse and smoke" step above rather than passing the
+        # globs straight through, so a non-script dropped into bin/ makes that step fail
+        # on its own terms instead of failing here as an unreadable shebang.
+        #
+        # The list is carried in the positional parameters, NOT in a string expanded
+        # unquoted. `files="$files $f"` then `shellcheck $files` needs word splitting to
+        # do anything, and zsh does not split unquoted expansions: under zsh the whole
+        # list arrives as one filename and shellcheck exits 2 on a file that does not
+        # exist. `set --` behaves identically in both, which is the rule this repo's
+        # scripts already follow.
+        run: |
+          set -e
+          set --
+          for f in hooks/*.sh bin/* statusline/*.sh; do
+            case "$f" in *.json) continue ;; esac
+            head -1 "$f" | grep -q '^#!' || continue
+            set -- "$@" "$f"
+          done
+          [ "$#" -gt 0 ] || { echo "no scripts matched; the globs moved" >&2; exit 1; }
+          echo "linting $# files:" "$@"
+          shellcheck --severity=error "$@"
+          echo "no error-level shellcheck findings"

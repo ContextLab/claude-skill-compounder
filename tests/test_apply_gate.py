@@ -31,6 +31,7 @@ exactly the trap .claude/CLAUDE.md warns about, so each test pins the one it nee
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unicodedata
@@ -62,6 +63,30 @@ def cell_width(ch):
 
 def columns(text):
     return sum(cell_width(c) for c in ANSI.sub("", text))
+
+
+# A stand-in for the KERNEL, not for anything in this package: a real executable named
+# `jq`, put first on PATH, that refuses any single argv element over MAX_ARG_STRLEN and
+# otherwise execs the real jq. That is what execve(2) does on Linux and what macOS does
+# not do, which is the whole reason CI could be red while this suite was green.
+#
+# The length is counted under LC_ALL=C so `${#a}` counts BYTES rather than characters --
+# the kernel counts bytes, and a 409 KB message of 3-byte glyphs is only 136 KB of
+# characters. LC_ALL is restored before the exec so the real jq runs in the caller's
+# locale.
+SHIM_JQ = r"""#!/bin/bash
+_shim_saved_lc="${LC_ALL-}"
+_shim_had_lc="${LC_ALL+yes}"
+LC_ALL=C
+for _shim_a in "$@"; do
+  if [ "${#_shim_a}" -gt %(cap)d ]; then
+    printf '%%s\n' "jq: Argument list too long" >&2
+    exit 126
+  fi
+done
+if [ -n "$_shim_had_lc" ]; then LC_ALL="$_shim_saved_lc"; else unset LC_ALL; fi
+exec "%(real)s" "$@"
+"""
 
 
 class ApplyGateBase(unittest.TestCase):
@@ -847,95 +872,217 @@ class TriggerByteBoundTest(ApplyGateBase):
         self.assertIsNone(self.decision(self.at_ceilings(prompt="p2")))
 
 
+# =========================================== the per-argument cap Linux enforces
+class LinuxArgvCapTest(ApplyGateBase):
+    """The gate emitted NOTHING at its own documented ceilings on Linux, and a green macOS
+    suite could not see it. This class makes the platform difference reproducible HERE.
+
+    Linux enforces two separate exec limits. ARG_MAX bounds the whole vector (a quarter of
+    the stack rlimit, typically 2 MB) and was never the binding one. MAX_ARG_STRLEN bounds
+    ONE argument at a hard 131072 bytes -- 32 pages, `include/uapi/linux/binfmts.h`, not
+    tunable, not raised by a larger ARG_MAX. macOS has no per-argument cap at all, only
+    ARG_MAX 1048576 (`getconf ARG_MAX`).
+
+    `jq -n --arg r "$reason"` put the whole block message into ONE argument. At the two
+    documented ceilings (MAX_TRIGGER 20000, MAX_NAMED 20) that message is 409452 bytes:
+    comfortably inside macOS's total, and 3.1x over Linux's per-argument cap. So
+    TriggerByteBoundTest above passed here and failed on ubuntu, and the gate was silent
+    on Linux at settings its own ENV block calls legal.
+
+    THE SHIM IS A STAND-IN FOR THE KERNEL, NOT FOR ANY CODE IN THIS PACKAGE. It is a real
+    executable named `jq`, first on PATH, that refuses any argv element over 131072 bytes
+    and otherwise `exec`s the real jq -- which is precisely what execve(2) does on Linux.
+    The hook is the real hook, the markers are real files, and the jq that answers is the
+    real jq. `test_the_shim_itself_refuses_and_only_over_the_cap` proves the shim is live
+    before anything is concluded from it; a fault injector that quietly does nothing is
+    the dead guard this repo has a skill about.
+    """
+
+    MAX_ARG_STRLEN = 131072
+    CJK = "\u4e16"
+    CEIL_TRIGGER = 20000
+    CEIL_NAMED = 20
+
+    def setUp(self):
+        super().setUp()
+        real = shutil.which("jq", path=BASE_PATH)
+        self.assertIsNotNone(real, "jq is not on the test PATH; this suite needs it")
+        self.shimdir = self.state / "argv-cap-shim"
+        self.shimdir.mkdir()
+        shim = self.shimdir / "jq"
+        shim.write_text(SHIM_JQ % {"real": real, "cap": self.MAX_ARG_STRLEN})
+        shim.chmod(0o755)
+
+    def shim_env(self, **extra):
+        e = self.env(**extra)
+        e["PATH"] = "%s:%s" % (self.shimdir, BASE_PATH)
+        return e
+
+    def shim_stop(self, session="sess-A", prompt="p1", now=4600, **envextra):
+        payload = {"hook_event_name": "Stop", "session_id": session,
+                   "prompt_id": prompt, "stop_hook_active": False}
+        envextra.setdefault("APPLY_GATE_MAX_TRIGGER", self.CEIL_TRIGGER)
+        envextra.setdefault("APPLY_GATE_MAX_NAMED", self.CEIL_NAMED)
+        r = subprocess.run([str(HOOK)], input=json.dumps(payload), capture_output=True,
+                           text=True, env=self.shim_env(APPLY_GATE_NOW=now, **envextra))
+        self.assertEqual(r.returncode, 0, "the hook exited %d: %r" % (r.returncode, r.stderr))
+        self.assertEqual(r.stderr, "", "the hook wrote to stderr: %r" % r.stderr)
+        return r.stdout
+
+    def fill(self):
+        trig = self.CJK * self.CEIL_TRIGGER
+        for i in range(self.CEIL_NAMED):
+            self.marker("skill-%02d" % i, closed=1000 + i, trigger=trig)
+
+    def test_the_shim_itself_refuses_and_only_over_the_cap(self):
+        """The injector must be observed working, in both directions, or every other
+        assertion in this class is vacuous."""
+        env = self.shim_env()
+        over = subprocess.run(["jq", "-n", "--arg", "r", "R" * (self.MAX_ARG_STRLEN + 1),
+                               "$r|length"], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, env=env)
+        self.assertNotEqual(over.returncode, 0,
+                            "the shim let a %d-byte argument through; Linux would not"
+                            % (self.MAX_ARG_STRLEN + 1))
+        self.assertEqual(over.stdout, "", "a refused exec must produce no answer")
+        under = subprocess.run(["jq", "-n", "--arg", "r", "R" * (self.MAX_ARG_STRLEN - 1),
+                                "$r|length"], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL, env=env)
+        self.assertEqual(under.returncode, 0,
+                         "the shim refused a LEGAL argument: %r" % under.stderr)
+        self.assertEqual(under.stdout.strip(), str(self.MAX_ARG_STRLEN - 1))
+
+    def test_the_gate_still_emits_at_the_ceilings_under_the_linux_argv_cap(self):
+        """The ubuntu failure, reproduced and then closed. Before the streaming fix this
+        produced nothing at all."""
+        self.fill()
+        raw = self.shim_stop()
+        d = self.decision(raw)
+        self.assertIsNotNone(
+            d, "the gate emitted NOTHING with Linux's per-argument cap simulated: the "
+               "reason is still travelling in argv")
+        self.assertEqual(d["decision"], "block")
+        for i in range(self.CEIL_NAMED):
+            self.assertIn("skill-%02d" % i, d["reason"])
+
+    def test_the_message_really_is_bigger_than_one_linux_argument(self):
+        """Otherwise the test above would pass with the old spelling too. The message has
+        to be over the cap for the cap to have been what silenced it."""
+        self.fill()
+        d = self.decision(self.shim_stop())
+        self.assertIsNotNone(d)
+        n = len(d["reason"].encode("utf-8"))
+        print("\n  [linux argv cap] reason: %d bytes (MAX_ARG_STRLEN %d, ratio %.1fx)"
+              % (n, self.MAX_ARG_STRLEN, n / float(self.MAX_ARG_STRLEN)))
+        self.assertGreater(n, self.MAX_ARG_STRLEN,
+                           "%d bytes would have fitted in one Linux argument, so this "
+                           "class proves nothing" % n)
+
+    def test_the_default_settings_were_never_over_the_cap(self):
+        """Which is why this went unseen for as long as it did: nobody's real trigger
+        comes near it. The three recorded on this machine are 359, 359 and 518
+        codepoints."""
+        self.marker("ordinary", trigger="a dead end that cost an afternoon " * 15)
+        d = self.decision(self.shim_stop(APPLY_GATE_MAX_TRIGGER=1200,
+                                         APPLY_GATE_MAX_NAMED=4))
+        self.assertIsNotNone(d)
+        self.assertLess(len(d["reason"].encode("utf-8")), self.MAX_ARG_STRLEN)
+
+    def test_the_claims_still_match_the_message_under_the_cap(self):
+        """A block that reaches stdout must claim exactly the skills it named, whatever
+        the exec limits are."""
+        self.fill()
+        d = self.decision(self.shim_stop())
+        self.assertIsNotNone(d)
+        gate = self.state / "apply-gate"
+        claimed = sorted(p.name.split(".named.")[1]
+                         for p in gate.iterdir() if ".named." in p.name)
+        self.assertEqual(claimed, sorted("skill-%02d" % i for i in range(self.CEIL_NAMED)))
+        for name in claimed:
+            self.assertIn(name, d["reason"])
+
+
 # ================================================== the claim outlives a failed emit
 class EmitFailureTest(ApplyGateBase):
     """The claim was burnt BEFORE the message was emitted, so an emit failure silenced
     the skill for the rest of the session and the user never saw the flag.
 
-    Reproduced before the fix: a marker with a 2 MB trigger, one Stop payload -> stdout 0
+    Reproduced before that fix: a marker with a 2 MB trigger, one Stop payload -> stdout 0
     bytes, rc 0, and both `sess-A.named.big-skill` and `sess-A.p1.turn` already on disk.
-    `jq -n --arg r "$reason"` is an exec; over ARG_MAX it dies with E2BIG into
-    `2>/dev/null` and `|| exit 0` swallows it -- while the claim says the skill has been
-    named. That violates the file's own rule: "a skill silenced for this session but never
-    shown to the user is a flag that disappeared without being read."
+    The reason was handed to `jq -n --arg r`, the exec died, `2>/dev/null` and `|| exit 0`
+    swallowed it -- while the claim said the skill had been named. That violates the
+    file's own rule: "a skill silenced for this session but never shown to the user is a
+    flag that disappeared without being read."
 
-    THE CAP ABOVE IS NOT THIS FIX, which is why this test does not reach E2BIG through the
-    trigger. It reaches it through the ENVIRONMENT, which counts against the same ARG_MAX
-    as the argument vector and which no cap in this file can bound. A session with a large
-    environment is not exotic, and it is the one exec-size input the marker contract has no
-    say over.
+    THE INJECTOR CHANGED WHEN THE EMIT DID, AND THE REASON IT CHANGED IS THE FIX ITSELF.
+    This test used to reach a failed emit by padding the ENVIRONMENT until the exec of
+    `jq -n --arg r "$reason"` went over ARG_MAX. The reason no longer travels in argv at
+    all -- the hook writes it to a file and jq reads it back with `--rawfile` -- so the
+    emit's argument vector is a few hundred bytes, SMALLER than the ~4 KB jq program the
+    hook already exec'd once per marker to get here. No environment size can therefore
+    fail the emit without failing the candidate read first, and a hook that never reaches
+    the emit proves nothing about what it claims afterwards. Keeping the old padding would
+    have been asserting on a failure mode the fix removed.
 
-    NOTHING HERE IS MOCKED: real env, real execs, real files. The window is CALIBRATED at
-    run time rather than hardcoded, because ARG_MAX differs by platform (1048576 measured
-    here with `getconf ARG_MAX`; Linux is larger and additionally caps a single string at
-    MAX_ARG_STRLEN, which is why the padding is many medium strings and not one huge one).
+    So the failure is injected where the message is now built: `ulimit -f 1` on the hook
+    itself, a file-size rlimit of one 512-byte block. Nothing is mocked -- the kernel
+    refuses the write exactly as a full filesystem would. 512 is above everything the hook
+    writes before the reason (`cand.txt` is ~180 bytes for these four short markers) and
+    far below the reason itself (~1.9 KB), so the first write it stops is the one under
+    test. `_rlimit_bites` proves the limit is really enforced before anything is concluded
+    from the silence.
     """
 
-    SMALL = 4000            # ~the hook's own per-marker `jq` argv; these must still exec
-    BIG = 80000             # under the reason this test builds (measured: 82510 bytes)
-    STEP = 50000            # < BIG - SMALL, which is what makes the search land in the gap
-    CEILING = 16 * 1024 * 1024
+    FSIZE_BLOCKS = 1        # `ulimit -f` counts 512-byte blocks, on both platforms
 
-    def _pad_env(self, pad, **extra):
-        e = self.env(**extra)
-        for i in range(pad // self.STEP):
-            e["APPLY_GATE_TEST_PAD%03d" % i] = "x" * self.STEP
-        return e
+    def under_fsize_limit(self, argv, **kw):
+        """Run argv with RLIMIT_FSIZE set, via a shell that `exec`s into it -- so the
+        process under test IS the hook and the captured stderr is the hook's own."""
+        return subprocess.run(
+            ["/bin/sh", "-c", 'ulimit -f %d; exec "$0" "$@"' % self.FSIZE_BLOCKS] + argv,
+            capture_output=True, text=True, **kw)
 
-    def _execs(self, pad, argsize):
-        """Can jq be exec'd with this environment and an argument of this size?"""
-        try:
-            r = subprocess.run(["jq", "-n", "--arg", "r", "R" * argsize, "$r|length"],
-                               capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                               env=self._pad_env(pad))
-            return r.returncode == 0
-        except OSError:
-            return False           # E2BIG surfaces here, before jq is ever entered
-
-    def _calibrate(self):
-        """The largest padding at which a SMALL exec still works. Because BIG - SMALL is
-        wider than STEP, a BIG exec is necessarily over the line at that same padding."""
-        pad = self.STEP
-        while pad <= self.CEILING and self._execs(pad, self.SMALL):
-            pad += self.STEP
-        best = pad - self.STEP
-        if best < self.STEP:
-            self.skipTest("no environment size on this platform separates a %d-byte exec "
-                          "from a %d-byte one below %d bytes of padding"
-                          % (self.SMALL, self.BIG, self.CEILING))
-        if self._execs(best, self.BIG):
-            self.skipTest("could not straddle ARG_MAX on this platform: a %d-byte exec "
-                          "still succeeds at %d bytes of padding" % (self.BIG, best))
-        return best
+    def _rlimit_bites(self):
+        probe = self.state / "rlimit-probe"
+        r = self.under_fsize_limit(["/bin/sh", "-c", 'printf "%2000s" "" > "$0"',
+                                    str(probe)], stdin=subprocess.DEVNULL,
+                                   env={"PATH": BASE_PATH})
+        wrote = probe.stat().st_size if probe.exists() else 0
+        if r.returncode == 0 and wrote >= 2000:
+            self.skipTest("RLIMIT_FSIZE is not enforced here: a 2000-byte write succeeded "
+                          "under `ulimit -f %d`" % self.FSIZE_BLOCKS)
 
     def test_a_block_that_could_not_be_emitted_does_not_burn_the_claim(self):
-        pad = self._calibrate()
+        self._rlimit_bites()
         for i in range(4):
-            self.marker("skill-%d" % i, closed=1000 + i, trigger="T" * 30000)
+            self.marker("skill-%d" % i, closed=1000 + i)
         payload = {"hook_event_name": "Stop", "session_id": "sess-A",
                    "prompt_id": "p1", "stop_hook_active": False}
-        r = subprocess.run([str(HOOK)], input=json.dumps(payload), capture_output=True,
-                           text=True,
-                           env=self._pad_env(pad, APPLY_GATE_NOW=4600,
-                                             APPLY_GATE_MAX_TRIGGER=20000))
+        r = self.under_fsize_limit([str(HOOK)], input=json.dumps(payload),
+                                   env=self.env(APPLY_GATE_NOW=4600))
         # A hook may never break a turn, and may never speak on stderr, whatever fails.
-        self.assertEqual(r.returncode, 0, "the hook exited %d" % r.returncode)
+        # The stderr assertion is not incidental here: `printf` is a builtin, so a single
+        # subshell would have let bash report "Filesize limit exceeded" from the MAIN
+        # shell. This is the test that holds the second subshell in place.
+        self.assertEqual(r.returncode, 0, "the hook exited %d: %r" % (r.returncode, r.stderr))
         self.assertEqual(r.stderr, "", "the hook wrote to stderr: %r" % r.stderr)
-        self.assertEqual(r.stdout, "", "the emit was expected to fail in this environment")
+        self.assertEqual(r.stdout, "", "the emit was expected to fail under the rlimit")
 
         gate = self.state / "apply-gate"
         # THE HOOK REALLY DID REACH THE EMIT. The per-turn claim is taken after the
         # candidates are read and before the body is built, so its presence proves the
-        # candidate stage worked and the exec that died was the emit itself -- without it
-        # this test would also pass if the hook had exited early for some unrelated reason.
+        # candidate stage worked and the write that died was the message itself -- without
+        # it this test would also pass if the hook had exited early for some unrelated
+        # reason.
         self.assertTrue((gate / "sess-A.p1.turn").exists(),
                         "the hook never got as far as the emit; this test proved nothing")
         burnt = sorted(p.name for p in gate.iterdir() if ".named." in p.name)
         self.assertEqual(burnt, [], "claims were burnt for a block nobody ever saw: %s"
                                     % burnt)
 
-        # And the flag is still standing next turn, in an ordinary environment.
-        d = self.decision(self.stop(prompt="p2", APPLY_GATE_MAX_TRIGGER=20000))
+        # And the flag is still standing next turn, in an ordinary environment. This is
+        # also the control: same markers, same hook, no rlimit -> a block.
+        d = self.decision(self.stop(prompt="p2"))
         self.assertIsNotNone(d, "the skill was silenced for the rest of the session by a "
                                 "block the user never saw")
         for i in range(4):

@@ -204,7 +204,7 @@ Two rules that decide most of the hard cases:
    ships 12 seed skills"* behind `find skills -maxdepth 2 -name SKILL.md | wc -l`. The count
    was right and the noun was wrong. That command counts `SKILL.md` files; *seed skill* is a
    narrower term this repository defines elsewhere, in the README's seed-pool table, which
-   had five rows (`git show 40babc1:README.md`, as of 2026-08-25). That row count is a past
+   had five rows (`git show 83a75b5:README.md`, as of 2026-08-25). That row count is a past
    state, so it is bucket B: it carries the source that reproduces it instead of being
    re-derived from today's README. A fourth reviewer found the noun, and the test that was
    supposed to guard the claim had locked the wrong quantity in place. So before you accept

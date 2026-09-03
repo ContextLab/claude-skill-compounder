@@ -1,11 +1,15 @@
 # Open threads
 
-What is actually open, as of **2026-09-02**, on `15b3b28` (Waves 1 through 3 committed —
-the forge-diet rewrite of `skills/skill-compounder/SKILL.md`, `skillinsight
-promote`/`decline --source`, the repeat gate's default-off refusal arm and the doc-gate
-fixes are all in) plus the uncommitted Wave 4 tree: `hooks/precompact.sh` and
-`tests/test_precompact.py` for issue #8, their wiring on both install paths, and the shared
-marker-extractor fix in `hooks/insight-capture.sh`. Written so nothing here depends
+What is actually open, as of **2026-09-02**, on the CI-fix commit following `385624f` —
+the one the close-out orchestrator makes next, carrying the CI-fix wave (apply-gate
+streaming, the `stat` order, the four test files, `ci.yml` and `.shellcheckrc`), the
+release packaging in `install.sh`, the E2E harness under `tests/e2e/`, and
+`skillforge doctor --json`. Everything through `385624f` is committed: Waves 1 through 3
+(the forge-diet rewrite of `skills/skill-compounder/SKILL.md`, `skillinsight
+promote`/`decline --source`, the repeat gate's default-off refusal arm, the doc-gate
+fixes) and Wave 4 (`hooks/precompact.sh` and `tests/test_precompact.py` for issue #8,
+their wiring on both install paths, the shared marker-extractor fix in
+`hooks/insight-capture.sh`). Written so nothing here depends
 on a session remembering it: every entry carries the command or the path that establishes
 it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
 close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
@@ -340,19 +344,75 @@ editing the prose alone.
   `docs/CLAUDE-CODE-BEHAVIOR.md` cover all three scopes; the model tier is a remaining limit
   stated in that file, and the same limit applies to every routing pin in `skills/`.
 
-## Still wanted: end-to-end testing the way a user meets it
+## Open: what the CI-fix wave found and did not fix
 
-Partly addressed by `edc2f60` ("Test the package as a user meets it, and fix what that
-found") and by the live routing probes, but not finished; this is issue #10. The remaining
-gap: install the package into a throwaway config directory, run real `claude -p` sessions
-against it, and watch the state files, the ledger and the weekly queue *while they run*,
-evaluating the outputs critically rather than checking exit codes. Never against the real
-`~/.claude`. Issue #14 (run the A-E pipeline end to end on a real trigger) and issue #15
-(trigger each of the nine skills from a real session) are the two concrete pieces of it.
+- **`hooks/repeat-gate.sh:553` dies `E2BIG` at about 890 KB of hook environment.**
+  `norm_bash`'s first `sed` is the hook's first `exec`, and `execve` counts the
+  environment as well as the argument vector, so in a narrow band just under the padding
+  at which the hook cannot be launched at all it launches and that `sed` cannot: bash
+  writes `/usr/bin/sed: Argument list too long` to the hook's stderr, which the hook does
+  not redirect and cannot suppress. **Measured at 891800 bytes of environment**, one unit
+  under the launch ceiling, while calibrating the deny-emit test in
+  `tests/test_repeat_gate.py` (`_probe_the_real_hook`, the `noisy` band). The exit status
+  was 0 at every padding — no turn was broken — so it was classified and stepped over
+  rather than repaired. The fix is to stop making a fresh `exec` of the whole `sed`
+  pipeline per call: bound what `norm_bash` hands out, or do the normalisation without
+  spawning under a large environment.
+- **19 shellcheck findings at warning/style.** Zero at `--severity=error`, which is where
+  the CI job's floor sits; the 19 are the ones left after the three codes `.shellcheckrc`
+  disables with reasons. Both counts and the path to raising the floor are in the "Lint
+  every shell script" step of `.github/workflows/ci.yml` and in `.shellcheckrc`'s
+  comments; re-derive with
+  `shellcheck -f gcc hooks/*.sh bin/* statusline/*.sh | grep -oE 'SC[0-9]+' | sort | uniq -c`.
+  **`install.sh` is not in that job's file list**, and it is now a script users pipe
+  straight into `bash`. Linted by hand on 2026-09-02 it has 0 findings at every severity
+  (`shellcheck -f gcc install.sh | wc -l` → 0), so adding it to the CI globs costs nothing
+  today and stops the next edit going unchecked. `uninstall.sh` is outside it too.
+- **`hooks/doc-gate.sh:966` may carry the same argv shape and nobody has measured it.**
+  The override row's file list goes in as `--arg files "$(cat "$TMP/code.txt")"`, and
+  `code.txt` grows with the number of changed code files across up to
+  `DOC_GATE_MAX_COMMITS` (100) commits. The jq program truncates to `.[0:8]`, but that
+  happens *after* the exec, so the truncation does not bound the argument. On Linux that
+  is one argv element against `MAX_ARG_STRLEN` (131072 bytes) — the same shape
+  `hooks/apply-gate.sh` was just fixed for. **Unmeasured**: no run has been observed
+  failing, and the ceiling is roughly two thousand paths, which no commit range here has
+  reached. Check it before assuming it is fine, and the fix is the one now written up in
+  `docs/DESIGN.md`'s portability section — `--rawfile` against `$TMP/code.txt`, which is
+  already on disk. Note the comment above that call says `--arg` is used to stay off
+  jq 1.6; `--rawfile` there would move this file onto the 1.6 floor the rest of the
+  package already sits on, so the two decisions have to be made together.
+- **#34: no forge has run under the diet.** The rewritten protocol has never been
+  executed end to end by a real forge, so nothing has measured whether the diet's round
+  budget holds.
+
+**CI green-ness is unverified until the push.** Everything above was fixed against
+GNU-shaped shims and a local run on macOS. No Ubuntu runner has seen this tree. Do not
+record CI as green on the strength of the local suite; read the run.
+
+Next after this: **#39**, the paid session review's default (it is on by default and
+spends money, and stage 2 cannot finish its own gate — see above), then **#40**, the docs
+split.
 
 ## Closed
 
 Kept as one line each so a returning session does not reopen them.
+
+- **End-to-end certification the way a user meets it is done** (the "Still wanted" entry
+  that stood here, and issue #36). `tests/e2e/journey.py` walks install → use → forge →
+  apply → uninstall in a throwaway config, bin and state directory, with a scratch git
+  project as the problem, and records the decisive line it saw at each step rather than an
+  exit code. First real run 2026-09-02: **all steps PASS, 6 sonnet calls, 34.9 s**, report
+  at `/tmp/skill-compounder-e2e-2026-09-02/REPORT.md`, and it found no product failures.
+  The report's own summary line reads `12 PASS` — the steps are numbered 0 through 11, so
+  "11 steps" (as the audit note first recorded it) is the last index, not the count.
+  It is not globbed by `run_tests.sh` and must never run in CI — it spends real calls;
+  `--no-model` exercises the harness for free. Operator's guide is `docs/e2e.md`. One limit
+  stays and is stated in the report: a throwaway `CLAUDE_CONFIG_DIR` cannot authenticate,
+  so sessions run on ambient credentials with `--settings` plus `--setting-sources ''`,
+  which puts the routing measurement at project scope with n=1. The three issues this
+  entry used to point at — #10, #14 and #15 — are all closed as of 2026-09-02
+  (`gh issue view <n> --repo ContextLab/claude-skill-compounder --json state`), so #36 is
+  the only tracker item left here and it is closable on this run.
 
 - **`#8` PreCompact capture is built.** It was "settled design, nothing written" through
   three waves. `hooks/precompact.sh` now captures skill candidates from the transcript

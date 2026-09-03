@@ -1771,6 +1771,9 @@ class DenyEmitFailureTest(GateCase):
     SMALL = 1500                    # > the store query's argv; these execs must still work
     BIG = 2300                      # > the capped deny reason this scenario builds
     MAX_UNITS = 100000              # 20 MB of padding before giving up
+    WINDOW = 40                     # UNITs either side of the proxy's answer to search
+
+    _probes = 0
 
     def _pad_env(self, units, **extra):
         e = self.env(**extra)
@@ -1789,7 +1792,18 @@ class DenyEmitFailureTest(GateCase):
             return False            # E2BIG surfaces here, before jq is ever entered
 
     def _calibrate(self):
-        """The largest padding at which a SMALL exec still works, by binary search."""
+        """The largest padding at which a SMALL exec still works, by binary search.
+
+        A STARTING POINT, NOT THE ANSWER. `jq -n --arg r <1500 bytes>` is a proxy for
+        the exec that actually has to survive -- the store query at
+        hooks/repeat-gate.sh:993, ~1336 bytes of jq program plus its own argv -- and a
+        proxy is not the thing. Linux charges every string in argv AND environ
+        separately against ARG_MAX, so a padding calibrated on a single 1500-byte
+        argument does not guarantee the query survives it: on ubuntu the query died
+        first, the hook failed open, and the assertion below reported "never reached
+        the deny arm; this test proved nothing". `_padding_that_silences_a_real_deny`
+        walks out from this answer and MEASURES the hook instead of trusting it.
+        """
         if not self._execs(0, self.SMALL):
             self.skipTest("a %d-byte exec fails with no padding at all" % self.SMALL)
         if self._execs(self.MAX_UNITS, self.SMALL):
@@ -1823,6 +1837,93 @@ class DenyEmitFailureTest(GateCase):
             self.run_hook(self.success(self.FIX_CMD, s))
         self.tick()
 
+    def _probe_sid(self):
+        """A throwaway session id EXACTLY as long as the real one below.
+
+        Two characters, like `s3`, because the session id is passed to the store query
+        as `--arg sid` and therefore counts against the very limit being straddled. A
+        probe id of a different length would size a slightly different exec from the one
+        the assertions then run, and the window here is under a kilobyte wide.
+        """
+        n = self._probes
+        self._probes += 1
+        sid = chr(ord("a") + n // 10) + str(n % 10)      # a0..e9, never s1/s2/s3
+        return sid
+
+    def _probe_the_real_hook(self, units):
+        """Deliver this scenario's attempt at this padding and report WHICH of the three
+        things happened, measured off the hook itself:
+
+          `emitted`      the deny reached stdout -- not enough padding, the emit lived
+          `denied`       the deny arm ran and the emit died -- what this test needs
+          `noisy`        an exec died and BASH announced it -- too much padding
+          `failed-open`  an exec before the deny arm died quietly -- too much padding
+          `unlaunchable` execve refused the hook itself -- far too much padding
+
+        `noisy` is a band this walk found rather than predicted, and it is why the
+        classification here does not assert. Just under the padding at which the hook
+        cannot be launched at all there is a band where it launches and its FIRST exec
+        cannot: `norm_bash`'s `sed` at hooks/repeat-gate.sh:553 dies E2BIG and bash
+        writes `/usr/bin/sed: Argument list too long` to the hook's stderr, which the
+        hook does not redirect and cannot suppress. Measured here at 891800 bytes of
+        environment, one UNIT under the launch ceiling. A padding in that band is
+        useless to this test whatever else it does, so it is CLASSIFIED and stepped
+        over -- the silence-on-stderr claim is asserted where it belongs, on the one
+        run the walk selects, below. The exit status is asserted at every padding
+        instead: no environment size excuses a hook breaking the turn, and none did.
+        """
+        self.tick()
+        sid = self._probe_sid()
+        try:
+            r = subprocess.run(["bash", HOOK],
+                               input=json.dumps(self.attempt(self.LONG_CMD, sid)),
+                               capture_output=True, text=True, timeout=180,
+                               env=self._pad_env(units, REPEAT_GATE_NOW=str(self.clock)))
+        except OSError:
+            return "unlaunchable"
+        self.assertEqual(r.returncode, 0, "the hook exited %d at %d bytes of padding"
+                                          % (r.returncode, units * self.UNIT))
+        if r.stderr:
+            return "noisy"
+        if r.stdout.strip():
+            return "emitted"
+        if os.path.isdir(os.path.join(self.state, "repeats", "denied", sid)):
+            return "denied"
+        return "failed-open"
+
+    def _padding_that_silences_a_real_deny(self):
+        """The padding this test needs: past what the emit survives, short of what the
+        store query before it survives. Found by walking OUT from the proxy's answer, a
+        UNIT at a time, until the hook is OBSERVED reaching the deny arm and losing the
+        emit -- and skipped, with the outcomes measured, if no padding does both.
+
+        Both directions, not just down. The proxy calibrates on 1500 bytes; the query is
+        ~1490 and the emit ~2150, so the proxy's answer can land on either side of the
+        window depending on how a platform accounts for the environment, and a one-way
+        walk would be right about one platform by construction.
+        """
+        start = self._calibrate()
+        order = [start]
+        for d in range(1, self.WINDOW + 1):
+            order += [start - d, start + d]
+        bands = {}
+        for units in order:
+            if units < 0:
+                continue
+            outcome = self._probe_the_real_hook(units)
+            lo, hi, n = bands.get(outcome, (units, units, 0))
+            bands[outcome] = (min(lo, units), max(hi, units), n + 1)
+            if outcome == "denied":
+                return units
+        self.skipTest(
+            "no environment size straddles the store query and the emit on this "
+            "platform: the proxy calibrated at %d units (%d bytes), and every padding "
+            "within %d bytes of it fell in a band that cannot show this -- %s"
+            % (start, start * self.UNIT, self.WINDOW * self.UNIT,
+               ", ".join("%s at %d-%d bytes (%d probes)"
+                         % (k, lo * self.UNIT, hi * self.UNIT, n)
+                         for k, (lo, hi, n) in sorted(bands.items()))))
+
     def test_the_scenario_really_does_refuse_and_the_reason_is_near_its_cap(self):
         """Non-vacuity for the test below, which asserts on SILENCE. Without this, a
         scenario that simply never refused would satisfy it."""
@@ -1833,8 +1934,11 @@ class DenyEmitFailureTest(GateCase):
                            "the emit on the far side of the store query")
 
     def test_a_deny_that_could_not_be_emitted_does_not_burn_the_claim(self):
-        units = self._calibrate()
+        # TEACHING FIRST, because the calibration below now runs the real hook and a
+        # hook with nothing to refuse cannot show whether it reached the deny arm.
         self._teach_a_big_refusal()
+        units = self._padding_that_silences_a_real_deny()
+        self.tick()
 
         r = subprocess.run(["bash", HOOK],
                            input=json.dumps(self.attempt(self.LONG_CMD, "s3")),

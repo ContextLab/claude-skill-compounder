@@ -308,7 +308,7 @@ class CaptureTest(PrecompactTestBase):
         self.assertEqual(len(self.records()), 2)
 
     def test_a_marker_immediately_after_another_is_captured(self):
-        """THE REGRESSION TEST FOR A FIXED DEFECT IN THE SHARED EXTRACTOR. It was never
+        r"""THE REGRESSION TEST FOR A FIXED DEFECT IN THE SHARED EXTRACTOR. It was never
         this hook's defect alone: the scan is copied verbatim from
         hooks/insight-capture.sh and that hook produced one row from the identical
         two-marker text.

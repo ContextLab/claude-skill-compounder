@@ -1292,7 +1292,17 @@ SOURCES_EOF
       # still a verdict from the day it was returned, and filing it under today would put
       # it at the top of `reviews` above reviews that came after it. mtime is what the
       # run left behind; `reindexed_at` below is the only thing that carries today.
-      ri_mt="$(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null)"
+      # GNU FORM FIRST, VALIDATE, THEN BSD -- never a plain `A || B` chain. On GNU
+      # coreutils `-f` is --file-system, not a format string, so `stat -f %m FILE` there
+      # reports on the filesystem, still writes to stdout, and `$( )` captures that. An
+      # `||` chain therefore never reaches the GNU form at all: the numeric guard rejects
+      # the captured text and every recovered verdict falls back to NOW -- filed under
+      # today, above reviews that came after it, which is exactly what the paragraph
+      # above says must not happen. BSD stat has no -c, so it fails cleanly and macOS
+      # reaches the second form. Same ordering, and the same reason, as the base-cache
+      # mtime in statusline/statusline.sh.
+      ri_mt="$(stat -c %Y "$sf" 2>/dev/null)"
+      case "$ri_mt" in ''|*[!0-9]*) ri_mt="$(stat -f %m "$sf" 2>/dev/null)" ;; esac
       case "$ri_mt" in ''|*[!0-9]*) ri_mt="$now" ;; esac
       ri_ts="$(date -u -r "$ri_mt" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
                || date -u -d "@$ri_mt" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"

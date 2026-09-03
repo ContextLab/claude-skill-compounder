@@ -168,6 +168,19 @@ through `gh` and only to read: see [Contributing a skill back](#contributing-a-s
 curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash
 ```
 
+Pinned to a release, which is the form to prefer once a tag exists:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | SKILL_COMPOUNDER_REF=v0.3.0 bash
+```
+
+`v0.3.0` is the first tagged release and it has not been cut yet;
+`git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists the
+tags that exist right now. With `SKILL_COMPOUNDER_REF` unset the installer takes `main`,
+which is whatever was last pushed to it, so two people running the plain one-liner on the
+same day can end up on different code. `--ref v0.3.0` is the flag form, and over the pipe
+it needs `bash -s -- --ref v0.3.0`.
+
 Or from a clone:
 
 ```bash
@@ -180,6 +193,98 @@ Requires `python3` (installer only), `jq` (hooks, CLIs, and status line), and
 
 Hooks and skills are picked up **without restarting Claude Code**, though `/hooks` forces
 a config reload if you want to be certain.
+
+### Five-minute quickstart
+
+Nothing has to be forged for any of this to pay for itself. The two cheap tiers cost one
+command each, and one more command says whether the install took.
+
+Write a lesson down where a later session will read it:
+
+```bash
+skillnote add --scope project "the suite is ./run_tests.sh, not pytest" \
+  --why "pytest collects nothing here"
+```
+
+That appends a dated line to this project's `.claude/CLAUDE.md`, inside a
+`skillnote:begin`/`skillnote:end` marker block, and writes a `note` row to the ledger.
+`--scope global` puts it in `~/.claude/CLAUDE.md`; `--scope memory` writes a Claude Code
+memory file plus the `MEMORY.md` index line that gets it read back.
+
+A lesson that applies only at one moment is a reminder rather than a note. Give it the
+words, the path or the command that should bring it back:
+
+```bash
+skillnote add --remind --scope project "run the migration before the seed script" \
+  --keyword migration --command "python manage.py loaddata"
+```
+
+`hooks/remind.sh` states that back when your prompt carries the keyword, or when a `Bash`,
+`Write` or `Edit` call matches the command signature. It denies nothing.
+`skillnote list --scope remind` shows what is armed, and `skillnote remove <id>` disarms
+one.
+
+Then check the wiring:
+
+```bash
+skillforge doctor
+```
+
+One line per check — `jq`, the state directory, the hook entries in your `settings.json`,
+the status line marker, the skill and CLI symlinks, the ledger, the counters, and any
+forge left running — and exit 1 if any of them failed. Run it first whenever something
+seems not to be firing.
+
+Forging is the expensive tier and it comes later, once a note has been rewritten often
+enough to count as a recurrence:
+[Three ways to compound](#three-ways-to-compound-note-reminder-skill).
+
+### Supported versions
+
+|What|What is supported|Where that comes from|
+|-|-|-|
+|Claude Code CLI|2.1.241 through 2.1.259|the range every entry in `docs/CLAUDE-CODE-BEHAVIOR.md` was measured against: `grep -ohE '2\.1\.2[0-9]+' docs/CLAUDE-CODE-BEHAVIOR.md \| sort -uV \| sed -n '1p;$p'`|
+|`bash`|3.2 and newer|macOS ships 3.2 (`/bin/bash --version`), and the shell rules in `docs/DESIGN.md` are written against it. The ubuntu runner ships a much newer one; both print theirs in the `bash --version \| head -1` step of `.github/workflows/ci.yml`|
+|`zsh`|parsed, not pinned|every shipped script must pass `zsh -n` as well as `bash -n`, on both runners, in that same step|
+|`jq`|1.6 and newer|`skillforge doctor` fails below it and says why: `skillforge backfill` passes `--rawfile`, which jq did not have before 1.6|
+|`python3`|3.9|what CI installs (`grep python-version .github/workflows/ci.yml`). The installer is the only thing here that uses it|
+|macOS and Ubuntu|both|the CI matrix (`grep -m1 'os: \[' .github/workflows/ci.yml`)|
+
+A tag is cut only once the suite is green on both of those operating systems and the
+end-to-end journey has passed against a throwaway config:
+[docs/e2e.md](docs/e2e.md). The rest of the release procedure is
+[docs/releasing.md](docs/releasing.md).
+
+### Updating and rolling back
+
+The `curl` one-liner clones into `~/.claude/skill-compounder-app` and installs from there.
+Re-running it **re-wires that checkout without moving it**. Moving it is a separate ask:
+
+```bash
+./install.sh --update                 # fetch and move to SKILL_COMPOUNDER_REF (default main)
+./install.sh --update --ref v0.3.0    # or to a tag you name
+./install.sh --rollback               # back to the ref recorded before that update
+```
+
+`--update` used to be implicit: a re-run ran `git pull --ff-only` on its way through, so
+asking to repair a broken install could hand you a different version of the package than
+the one that was broken. The two asks are now separate, and the reasoning is in
+[docs/DESIGN.md](docs/DESIGN.md#an-install-pins-a-ref-and-updating-is-a-separate-ask).
+
+`install.sh` writes the ref it checked out to `<state>/install-ref` along with the one
+before it, and `--rollback` reads that. With no previous ref recorded it refuses and says
+so rather than guessing. `SKILL_COMPOUNDER_UPDATE=1` is the environment form of `--update`,
+for the `curl` pipeline where a flag needs `bash -s --`.
+
+Those two names are the only environment variables `install.sh` reads:
+`SKILL_COMPOUNDER_REF` (default `main`) chooses the ref, and `SKILL_COMPOUNDER_UPDATE`
+(unset by default; `1` turns it on) asks for the move. Both are read at install time only,
+so neither belongs in the [Tuning](#tuning) table or in `~/.claude/settings.json` — set
+them on the command that runs the installer, or use `--ref` and `--update`.
+
+All three manage only the checkout `install.sh` cloned. Run them from a clone you made
+yourself and they refuse, naming the `git` commands to run instead: that checkout is
+yours, and moving it would discard whatever you had in it.
 
 ### What the installer writes into your `CLAUDE.md`
 
@@ -212,8 +317,9 @@ the doctrine twice. And to skip it entirely, by flag or by variable:
 SKILL_COMPOUNDER_DOCTRINE=0 ./install.sh
 ```
 
-`install.sh` passes its arguments straight to `scripts/setup.py`, so the flag works from a
-clone and over `curl … | bash -s -- --no-doctrine`. The flag is the stronger of the two:
+`install.sh` handles `--ref`, `--update` and `--rollback` itself and passes every other
+argument straight to `scripts/setup.py`, so the flag works from a clone and over
+`curl … | bash -s -- --no-doctrine`. The flag is the stronger of the two:
 `--no-doctrine` declines even where `SKILL_COMPOUNDER_DOCTRINE=1` is set, and leaving it
 off does not override a `SKILL_COMPOUNDER_DOCTRINE=0` in your environment.
 
@@ -916,12 +1022,27 @@ Noisy reminders are a tuning problem. The knobs worth setting are in the table b
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
 All thirty-four are environment variables, and they are not the whole set — this
-prints every name any shipped script reads, 103 of them:
+prints every name the hooks, the six CLIs, the status line and `install.sh` read, 111 of
+them as of 2026-09-02 (`uninstall.sh` and `scripts/` are outside it):
 
 ```bash
-grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
-  hooks/*.sh bin/* statusline/*.sh | sort -u
+grep -ohE '\b(CI|CLAUDE_SKILL_COMPOUNDER|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
+  hooks/*.sh bin/* statusline/*.sh install.sh | sort -u
 ```
+
+`install.sh` is in that list and its four names are the exception to everything below it.
+`SKILL_COMPOUNDER_REF`, `SKILL_COMPOUNDER_UPDATE`, `CLAUDE_SKILL_COMPOUNDER_APP` (where
+the managed checkout goes) and `CLAUDE_SKILL_COMPOUNDER_STATE` (where the state directory
+goes; `uninstall.sh` reads the same two) are read at **install time**, before any of this
+is wired up — so none has a row in the table and none has any place in
+`~/.claude/settings.json`, where setting them does nothing. Set them on the command that
+runs the installer. The first two are documented where they are used, under
+[Updating and rolling back](#updating-and-rolling-back).
+
+`CLAUDE_SKILL_COMPOUNDER` is in the alternation for those two names alone, and it has to
+be: the leading `\b` cannot match inside `CLAUDE_SKILL_COMPOUNDER`, because the position
+before `SKILL` sits between two word characters, so the `SKILL_COMPOUNDER` branch does not
+reach them.
 
 The closing `\b` arrived with `REMIND`, and it is not decoration. The suffix group is
 optional, so without it a bare prefix also matches the start of a longer word: `$REMINDERS`
@@ -1057,6 +1178,13 @@ destroyed to prove the destructive-op fixtures, a real virtual environment to pr
 stale-import one, and live `gh` queries against a repo with thousands of pull requests in
 every state. The `gh` tests skip cleanly when it is absent or unauthenticated; nothing
 else does.
+
+The suite never spends a model call. The acceptance journey that does — one pass through
+install, note, reminder, capture, forge, route, apply, report and uninstall against a
+throwaway Claude config — is a script you run by hand, never in CI:
+`python3 tests/e2e/journey.py --out <a fresh dir>`, six `claude -p` calls on your own
+subscription, or `--no-model` to rehearse it for nothing. It is the gate a release tag
+waits on: [docs/e2e.md](docs/e2e.md).
 
 CI runs the suite on both ubuntu and macos, because macOS ships bash 3.2 and that is
 where this repo's shell portability traps actually bite. It also runs

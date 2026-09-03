@@ -171,7 +171,7 @@ class TheOutputIsReadableByAPersonAndByGrep(DoctorCase):
     def test_every_check_prints_one_line_whose_first_word_is_the_verdict(self):
         r = self.doctor(SKILLFORGE_NOW=T0)
         for label in ("jq", "state", "settings", "statusline", "skills",
-                      "ledger", "counters", "forges"):
+                      "ledger", "counters", "forges", "review"):
             self.assertIn(verdict(r.stdout, label), ("PASS", "WARN", "FAIL"),
                           "no verdict line for '%s': %r" % (label, r.stdout))
 
@@ -576,6 +576,119 @@ class TheStuckForgeCheck(DoctorCase):
         r = self.doctor(SKILLFORGE_NOW=T0 + 8 * HOUR)
         self.assertIn("cannot be reaped", r.stdout,
                       "an unreachable open start was not reported: %r" % r.stdout)
+
+
+# ---------------------------------------------------------------------------- review
+
+class TheReviewCheck(DoctorCase):
+    """Informational only: hooks/session-review.sh is a detached, paid-for surface named
+    in neither settings.json nor hooks/hooks.json, so this is the only place a user can
+    see whether it is live. It must never itself be a FAIL -- whether review is on or off
+    is a choice, not a fault this package can judge."""
+
+    def test_enabled_by_default(self):
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "review"), "PASS", line_for(r.stdout, "review"))
+        self.assertIn("review: enabled", line_for(r.stdout, "review"))
+
+    def test_disabled_reflects_the_off_switch_and_still_passes(self):
+        r = self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=0)
+        self.assertEqual(verdict(r.stdout, "review"), "PASS", line_for(r.stdout, "review"))
+        self.assertIn("review: disabled", line_for(r.stdout, "review"))
+
+    def test_anything_other_than_the_literal_zero_is_still_enabled(self):
+        """hooks/session-review.sh only turns off on the literal string '0'
+        (REVIEW_ON="${SKILL_COMPOUNDER_REVIEW:-1}"; [ "$REVIEW_ON" = "0" ]), so this check
+        has to read the switch the same way or it could report a wiring that script does
+        not itself have."""
+        r = self.doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW="false")
+        self.assertEqual(verdict(r.stdout, "review"), "PASS", line_for(r.stdout, "review"))
+        self.assertIn("review: enabled", line_for(r.stdout, "review"))
+
+
+# --------------------------------------------------------------------------- --json
+
+class TheJsonForm(DoctorCase):
+    def json_doctor(self, **extra):
+        r = self.run_cli("doctor", "--json", **extra)
+        return r
+
+    def test_it_parses_as_one_json_object_and_nothing_else_is_on_stdout(self):
+        self.write_settings()
+        r = self.json_doctor(SKILLFORGE_NOW=T0)
+        obj = json.loads(r.stdout)
+        self.assertIsInstance(obj, dict, r.stdout)
+        for key in ("checks", "pass", "warn", "fail", "exit", "now", "state"):
+            self.assertIn(key, obj, "missing '%s': %r" % (key, obj))
+
+    def test_every_check_the_text_form_prints_is_in_the_json_form(self):
+        self.write_settings()
+        text = self.doctor(SKILLFORGE_NOW=T0)
+        js = self.json_doctor(SKILLFORGE_NOW=T0)
+        obj = json.loads(js.stdout)
+        names = {c["name"] for c in obj["checks"]}
+        for label in ("jq", "state", "settings", "statusline", "skills",
+                      "ledger", "counters", "forges", "review"):
+            self.assertIn(label, names, "'%s' is in the text form but not --json" % label)
+            self.assertEqual(verdict(text.stdout, label),
+                             next(c["status"] for c in obj["checks"] if c["name"] == label),
+                             "the verdict for '%s' differs between the text and JSON forms" % label)
+
+    def test_the_counts_match_the_text_forms_counts(self):
+        self.write_settings()
+        text = self.doctor(SKILLFORGE_NOW=T0)
+        js = self.json_doctor(SKILLFORGE_NOW=T0)
+        obj = json.loads(js.stdout)
+        m = re.search(r"^(\d+) pass, (\d+) warn, (\d+) fail$", text.stdout, re.M)
+        self.assertTrue(m, "no summary line in the text form: %r" % text.stdout)
+        want_pass, want_warn, want_fail = (int(g) for g in m.groups())
+        self.assertEqual(obj["pass"], want_pass)
+        self.assertEqual(obj["warn"], want_warn)
+        self.assertEqual(obj["fail"], want_fail)
+        self.assertEqual(len(obj["checks"]), want_pass + want_warn + want_fail)
+
+    def test_a_clean_state_exits_zero_with_exit_field_zero(self):
+        self.write_settings()
+        r = self.json_doctor(SKILLFORGE_NOW=T0)
+        obj = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(obj["exit"], 0)
+        self.assertEqual(obj["fail"], 0)
+
+    def test_a_fail_sets_both_the_process_exit_and_the_json_exit_field(self):
+        """Same fault the text form's test_a_state_directory_that_will_not_take_a_write_
+        fails uses: chmod the state root read-only so the probe write fails."""
+        self.start()
+        os.chmod(str(self.state), 0o555)
+        try:
+            r = self.json_doctor(SKILLFORGE_NOW=T0)
+        finally:
+            os.chmod(str(self.state), 0o755)
+        obj = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(obj["exit"], 1)
+        self.assertGreaterEqual(obj["fail"], 1)
+        self.assertEqual(next(c["status"] for c in obj["checks"] if c["name"] == "state"),
+                         "FAIL")
+
+    def test_the_review_check_reflects_the_env_var_in_json_too(self):
+        on = self.json_doctor(SKILLFORGE_NOW=T0)
+        off = self.json_doctor(SKILLFORGE_NOW=T0, SKILL_COMPOUNDER_REVIEW=0)
+        on_review = next(c for c in json.loads(on.stdout)["checks"] if c["name"] == "review")
+        off_review = next(c for c in json.loads(off.stdout)["checks"] if c["name"] == "review")
+        self.assertEqual(on_review["status"], "PASS")
+        self.assertIn("enabled", on_review["detail"])
+        self.assertEqual(off_review["status"], "PASS")
+        self.assertIn("disabled", off_review["detail"])
+
+    def test_doctor_leaves_the_state_directory_exactly_as_it_found_it_in_json_mode(self):
+        self.start()
+        before = sorted(p.relative_to(self.state).as_posix()
+                        for p in self.state.rglob("*"))
+        self.json_doctor(SKILLFORGE_NOW=T0 + 8 * HOUR)
+        after = sorted(p.relative_to(self.state).as_posix()
+                       for p in self.state.rglob("*"))
+        self.assertEqual(before, after, "doctor --json changed the state directory")
 
 
 if __name__ == "__main__":

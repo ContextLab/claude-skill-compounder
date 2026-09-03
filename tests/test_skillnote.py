@@ -49,6 +49,58 @@ NOW = 1788000000          # 2026-08-29T10:40:00Z
 LATER = NOW + 86400
 
 
+# A stand-in for GNU coreutils' `stat` on a machine that ships the BSD one. It is not a
+# mock of anything in this package: it is the OTHER PLATFORM'S TOOL, so an ordering that
+# only works against BSD stat fails here the way it fails on ubuntu.
+#
+#   `-c FMT`  answers, which is the GNU spelling and the one BSD stat rejects outright.
+#   `-f FMT`  is --file-system on GNU: the format is applied to a STATFS, `%m` is not a
+#             directive it knows, and what comes out is filesystem prose on stdout with a
+#             non-zero status. A caller that writes `stat -f %m f || stat -c %Y f` never
+#             reaches the second form, captures the prose, and falls back to NOW.
+#
+# The answer itself is delegated to the REAL stat through whichever spelling that stat
+# understands, so the shim never invents a value; only the interface is swapped.
+# Duplicated verbatim in tests/test_insights.py and tests/test_session_review.py --
+# these files shell out and share no imports, and this is the platform, not a helper.
+SHIM_STAT = r"""#!/bin/bash
+# An optional argv log, so a test can assert WHICH spelling was tried and in what order.
+[ -n "${SHIM_STAT_LOG-}" ] && printf '%%s\n' "$*" >> "$SHIM_STAT_LOG"
+_real_field() {   # $1 GNU format, $2 BSD format, $3 file
+  _v="$("%(real)s" -c "$1" "$3" 2>/dev/null)"
+  case "$_v" in ''|*[!0-9]*) _v="$("%(real)s" -f "$2" "$3" 2>/dev/null)" ;; esac
+  printf '%%s' "$_v"
+}
+if [ "${1-}" = "-c" ]; then
+  case "${2-}" in
+    '%%Y') _out="$(_real_field %%Y %%m "${3-}")" ;;
+    '%%a') _out="$(_real_field %%a %%OLp "${3-}")" ;;
+    *) exit 1 ;;
+  esac
+  [ -n "$_out" ] || exit 1
+  printf '%%s\n' "$_out"
+  exit 0
+fi
+if [ "${1-}" = "-f" ]; then
+  printf '  File: "%%s"\n  ID: 0 Namelen: 255 Type: ext2/ext3\n' "${3-}"
+  exit 1
+fi
+exit 1
+"""
+
+
+def write_stat_shim(directory):
+    """Put the GNU-mimicking `stat` first on a PATH built from `directory`."""
+    real = shutil.which("stat", path=PATH)
+    if real is None:                      # nothing in this repo can run without stat
+        raise AssertionError("no stat on the test PATH")
+    directory.mkdir(parents=True, exist_ok=True)
+    shim = directory / "stat"
+    shim.write_text(SHIM_STAT % {"real": real})
+    shim.chmod(0o755)
+    return "%s:%s" % (directory, PATH)
+
+
 def norm_of_available():
     """Does this checkout's repeat-gate actually answer `--norm-of`? Run it and see."""
     if not os.access(str(GATE), os.X_OK):
@@ -465,6 +517,51 @@ class BackupTest(SkillnoteCase):
                          "the original must be intact, never truncated")
         leftovers = [p.name for p in d.iterdir() if p.name.startswith(".skillnote.")]
         self.assertEqual(leftovers, [], "a temp file survived a failed write: %r" % leftovers)
+
+
+class ModePreservationTest(SkillnoteCase):
+    """`write_atomic` writes a NEW file and renames it over the old one, so the old
+    file's permissions have to be read and re-applied or every note silently widens or
+    narrows the user's CLAUDE.md. `mode_of` is what reads them, and it had never been
+    exercised against GNU coreutils -- the platform where `stat -f` means
+    --file-system rather than "use this format".
+
+    Nothing was actually wrong with the answer: mode_of validates its RESULT against an
+    octal shape instead of trusting the exit status, so GNU's filesystem prose fell
+    through to the `-c '%a'` form and the right mode came back. What was wrong is that
+    nothing tested it, and the call order asked GNU stat for a filesystem report on every
+    single write. These two tests pin the answer AND the order, so the ordering that is
+    correct on both platforms is the one the next author copies.
+    """
+
+    def test_an_existing_files_mode_survives_a_note_under_a_gnu_stat(self):
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_md.write_text("# My project\n", encoding="utf-8")
+        os.chmod(str(self.claude_md), 0o640)
+        shim_path = write_stat_shim(self.root / "gnu-stat")
+        self.ok("add", "--scope", "project", "a lesson", PATH=shim_path)
+        self.assertIn("a lesson", self.claude_md.read_text(encoding="utf-8"))
+        self.assertEqual(oct(os.stat(str(self.claude_md)).st_mode & 0o7777), oct(0o640),
+                         "the mode was lost across the atomic write")
+
+    def test_the_gnu_spelling_is_tried_first_and_the_bsd_one_is_never_reached(self):
+        """The ordering, observed rather than asserted from the source. On GNU the `-f`
+        form can only ever be a doomed process whose stdout happens not to look octal;
+        asking for it first is the shape that broke bin/skillinsight and
+        hooks/session-review.sh outright."""
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_md.write_text("# My project\n", encoding="utf-8")
+        os.chmod(str(self.claude_md), 0o640)
+        shim_path = write_stat_shim(self.root / "gnu-stat")
+        log = self.root / "stat-calls.log"
+        self.ok("add", "--scope", "project", "a lesson",
+                PATH=shim_path, SHIM_STAT_LOG=str(log))
+        calls = [l for l in log.read_text().splitlines() if l.strip()]
+        self.assertTrue(calls, "the shim was never called; this test proved nothing")
+        self.assertTrue(calls[0].startswith("-c "),
+                        "the first stat spelling tried was %r" % calls[0])
+        self.assertEqual([c for c in calls if c.startswith("-f ")], [],
+                         "GNU stat was asked for a filesystem report: %s" % calls)
 
 
 class SymlinkTest(SkillnoteCase):

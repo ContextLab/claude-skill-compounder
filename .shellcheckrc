@@ -1,0 +1,29 @@
+# ShellCheck configuration for this repository.
+#
+# Read by `shellcheck` for any file under this directory, so the CI job and a local
+# run see the same rules. Three codes are disabled, and the bar for being here is
+# narrow on purpose: EVERY instance in the tree must be an intentional pattern this
+# repository already documents, verified one at a time. A code with even one genuine
+# finding stays enabled and is fixed in the script instead. The counts below were
+# taken with shellcheck 0.11.0 over `hooks/*.sh bin/* statusline/*.sh` on 2026-09-02;
+# re-derive with `shellcheck -f gcc hooks/*.sh bin/* statusline/*.sh | grep -oE 'SC[0-9]+' | sort | uniq -c`.
+
+# why: single-quoted strings that are meant to stay literal. All 25 instances are one
+# of three deliberate shapes: a jq program whose `$name` is a jq variable bound by
+# `--arg` (never a shell variable), a `sed` program, or a `printf` format string
+# carrying literal backticks and `$` for the Markdown a hook writes. Double-quoting any
+# of them would break it, which is the opposite of what this check suggests.
+disable=SC2016
+
+# why: positional field names in `IFS="$SEP" read -r a b c d` over a delimited record.
+# All 16 instances name every field of the record even where the branch consumes only
+# some, which is how the record's shape stays readable at the read site. They are not
+# unused variables in the sense the check means; dropping them would make the field
+# order implicit and the next reader would have to count separators.
+disable=SC2034
+
+# why: functions reached only through `trap`. All 7 instances are `cleanup` (six
+# scripts, each with `trap cleanup EXIT`) or `flush_stage1`, which `cleanup` calls.
+# ShellCheck cannot see a trap as an invocation, and the check says so itself:
+# "or ignored if invoked indirectly".
+disable=SC2329

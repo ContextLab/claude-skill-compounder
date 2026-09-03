@@ -55,6 +55,58 @@ INJECTION = (
     + "─" * 24 + '`"')
 
 
+# A stand-in for GNU coreutils' `stat` on a machine that ships the BSD one. It is not a
+# mock of anything in this package: it is the OTHER PLATFORM'S TOOL, so an ordering that
+# only works against BSD stat fails here the way it fails on ubuntu.
+#
+#   `-c FMT`  answers, which is the GNU spelling and the one BSD stat rejects outright.
+#   `-f FMT`  is --file-system on GNU: the format is applied to a STATFS, `%m` is not a
+#             directive it knows, and what comes out is filesystem prose on stdout with a
+#             non-zero status. A caller that writes `stat -f %m f || stat -c %Y f` never
+#             reaches the second form, captures the prose, and falls back to NOW.
+#
+# The answer itself is delegated to the REAL stat through whichever spelling that stat
+# understands, so the shim never invents a value; only the interface is swapped.
+# Duplicated verbatim in tests/test_session_review.py and tests/test_skillnote.py --
+# these files shell out and share no imports, and this is the platform, not a helper.
+SHIM_STAT = r"""#!/bin/bash
+# An optional argv log, so a test can assert WHICH spelling was tried and in what order.
+[ -n "${SHIM_STAT_LOG-}" ] && printf '%%s\n' "$*" >> "$SHIM_STAT_LOG"
+_real_field() {   # $1 GNU format, $2 BSD format, $3 file
+  _v="$("%(real)s" -c "$1" "$3" 2>/dev/null)"
+  case "$_v" in ''|*[!0-9]*) _v="$("%(real)s" -f "$2" "$3" 2>/dev/null)" ;; esac
+  printf '%%s' "$_v"
+}
+if [ "${1-}" = "-c" ]; then
+  case "${2-}" in
+    '%%Y') _out="$(_real_field %%Y %%m "${3-}")" ;;
+    '%%a') _out="$(_real_field %%a %%OLp "${3-}")" ;;
+    *) exit 1 ;;
+  esac
+  [ -n "$_out" ] || exit 1
+  printf '%%s\n' "$_out"
+  exit 0
+fi
+if [ "${1-}" = "-f" ]; then
+  printf '  File: "%%s"\n  ID: 0 Namelen: 255 Type: ext2/ext3\n' "${3-}"
+  exit 1
+fi
+exit 1
+"""
+
+
+def write_stat_shim(directory):
+    """Put the GNU-mimicking `stat` first on a PATH built from `directory`."""
+    real = shutil.which("stat", path=PATH)
+    if real is None:                      # nothing in this repo can run without stat
+        raise AssertionError("no stat on the test PATH")
+    directory.mkdir(parents=True, exist_ok=True)
+    shim = directory / "stat"
+    shim.write_text(SHIM_STAT % {"real": real})
+    shim.chmod(0o755)
+    return "%s:%s" % (directory, PATH)
+
+
 class InsightsTestBase(unittest.TestCase):
 
     def setUp(self):
@@ -137,7 +189,7 @@ class CaptureTest(InsightsTestBase):
         self.assertTrue(recs[0]["hash"])
 
     def test_a_marker_immediately_after_another_is_captured(self):
-        """THE REGRESSION TEST FOR A FIXED DEFECT, pinned here because this is where the
+        r"""THE REGRESSION TEST FOR A FIXED DEFECT, pinned here because this is where the
         defect lived: the same scan is copied into hooks/precompact.sh, and both hooks
         were measured producing ONE row from this exact two-marker text on 2026-09-02.
 
@@ -820,6 +872,51 @@ class ReindexTest(InsightsTestBase):
         self.assertNotEqual(row["ts"], row["reindexed_at"])
         self.assertEqual(row["reindexed_at"],
                          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW)))
+
+    def test_the_timestamp_is_still_the_answers_own_age_under_a_gnu_stat(self):
+        """THE UBUNTU FAILURE, REPRODUCED HERE. `reindex` read the answer's mtime with
+        `stat -f %m F || stat -c %Y F`. On GNU coreutils `-f` is --file-system, so the
+        first form reports on the filesystem rather than failing: the `$( )` captured that
+        text, the numeric guard rejected it, and every recovered verdict was filed under
+        TODAY -- above reviews that came after it, which is the one thing the code comment
+        beside it says must not happen. The `||` meant the GNU form was never reached at
+        all.
+
+        The shim is GNU's interface over the real stat's answers, so this pins the
+        ORDERING (GNU form, validate, then BSD) on a machine that has no GNU stat.
+        """
+        old = NOW - 90 * 86400
+        shim_path = write_stat_shim(self.root / "gnu-stat")
+        self.plant("aaaa4444-0000-0000-0000-000000000009", mtime=old)
+        r = self.run_cli("reindex", PATH=shim_path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.rows()[0]
+        self.assertEqual(row["ts"], time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                  time.gmtime(old)),
+                         "the mtime was lost to GNU's `stat -f` and the row got today")
+        self.assertEqual(row["week"], time.strftime("%G-W%V", time.gmtime(old)))
+        self.assertNotEqual(row["week"], WEEK)
+
+    def test_the_gnu_stat_shim_really_answers_and_really_refuses(self):
+        """A shim that quietly did nothing would make the test above vacuous: it would
+        pass against BSD-first ordering too. Both halves are observed."""
+        shim_path = write_stat_shim(self.root / "gnu-stat")
+        shim = self.root / "gnu-stat" / "stat"
+        target = self.root / "probe"
+        target.write_text("x")
+        os.utime(target, (NOW - 12345, NOW - 12345))
+        good = subprocess.run([str(shim), "-c", "%Y", str(target)], capture_output=True,
+                              text=True, env={"PATH": shim_path}, timeout=TIMEOUT)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertEqual(good.stdout.strip(), str(NOW - 12345))
+        bad = subprocess.run([str(shim), "-f", "%m", str(target)], capture_output=True,
+                             text=True, env={"PATH": shim_path}, timeout=TIMEOUT)
+        self.assertNotEqual(bad.returncode, 0,
+                            "GNU's `stat -f %m` does not succeed; the shim must not")
+        self.assertNotEqual(bad.stdout.strip(), "",
+                            "the defect needs stdout to be non-empty and non-numeric: "
+                            "that is what an `||` chain captures and keeps")
+        self.assertFalse(bad.stdout.strip().isdigit())
 
     def test_the_project_is_recovered_from_the_reviewed_sessions_transcript(self):
         """The stage-1 JSON's `session_id` is the id of the session the MODEL ran in, so

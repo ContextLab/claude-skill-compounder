@@ -66,6 +66,58 @@ NO_CLI, BAD_ARGV, CLAIMED, LOCKED, COOLDOWN = 14, 15, 16, 17, 18
 UNWRITABLE, NO_DIGEST = 19, 20
 
 
+# A stand-in for GNU coreutils' `stat` on a machine that ships the BSD one. It is not a
+# mock of anything in this package: it is the OTHER PLATFORM'S TOOL, so an ordering that
+# only works against BSD stat fails here the way it fails on ubuntu.
+#
+#   `-c FMT`  answers, which is the GNU spelling and the one BSD stat rejects outright.
+#   `-f FMT`  is --file-system on GNU: the format is applied to a STATFS, `%m` is not a
+#             directive it knows, and what comes out is filesystem prose on stdout with a
+#             non-zero status. A caller that writes `stat -f %m d || stat -c %Y d` never
+#             reaches the second form and keeps the prose.
+#
+# The answer itself is delegated to the REAL stat through whichever spelling that stat
+# understands, so the shim never invents a value; only the interface is swapped.
+# Duplicated verbatim in tests/test_insights.py and tests/test_skillnote.py -- these files
+# shell out and share no imports, and this is the platform, not a helper.
+SHIM_STAT = r"""#!/bin/bash
+# An optional argv log, so a test can assert WHICH spelling was tried and in what order.
+[ -n "${SHIM_STAT_LOG-}" ] && printf '%%s\n' "$*" >> "$SHIM_STAT_LOG"
+_real_field() {   # $1 GNU format, $2 BSD format, $3 file
+  _v="$("%(real)s" -c "$1" "$3" 2>/dev/null)"
+  case "$_v" in ''|*[!0-9]*) _v="$("%(real)s" -f "$2" "$3" 2>/dev/null)" ;; esac
+  printf '%%s' "$_v"
+}
+if [ "${1-}" = "-c" ]; then
+  case "${2-}" in
+    '%%Y') _out="$(_real_field %%Y %%m "${3-}")" ;;
+    '%%a') _out="$(_real_field %%a %%OLp "${3-}")" ;;
+    *) exit 1 ;;
+  esac
+  [ -n "$_out" ] || exit 1
+  printf '%%s\n' "$_out"
+  exit 0
+fi
+if [ "${1-}" = "-f" ]; then
+  printf '  File: "%%s"\n  ID: 0 Namelen: 255 Type: ext2/ext3\n' "${3-}"
+  exit 1
+fi
+exit 1
+"""
+
+
+def write_stat_shim(directory):
+    """Put the GNU-mimicking `stat` first on a PATH built from `directory`."""
+    real = shutil.which("stat", path=PATH)
+    if real is None:
+        raise AssertionError("no stat on the test PATH")
+    directory.mkdir(parents=True, exist_ok=True)
+    shim = directory / "stat"
+    shim.write_text(SHIM_STAT % {"real": real})
+    shim.chmod(0o755)
+    return "%s:%s" % (directory, PATH)
+
+
 def assistant_record(**parts):
     """One real transcript line of the shape the digest reads."""
     return json.dumps({
@@ -307,6 +359,50 @@ class ThrottleTest(SessionReviewBase):
         r = self.run_review(self.live_env(), sid="fresh")
         self.assertEqual(r.returncode, COOLDOWN,
                          "a stale lock must be broken, not treated as held")
+
+    def test_a_stale_lock_is_still_broken_under_a_gnu_stat(self):
+        """THE UBUNTU FAILURE, REPRODUCED HERE. The lock's age was read with
+        `stat -f %m LOCK || stat -c %Y LOCK`. On GNU coreutils `-f` is --file-system, so
+        the first form does not fail: it prints filesystem prose and the `||` never
+        reaches the GNU spelling. `lock_mt` then failed the numeric guard, `lock_age`
+        stayed empty, and the age-out branch could not run -- a lock left behind by a
+        killed dispatch was reported HELD, forever, on every Linux machine. That is a
+        gate that can never be reopened, which is worse than the runaway it guards.
+
+        Same fixture as the test above, with GNU's interface in front of the real stat.
+        """
+        d = self.reviews()
+        (d / ".lock").mkdir()
+        old = NOW - 100000  # older than the 5400s default TTL
+        os.utime(d / ".lock", (old, old))
+        (d / ".last-dispatch").write_text(str(NOW))  # so it stops at the next gate
+        shim_path = write_stat_shim(Path(self.tmp) / "gnu-stat")
+        r = self.run_review(self.live_env(PATH=shim_path), sid="fresh")
+        self.assertEqual(r.returncode, COOLDOWN,
+                         "with GNU's stat the stale lock was reported held: %d" % r.returncode)
+
+    def test_the_gnu_stat_shim_really_answers_and_really_refuses(self):
+        """A shim that quietly did nothing would make the test above vacuous: it would
+        pass against the BSD-first ordering too. Both halves are observed."""
+        shim_path = write_stat_shim(Path(self.tmp) / "gnu-stat")
+        shim = Path(self.tmp) / "gnu-stat" / "stat"
+        target = Path(self.tmp) / "probe"
+        target.mkdir()
+        os.utime(target, (NOW - 4242, NOW - 4242))
+        good = subprocess.run([str(shim), "-c", "%Y", str(target)], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL,
+                              env={"PATH": shim_path}, timeout=60)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertEqual(good.stdout.strip(), str(NOW - 4242))
+        bad = subprocess.run([str(shim), "-f", "%m", str(target)], capture_output=True,
+                             text=True, stdin=subprocess.DEVNULL,
+                             env={"PATH": shim_path}, timeout=60)
+        self.assertNotEqual(bad.returncode, 0,
+                            "GNU's `stat -f %m` does not succeed; the shim must not")
+        self.assertNotEqual(bad.stdout.strip(), "",
+                            "the defect needs stdout non-empty and non-numeric: that is "
+                            "what an `||` chain captures and keeps")
+        self.assertFalse(bad.stdout.strip().isdigit())
 
     def test_the_lock_is_released_on_every_exit_path(self):
         d = self.reviews()

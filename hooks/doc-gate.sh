@@ -951,9 +951,14 @@ if [ -n "$ov_kind" ]; then
   # a newline or a backslash cannot produce a line that no reader can parse -- and so
   # that nothing is claimed on behalf of a row that could not even be built.
   # The file list goes in through `--arg` and a command substitution rather than
-  # `--rawfile`, which jq did not gain until 1.6; nothing else in this package needs
-  # 1.6, and a hook that silently stops recording on an older jq is the failure mode
-  # this whole file is written against.
+  # `--rawfile`, which jq did not gain until 1.6. Other components here DO need 1.6 --
+  # `bin/skillforge`'s backfill, `hooks/remind.sh` and `hooks/apply-gate.sh` each pass
+  # `--rawfile`, and `skillforge doctor` asserts 1.6 as this package's floor for that
+  # reason -- so the old claim here, that nothing else needed 1.6, was false. What is
+  # true is narrower: `doctor` is a command a user has to run, this row is bookkeeping
+  # nothing downstream blocks on, and a hook that silently stops recording on an older
+  # jq is the failure mode this whole file is written against. Where the argument costs
+  # nothing, it stays on the 1.5 spelling.
   jq -n -c \
     --arg ts "$now" --arg session "$sid" --arg head "$head_sha" \
     --arg kind "$ov_kind" --arg reason "$ov_reason" --arg cwd "$workdir" \

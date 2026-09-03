@@ -373,3 +373,81 @@ Open (also in OPEN-THREADS.md): remind.sh claim/stamp prune; REMIND_MAX / cooldo
 re-measured once the tiers have data; ai-tell-audit reports pre-existing README rows over
 threshold (`names`, `lives`, bolded-term-colon) outside this session's prose.
 Resume: read this note top to bottom, then `gh issue view 31`.
+
+## Review received (2026-09-02, ~23:10 EDT) and response
+
+An external review (pasted by the user) lists: main red in CI (VERIFIED: every `tests` run
+since Sep 1 failed on both OS; runs 33704550609/33704537708 for 385624f/c06eb6c); tracker out
+of sync with landed work; full user journey unproven; stage-2 auto-forge structurally blocked;
+measurement indirect; over-engineered vs evidence; paid review default-on; installer follows
+mutable main; docs too large; hygiene (skillreport:57 comment, Python escape warnings,
+ShellCheck absent, Node 20 actions, version 0.2.0 unreleased). Priorities P0 CI, P1 tracker,
+P2 E2E harness, P3 cautious beta, P4 evidence over weeks.
+Plan: P0 triage from real logs, then parallel fixers by file ownership; P1 reconcile via gh
+(parallel, no repo files); then P2 E2E harness (tests/e2e/, throwaway config, real claude -p);
+then P3 (paid review opt-in, tagged release + pinned installer, doctor --json, quickstart,
+supported versions, upgrade/rollback test). P4 cannot be done in a session.
+- ~23:25 CI triage (run 33704550609, both OS): 11 failing tests. Product: apply-gate emits
+  nothing at its documented ceiling on Linux (single argv > MAX_ARG_STRLEN 131072; fix = stream
+  via --rawfile). Portability: `stat -f %m || stat -c %Y` order captures GNU garbage
+  (skillinsight:1295, session-review:403; skillnote:298 has no GNU form at all). Invalid tests:
+  forge-apply 1<<18 argv pattern; repeat-gate deny padding calibration; dead-guard example
+  relies on BSD wc padding (canary vacuous); seed-authoring sweep of live ~/.claude roots.
+  CI config: shallow checkout hides eec5d1b and the first commit (fetch-depth 0). Doc:
+  claim-provenance cites 40babc1, an object on this laptop only (re-point to a pushed commit).
+  Fixers dispatched with disjoint ownership: A+B+G (hooks/apply-gate.sh, bin/skillinsight,
+  hooks/session-review.sh, bin/skillnote + their tests, escape warnings); C+D (four test
+  files); E+F (ci.yml fetch-depth/action bumps/shellcheck job + .shellcheckrc,
+  claim-provenance SKILL.md + its test). E2E harness agent (tests/e2e/, docs/e2e.md) and
+  tracker reconciliation agent running in parallel.
+- ~23:45 E+F done: ci.yml checkout v7 + fetch-depth 0, setup-python v7, setup-node v7,
+  shellcheck job (0.11.0, 67 findings, 0 error-level; SC2016/SC2034/SC2329 suppressed with
+  reasons in .shellcheckrc; 19 open at warning/style for follow-up). claim-provenance worked
+  example re-pointed 40babc1 -> 83a75b5 (on origin, same number). Fresh full clone: 56/56;
+  depth-1 clone: exactly the two shallow failures. doctor --json done (51 tests).
+- ~23:55 tracker reconciled: closed #8, #20-#29 with evidence; #19 retitled (remaining: deeper
+  composition + forged skill actually used); #30 open as measurement campaign; #31 body is now
+  a status table. New: #32 PreCompact residuals, #33 remind prune/constants, #34 no forge has
+  run since the diet, #35 CI red (P0), #36 E2E, #37 event attribution, #38 release packaging,
+  #39 paid review opt-in, #40 docs split, #41 hygiene. Note: the Python escape warning claim
+  did not reproduce on 3.9 (SyntaxWarning only on 3.12+); fixer A+B+G is fixing the docstrings
+  anyway.
+- ~00:10 (Sep 3) E2E harness done: tests/e2e/journey.py (+README, docs/e2e.md). Real run: all
+  11 steps PASS, 6 sonnet calls, 35 s; report at /tmp/skill-compounder-e2e-2026-09-02/REPORT.md.
+  Auth limit: a throwaway CLAUDE_CONFIG_DIR cannot authenticate (Keychain), so sessions use
+  --settings + --setting-sources '' with HOME intact; routing measured at project scope, n=1.
+  Product failures: none. Owed: link docs/e2e.md from README (packaging agent owns README).
+- ~00:25 (Sep 3) C+D done (four test files; Linux behaviour simulated with GNU-shaped shims;
+  found hooks/repeat-gate.sh:553 sed dies E2BIG at ~890 KB of env, reported not fixed).
+  Packaging done: install.sh --ref/--update/--rollback (+ SKILL_COMPOUNDER_REF/UPDATE),
+  <state>/install-ref record, plugin.json 0.3.0, README quickstart/supported versions/
+  updating sections, docs/releasing.md; two installer defects found and fixed while testing.
+  Owed to close-out: .claude/CLAUDE.md derivation grep paths must include install.sh;
+  skillforge header now names SKILL_COMPOUNDER_REVIEW (done by orchestrator).
+- ~00:40 (Sep 3) A+B+G done. `hooks/apply-gate.sh` no longer puts the block reason in the
+  argv: it writes it to `$TMP/reason.txt` and passes `jq -n --rawfile r`, so the message
+  size stops being an exec-size question. The bug it fixes is a Linux-only one --
+  `MAX_ARG_STRLEN` caps a SINGLE argv element at 131072 bytes and a larger `ARG_MAX` does
+  not raise it, so at this file's own documented ceilings (MAX_TRIGGER 20000, MAX_NAMED 20)
+  the reason rendered 409452 bytes and the emit died with E2BIG, printing nothing, while
+  macOS passed. A shim test reproduces the cap on macOS rather than trusting CI to notice
+  next time. The `printf` and the `jq` each keep two levels of subshell, both load-bearing
+  under a file-size rlimit; the header records the measurements.
+  Three `stat` call sites fixed the same way: query the GNU form first, validate the result
+  before accepting it, and only then fall back to BSD. `stat -f %m || stat -c %Y` is wrong
+  because GNU's `-f` is `--file-system`, so the bogus format exits 1 while the valid part
+  still prints and `$( )` captures it. `bin/skillinsight:1304` and
+  `hooks/session-review.sh:410` are mtimes reordered (`-c %Y` then `-f %m`, digits guard
+  between); `bin/skillnote:307` is a mode query that had no GNU form at all and gained one
+  (`-c '%a'` then `-f '%OLp'`). Docstrings carrying regex escapes made raw, which silences
+  the SyntaxWarning on 3.12+; it never reproduced on 3.9.
+- ~01:20 (Sep 3) close-out found one red in the whole-suite run and fixed the code, not the
+  test: `tests/test_ledger.py::test_neither_script_contains_a_network_call` greps
+  `bin/skillforge` and `bin/skillreport` for `curl `, `wget `, `nc `, `https://`, `http://`.
+  The `doctor --json` work had introduced `jq -nc` at `bin/skillforge:1506`, whose `-nc `
+  matches the netcat needle. Not a network call, but the assertion is the one that must not
+  be weakened, so the call site was respelled `jq -n -c` -- identical behaviour and the
+  spelling the other seven `jq -n -c` sites in that file already use. `skillforge doctor
+  --json` still exits 0 and `test_ledger.py` is 45 tests OK. Worth noting for the next
+  agent: this is a substring gate, so any future `-nc`, `-c`-clustered flag or a URL in a
+  comment will trip it the same way.

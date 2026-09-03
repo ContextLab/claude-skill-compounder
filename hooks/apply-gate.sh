@@ -120,16 +120,28 @@
 #
 # THE CAP IS SPENT IN TWO UNITS AT ONCE -- CODEPOINTS AND BYTES, WHICHEVER CUTS FIRST --
 # AND THE BYTE HALF IS THE HALF THAT MAKES IT A BOUND. The first version of this cap
-# counted only codepoints, which is what jq's `length` returns; the exec it feeds counts
-# BYTES against ARG_MAX (1048576 here). Both knobs have a documented legal ceiling, and at
-# those two ceilings together -- MAX_TRIGGER 20000, MAX_NAMED 20 -- 20 x 20000 codepoints
-# of 3-byte text is 1200000 bytes of quote, so the emit died with E2BIG and the hook
-# printed nothing. Measured, exactly that input: 0 bytes on stdout, rc 0, empty stderr,
-# `sess-A.p1.turn` on disk. The same input now renders 409452 bytes, with every quote in it
-# inside the 20000-byte budget (widest measured: 19998, the last whole glyph that fits).
-# That was the unbounded-quote defect arriving back through the cap written to prevent it,
-# from a setting the ENV block calls legal -- a flag the user never sees, at the settings
-# the file itself documents.
+# counted only codepoints, which is what jq's `length` returns, while everything
+# downstream counts BYTES. Both knobs have a documented legal ceiling, and at those two
+# ceilings together -- MAX_TRIGGER 20000, MAX_NAMED 20 -- 20 x 20000 codepoints of 3-byte
+# text is 1200000 bytes of quote out of a cap that believed it had allowed 400000. The
+# same input now renders 409452 bytes, with every quote in it inside the 20000-byte budget
+# (widest measured: 19998, the last whole glyph that fits). That was the unbounded-quote
+# defect arriving back through the cap written to prevent it, from a setting the ENV block
+# calls legal -- a flag the user never sees, at the settings the file itself documents.
+#
+# WHAT THE BYTE HALF IS FOR NOW, AND WHAT IT IS NOT FOR. It was written because the emit
+# was an exec -- `jq -n --arg r "$reason"` -- and 1200000 bytes in one argument died with
+# E2BIG, so the hook printed nothing at its own documented settings. Measured then: 0 bytes
+# on stdout, rc 0, empty stderr, `sess-A.p1.turn` on disk. Capping the bytes did NOT close
+# that on Linux, and this is the part the cap alone could not reach: Linux caps a SINGLE
+# argument at MAX_ARG_STRLEN, a hard 131072 bytes, and 409452 is 3.1x that. macOS has no
+# per-argument cap, so this suite stayed green here while the gate went silent on ubuntu at
+# its own documented ceilings. The emit no longer puts the message in argv at all -- it is
+# streamed through a file, see EMIT, AND ONLY THEN CLAIM -- so the cap is no longer what
+# keeps the exec alive. It is now exactly what its name says: a bound on how much of
+# somebody else's file this hook pastes into the model's context, in the unit context is
+# measured in. It still fires and the cut is still announced. Do not "simplify" it back to
+# a codepoint cap on the strength of the exec having been fixed; they were two defects.
 #
 # For ASCII the two units are the same number, so nothing about the default behaviour
 # moved: a 1200-codepoint budget still shows 1200 ASCII characters. What changed is only
@@ -272,10 +284,13 @@ SEP="$(printf '\037')"
 # discarding a real flag.
 #
 # EVERY FIELD LEAVES THIS jq ALREADY BOUNDED, and that is the point of doing it here
-# rather than in the shell. The unbounded string must never reach a variable the shell
-# then hands to a command as an ARGUMENT: `jq -n --arg r "$reason"` is an exec, and an
-# exec over ARG_MAX (1048576 on this machine, `getconf ARG_MAX`) fails outright. Bounding
-# at the read is what keeps every later step under that ceiling by construction.
+# rather than in the shell. The unbounded string must never reach a shell variable that
+# then travels somewhere with a limit on it. It is pasted into the model's context; and
+# until the emit was changed to stream (see EMIT, AND ONLY THEN CLAIM) it was also handed
+# to `jq -n --arg r` as ONE argument, where Linux's per-argument MAX_ARG_STRLEN (131072
+# bytes, hard) killed the exec outright while macOS's much larger ARG_MAX let it through.
+# Bounding at the read is what keeps every later step under a ceiling by construction
+# rather than by a check nobody has watched fire.
 #
 # THE CLAIM KEY IS COMPUTED HERE TOO, from the FULL name, for the same reason: the shell
 # must not touch the untruncated string, so it cannot be the thing that sanitises it. The
@@ -297,13 +312,13 @@ while IFS= read -r f; do
     def shortname: if (length > 96) then (.[0:95] + "…") else . end;
     # THE CUT FIRES ON CODEPOINTS OR ON BYTES, WHICHEVER COMES FIRST, and the byte half
     # is not a refinement -- it is the half that makes the cap a cap. jq'"'"'s `length` counts
-    # CODEPOINTS; the exec this text is eventually handed to counts BYTES against ARG_MAX
-    # (1048576 here, `getconf ARG_MAX`). At the two knobs'"'"' own documented ceilings --
-    # MAX_TRIGGER 20000, MAX_NAMED 20 -- 20 x 20000 codepoints of 3-byte text is 1200000
-    # bytes of quote, so `jq -n --arg r "$reason"` died with E2BIG and the hook printed
-    # nothing at all. Measured, exactly that input, before this: 0 bytes on stdout, rc 0,
-    # empty stderr. That is the unbounded-quote defect arriving back through the cap that
-    # was supposed to prevent it, reachable from a setting the ENV block calls legal.
+    # CODEPOINTS; everything this text is measured against downstream counts BYTES. At the
+    # two knobs'"'"' own documented ceilings -- MAX_TRIGGER 20000, MAX_NAMED 20 -- 20 x 20000
+    # codepoints of 3-byte text is 1200000 bytes of quote out of a cap that believed it had
+    # allowed 400000. While the emit still passed the message as one argv element, that
+    # died with E2BIG and the hook printed nothing at all: measured, exactly that input,
+    # 0 bytes on stdout, rc 0, empty stderr. The emit streams through a file now, so this
+    # cap bounds the model'"'"'s context rather than an exec -- see THE QUOTE IS BOUNDED.
     #
     # So $tmax is spent as a codepoint budget AND as a byte budget. For ASCII the two are
     # the same number and nothing changes; for multibyte text the byte budget bites first.
@@ -400,11 +415,18 @@ fmt_age() {
 #
 # HOW IT FAILED, MEASURED. A marker carrying a 2 MB trigger, one Stop payload: stdout 0
 # bytes, exit 0, and BOTH `sess-A.named.big-skill` and `sess-A.p1.turn` already on disk.
-# `jq -n --arg r "$reason"` is an exec and the reason was over ARG_MAX (1048576 here), so
+# `jq -n --arg r "$reason"` was an exec and the reason was over ARG_MAX (1048576 here), so
 # it died with E2BIG into `2>/dev/null` and the `|| exit 0` swallowed it -- while the claim
 # said the skill had been named. Every later turn of that session was then silent: the
 # flag was gone from the gate without ever having been on anyone's screen. That is the
 # thing the comment at the end of this block forbids, done by the code above it.
+#
+# THE EXEC ROUTE TO THAT SILENCE IS CLOSED NOW AND THE ORDERING STILL MATTERS. The reason
+# is streamed through a file, so no legal setting can fail the emit on size. What can
+# still fail it is everything else an exec and a write can fail on -- jq gone, a full or
+# read-only /tmp, a signal mid-write -- and every one of those routes ends in the same
+# place: a claim that says a skill was named in a message nobody ever saw. The ordering is
+# the guard against the OUTCOME, not against the one input that used to produce it.
 #
 # So: the `[ -d ]` test is the DECISION (has this session already been told about this
 # skill?), and the `mkdir` is the CLAIM, taken only once the block is actually on stdout.
@@ -495,13 +517,40 @@ This gate names each forged skill at most once per session, so it will not stop 
 again for the ones above."
 
 # EMIT, AND ONLY THEN CLAIM. The message is rendered to a file first so that "did the
-# block actually reach stdout" is a question with an answer: `jq -n --arg r` is an exec,
-# and an exec that dies (E2BIG over ARG_MAX, jq gone, a full /tmp) writes nothing while
-# still exiting 0 through the `||`. Rendering, checking, and only then copying it out is
-# what lets the claims below be conditional on the block having really happened.
+# block actually reach stdout" is a question with an answer: an exec that dies (jq gone,
+# a full /tmp, a signal mid-write) writes nothing while still exiting 0 through the `||`.
+# Rendering, checking, and only then copying it out is what lets the claims below be
+# conditional on the block having really happened.
 #
 # Failure here is silence, as everywhere else in this file -- and now silence with the
 # flag intact, so the next turn tries again instead of the skill being gone for good.
+#
+# THE REASON IS STREAMED THROUGH A FILE, NOT HANDED TO jq AS AN ARGUMENT, AND THAT IS A
+# PORTABILITY FIX, NOT A TIDY-UP. `jq -n --arg r "$reason"` put the whole message into
+# ONE element of the argument vector. Linux caps a single argument at MAX_ARG_STRLEN,
+# which is a hard 131072 bytes (32 pages, `include/uapi/linux/binfmts.h`) and is NOT
+# raised by a larger ARG_MAX -- the total on Linux is a quarter of the stack rlimit,
+# typically 2 MB, so the total was never the binding limit. At this file's own documented
+# ceilings (MAX_TRIGGER 20000, MAX_NAMED 20) the reason renders 409452 bytes, so on Linux
+# the emit died with E2BIG and the gate printed nothing AT ITS OWN DOCUMENTED SETTINGS,
+# while macOS (no per-argument cap, ARG_MAX 1048576) passed. That is a green suite on one
+# platform hiding a silent gate on the other, and it is what turned CI red on ubuntu.
+# `--rawfile` puts a PATH in the argv and the bytes in a file, so the message size stops
+# being an exec-size question on either platform. It needs jq >= 1.6, which
+# `skillforge doctor` already asserts as this package's floor for exactly this reason.
+#
+# THE `printf` IS WRAPPED IN TWO SUBSHELLS AND BOTH LEVELS ARE LOAD-BEARING. `printf` is
+# a BUILTIN, so the shell that runs it is the shell the kernel signals: under a file-size
+# rlimit it takes SIGXFSZ itself and dies, and whoever REAPS it prints the diagnostic.
+# One level of subshell moves the death to the subshell and the diagnostic to the MAIN
+# shell, whose stderr a hook may never write to. Measured, both spellings, `ulimit -f 1`:
+#   ( printf ... >f; w=$?; exit "$w" ) 2>/dev/null
+#       -> "Filesize limit exceeded: 25" on the hook's stderr, rc 0
+#   ( ( printf ... >f ); w=$?; exit "$w" ) 2>/dev/null
+#       -> nothing on stderr, the `if` sees 153, rc 0
+# The inner subshell dies; the middle one reaps it and prints into its OWN redirected
+# stderr, then exits with a NORMAL status, so the main shell has nothing to report. Do
+# not flatten either level.
 #
 # THE SUBSHELL IS NOT DECORATION AND `2>/dev/null` ON THE jq ALONE IS NOT ENOUGH. When the
 # emit dies from a SIGNAL rather than an exit status -- `ulimit -f 1` and jq takes SIGXFSZ
@@ -520,8 +569,9 @@ again for the ones above."
 #
 # The EXIT STATUS is what decides, not `[ -s ]` on its own: a jq killed mid-write leaves a
 # non-empty, half-written file, and half a JSON decision on stdout is worse than none.
-if ( jq -n --arg r "$reason" '{decision:"block", reason:$r}' >"$TMP/block.json"
-     emit_rc=$?; exit "$emit_rc" ) 2>/dev/null \
+if ( ( printf '%s' "$reason" >"$TMP/reason.txt" ); w_rc=$?; exit "$w_rc" ) 2>/dev/null \
+   && ( jq -n --rawfile r "$TMP/reason.txt" '{decision:"block", reason:$r}' >"$TMP/block.json"
+        emit_rc=$?; exit "$emit_rc" ) 2>/dev/null \
    && [ -s "$TMP/block.json" ] && cat "$TMP/block.json" 2>/dev/null; then
   # Guard 3's claim. Atomic per skill, so it is still correct under the double delivery
   # of one event -- though guard 2 has already made that unreachable for the SAME event;

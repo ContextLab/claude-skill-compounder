@@ -294,10 +294,19 @@ prune_backups() { # <configured path> -- newest MAX_BACKUPS kept, our prefix onl
 
 # `stat` is the trap fmt_date documents, in its other form: `-f` is a format string on BSD
 # and --file-system on GNU, so the RESULT is validated and the exit status is not trusted.
+#
+# THE GNU FORM IS TRIED FIRST, and that ordering is the fix, not a preference. Validating
+# the result already stopped GNU's `-f` output being mistaken for a mode here -- this
+# function never had the `A || B` defect its two siblings did -- but asking a GNU stat for
+# a filesystem report first is one doomed process per call whose stdout only happens not
+# to look octal. Ordering it GNU-first, validate, then BSD makes all three `stat` call
+# sites in this package one shape (statusline/statusline.sh, bin/skillinsight, here), so
+# the next author copies the shape that is correct on both platforms. BSD stat has no -c,
+# so the first form fails cleanly on macOS and the second answers.
 mode_of() {
-  mo="$(stat -f '%OLp' "$1" 2>/dev/null)"
-  case "$mo" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$mo"; return 0 ;; esac
   mo="$(stat -c '%a' "$1" 2>/dev/null)"
+  case "$mo" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$mo"; return 0 ;; esac
+  mo="$(stat -f '%OLp' "$1" 2>/dev/null)"
   case "$mo" in [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) printf '%s' "$mo"; return 0 ;; esac
   printf '600'
 }

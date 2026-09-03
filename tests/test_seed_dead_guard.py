@@ -68,25 +68,76 @@ class TheWorkedExampleIsTrue(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    PATH = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+
     def run_guard(self, target, cap=None):
-        env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+        env = {"PATH": self.PATH}
         if cap is not None:
             env["CAP"] = str(cap)
         return subprocess.run([str(self.guard), target], cwd=self.d, env=env,
                               capture_output=True, text=True, timeout=60)
 
-    def test_the_count_really_is_padded(self):
-        """The boundary fact the whole example rests on. If a platform stops padding,
-        this test says so instead of the example quietly becoming fiction."""
+    def wc_raw(self):
+        """The exact bytes `wc -l <` prints for the 500-line file, here, measured.
+
+        UNDER THE GUARD'S OWN PATH, not the ambient one. The skill this tests says to
+        probe "the exact binary the program resolves, not the one you assume"; a `wc`
+        earlier on the developer's PATH than the guard's `/usr/bin` would answer a
+        question about a different program.
+        """
         with open(self.d / "big.txt", "rb") as fh:      # `wc -l <file`, without a shell
-            r = subprocess.run(["wc", "-l"], stdin=fh, capture_output=True, text=True)
-        self.assertNotEqual(r.stdout, r.stdout.strip(),
-                            "`wc -l <` did not pad its output here, so the example's "
-                            "premise does not hold on this platform: %r" % r.stdout)
+            r = subprocess.run(["wc", "-l"], stdin=fh, capture_output=True, text=True,
+                               env={"PATH": self.PATH}, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def wc_pads(self):
+        """Whether this `wc` LEFT-pads. `lstrip()`, never `strip()`: see below."""
+        raw = self.wc_raw()
+        return raw != raw.lstrip()
+
+    def require_padding(self):
+        """The two cases below demonstrate a DEAD guard, and a guard is only dead where
+        the premise holds. Where it does not, the example is not wrong -- it is out of
+        scope, and `SKILL.md` says so itself: "Every line below runs as printed, in an
+        empty directory, on macOS/BSD with bash on PATH"."""
+        if not self.wc_pads():
+            self.skipTest("`wc -l <` prints %r here: no leading pad, so this is not the "
+                          "BSD wc the skill's worked example is scoped to and the guard "
+                          "in it is alive rather than dead (see the biconditional in "
+                          "test_the_count_really_is_padded, which runs on both)"
+                          % self.wc_raw())
+
+    def test_the_count_really_is_padded(self):
+        """The boundary fact the whole example rests on -- and the CONSEQUENCE it
+        claims, pinned in both directions, so neither platform gets a free pass.
+
+        THIS TEST WAS VACUOUS, AND ITS SILENCE IS WHY THE TWO CASES BELOW WENT RED ON
+        UBUNTU WITH NO WARNING. It compared `stdout` against `stdout.strip()`, which
+        also removes the trailing newline, so the two differ on every platform ever
+        built: GNU coreutils, which pads nothing, passed it. `lstrip()` asks the
+        question that was meant.
+
+        The claim is not "wc pads" -- that is platform trivia. It is "the padding is
+        what kills the guard", so both halves are asserted together: where the count is
+        padded the 500-line file must slip past a cap of 100, and where it is not, the
+        same file and the same guard must be REFUSED. A future `wc` that stops padding
+        does not quietly turn the example into fiction; it moves this test to its other
+        branch and skips the two cases that no longer apply.
+        """
+        raw = self.wc_raw()
+        refused = self.run_guard("big.txt").returncode == 1
+        self.assertEqual(
+            self.wc_pads(), not refused,
+            "the boundary bytes and the guard's behaviour disagree: `wc -l <` printed "
+            "%r and 500 lines against a cap of 100 %s -- one of the two readings is "
+            "wrong, and the worked example rests on their agreement"
+            % (raw, "was REFUSED" if refused else "was processed"))
 
     def test_the_guard_ships_dead(self):
         """500 lines against a cap of 100, and it processes the file. No symptom points
         at the guard: the program looks like it is working."""
+        self.require_padding()
         r = self.run_guard("big.txt")
         self.assertEqual(r.returncode, 0)
         self.assertIn("processing big.txt", r.stdout)
@@ -95,6 +146,7 @@ class TheWorkedExampleIsTrue(unittest.TestCase):
     def test_the_mutation_probe_exposes_it(self):
         """Step 1 of the skill. A cap of 0 must refuse everything; if forcing the guard
         to a state that MUST change behaviour changes nothing, it never runs."""
+        self.require_padding()
         r = self.run_guard("small.txt", cap=0)
         self.assertIn("processing small.txt", r.stdout,
                       "the mutation probe changed behaviour, so this guard was not dead "

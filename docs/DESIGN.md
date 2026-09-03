@@ -322,6 +322,19 @@ statement, which is correct under all of them.
 **`printf '%s' "…%…"` does not need `%%`.** A literal percent inside an *argument* to
 `%s` is not a format string, so escaping it produces a visible `%%`.
 
+**A growable value goes through a file, never through `--arg`.** Linux caps one element of
+the argument vector at `MAX_ARG_STRLEN`, which a larger `ARG_MAX` does not raise; macOS has
+no per-argument cap at all. A value whose size follows the input -- a rendered block reason,
+a transcript excerpt, a file list -- therefore fits on one platform and fails with `E2BIG`
+on the other, and a hook that cannot exec prints nothing, which is the failure mode every
+gate here is written against. The rule is to put a *path* in the argv and the bytes in a
+file: `jq --rawfile`, `grep -f`. That is why `hooks/apply-gate.sh` streams its reason and
+why `bin/skillforge`'s backfill and `hooks/remind.sh` do the same, and it is what fixes
+jq 1.6 as the package floor `skillforge doctor` asserts. The measured byte counts, the
+platform each was taken on and the CI run that caught it are in the header of
+`hooks/apply-gate.sh`. They are not in `docs/CLAUDE-CODE-BEHAVIOR.md` and do not belong
+there: this is a Linux kernel constant, not behaviour of Claude Code.
+
 **`path` is zsh's array view of `$PATH`.** Same family as `status`, and worth stating
 separately because the symptom is not an empty segment but a subtly wrong one. Reading a slot
 filename into a variable called `path` replaces the command search path with that one
@@ -547,6 +560,48 @@ A root `CLAUDE.md` fails `claude plugin validate --strict`, and `.claude/CLAUDE.
 as project context the same way
 ([CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#claudemd-at-a-plugin-root-fails---strict)).
 Since `--strict` is what the marketplace review pipeline runs, the file lives there.
+
+---
+
+## An install pins a ref, and updating is a separate ask
+
+The installed package is a git checkout, so "which version am I running" is answered by
+whatever `HEAD` happens to be, and until now nothing chose that on purpose. The clone was
+`--depth 1` off the default branch, and a re-install ran `git pull --ff-only` before doing
+anything else. Two consequences, both of which a user meets rather than reads about.
+
+The first is that two people who ran the same one-liner on the same day could be running
+different code, and neither command line says so. `SKILL_COMPOUNDER_REF` and `--ref` fix
+that by naming a tag: the same string gives the same commit next month, which is the whole
+content of the word "release" for a package with no build step.
+
+The second is that repairing an install and upgrading it were the same gesture. A user
+whose hooks stopped firing re-runs the installer, which is the right instinct, and the pull
+handed them a different version of the package than the one that had been failing --
+so whatever they were about to report is now about code they have never run. `--update`
+and `SKILL_COMPOUNDER_UPDATE=1` make the upgrade something asked for, and a plain re-run
+re-wires exactly what is already on disk. `--rollback` is the other half: an upgrade nobody
+can undo is one people decline to take.
+
+**Where the previous ref is recorded, and why it is not the manifest.** `<state>/install-ref`
+is written by `install.sh`, two lines, current and previous. The install manifest would be
+the tidier home for it, and it is the wrong one: `skill_compounder/installer.py` records
+what was *linked*, is exercised by a suite that never clones anything, and knows nothing
+about a checkout's git state. The rotation rule is the part worth keeping -- previous moves
+only when the commit really changed, so an `--update` that lands where it already was
+cannot quietly overwrite the thing `--rollback` needs.
+
+**Both flags refuse a clone they did not make.** Running `--update` inside your own
+checkout would move your branch and discard what you had there, which is the one thing
+uninstall has never been willing to do either, so the two moving flags check that the
+checkout is the one at `~/.claude/skill-compounder-app` and otherwise print the `git`
+commands and stop. `--ref` in that position is a note rather than a refusal: it selects,
+and running the script from a checkout is already a selection.
+
+**`install.sh` is now a script that rewrites itself while running.** `--update` runs `git`
+against the checkout it is being read out of, which is exactly the lazy-parse hazard the
+shell-portability section above describes. It is wrapped in one brace group and every path
+ends in `exit`, for the same reason `hooks/session-review.sh` is.
 
 ---
 

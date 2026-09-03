@@ -1404,6 +1404,33 @@ class TheLandedCheckHasNoPatternLengthLimit(ApplyCase):
         super().setUp()
         self.author("widget")
 
+    def fixed_line_grep(self, pattern, haystack):
+        """`grep -F -x -q` for a fixed pattern of ANY length, with the pattern handed
+        over in a FILE rather than on argv.
+
+        NOT A CONVENIENCE -- ON LINUX IT IS THE ONLY WAY TO ASK THE QUESTION. Linux caps
+        a SINGLE argv string at MAX_ARG_STRLEN (131072 bytes) independently of the total
+        ARG_MAX, so `-e "x" * (1 << 18)` never reaches grep at all: execve refuses and
+        python raises `OSError: Argument list too long`. A search that read that refusal
+        as "grep would not take it" would be measuring the kernel's per-argument limit
+        and reporting it as grep's pattern limit -- the comment this replaced said
+        "well inside ARG_MAX, so argv is never the failure", which is true of the total
+        and false of the string.
+
+        `-f` changes nothing about what is being measured: bisected on this machine's
+        BSD grep 2.6.0-FreeBSD, `-f` and `-e` report the SAME ceiling (65536).
+        """
+        pat = self.root / "grep-pattern.txt"
+        pat.write_text(pattern + "\n", encoding="utf-8")
+        try:
+            return subprocess.run(["/usr/bin/grep", "-F", "-x", "-q", "-f", str(pat),
+                                   str(haystack)], capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL)
+        except OSError as exc:
+            self.fail("a %d-character pattern still reached argv, so this probe would "
+                      "have measured the kernel's per-argument limit and not grep's "
+                      "pattern limit: %s" % (len(pattern), exc))
+
     def ceiling(self):
         """The longest fixed pattern /usr/bin/grep accepts here, by bisection -- measured,
         not quoted, so this test cannot be reading a stale figure off a comment. Returns
@@ -1415,12 +1442,9 @@ class TheLandedCheckHasNoPatternLengthLimit(ApplyCase):
 
         def accepts(n):
             probe.write_text("x" * n + "\n", encoding="utf-8")
-            r = subprocess.run(["/usr/bin/grep", "-F", "-x", "-q", "-e", "x" * n,
-                                str(probe)], capture_output=True, text=True,
-                               stdin=subprocess.DEVNULL)
-            return r.returncode == 0
+            return self.fixed_line_grep("x" * n, probe).returncode == 0
 
-        lo, hi = 1, 1 << 18          # well inside ARG_MAX, so argv is never the failure
+        lo, hi = 1, 1 << 18          # the pattern travels in a file, so no argv limit
         self.assertTrue(accepts(lo), "/usr/bin/grep refused a one-character pattern")
         if accepts(hi):
             found = None
@@ -1475,9 +1499,7 @@ class TheLandedCheckHasNoPatternLengthLimit(ApplyCase):
         # What /usr/bin/grep does with a pattern that long, printed rather than asserted:
         # the point is that the CLI no longer cares, and the ceiling is a property of the
         # platform this happens to run on.
-        probe = subprocess.run(["/usr/bin/grep", "-F", "-x", "-q", "-e", row,
-                                str(self.ledger)], capture_output=True, text=True,
-                               stdin=subprocess.DEVNULL)
+        probe = self.fixed_line_grep(row, self.ledger)
         print("  row on the ledger: %d characters (evidence %d); /usr/bin/grep -F -x on "
               "it: exit %d %r" % (len(row), want, probe.returncode, probe.stderr.strip()))
         if target is not None:
@@ -1579,6 +1601,13 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
             # dead, and the jq version `doctor` reads instead of asking jq, which is a
             # test pin of the same kind as SKILLFORGE_NOW.
             "SKILLFORGE_ACTIVE_TTL", "SKILLFORGE_DOCTOR_JQ_VERSION",
+            # NOT this CLI's knob, and the only entry here that is not. `doctor_review`
+            # reads hooks/session-review.sh's off switch with that script's own default
+            # ("1") purely to REPORT it: the switch is read at that script's first gate,
+            # and the script is in neither wiring, so nothing else surfaces whether it
+            # is live. A second copy of a default is a drift risk, which is why the
+            # comment above `doctor_review` quotes the line it is copied from.
+            "SKILL_COMPOUNDER_REVIEW",
             # Internal state, initialised on every path that reaches the read; the
             # default is a `set -u` belt, not a way in.
             "TRIGGER_TEXT", "TRIGGER_KIND", "SKILL_PRESENT", "RESOLVED_NAME",

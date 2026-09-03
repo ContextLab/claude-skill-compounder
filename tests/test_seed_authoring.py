@@ -1939,6 +1939,35 @@ class GateChecksReferenceTest(unittest.TestCase):
         return subprocess.run(["bash", "-c", block], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=180)
 
+    def live_roots(self):
+        """The roots the shipped block sweeps when it is copied unchanged, READ OUT OF
+        THE BLOCK rather than retyped here -- `run_sweep(roots)` already asserts the
+        same literal, and two copies of it would let one drift."""
+        m = re.search(r"(?m)^python3 - (.+?) <<'PY'$", self.block)
+        self.assertIsNotNone(
+            m, "the sweep no longer opens with a `python3 - <roots> <<'PY'` line, so "
+               "nothing here can tell which roots it sweeps by default")
+        return m.group(1).split()
+
+    def live_skills(self):
+        """The skill directory NAMES the default sweep should report, walked the way the
+        block walks: `followlinks=True`, one realpath `seen` set shared across the roots,
+        and the LINK's basename rather than the target's -- which is what the block
+        prints. A machine with none is an ordinary machine (every CI runner is one), not
+        a failure."""
+        seen, names = set(), []
+        for root in self.live_roots():
+            for dirpath, dirnames, filenames in os.walk(
+                    str(Path(root).expanduser()), followlinks=True):
+                real = os.path.realpath(dirpath)
+                if real in seen:
+                    dirnames[:] = []
+                    continue
+                seen.add(real)
+                if "SKILL.md" in filenames:
+                    names.append(os.path.basename(dirpath))
+        return sorted(names)
+
     def parse_gate_step(self):
         """The number of `skill-compounder`'s step that runs the parse gate, DERIVED.
 
@@ -1976,11 +2005,58 @@ class GateChecksReferenceTest(unittest.TestCase):
         self.assertNotIn("GATE A PASS", self.text,
                          "the reference has started duplicating the Phase 3 block")
 
+    def test_the_default_sweep_runs_clean_against_its_documented_roots(self):
+        """The invocation a reader actually copies, with its roots untouched -- and the
+        half of it that is true on every machine, including one where those roots do not
+        exist. `os.walk` over a missing directory yields nothing and raises nothing, so
+        an empty machine must still produce a clean run and a summary.
+
+        The exit status is asserted against that summary because the block SELLS it:
+        "exit status is the failure count, so it works as a gate in a loop". A sweep
+        that printed the count and exited 0 would pass the old assertions and be
+        useless in the loop it advertises.
+        """
+        r = self.run_sweep()
+        self.assertEqual(r.stderr, "", r.stderr)
+        m = re.search(r"(?m)^(\d+) failing$", r.stdout)
+        self.assertIsNotNone(m, "the sweep printed no summary line: %r" % r.stdout)
+        self.assertEqual(r.returncode, min(int(m.group(1)), 125),
+                         "the exit status does not carry the failure count, so the "
+                         "block cannot be used as the gate it says it is: %r / %d"
+                         % (r.stdout, r.returncode))
+
     def test_the_sweep_runs_and_reports_per_skill(self):
+        """One line per skill, from the DEFAULT roots.
+
+        THIS USED TO ASSERT `^(ok|warn|FAIL)` AGAINST WHATEVER HAPPENED TO BE INSTALLED,
+        which is a test that passes on the author's laptop and fails on every clean
+        machine: `~/.claude/skills` and `~/.claude/plugins/cache` are empty on a CI
+        runner, the sweep correctly reports nothing per skill, and the regex found no
+        match. What is proved here is the sweep's behaviour ON those roots, so where
+        they hold no SKILL.md there is nothing to prove and it says so -- the same
+        reporting is proved on every machine, against this repository's own skills/, by
+        `test_the_sweep_finds_the_same_skills_the_gate_accepts`.
+
+        Where they do hold skills, the claim is stronger than the regex was: EVERY skill
+        under those roots gets a line, and no line names anything that is not there.
+        """
+        expected = self.live_skills()
+        if not expected:
+            self.skipTest("the documented roots (%s) hold no SKILL.md on this machine, "
+                          "so the default sweep has nothing to report per skill; "
+                          "test_the_sweep_finds_the_same_skills_the_gate_accepts proves "
+                          "the same reporting against this repository's own skills/"
+                          % " ".join(self.live_roots()))
         r = self.run_sweep()
         self.assertEqual(r.stderr, "", r.stderr)
         self.assertRegex(r.stdout, r"(?m)^\d+ failing$")
-        self.assertRegex(r.stdout, r"(?m)^(ok|warn|FAIL)")
+        reported = sorted(ln.split()[1] for ln in r.stdout.splitlines()
+                          if re.match(r"^(ok|warn|FAIL)\s", ln))
+        self.assertEqual(reported, expected,
+                         "the sweep and a walk of the same roots disagree about which "
+                         "skills are installed -- either the block stopped reporting one "
+                         "line per skill, or a skill was installed or removed while this "
+                         "test was running")
 
     def test_the_sweep_finds_the_same_skills_the_gate_accepts(self):
         r = self.run_sweep(str(REPO / "skills") + "/..")

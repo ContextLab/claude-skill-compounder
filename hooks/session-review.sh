@@ -400,7 +400,15 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   # rather than trusting a pid: the pid could have been reused, and there is no portable
   # way to ask whether a pid is still OUR process.
   lock_age=""
-  lock_mt="$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || true)"
+  # GNU FORM FIRST, VALIDATE, THEN BSD -- never a plain `A || B` chain. `-f` is
+  # --file-system on GNU coreutils, so `stat -f %m DIR` there is a bogus format over a
+  # filesystem, prints to stdout anyway, and the `||` never reaches the GNU form. The
+  # guard below then blanks lock_mt, lock_age stays empty, and a lock left behind by a
+  # killed dispatch is reported HELD instead of aged out -- permanently, which is the
+  # failure this branch exists to prevent. BSD stat has no -c and fails cleanly, so
+  # macOS reaches the second form. Same ordering as statusline/statusline.sh.
+  lock_mt="$(stat -c %Y "$LOCK" 2>/dev/null)"
+  case "$lock_mt" in ''|*[!0-9]*) lock_mt="$(stat -f %m "$LOCK" 2>/dev/null)" ;; esac
   case "$lock_mt" in ''|*[!0-9]*) lock_mt="" ;; esac
   [ -n "$lock_mt" ] && lock_age=$(( NOW - lock_mt ))
   if [ -n "$lock_age" ] && [ "$lock_age" -gt "$REVIEW_LOCK_TTL" ]; then
