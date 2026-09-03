@@ -1,5 +1,9 @@
 # 2026-09-03 handoff: after v0.3.1
 
+**Superseded the same day.** Items 1, 3, 4, 5, 7 (composition half) and 8 below were worked;
+resume from `notes/2026-09-03-resume-session.md` instead, which carries its own resume
+command and the current state of every item.
+
 ## Resume command
 
 ```bash

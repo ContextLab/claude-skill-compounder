@@ -46,6 +46,16 @@ brew's 0.11.0 is silent. Fixed in `ec6acc0` by dropping the dead parameter, chec
 with the `shellcheck-py==0.9.0.6` wheel at the warning floor over every script (0 findings).
 Recorded as a project note in `.claude/CLAUDE.md`. #33 closes once `ec6acc0` is green.
 
+## Resume command
+
+```bash
+cd "/Users/jmanning/claude-skill-compounder"
+git checkout main && git pull --ff-only
+```
+
+`main` and `resume/after-v0.3.1` are the same commit; the practice is everything on main.
+Open issues after this session: #19, #30, #31 (epic), #32, #34, #37, #42. #9 and #33 closed today.
+
 ## Still to do from the handoff
 
 2. Measurement campaign (#30, #37): needs a week of ordinary use; not startable today.
