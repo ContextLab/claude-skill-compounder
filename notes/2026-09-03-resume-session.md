@@ -13,18 +13,26 @@ the tier gate's routing half, so it became reminder `n2288836221x440` keyed on `
 `bin/*`, `statusline/*.sh`, `install.sh`. Recorded on #34 (comment 5525414232, corrected once:
 21 rows not 18, and the six-fold memory row is the read-back measurement, not a retry).
 
-## In progress
+## Landed in `c9150de` (main and resume/after-v0.3.1, both pushed)
 
-- #33: prune of `<state>/remind/` and a `hits.jsonl` write cap, one builder agent
-  (owns hooks/remind.sh, tests/test_remind.py, docs/operations.md rows).
-- repeat-gate `norm_bash` E2BIG at ~890 KB env, one builder agent
-  (owns hooks/repeat-gate.sh, tests/test_repeat_gate.py, docs/operations.md rows).
-- #9 triage against #31, one read-only agent.
-- Orchestrator owns `.claude/CLAUDE.md`, `notes/OPEN-THREADS.md`, README, and the
-  derivation-count re-run after both builders land.
+- #33: `hooks/remind.sh` prunes other sessions' `remind/` directories on a sampled draw
+  (`REMIND_PRUNE_EVERY`, `REMIND_PRUNE_TTL`, existing `REMIND_NOW` clock) and trims
+  `hits.jsonl` on write; `PruneTest`, `HitsCapTest`. Close-out comment posted; close on
+  green CI.
+- repeat-gate E2BIG: mechanism re-measured (sed regex argv, not the command text); the
+  hook closes stderr before its first exec (`REPEAT_GATE_STDERR`); `ExecNoiseTest`.
+- ShellCheck: all 19 findings cleared, two of them live bugs (backtick executing `start`
+  in a skillforge die message; skillnote's glob-in-variable case pattern inert under zsh).
+  CI floor is `--severity=warning`; install.sh and uninstall.sh added to both shell steps.
+- Docs: derivation counts re-run (126/128 CLAUDE.md, 116 operations.md); OPEN-THREADS
+  records the prune policy, the E2BIG mechanism and the lint closure.
+- #9 closed against #31 with a verified table. Reminder re-recorded count-free as
+  `n195966769x406` (the first, `n2288836221x440`, embedded the stale 120 and is tombstoned).
+- Full suite on the quiet tree: 50 files, ALL TESTS PASSED, 2 skips.
 
-## Still to do from the handoff, in order
+## Still to do from the handoff
 
-4. ShellCheck: 19 warning/style findings, raise `--severity` in `.github/workflows/ci.yml`
-   (after the two builders, since it touches their files).
-2, 6, 7: measurement campaign, #42 fresh-config journey, #19 composition — not started.
+2. Measurement campaign (#30, #37): needs a week of ordinary use; not startable today.
+6. #42 fresh-config journey: needs `CLAUDE_CODE_OAUTH_TOKEN` handed in.
+7. #19: the composition half and the "forged skill actually used" half (blocked on #34's
+   second occurrence for the latter).
