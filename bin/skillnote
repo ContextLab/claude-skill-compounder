@@ -149,11 +149,9 @@ usage() {
   echo "index was seen in 0 of 3 runs. Ledger rows for that scope say readback:\"via-index\"."
 }
 
-# WHERE THIS SCRIPT REALLY IS. $0 is a symlink in the user's bin directory on any machine
-# that ran the installer, so `dirname $0` finds the symlink's directory -- and neither
-# ../hooks/ nor the sibling skillforge is there. Resolved through the same loop the file
-# writer below uses.
-SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+# WHERE THIS SCRIPT REALLY IS: see SELF, set right after resolve_link() below. It cannot
+# be set here, because the resolver it needs is defined further down and a shell function
+# does not exist before its definition has been read.
 
 # ------------------------------------------------------------- portable epoch -> text
 #
@@ -249,6 +247,14 @@ resolve_link() { # <path> -> the regular file it ultimately names
   done
   printf '%s' "$rl_p"
 }
+
+# WHERE THIS SCRIPT REALLY IS. $0 is a symlink in the user's bin directory on any machine
+# that ran the installer, so `dirname $0` finds the symlink's directory -- and neither
+# ../hooks/ nor the sibling skillforge is there. Found live on 2026-09-02: through
+# ~/.local/bin/skillnote every --command refused, while bin/skillnote accepted the same
+# flag. Resolve the link FIRST, then take the directory.
+SELF="$(resolve_link "$0")"
+SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")"
 
 # 2. BACK UP BESIDE THE *CONFIGURED* PATH, NOT THE RESOLVED ONE. Twin of backup_file()
 #    (installer.py:211-252). A symlinked CLAUDE.md must not sprinkle .bak- files through
@@ -392,7 +398,7 @@ END_MARK='<!-- skillnote:end -->'
 # notes into a block nobody reads. Named line numbers, and a refusal.
 check_single_block() { # <resolved path>
   [ -f "$1" ] || return 0
-  csb_lines="$(grep -n -F "$BEGIN_MARK" "$1" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')"
+  csb_lines="$(grep -n -x -F "$BEGIN_MARK" "$1" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')"
   csb_n="$(printf '%s' "$csb_lines" | wc -w | tr -d ' ')"
   case "$csb_n" in ''|*[!0-9]*) csb_n=0 ;; esac
   [ "$csb_n" -le 1 ] && return 0
@@ -412,7 +418,7 @@ insert_line() { # <file to read, or /dev/null> <the built line> <output file>
   SN_LINE="$2" SN_BEGIN="$BEGIN_MARK" SN_END="$END_MARK" awk '
     BEGIN { line = ENVIRON["SN_LINE"]; b = ENVIRON["SN_BEGIN"]; e = ENVIRON["SN_END"];
             placed = 0; last = "" }
-    { if (!placed && index($0, e) > 0) { print line; placed = 1 }
+    { if (!placed && $0 == e) { print line; placed = 1 }
       last = $0; print }
     END {
       if (!placed) {
@@ -527,7 +533,10 @@ add_reminder() {
     while IFS= read -r ar_c; do
       [ -n "$ar_c" ] || continue
       ar_n="$(norm_of_bash "$ar_c")" || die3 "--command needs 'hooks/repeat-gate.sh --norm-of Bash', and this checkout's repeat-gate does not answer it (looked at $(dirname "$SELF")/../hooks/repeat-gate.sh). A literal command stored as if it were a signature would never match anything. Use --keyword or --path, or update the checkout."
-      ar_cmds="$(printf '%s' "$ar_cmds" | jq -c --arg e "$(printf 'Bash\n%s' "$ar_n")" '. + [$e]' 2>/dev/null)"
+      # Stored EXACTLY as `--norm-of` prints it, because hooks/remind.sh compares that same
+      # output byte-for-byte. Found live on 2026-09-02: a "Bash\n" prefix on this side made
+      # every --command reminder silent, the failure the refusal above exists to prevent.
+      ar_cmds="$(printf '%s' "$ar_cmds" | jq -c --arg e "$ar_n" '. + [$e]' 2>/dev/null)"
       [ -n "$ar_cmds" ] || die "could not build the command list (is jq healthy?)"
     done <<CMDEOF
 $cm

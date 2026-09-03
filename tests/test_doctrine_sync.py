@@ -62,9 +62,11 @@ close them; a reviewer who finds one has found a documented limit, not a defect:
   - Whoever changes a rule may change the pinned sentence here to match. That is the
     point: it makes the change visible in the diff, not impossible.
   - The user's global `~/.claude/CLAUDE.md` stanza is the third mirror named in the rule
-    quoted above. It is hand-maintained on each machine and this repo neither ships nor
-    installs it, so nothing here can check it. The repo's own `.claude/CLAUDE.md` is what
-    is checked.
+    quoted above, and it USED to be unchecked here on the grounds that this repo neither
+    shipped nor installed it. That stopped being true when `installer.py` grew
+    `DOCTRINE_TEXT` and wrote the block itself, so the constant is now a mirror like any
+    other. What still cannot be checked is the file on a particular machine: a user may
+    edit the installed block, and nothing here reads anyone's `~/.claude/CLAUDE.md`.
 
 `<!-- doctrine: <id> -->` anchors mark the pinned sentences in the two documents that
 state the doctrine at length. They render as nothing, and they tell a human editing the
@@ -74,11 +76,14 @@ stanza and carries the sentences without anchors.
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from skill_compounder.installer import DOCTRINE_TEXT  # noqa: E402
 SKILL = (ROOT / "skills" / "skill-compounder" / "SKILL.md").read_text()
 README = (ROOT / "README.md").read_text()
 REPO_CLAUDE = (ROOT / ".claude" / "CLAUDE.md").read_text()
@@ -119,10 +124,20 @@ assert _glyphs, ("skillforge-status.sh no longer builds its bar with `bar=\"${ba
 BAR = re.compile("▕[%s]+▏ (\\d+)/(\\d+)" % "".join(sorted(_glyphs)))
 
 SKILL_PATH = "skills/skill-compounder/SKILL.md"
-MIRRORS = {SKILL_PATH: SKILL, "README.md": README, ".claude/CLAUDE.md": REPO_CLAUDE}
+# The global stanza the installer writes into the user's own `~/.claude/CLAUDE.md`. It is
+# the third mirror the rule in `.claude/CLAUDE.md` names, and it was unchecked here for as
+# long as this repo neither shipped nor installed it. It does both now -- `installer.py`
+# carries the text and `render_doctrine()` writes it -- so it is read from the constant
+# rather than from any machine's file, and the `{app_home}` placeholder is substituted the
+# way `render_doctrine` substitutes it.
+STANZA_PATH = "skill_compounder/installer.py (DOCTRINE_TEXT)"
+STANZA = DOCTRINE_TEXT.replace("{app_home}", "<the checkout>")
+MIRRORS = {SKILL_PATH: SKILL, "README.md": README, ".claude/CLAUDE.md": REPO_CLAUDE,
+           STANZA_PATH: STANZA}
 
-# Where an anchor comment is required alongside the sentence. `.claude/CLAUDE.md` is
-# excluded on purpose: see the module docstring.
+# Where an anchor comment is required alongside the sentence. `.claude/CLAUDE.md` and the
+# installed stanza are excluded on purpose: both are condensed restatements with no room
+# for an anchor per sentence. See the module docstring.
 ANCHORED = (SKILL_PATH, "README.md")
 
 
@@ -172,26 +187,64 @@ DOCTRINE = (
     ("no-forked-reviewer",
      "The red-teamer must never be a fork of either layer — not of the orchestrator that "
      "dispatches it, and not of the session that dispatched the orchestrator.",
-     (SKILL_PATH, "README.md", ".claude/CLAUDE.md"),
+     (SKILL_PATH, "README.md", ".claude/CLAUDE.md", STANZA_PATH),
      "A fresh reviewer is the one thing the loop cannot work without: a fork already knows "
      "what the skill was meant to say."),
 
-    ("orchestrator-runs-the-rounds",
-     "The session that starts a forge does not run it.",
+    # `orchestrator-runs-the-rounds` ("The session that starts a forge does not run it.")
+    # was retired on 2026-09-02 with the forge diet. The invariant it protected -- review
+    # traffic must not land in the user's thread -- is real and is now carried by
+    # `forge-runs-in-the-background`, which states it about the agents rather than about a
+    # layer. The orchestrator itself is gone from the default forge: it caught no defect in
+    # ten forges and caused the 86-hour stuck one, so a rule requiring one would now be
+    # requiring the thing that was removed.
+    ("forge-runs-in-the-background",
+     "Every agent a forge dispatches runs in the background, and the session that starts "
+     "one never blocks on it.",
+     (SKILL_PATH, "README.md", STANZA_PATH),
+     "The reason the loop was moved off the main thread was never blocking -- the agents "
+     "always ran in the background -- it was review traffic landing in the thread the user "
+     "is talking to. Stated as 'someone else runs it', the rule died with the orchestrator; "
+     "stated about the dispatches, it survives the diet."),
+
+    ("tier-before-forge",
+     "A procedure earns a skill only when it has steps a model gets wrong without them AND "
+     "a trigger a description can route; otherwise it is a note or a reminder.",
+     (SKILL_PATH, "README.md", STANZA_PATH),
+     "The threshold said only costly-and-recurring, which a note also passes. Ten days of "
+     "the cheap branch being taken zero times is what a missing rule looks like: with one "
+     "output path, everything that cleared the bar got a forge."),
+
+    ("cheap-branch",
+     "The cheap branch is a command, not an intention: `skillnote add` records the note or "
+     "the reminder, and a lesson nobody ran a command for was not kept.",
      (SKILL_PATH, "README.md"),
-     "The loop moved off the main thread so review traffic stops landing in the user's "
-     "context. A README that does not say so teaches the old shape."),
+     "The sentence this replaced -- 'write a note or update the project's CLAUDE.md' -- "
+     "named no path, no CLI and no ledger row, and was taken zero times in ten days. A "
+     "branch with no command behind it is a branch nobody can be shown to have taken."),
+
+    ("hard-round-cap",
+     "A third round is earned by a falling blocking count, and `skillforge` refuses the "
+     "round without one.",
+     (SKILL_PATH, "README.md", STANZA_PATH),
+     "Three of ten forges ran past an advisory cap that refused nothing, and rounds 3 and "
+     "beyond were roughly 60% of the wall clock. A budget nothing enforces is a suggestion."),
 
     ("close-ownership",
-     "You own `start`, `done` and `fail`; the orchestrator owns everything between.",
+     "You own `start`, `done` and `fail`; every agent you dispatch owns everything between.",
      (SKILL_PATH, "README.md"),
-     "Exactly one party may close a forge; the CLI discards the second close at exit 0."),
+     "Exactly one party may close a forge; the CLI discards the second close at exit 0. "
+     "Renamed from 'the orchestrator owns everything between' on 2026-09-02: the default "
+     "forge has no orchestrator, and a rule naming a stage that is not there reads as "
+     "inapplicable rather than as binding on the builder and the reviewer."),
 
-    ("orchestrator-does-not-close",
-     "The orchestrator calls neither `done` nor `fail`.",
+    ("dispatched-agents-do-not-close",
+     "A dispatched agent calls neither `done` nor `fail`.",
      (SKILL_PATH,),
      "The same rule named from the other side. A rule that only says someone does not "
-     "close the forge can be read either way."),
+     "close the forge can be read either way. Renamed from `orchestrator-does-not-close` "
+     "for the reason above, and widened at the same time: C and D could always have called "
+     "`done`, and the old wording forbade it only to a stage that no longer exists."),
 
     ("no-leading-prompt",
      "Never hand a reviewer a list of what not to flag.",
@@ -214,7 +267,7 @@ DOCTRINE = (
 
     ("both-conditions",
      "Both must hold, or it gets a note rather than a skill.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, "README.md", STANZA_PATH),
      "Costly OR recurring says yes to nearly any non-trivial work, and a threshold that "
      "always resolves to yes is worse than none."),
 
@@ -246,13 +299,17 @@ DOCTRINE = (
      "step. A cap reached is not a decision point; it is the moment the budget for making "
      "one ran out."),
 
-    ("the-assessment-binds-from-round-three",
-     "The assessment binds from round 3 and not before",
+    ("the-assessment-binds-from-round-two",
+     "The assessment binds from round 2, where the first comparison exists, and never from "
+     "round 1.",
      (SKILL_PATH,),
      "A cold reviewer showed the catch-all firing at round 1: with one data point no "
      "trajectory can match the converging definition, so 'anything else is not converging' "
      "handed a pressed session permission to abandon after a single round. A rule that "
-     "fires on one round is a licence to quit after one."),
+     "fires on one round is a licence to quit after one. Renumbered from 3 to 2 with the "
+     "forge diet, because the cap is 2 and a rule that binds only from round 3 would never "
+     "bind at all on a default forge; 2 is also where the first comparison exists, which is "
+     "the property the rule was always about."),
 
     ("narrowing-restarts-the-review",
      "A narrowed skill is a new skill for review purposes: the rounds already spent "
@@ -275,7 +332,7 @@ DOCTRINE = (
     ("routing-gate-on-completion",
      "A forge cannot be reported clean while the skill's own must-fire prompts do not "
      "fire it.",
-     (SKILL_PATH, "README.md"),
+     (SKILL_PATH, "README.md", STANZA_PATH),
      "Every seed skill passed a full red-team loop on a `## Trigger precision` section "
      "nobody ran; three of the claims were then false. A reviewer agreeing a description "
      "reads well is not a measurement of the router."),
@@ -359,6 +416,15 @@ DOCTRINE = (
      "reader who already suspects the procedure is more expensive than the problem is the "
      "one who abandons it halfway and does not say so; without a stated bound the skill has "
      "no exit ramp to offer them, and the forge has nowhere to record the judgement."),
+
+    ("verdict-follows-the-apply",
+     "A verdict is recorded after the skill has been applied to the problem that caused "
+     "it, never before.",
+     (SKILL_PATH,),
+     "`skillforge verdict` had 0 rows in 807, and five of six closed forges had no `apply` "
+     "row either. Both debts close in the same turn because that turn is the only moment "
+     "anyone holds both the skill and the problem; a verdict written any earlier judges a "
+     "text rather than an event."),
 
     ("concurrent-forges",
      "Concurrent forges are fine — each gets its own record and its own slot in the status "
@@ -480,12 +546,20 @@ class OrphanedConstantTest(unittest.TestCase):
     """A doc must not attribute a threshold constant to a skill that has dropped it."""
 
     def test_no_doc_cites_a_duration_the_skill_does_not_have(self):
-        pattern = re.compile(r">\s?(\d+)\s?min")
+        """Both directions a doc can name a duration: a `>N min` threshold and an
+        `under N min` target.
+
+        The pattern was `>\\s?(\\d+)\\s?min` alone, which made this test vacuous the day
+        the skill dropped its last `>N min` threshold -- nothing in either document
+        matched, so nothing was checked. The forge diet then put "under 30 minutes" into
+        the README and the skill at once, which is exactly the pair that drifts.
+        """
+        pattern = re.compile(r"(?:>|under )\s?(\d+)\s?min")
         for name, text in (("README.md", README), (".claude/CLAUDE.md", REPO_CLAUDE)):
             for cited in pattern.findall(text):
                 self.assertRegex(
-                    SKILL, r">\s?%s\s?min" % cited,
-                    "%s cites a >%s min threshold that SKILL.md does not define"
+                    SKILL, r"(?:>|under )\s?%s\s?min" % cited,
+                    "%s cites a %s-minute figure that SKILL.md does not define"
                     % (name, cited),
                 )
 
@@ -766,28 +840,62 @@ class DerivationCommandTest(unittest.TestCase):
 
 
 class ForgeDiagramTest(unittest.TestCase):
-    """The README's forging diagram is structure, not prose, so its shape is decidable.
+    """The README's forging diagrams are structure, not prose, so their shape is decidable.
 
     This is the only guard in this file that reads the README's account of the protocol
     beyond a pinned sentence, and it can be, because ASCII tree indentation has a parse.
-    The first version of the test asserted only that the word "orchestrator" appeared
-    somewhere in the README, which passes against a diagram that still hangs the builder
-    off the main session. Bind the nesting instead.
+    The first version asserted only that the word "orchestrator" appeared somewhere in the
+    README, which passes against a diagram that still hangs the builder off the main
+    session. Bind the nesting instead.
+
+    There are TWO diagrams since the forge diet: the default shape, where the session
+    dispatches the builder and the reviewer itself, and the escalated shape, where an
+    orchestrator takes the loop from the granted round on. Each is checked for the nesting
+    it is supposed to have, and the escalated one is also checked against the condition
+    `SKILL.md` states for reaching it -- so a README that keeps the old picture, or that
+    keeps the new one and drops the old, fails here either way.
     """
 
-    def test_the_diagram_nests_the_loop_under_the_orchestrator(self):
+    def diagrams(self):
+        found = re.findall(r"```\nskillforge start.*?```", README, re.S)
+        self.assertEqual(
+            len(found), 2,
+            "README no longer carries exactly two `skillforge start` diagrams (the default "
+            "forge and the escalated one); found %d" % len(found))
+        return found
+
+    @staticmethod
+    def _index(lines, role, fail):
+        for i, line in enumerate(lines):
+            if re.search(r"[├└]─ %s" % re.escape(role), line):
+                return i
+        fail("the diagram omits %r" % role)
+
+    def test_the_default_diagram_hangs_the_builder_and_reviewer_off_the_session(self):
+        """No orchestrator in the default forge, and the builder and the reviewer are
+        children of the session rather than of anything else."""
+        lines = self.diagrams()[0].splitlines()
+        self.assertNotIn(
+            "orchestrator", self.diagrams()[0],
+            "the README's FIRST forging diagram still shows an orchestrator; the default "
+            "forge dispatches the builder and the reviewer from the session itself")
+        session = self._index(lines, "A: this session", self.fail)
+        depth = len(lines[session]) - len(lines[session].lstrip())
+        for role in ("builder", "red-team", "loop"):
+            i = self._index(lines, role, self.fail)
+            self.assertEqual(
+                len(lines[i]) - len(lines[i].lstrip()), depth,
+                "the default diagram must place %r at the same depth as the session's own "
+                "row, i.e. dispatched by the session: %r" % (role, lines[i].strip()))
+
+    def test_the_escalated_diagram_still_nests_the_loop_under_the_orchestrator(self):
         if "orchestrator" not in FORGING:
-            self.fail("SKILL.md no longer hands the loop to an orchestrator, so this whole "
-                      "test and the `orchestrator-runs-the-rounds` rule need re-deriving")
-        diagram = re.search(r"```\nskillforge start.*?```", README, re.S)
-        self.assertIsNotNone(diagram, "README's forging diagram is no longer parseable")
-        lines = diagram.group(0).splitlines()
+            self.fail("SKILL.md no longer brings an orchestrator back on an escalated "
+                      "forge, so this test needs re-deriving")
+        lines = self.diagrams()[1].splitlines()
 
         def line_of(role):
-            for i, line in enumerate(lines):
-                if re.search(r"[├└]─ %s" % re.escape(role), line):
-                    return i
-            self.fail("the README diagram omits %r" % role)
+            return self._index(lines, role, self.fail)
 
         orch_i = line_of("orchestrator")
         orch = len(lines[orch_i]) - len(lines[orch_i].lstrip())
@@ -799,22 +907,39 @@ class ForgeDiagramTest(unittest.TestCase):
             i = line_of(role)
             self.assertGreater(
                 i, orch_i,
-                "the README diagram must place %r after the orchestrator that dispatches "
-                "it" % role)
+                "the README's escalated diagram must place %r after the orchestrator that "
+                "dispatches it" % role)
             child = len(lines[i]) - len(lines[i].lstrip())
             self.assertGreater(
                 child, orch,
-                "the README diagram must nest %r *under* the orchestrator: SKILL.md no "
-                "longer lets the main session dispatch it directly" % role)
+                "the README's escalated diagram must nest %r *under* the orchestrator"
+                % role)
             for between in lines[orch_i + 1:i]:
                 if not between.strip():
                     continue
                 depth = len(between) - len(between.lstrip())
                 self.assertGreater(
                     depth, orch,
-                    "the README diagram breaks out of the orchestrator's subtree before "
+                    "the escalated diagram breaks out of the orchestrator's subtree before "
                     "reaching %r, so %r hangs off something else: %r"
                     % (role, role, between.strip()))
+
+    def test_the_condition_for_the_second_diagram_is_the_cap_the_skill_states(self):
+        """The escalated shape is reached at a stated number of rounds, and that number is
+        the cap, not a second constant. Derived from `SKILL.md` on both sides."""
+        m = re.search(r"budget exceeds (\w+) rounds", FORGING)
+        self.assertIsNotNone(
+            m, "the forging protocol no longer states the condition under which the "
+               "orchestrator and the judge come back, so the second diagram documents a "
+               "shape nothing can be reached from")
+        stated = count_word(m.group(1))
+        self.assertIsNotNone(stated, "unreadable numeral in %r" % m.group(0))
+        cap = re.search(r"Cap at (\d+) rounds", SKILL)
+        self.assertIsNotNone(cap, "SKILL.md no longer states a round cap")
+        self.assertEqual(
+            stated, int(cap.group(1)),
+            "the protocol brings the orchestrator back past %d rounds but caps the loop at "
+            "%s; one of the two numbers moved on its own" % (stated, cap.group(1)))
 
 
 # A json filename as the docs write it, inside backticks: `forge/<slug>.forge.json`,
@@ -1121,7 +1246,8 @@ class HeldOutIsConstructionNotInstructionTest(unittest.TestCase):
         cls._tmp.cleanup()
 
     def sentence(self):
-        m = re.search(r"Do \*\*not\*\* hand B the project.*?\n\n", SKILL, re.S)
+        m = re.search(r"Do \*\*not\*\* hand a dispatched agent the project.*?\n\n",
+                      SKILL, re.S)
         self.assertIsNotNone(
             m, "the forging protocol no longer tells the orchestrator's dispatcher what "
                "to withhold, so there is nothing left for this test to check")

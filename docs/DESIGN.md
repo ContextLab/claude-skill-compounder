@@ -56,10 +56,41 @@ reader finds it inside the file it is already reading.
 The reminder hook *does* key its counters per session, and that is correct: it both writes
 and reads using the payload's `.session_id`, so the two sides agree.
 
+### Why the forge went on a diet
+
+The default forge was five stages and a five-round cap: A, an orchestrator, a builder, a
+red-teamer per round, and a judge — eight agents at the cap, over twelve steps and 28 doctrine
+gates. The ten forges closed under it took 0.60, 0.95, 0.96, 1.75, 3.11, 3.45, 5.36, 5.81,
+6.47 and 86.4 hours (`notes/2026-09-02-audit-and-replan.md`), a median of about 3.3, and six
+of the ten closed `done` against four `fail`. Cost was uncorrelated with value: `finish-task`
+cost twelve hours and 1301 lines and has zero genuine uses, while the two most-used skills are
+around 405 lines each.
+
+The audit could attribute an observed catch to only four cheap pieces — the parse gate (~2s),
+the routing gate (~90s per skill, under 1% of a median forge), round 1 plus one confirming
+round, and the non-fork reviewer. So those stayed. What went: rounds 3 and beyond, which were
+about 60% of the wall clock; the orchestrator layer, which caught no defect in ten forges and
+produced the 86.4-hour outlier; the judge, which produced two meta findings ever and never a
+skill defect; and the unconditional runnable reproduction, which no note records catching
+anything. The judge's first question moved into step 1, where it is one sentence written
+beside the verbatim trigger, and the orchestrator and the judge both come back on a forge
+whose budget has been raised past two rounds — which is the only kind of forge whose review
+traffic was ever big enough to want a layer between it and the user.
+
+The cap became a refusal rather than a number in a doc because three of the ten forges simply
+ran past the advisory one. `skillforge round` owns the round record, so it can count what is
+really there; `step` still records an overrun rather than refusing it, because a budget is a
+plan and a step reached is an observation. See `bin/skillforge`'s own header for that split.
+
+**The counter-evidence, kept here because it is the argument against this change.** The
+cheapest forge on record — `ai-tell-audit`, 35 minutes — shipped a skill that was broken
+within the hour. A short forge is not a safe forge, and nothing in the diet claims otherwise:
+what it claims is that the rounds that were cut were not the rounds doing the catching.
+
 ### One file per forge
 
-Several forges run at once. The loop runs in a background orchestrator, so a main thread
-that is not tied up for the length of a forge starts a second one cheaply, and does.
+Several forges run at once. Every agent a forge dispatches runs in the background, so a main
+thread that is not tied up for the length of a forge starts a second one cheaply, and does.
 
 `skillforge` writes `forge/<slug>.forge.json`, one file per forge, and reads every `*.json`
 in that directory as a slot. `start` never touches another forge's record. The slug is only
@@ -890,10 +921,19 @@ taking the escape a deliberate act with a written reason, and every one of them 
 row to `<state>/doc-gate/overrides.jsonl`. An escape nobody can count is indistinguishable
 from a gate nobody has.
 
-**`notes/` is classified as neither code nor documentation, and that is deliberate.** It is
-a dated log rather than a description of the system. Counting it as documentation would let
-every push this repository makes satisfy the gate by adding a session note, which is exactly
-the shape of compliance the gate exists to refuse.
+**How `notes/` is classified is a per-repository decision, so it became a knob rather than a
+rule.** The original rule counted it as neither code nor documentation, on the argument that
+a dated log is not a description of the system and that counting it as documentation would
+let every push here satisfy the gate by adding a session note — exactly the shape of
+compliance the gate exists to refuse. That argument is sound about *this* repository and
+wrong about most others, where `notes/` is where the writing lives; and it was not a
+judgement the gate should have been making on anyone's behalf, since a hardcoded path shape
+built on one repository's habits is how a gate acquires a reputation for being wrong.
+`DOC_GATE_NOTES` states it instead: `doc` by default, because a `notes/` directory is
+usually prose someone wrote, and `neither` where it is a log. This repository sets `neither`
+in `.claude/settings.json`, which keeps the original behaviour exactly where the original
+argument holds. The evidence that this needed to be a knob is that the only
+`DOC_GATE_OVERRIDE` in the record was taken against the hardcoded version.
 
 **The repeat gate spans three events because the thing it recognises is a sequence.** A
 failure is one event, the call that worked instead is another, and the next attempt at the
@@ -911,7 +951,9 @@ stops a command that failed once for a transient reason — a timeout, a rate li
 sharing a signature with the same command failing structurally, which is the difference
 between a useful refusal and noise.
 
-**The gate denies once per session per signature, and would be worse if it denied always.**
+**The gate denies once per session per signature, and would be worse if it denied always** —
+when it denies at all, which by default it does not (`REPEAT_GATE_REFUSE`; the measurement
+is in that script's header and the operational summary in `.claude/CLAUDE.md`).
 The recovery it names is a heuristic — the first success of the same tool after a failure,
 inside a bounded window, agreed across sessions by plurality — and a heuristic that cannot be
 overruled is a trap. One refusal forces a decision; a second attempt in the same session goes

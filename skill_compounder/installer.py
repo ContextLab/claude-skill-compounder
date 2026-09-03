@@ -323,20 +323,33 @@ Three standing habits, so the recognition can fire without loading the skill fir
 2. **During work**, watch for procedures that are BOTH costly — you can name the specific
    dead end in one sentence — AND recurring, meaning you can point at the second
    occurrence. Both need a concrete referent, not a judgement: if either sentence is hard
-   to write, that is the answer. Both, or it gets a note instead of a skill.
+   to write, that is the answer. Both must hold, or it gets a note rather than a skill.
 3. **When a skill misfires**, never silently work around it: fix the wording, or fix the
    procedure and re-red-team it, or retire it — retirement only with independent
    concurrence from a second fresh agent asked a neutral question.
 
+Compounding: keep what a session learned at the cheapest tier that holds it.
+
+    note:     skillnote add --scope project "<line>"
+    reminder: skillnote add --remind --keyword <k> "<line>"
+    skill:    forge it, per the protocol below.
+
+A procedure earns a skill only when it has steps a model gets wrong without them AND a
+trigger a description can route; otherwise it is a note or a reminder.
+
 When any of these fires, invoke `skill-compounder` and follow it exactly. It carries the
 builder/red-team loop, the `skillforge` progress animation, and the retirement protocol.
-The loop runs in an orchestrator subagent, not in the main thread: announce it, start the
-forge, hand it off, and close it when the orchestrator reports. The red-teamer must never
+The default forge is one builder subagent and one cold reviewer over two rounds, and it is
+hard-capped: A third round is earned by a falling blocking count, and `skillforge` refuses
+the round without one. Every agent a forge dispatches runs in the background, and the
+session that starts one never blocks on it. The red-teamer must never
 be a fork of either layer — not of the orchestrator that dispatches it, and not of the
 session that dispatched the orchestrator. A forked reviewer already knows what the skill
 was meant to say, so it cannot find the ambiguity that will bite a cold session later; each
 round needs a genuinely new reviewer, because after round one the previous one is no longer
-cold.
+cold. A forge cannot be reported clean while the skill's own must-fire prompts do not fire
+it. Close with `skillforge done`, then `skillforge apply` and `skillforge verdict` in the
+same turn.
 
 Two hooks in `settings.json` surface these reminders automatically during long sessions
 (they point at `{app_home}/hooks/compound-improvement.sh`). If they become

@@ -95,10 +95,12 @@ def gate_step():
 class GateIsAStepTest(unittest.TestCase):
     """The gate is a numbered step, not an aside.
 
-    Step 3 (`Verify the draft parses`) is a numbered step for a stated reason: a skill
-    can pass every red-team round on its content and still ship inert. The routing gate
-    is the same claim about reachability rather than loading, so it earns the same
-    standing. A footnote is what the old `Trigger precision` checklist row was.
+    The builder step -- whichever number it carries, `gate_step()` and the
+    `skill-authoring` lookup below both find their step by what it DOES -- earns its
+    number because a skill can pass every red-team round on its content and still ship
+    inert. The routing gate is the same claim about reachability rather than loading, so
+    it earns the same standing. A footnote is what the old `Trigger precision` checklist
+    row was.
     """
 
     def test_the_protocol_carries_a_numbered_routing_gate(self):
@@ -549,7 +551,7 @@ class HandOffNamesAgreeTest(unittest.TestCase):
         section = rc.parse_skill(SKILL_PATH)["section"]
         self.assertIn("superpowers:writing-skills", section)
 
-    def test_step_four_says_why_the_bare_names_do_not_work(self):
+    def test_the_builder_step_says_why_the_bare_names_do_not_work(self):
         """Not merely that they do not resolve: WHERE they do resolve. A session told
         only "that name does not work" cannot find the thing it was pointed at."""
         step = [b for n, b in steps().items() if "skill-authoring" in b]

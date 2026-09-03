@@ -300,3 +300,10 @@ Each is a **counted claim**; re-derive from code.
 2. Memory-scope read-back is unverified. Say so; do not promise it.
 3. Slug transform measured only for paths with no dots or spaces. Refuse on unknown slug.
 4. `REMIND_MAX=2` and once-per-session cooldown are guesses; do not tune before hit counts exist.
+
+## Correction, 2026-09-02 evening
+
+The example row above shows `commands: ["Bash\n./run_tests.sh"]`. The shipped form is the
+bare output of `hooks/repeat-gate.sh --norm-of Bash` (no tool prefix), because that is what
+`hooks/remind.sh` compares. A real headless run found the prefixed form silent; the writer
+now stores the bare signature and `tests/test_remind.py::WriterReaderTest` drives both halves.

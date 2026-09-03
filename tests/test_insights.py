@@ -895,5 +895,528 @@ class ReindexTest(InsightsTestBase):
         self.assertIn("skillinsight reindex", r.stdout)
 
 
+# `promote` -- the one command between a queued candidate and something that will
+# actually be read again. Everything below drives the real CLI, which drives the real
+# bin/skillnote, which writes a real CLAUDE.md into a real temp directory. No mocks: the
+# whole point of the subcommand is that it does not reimplement skillnote, so a test
+# that stood in for skillnote would test nothing.
+SKILLNOTE = REPO / "bin" / "skillnote"
+REPEAT_GATE = REPO / "hooks" / "repeat-gate.sh"
+
+
+class PromoteTest(InsightsTestBase):
+
+    def setUp(self):
+        super().setUp()
+        self.proj = self.root / "proj"
+        self.proj.mkdir()
+
+    def env(self, **extra):
+        e = super().env(**extra)
+        # skillnote has its own clock and does not read INSIGHT_NOW. Pinning someone
+        # else's clock does nothing to it -- .claude/CLAUDE.md says so in as many words.
+        e.setdefault("SKILLNOTE_NOW", str(NOW))
+        return e
+
+    # ------------------------------------------------------------------ fixtures
+
+    def enqueue(self, text, hash="cafebabe00000000", source="marker", week=WEEK,
+              ts="2025-08-24T00:00:00Z", project=None):
+        d = self.queue
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / ("%s.jsonl" % week)).open("a") as fh:
+            fh.write(json.dumps({"hash": hash, "ts": ts, "week": week,
+                                 "source": source, "session": "s1",
+                                 "project": project or str(self.proj),
+                                 "text": text}) + "\n")
+        return hash
+
+    def claude_md(self):
+        p = self.proj / ".claude" / "CLAUDE.md"
+        return p.read_text() if p.exists() else ""
+
+    def note_body(self):
+        """The readable half of the one note line, without the id comment."""
+        line = [l for l in self.claude_md().splitlines() if l.startswith("- **")][0]
+        return line.split("** ", 1)[1].split(" <!--")[0]
+
+    def promoted(self, name=".promoted.jsonl", where=None):
+        f = (where or self.queue) / name
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+
+    def shell_glob(self):
+        """What `"$DIR"/*.jsonl` expands to for the CLI and for the capture hook."""
+        r = subprocess.run(["/bin/sh", "-c",
+                            'ls -1 "$1"/*.jsonl 2>/dev/null | sort', "sh",
+                            str(self.queue)],
+                           capture_output=True, text=True, timeout=TIMEOUT)
+        return [Path(l).name for l in r.stdout.splitlines() if l.strip()]
+
+    def reminders(self):
+        f = self.state / "reminders.jsonl"
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+
+    # ------------------------------------------------------------ the note it writes
+
+    def test_a_queued_candidate_becomes_a_note_in_the_projects_claude_md(self):
+        self.enqueue("Kill the runner and re-run the full suite.")
+        r = self.run_cli("promote", "cafebabe", "--to", "note",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Kill the runner and re-run the full suite.", self.claude_md())
+        self.assertIn("skillnote:begin", self.claude_md())
+
+    def test_the_text_is_the_first_line_only(self):
+        self.enqueue("The lesson itself.\nAnd a second line of context nobody wants "
+                   "inside a bullet.")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        self.assertIn("The lesson itself.", self.claude_md())
+        self.assertNotIn("second line of context", self.claude_md())
+
+    def test_the_text_is_squeezed_and_capped_at_200_characters(self):
+        self.enqueue("lesson " * 60)
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        body = self.note_body()
+        self.assertEqual(len(body), 200, "a 200-character cap, counted in characters")
+        self.assertNotIn("  ", body, "runs of whitespace are squeezed")
+
+    def test_the_cap_counts_characters_and_not_bytes(self):
+        """`cut -c` is locale-dependent for multibyte text; the cap is done in jq.
+
+        A queue record's text routinely carries the ★ from the marker it was captured
+        from, and a byte cap would slice one in half and leave the CLAUDE.md holding a
+        broken sequence.
+        """
+        self.enqueue("\u2605\u2605 " * 100)
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        body = self.note_body()
+        self.assertEqual(len(body), 200, "200 characters, which is 400 bytes here")
+        self.assertEqual(body.count("\u2605"), 134)
+        self.assertNotIn("\ufffd", self.claude_md(), "no glyph was cut in half")
+
+    def test_the_note_carries_the_pinned_date_not_todays(self):
+        self.enqueue("A dated lesson.")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        self.assertRegex(self.claude_md(), r"- \*\*2025-08-2[34]\*\* A dated lesson\.")
+
+    def test_the_note_records_where_it_came_from(self):
+        """The provenance goes in the comment, never into the readable sentence."""
+        self.enqueue("A lesson.")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        line = [l for l in self.claude_md().splitlines() if l.startswith("- **")][0]
+        self.assertIn("source:session", line)
+        self.assertIn("skillinsight promote cafebabe", line)
+        self.assertTrue(line.split(" <!--")[0].endswith("A lesson."),
+                        "the visible half stays one sentence: %s" % line)
+
+    def test_the_text_can_be_overridden(self):
+        self.enqueue("session-audit: 41 file edits counted across 9 files")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj),
+                     "--text", "Two of those nine were the same off-by-one.")
+        self.assertIn("Two of those nine were the same off-by-one.", self.claude_md())
+        self.assertNotIn("41 file edits", self.claude_md())
+
+    def test_the_project_comes_from_the_record_when_no_flag_is_given(self):
+        self.enqueue("A lesson about the other repo.", project=str(self.proj))
+        r = self.run_cli("promote", "cafebabe", "--to", "note")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("A lesson about the other repo.", self.claude_md())
+
+    # ------------------------------------------------------------- the queue record
+
+    def test_a_promote_record_is_written_and_names_the_note_id(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe", "--to", "note",
+                         "--project", str(self.proj))
+        rows = self.promoted()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["hash"], "cafebabe00000000")
+        self.assertEqual(rows[0]["to"], "note")
+        self.assertRegex(rows[0]["id"], r"^n[0-9]+x[0-9]+$")
+        self.assertIn(rows[0]["id"], self.claude_md(),
+                      "the recorded id has to be the id that is actually in the file")
+        self.assertIn(rows[0]["id"], r.stdout)
+
+    def test_the_promote_log_is_a_dotfile_and_is_not_a_week_of_candidates(self):
+        """The reason .declined.jsonl is a dotfile, and it bites harder here.
+
+        A promote record carries a `"hash":"..."` string, which is exactly what the
+        capture hook's dedup greps `*.jsonl` for; under a non-dotted name, promoting a
+        candidate would blocklist its hash in the hook forever.
+        """
+        self.enqueue("A lesson.")
+        before = self.shell_glob()
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        self.assertTrue((self.queue / ".promoted.jsonl").exists())
+        # THE SHELL'S GLOB, NOT PYTHON'S. `Path.glob("*.jsonl")` matches a leading dot
+        # and the shell's does not, so asserting with pathlib here would pass against a
+        # file named `promoted.jsonl` and prove the opposite of what it claims.
+        self.assertEqual(self.shell_glob(), before,
+                         "the glob every reader uses must not see it")
+        self.assertIn("candidates:      1", self.run_cli("stats").stdout)
+        self.assertIn("promoted:        1", self.run_cli("stats").stdout)
+
+    def test_promoting_twice_writes_one_note_and_one_record(self):
+        self.enqueue("A lesson.")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        r = self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("already promoted", r.stdout)
+        self.assertEqual(len(self.promoted()), 1)
+        self.assertEqual(self.claude_md().count("A lesson."), 1)
+
+    # ------------------------------------------------------- it leaves the queue
+
+    def test_a_promoted_candidate_stops_being_pending(self):
+        self.enqueue("A lesson.")
+        self.assertEqual(self.run_cli("pending", "--format", "tsv").stdout.split("\t")[0],
+                         "1")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        self.assertEqual(self.run_cli("pending", "--format", "tsv").stdout.split("\t")[0],
+                         "0")
+
+    def test_list_marks_it_promoted_and_keeps_the_record(self):
+        self.enqueue("A lesson.")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        out = self.run_cli("list").stdout
+        self.assertIn("[promoted]", out)
+        self.assertIn("A lesson.", out, "promote never deletes the queued line")
+        self.assertEqual(len(self.records()), 1)
+
+    def test_review_leaves_it_out_and_says_which_judgement_it_was(self):
+        self.enqueue("A lesson.", hash="aaaa0000aaaa0000")
+        self.enqueue("Another lesson.", hash="bbbb0000bbbb0000")
+        self.run_cli("promote", "aaaa0000", "--to", "note", "--project", str(self.proj))
+        self.run_cli("decline", "bbbb0000", "--why", "no")
+        out = self.run_cli("review").stdout
+        self.assertIn("0 candidates", out)
+        self.assertIn("1 already declined", out)
+        self.assertIn("1 already promoted", out)
+
+    def test_a_declined_record_is_not_double_counted_as_promoted(self):
+        h = self.enqueue("A lesson.")
+        self.run_cli("decline", h[:8], "--why", "no")
+        self.run_cli("promote", h[:8], "--to", "note", "--project", str(self.proj))
+        out = self.run_cli("review").stdout
+        self.assertIn("1 already declined", out)
+        self.assertNotIn("already promoted", out)
+
+    # ------------------------------------------------------------------ reminders
+
+    def test_a_reminder_needs_an_explicit_match_rule(self):
+        self.enqueue("A lesson about tests.")
+        r = self.run_cli("promote", "cafebabe", "--to", "reminder",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--keyword", r.stderr)
+        self.assertEqual(self.reminders(), [], "nothing is written on a refusal")
+        self.assertEqual(self.promoted(), [])
+
+    def test_keywords_are_never_derived_from_the_records_prose(self):
+        self.enqueue("The runner wedges when a test file imports the fixture twice.")
+        self.run_cli("promote", "cafebabe", "--to", "reminder",
+                     "--project", str(self.proj), "--keyword", "RUNNER")
+        rows = self.reminders()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["match"]["keywords"], ["runner"],
+                         "exactly what was passed, lowercased, and nothing mined "
+                         "out of the text: %s" % rows[0]["match"])
+
+    def test_a_path_and_a_command_are_passed_straight_through(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe", "--to", "reminder",
+                         "--project", str(self.proj),
+                         "--path", "tests/*.py",
+                         "--command", 'gh issue comment 19 --body "x"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self.reminders()[0]
+        self.assertEqual(row["match"]["paths"], ["tests/*.py"])
+        # The signature, not the literal command -- and the signature has to be BYTE FOR
+        # BYTE what hooks/repeat-gate.sh prints, because hooks/remind.sh builds its own
+        # `$NORM` from that same command (remind.sh:319-320, newlines stripped) and tests
+        # membership with `$cm | index($norm)`. An exact-match index() has no tolerance
+        # for a decoration on either side.
+        #
+        # This asserted `"Bash\n" + norm` until 2026-09-02, which is the shape bin/skillnote
+        # really wrote and the reason every --command reminder was silent in a real
+        # session: the writer stored a two-line value and the reader compared one line.
+        # The prefix was removed from the writer, so it is removed from the expectation
+        # here. tests/test_remind.py::WriterReaderTest drives the same contract end to end,
+        # real writer into real hook, which is what would have caught this without a live
+        # session.
+        norm = subprocess.run([str(REPEAT_GATE), "--norm-of", "Bash"],
+                              input='gh issue comment 19 --body "x"',
+                              capture_output=True, text=True, env=self.env(),
+                              timeout=TIMEOUT).stdout.strip()
+        self.assertEqual(row["match"]["commands"], [norm])
+        self.assertNotIn("\n", row["match"]["commands"][0],
+                         "a stored signature with a newline in it can never equal the "
+                         "single line hooks/remind.sh compares against")
+        self.assertNotIn("19", row["match"]["commands"][0])
+
+    def test_a_note_and_a_reminder_coexist(self):
+        self.enqueue("A lesson.")
+        self.run_cli("promote", "cafebabe", "--to", "note", "--project", str(self.proj))
+        self.run_cli("promote", "cafebabe", "--to", "reminder",
+                     "--project", str(self.proj), "--keyword", "test")
+        rows = self.promoted()
+        self.assertEqual(sorted(r["to"] for r in rows), ["note", "reminder"])
+        self.assertNotEqual(rows[0]["id"], rows[1]["id"], "different stores, different ids")
+
+    # ------------------------------------------------------------------ refusals
+
+    def test_an_unknown_hash_is_refused(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "nosuchhash", "--to", "note")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no queued candidate", r.stderr)
+        self.assertEqual(self.claude_md(), "")
+
+    def test_an_ambiguous_prefix_is_refused(self):
+        self.enqueue("One.", hash="dd00000000000001")
+        self.enqueue("Two.", hash="dd00000000000002")
+        r = self.run_cli("promote", "dd00", "--to", "note")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("use more of the hash", r.stderr)
+
+    def test_to_is_required(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--to", r.stderr)
+
+    def test_an_unknown_tier_is_refused(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe", "--to", "skill")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("'note' or 'reminder'", r.stderr)
+
+    def test_an_unknown_scope_is_refused_naming_the_three(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe", "--to", "note", "--scope", "repo")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("project, global, memory", r.stderr)
+
+    def test_a_hash_and_a_verdict_together_are_refused(self):
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe", "--verdict", "abcd", "--to", "note")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not both", r.stderr)
+
+    def test_neither_a_hash_nor_a_verdict_is_refused(self):
+        r = self.run_cli("promote", "--to", "note")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--verdict", r.stderr)
+
+    def test_skillnotes_environment_exit_code_is_carried_through(self):
+        """3 is 'fix your environment', 2 is 'fix your command line'.
+
+        Collapsing skillnote's 3 into this CLI's own 2 would send the caller looking for
+        a mistyped flag when the real answer is that Claude Code has never opened that
+        directory, so the memory slug does not exist.
+        """
+        self.enqueue("A lesson.")
+        r = self.run_cli("promote", "cafebabe", "--to", "note", "--scope", "memory",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("slug", r.stderr)
+        self.assertEqual(self.promoted(), [],
+                         "a refused write must leave no promote record behind")
+
+    # -------------------------------------------------------------- verdict form
+
+    def review_row(self, session="aaaa1111-0000-0000-0000-000000000001",
+                   verdict="CANDIDATE", name="kill-and-rerun-full-suite",
+                   ts="2025-08-24T00:00:00Z"):
+        d = self.state / "reviews"
+        (d / "2025-W34").mkdir(parents=True, exist_ok=True)
+        report = d / "2025-W34" / ("%s.md" % session)
+        report.write_text("the report body\n")
+        with (d / "index.jsonl").open("a") as fh:
+            fh.write(json.dumps({"ts": ts, "week": "2025-W34", "session": session,
+                                 "project": str(self.proj), "verdict": verdict,
+                                 "name": name, "report": str(report),
+                                 "cost_usd": "0.22", "stage": "analysis"}) + "\n")
+        return session
+
+    def test_a_candidate_verdict_becomes_a_note(self):
+        self.review_row()
+        r = self.run_cli("promote", "--verdict", "aaaa1111", "--to", "note",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("kill-and-rerun-full-suite", self.claude_md())
+        self.assertIn("source:verdict", self.claude_md())
+
+    def test_the_verdict_note_points_at_the_report_it_came_from(self):
+        self.review_row()
+        self.run_cli("promote", "--verdict", "aaaa1111", "--to", "note",
+                     "--project", str(self.proj))
+        self.assertIn('why:"see ', self.claude_md())
+        self.assertIn("aaaa1111-0000-0000-0000-000000000001.md", self.claude_md())
+
+    def test_the_verdict_record_lands_beside_the_reviews_not_in_the_queue(self):
+        self.review_row()
+        self.run_cli("promote", "--verdict", "aaaa1111", "--to", "note",
+                     "--project", str(self.proj))
+        rows = self.promoted(where=self.state / "reviews")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["session"], "aaaa1111-0000-0000-0000-000000000001")
+        self.assertEqual(rows[0]["to"], "note")
+        self.assertFalse((self.queue / ".promoted.jsonl").exists(),
+                         "a verdict is not a queue hash and must not fake one")
+
+    def test_promote_review_is_the_same_command(self):
+        self.review_row()
+        r = self.run_cli("promote-review", "aaaa1111", "--to", "note",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("kill-and-rerun-full-suite", self.claude_md())
+
+    def test_a_verdict_can_be_given_the_lesson_itself(self):
+        self.review_row()
+        self.run_cli("promote", "--verdict", "aaaa1111", "--to", "note",
+                     "--project", str(self.proj), "--text",
+                     "Kill the runner and re-run the full suite; a filtered re-run "
+                     "hides a cross-file failure.")
+        self.assertIn("hides a cross-file failure.", self.claude_md())
+
+    def test_a_none_verdict_has_nothing_to_promote(self):
+        self.review_row(session="bbbb2222-0000-0000-0000-000000000002",
+                        verdict="NONE", name="")
+        r = self.run_cli("promote", "--verdict", "bbbb2222", "--to", "note",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not CANDIDATE", r.stderr)
+        self.assertEqual(self.claude_md(), "")
+
+    def test_an_unknown_session_id_is_refused(self):
+        self.review_row()
+        r = self.run_cli("promote", "--verdict", "zzzz", "--to", "note")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no session review", r.stderr)
+
+    def test_an_ambiguous_session_prefix_is_refused(self):
+        self.review_row(session="cccc0000-0000-0000-0000-000000000001")
+        self.review_row(session="cccc0000-0000-0000-0000-000000000002")
+        r = self.run_cli("promote", "--verdict", "cccc0000", "--to", "note")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("use more of the session id", r.stderr)
+
+    def test_promoting_a_verdict_twice_writes_one_record(self):
+        self.review_row()
+        self.run_cli("promote", "--verdict", "aaaa1111", "--to", "note",
+                     "--project", str(self.proj))
+        r = self.run_cli("promote", "--verdict", "aaaa1111", "--to", "note",
+                         "--project", str(self.proj))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.promoted(where=self.state / "reviews")), 1)
+
+    def test_it_is_in_the_usage_text(self):
+        """A promotion path nobody can find promotes nothing."""
+        out = self.run_cli("--help").stdout
+        self.assertIn("skillinsight promote <hash> --to note|reminder", out)
+        self.assertIn("promote --verdict <session-id>", out)
+
+
+class BulkDeclineTest(InsightsTestBase):
+    """`decline --source <src>`.
+
+    46 of the 57 rows in the live queue on 2026-09-02 came from an output-style
+    plugin's `★ Insight` blocks. Judging those one hash at a time is 46 commands, and
+    the thing a reader reaches for instead is the mute -- which buries the real rows too.
+    """
+
+    def seed(self):
+        d = self.state / "insights"
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / ("%s.jsonl" % WEEK)).open("a") as fh:
+            for i in range(4):
+                fh.write(json.dumps({
+                    "hash": "aa%014d" % i, "ts": "2025-08-24T00:00:00Z", "week": WEEK,
+                    "source": "star-insight", "session": "s1",
+                    "project": str(self.root), "text": "plugin prose %d" % i}) + "\n")
+            fh.write(json.dumps({
+                "hash": "bb00000000000000", "ts": "2025-08-24T00:00:00Z", "week": WEEK,
+                "source": "marker", "session": "s1", "project": str(self.root),
+                "text": "a real candidate"}) + "\n")
+
+    def declined(self):
+        f = self.state / "insights" / ".declined.jsonl"
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+
+    def test_it_declines_every_record_of_one_source(self):
+        self.seed()
+        r = self.run_cli("decline", "--source", "star-insight", "--why", "plugin noise")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("declined 4 record(s)", r.stdout)
+        self.assertEqual(len(self.declined()), 4)
+        self.assertTrue(all(d["why"] == "plugin noise" for d in self.declined()))
+
+    def test_it_leaves_every_other_source_alone(self):
+        self.seed()
+        self.run_cli("decline", "--source", "star-insight")
+        line = self.run_cli("pending", "--format", "tsv").stdout
+        self.assertEqual(line.split("\t")[0], "1")
+        self.assertIn("a real candidate", self.run_cli("pending").stdout)
+
+    def test_it_deletes_nothing(self):
+        self.seed()
+        self.run_cli("decline", "--source", "star-insight")
+        self.assertEqual(len(self.records()), 5)
+        self.assertEqual(self.run_cli("list").stdout.count("[declined]"), 4)
+
+    def test_a_second_pass_declines_nothing_twice(self):
+        self.seed()
+        self.run_cli("decline", "--source", "star-insight")
+        r = self.run_cli("decline", "--source", "star-insight")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("declined 0 record(s)", r.stdout)
+        self.assertIn("4 already declined", r.stdout)
+        self.assertEqual(len(self.declined()), 4)
+
+    def test_a_source_that_matches_nothing_is_refused(self):
+        self.seed()
+        r = self.run_cli("decline", "--source", "star-insigth")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no queued candidate", r.stderr)
+        self.assertEqual(self.declined(), [])
+
+    def test_a_dry_run_writes_nothing(self):
+        self.seed()
+        r = self.run_cli("decline", "--source", "star-insight", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would decline 4", r.stdout)
+        self.assertEqual(self.declined(), [])
+
+    def test_it_can_be_bounded_to_one_week(self):
+        self.seed()
+        d = self.state / "insights"
+        with (d / "2025-W20.jsonl").open("w") as fh:
+            fh.write(json.dumps({
+                "hash": "cc00000000000000", "ts": "2025-05-12T00:00:00Z",
+                "week": "2025-W20", "source": "star-insight", "session": "s0",
+                "project": str(self.root), "text": "old plugin prose"}) + "\n")
+        r = self.run_cli("decline", "--source", "star-insight", "--week", "2025-W20")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("declined 1 record(s)", r.stdout)
+        self.assertEqual([d["hash"] for d in self.declined()], ["cc00000000000000"])
+
+    def test_the_single_hash_form_still_works(self):
+        self.seed()
+        r = self.run_cli("decline", "bb000000", "--why", "one line")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("declined bb00000000000000", r.stdout)
+        self.assertEqual(len(self.declined()), 1)
+
+    def test_it_is_in_the_usage_text(self):
+        self.assertIn("skillinsight decline --source", self.run_cli("--help").stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

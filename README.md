@@ -43,10 +43,10 @@ session can decode, so exactly one agent — the session itself — is allowed t
 project, and it spends that privilege judging the result rather than writing it. A
 **builder** writes the skill in a scratch directory with no path into the project. A
 **separate, cold** red-teamer is handed the skill and nothing else, and has to work out
-from the text alone what the skill is even for. They loop until the report comes back
-clean, driven by an **orchestrator** so none of that traffic lands in the thread you are
-talking to, and a final **judge** holds the words that set the forge off and asks whether
-what got built answers them.
+from the text alone what the skill is even for. Both run in the background, so none of that
+traffic lands in the thread you are talking to, and the loop is capped at two rounds: a
+third has to be earned from a falling count of blocking findings, and the CLI refuses it
+otherwise.
 
 ---
 
@@ -62,12 +62,12 @@ what got built answers them.
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
-|`hooks/repeat-gate.sh`|**Refuses.** Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it denies the third attempt once and says what to do instead. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it can deny the third attempt once and say what to do instead. **That refusal is off by default** (`REPEAT_GATE_REFUSE=1` arms it); learning and recovery run either way. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, on by default.** After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and off switch: [What runs against the API](#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
-|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic|
+|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic|
 |`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
 |`bin/skillinsight`|Reads and prunes the candidate queue|
@@ -359,6 +359,44 @@ habit also has an arm that asks nothing of the session and that the session cann
 decline, and a fourth mechanism below the three refuses outright rather than asking at
 all: [The claim gate](#the-claim-gate).
 
+## Three ways to compound: note, reminder, skill
+
+A forge is the expensive answer, and for most of what a session learns it is the wrong one.
+Three tiers ship, and the first two cost one command each:
+
+|Tier|What it costs|Where it lives|What reads it back|When to pick it|
+|-|-|-|-|-|
+|**note**|one command|a marker block in a project or global `CLAUDE.md`, or a Claude Code memory file|Claude Code, on every session that loads that file|the lesson is a fact with no steps: a path, a version, a command that works|
+|**reminder**|one command|`reminders.jsonl` in the state directory|`hooks/remind.sh`, when a prompt, a path or a command signature matches|the lesson applies at a moment you can name, and only then|
+|**skill**|a builder subagent, a cold reviewer, two rounds|`~/.claude/skills/<name>/` or a project's `.claude/skills/`|the router, when a prompt matches the description|the procedure has steps, and a description can route to it|
+
+```bash
+skillnote add --scope project "<the one-line lesson>" --why "<the dead end>" --source forge
+skillnote add --remind --scope project "<the lesson>" --keyword <k> --command "<the call>"
+skillnote list --scope remind
+```
+
+<!-- doctrine: tier-before-forge -->
+**A procedure earns a skill only when it has steps a model gets wrong without them AND a
+trigger a description can route; otherwise it is a note or a reminder.** Both halves are
+checkable before anything is dispatched. A fact has no steps, so forging "the suite is
+`./run_tests.sh`" wraps one sentence in eight hundred; and if the moment the procedure
+applies is internal to the assistant, with no utterance to match on, no description will
+route to it, while a reminder keyed on the tool call or the path will fire.
+
+The tiers promote rather than compete. A note that keeps getting rewritten is a recurrence,
+which is half the forging threshold, and both cheap tiers write a `note` row to the same
+ledger the forges are recorded in, so "we have written this down four times" is a query
+anyone can run. `skillinsight promote <hash> --to note|reminder` takes a queued
+candidate the other way, writing it down now instead of forging it or losing it.
+
+**What the memory scope does and does not get you.** `--scope memory` writes a Claude Code
+memory file and appends its index line to `MEMORY.md` in the same directory. Measured
+2026-09-02 on Claude Code 2.1.258: a memory file that `MEMORY.md` indexes is injected into a
+later session, and one it does not index was seen in 0 of 3 runs. The index line is what makes
+the read-back happen, so the ledger row for that scope records `readback:"via-index"` and
+claims nothing about the file on its own.
+
 ### 1. Before implementing, reuse before you build
 
 At the start of a substantive turn, a `UserPromptSubmit` hook reminds the session to check
@@ -400,32 +438,69 @@ Both want a **concrete referent** rather than a judgement, because both are othe
 loose enough to say yes to nearly any non-trivial work, and a threshold that always
 resolves to yes is worse than none.
 
-When both hold, the session runs the **forging protocol**. Every stage is denied something
-the stage before it had, and the denials are the mechanism:
+<!-- doctrine: cheap-branch -->
+**The cheap branch is a command, not an intention: `skillnote add` records the note or the
+reminder, and a lesson nobody ran a command for was not kept.**
+
+```bash
+skillnote add --scope project "<the one-line lesson>" --why "<the dead end>" --source forge
+skillnote add --remind --scope project "<the lesson>" --keyword <k> --command "<the call>"
+```
+
+When both conditions hold *and* the procedure has steps a description can route to, the
+session runs the **forging protocol**. Every stage is denied something the stage before it
+had, and the denials are the mechanism:
 
 ```
 skillforge start <name> <total-steps> "<one-line summary>" \
     --trigger "<the verbatim text that set this forge off>" \
     --trigger-kind <user-prompt|hook-checkpoint|review-dispatch|agent-decision>
   │
-  ├─ A: this session        → the only agent that sees the project; pre-registers the
-  │                           success criteria and the verbatim trigger, to disk
-  ├─ orchestrator agent (B) → no project content; picks the level, fixes the cap, runs
-       │                      the loop, and hands your thread back
-       ├─ builder agent (C)  → scratch directory, no path into the project; builds a
-       │                       runnable reproduction and runs every command it documents
-       ├─ red-team agent (D) → FRESH context, given the skill and nothing else; infers
-       │                       the scenario from it, then executes what it inferred
-       ├─ loop               → findings back to the builder; a NEW red-teamer each round
-       └─ cap at 5 rounds    → narrow the scope until clean, or abandon it honestly
-                               (10 for a complex or safety-critical skill)
-  ├─ A again                → runs the skill against the real case, scores the criteria
-  │                           it pre-registered, and runs the routing gate
-  └─ E: a fresh judge       → gets the verbatim trigger on its own; does A's framing
-                              match it? Install at B's level, or quarantine
+  ├─ A: this session       → the only agent that sees the project; pre-registers the
+  │                          success criteria, the level, and the verbatim trigger, to disk
+  ├─ builder agent (C)     → scratch directory, no path into the project; runs every
+  │                          command it documents, in the background
+  ├─ red-team agent (D)    → FRESH context, given the skill and nothing else; infers
+  │                          the scenario from it, then executes what it inferred
+  ├─ loop (2 rounds)       → findings back to the builder; a NEW red-teamer each round
+  ├─ cap at 2 rounds       → `skillforge round` refuses the third; earn it with a falling
+  │                          blocking count, or narrow, or abandon it honestly
+  └─ A again               → runs the skill against the real case, scores the criteria
+                             it pre-registered, and runs the routing gate
   │
-skillforge done "<outcome>"
+skillforge done "<outcome>" ; skillforge apply … ; skillforge verdict …
 ```
+
+Two dispatched agents and two rounds. A narrow skill should close in under 30 minutes; when
+it does not, the scope was wrong rather than the budget. Only a forge that has bought a
+third round gets the older, longer shape back — an orchestrator to keep the traffic off
+this thread, and a judge at the end:
+
+```
+skillforge start <name> <total-steps> "<one-line summary>" --trigger … --trigger-kind …
+  │
+  ├─ A: this session        → as above, plus the raised budget
+  ├─ orchestrator agent (B) → no project content; runs the loop from the granted round on,
+       │                      and hands your thread back
+       ├─ builder agent (C)  → scratch directory, no path into the project
+       ├─ red-team agent (D) → FRESH context, given the skill and nothing else
+       ├─ loop               → findings back to the builder; a NEW red-teamer each round
+       └─ cap at 2 rounds    → (4 for a complex or safety-critical skill), and never more:
+                               two grants is the ceiling, whatever the counts do
+  ├─ A again                → the real case, the criteria, the routing gate
+  └─ E: a fresh judge       → gets the verbatim trigger on its own; does A's framing
+                              match it? Install at A's level, or quarantine
+  │
+skillforge done "<outcome>" ; skillforge apply … ; skillforge verdict …
+```
+
+<!-- doctrine: hard-round-cap -->
+**A third round is earned by a falling blocking count, and `skillforge` refuses the round
+without one.** `skillforge round` past the budget exits 3 and writes no row; `skillforge
+escalate --converging` grants one more round only when the last two rounds show a strictly
+falling count of blocking findings, and `--narrowed "<what you cut>"` grants one, once, for
+the cold read a narrowed skill owes. Two grants is the ceiling, so the loop terminates at
+four rounds however the counts move.
 
 Paste the trigger, do not summarise it: it is the one thing about a forge that nothing can
 recover afterwards, because a quote is what a person actually said or what a hook actually
@@ -461,23 +536,25 @@ handled it properly. Read which skill the report says fired, not only its PASS c
 still ship, but it ships marked unmeasured and says so where the next session will read
 it. What is forbidden is the silent promotion of an unrun probe to a verified one.
 
-<!-- doctrine: orchestrator-runs-the-rounds -->
-**The session that starts a forge does not run it.** One orchestrator subagent runs the
-rounds and reports back when the loop closes. Blocking was never the problem — the
-agents already ran in the background. The problem was that every review report landed in
-the thread the user is talking to, and every revision brief was written out of it. A
-subagent dispatched from a main session can itself dispatch subagents, and `skillforge`
-is on its `PATH`, so the animation keeps moving while the main thread does something
-else. That is the only level of nesting the protocol relies on, and it is the only one
-it should use: a level further down, probes found `Agent` present for one agent and
-absent for another, with no rule predicting which
-([docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md)). So the builder and
-red-teamers dispatch nobody, and orchestrators are never nested.
+<!-- doctrine: forge-runs-in-the-background -->
+**Every agent a forge dispatches runs in the background, and the session that starts one
+never blocks on it.** Blocking was never the problem — the agents always ran in the
+background. The problem was that every review report landed in the thread the user is
+talking to, and every revision brief was written out of it. Two rounds of that traffic,
+polled for a marker file rather than relayed message by message, is a cost the shorter
+forge can pay; the rounds beyond two are what earned the orchestrator, which is why it
+comes back only when the budget does.
 
-The orchestrator's first decision is where the skill goes; its second is how many rounds
-the loop gets. Both are settled before the builder is dispatched, and the cap is already
-encoded in the `<total-steps>` passed to `skillforge start`, so no command can re-budget a
-forge once it is running.
+`skillforge` is on a subagent's `PATH`, so the animation keeps moving while the main thread
+does something else. One level of nesting is all the protocol relies on: a level further
+down, probes found `Agent` present for one agent and absent for another, with no rule
+predicting which ([docs/CLAUDE-CODE-BEHAVIOR.md](docs/CLAUDE-CODE-BEHAVIOR.md)). So the
+builder and the red-teamers dispatch nobody, and orchestrators are never nested.
+
+The level the skill installs at and the number of rounds the loop gets are both settled
+before the builder is dispatched, in the file A writes to disk. The cap is encoded in the
+`<total-steps>` passed to `skillforge start`, and `skillforge escalate` is the only command
+that can raise it.
 
 **A skill belongs at the highest level of the hierarchy to which it applies, and must be
 written generally enough to apply beyond the case that prompted it.** The hierarchy is
@@ -493,10 +570,12 @@ saying "run the project's suite" reads the particular out of the `CLAUDE.md` tha
 states it.
 
 <!-- doctrine: close-ownership -->
-**You own `start`, `done` and `fail`; the orchestrator owns everything between.** It
-reports its outcome rather than closing the record itself, so a forge whose orchestrator
-dies is still one someone can close — and a second close is not a correction, it is
-discarded silently at exit 0.
+**You own `start`, `done` and `fail`; every agent you dispatch owns everything between.**
+They report an outcome rather than closing the record, so a forge whose builder or
+orchestrator dies is still one someone can close — and a second close is not a correction,
+it is discarded silently at exit 0. A closed forge then records two more rows in the same
+turn: `skillforge apply`, for whether the skill was put on the problem that caused it, and
+`skillforge verdict`, for what happened when it was.
 
 <!-- doctrine: no-forked-reviewer -->
 **The red-teamer must never be a fork of either layer** — not of the orchestrator that
@@ -519,15 +598,16 @@ this repo's own documentation: the same file, reviewed by one agent given a "do 
 these" list and by one given only the principle, produced **1 finding and 4** — and the
 unprimed reviewer defended two passages the primed brief would have condemned.
 
-**Ask E whether A's framing matches the trigger it came from.** A's one-paragraph framing
-is what B and C are allowed to see, so everything downstream inherits it — including E's
-own question about whether the original problem got solved, which E would otherwise learn
-only from A. The verbatim trigger, handed to E separately and off the forge record, is what
-catches a misframing; nothing else in the pipeline can. A "no" there is a failure however
-good the skill is, and the skill is quarantined, not installed: A, B, C and D each append a
+**On a forge that ran past two rounds, ask E whether A's framing matches the trigger it
+came from.** A's one-paragraph framing is what the builder is allowed to see, so everything
+downstream inherits it — including E's own question about whether the original problem got
+solved, which E would otherwise learn only from A. The verbatim trigger, handed to E
+separately and off the forge record, is what catches a misframing. A "no" there is a failure
+however good the skill is, and the skill is quarantined, not installed: each agent appends a
 signed section to the report, nobody may rewrite anyone else's, and contradictions are kept
 and flagged rather than reconciled, because a merged narrative hides the most informative
-thing a failed forge produces.
+thing a failed forge produces. At the default budget there is no E, so A writes that
+sentence itself at step 1, beside the verbatim trigger, where the answer is still cheap.
 
 ### 3. When a skill misfires: fix, document, or retire
 
@@ -605,7 +685,7 @@ it off; the rest of its knobs are in [Tuning](#tuning).
 While a skill is being forged, your status line shows live progress:
 
 ```
-my-project git:(main)  ⣻ forge parallel-agents-one-codebase ▕██████······▏ 6/12  50% · red-team round 1
+my-project git:(main)  ⣻ forge parallel-agents-one-codebase ▕██████······▏ 3/6  50% · red-team round 1
 ```
 
 The tail alternates between what is happening right now and a one-line summary of what
@@ -679,6 +759,9 @@ skillinsight list          # one line per candidate, this week by default
 skillinsight pending       # what is queued and undeclined right now
 skillinsight review        # emit the batch, with the reviewing instructions
 skillinsight decline <hash> [--why <why>]   # judged and declined; the record is kept
+skillinsight decline --source <src> [--week <ISO-week>] [--dry-run]
+                           # the same judgement over every undeclined record from one source
+skillinsight promote <hash> --to note|reminder   # write it down now instead of forging it
 skillinsight snooze [<days>] | --clear      # stop announcing the queue without judging it
 skillinsight reviews [--show <n>] [--all]   # the automatic session reviews, newest first
 skillinsight reindex       # recovers a paid-for verdict that never reached index.jsonl
@@ -718,7 +801,9 @@ skillreport
 
 One table: what was forged, how many red-team rounds it cost, and how often it has been
 invoked **since** the session that created it. The last column is the one that matters,
-and it counts genuine reuse only.
+and it counts genuine reuse only. Its last two columns used to be structurally empty —
+nothing wrote an `apply` or a `verdict` row until a forge asked for both in the turn that
+closed it, which is what step 6 of the protocol now does.
 
 A `Skill` call whose result came back `"is_error":true` — `Unknown skill`, usually — is a
 failure and not a reuse; before those were excluded, one uninstalled skill took the
@@ -733,27 +818,29 @@ denominator altogether.
 
 ### What the ledger records
 
-`ledger.jsonl` is built to answer six questions, and to say so when it cannot:
+`ledger.jsonl` is built to answer seven questions — the five `skillforge --help` names about
+a forge, plus the two the cheap tiers and the round cap added — and to say so when it cannot:
 
 |Question|Row|
 |-|-|
 |What triggered the build|`start` and `origin`, carrying `--trigger` verbatim plus its kind|
 |What was built|`origin`: one row per skill, with its directory and whether we ship it|
+|Was it put on the problem that caused it|`apply`: `used`, `declined` or `failed`, with the verbatim evidence, written at step 6 as the forge closes|
 |Used since|`use`: one row per invocation, written live by the `Skill` hook|
-|Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it|
+|Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it, written at step 6 after the apply|
 |What was written down instead of forged|`note`: one row per `skillnote` entry, with its scope, its target file and its id. A second `add` of the same text writes no row|
 |What an extra red-team round cost|`escalate`: one row per round bought past a forge's budget, carrying the blocking counts that bought it and the round budget before and after|
 
-`note` and `escalate` are invisible to every reader written before them: each reader picks
-its events by name, and no selector lists either one.
+`note`, `apply` and `escalate` are invisible to every reader written before them: each reader
+picks its events by name, and no selector lists any of the three.
 
 A single `horizon` row records where the record begins, because a ledger holding nothing
 before Tuesday says nothing whatever about Monday. A row reconstructed after the fact
 carries `backfilled:true`, `confidence:"reconstructed"` and a `source` naming the evidence
 it was read from, and stays distinguishable from a live row forever.
 
-`skillreport skills` prints the first four per skill, with probe and test traffic kept on its
-own line instead of mixed into the count of genuine use. The default table above is
+`skillreport skills` prints the five forge questions per skill, with probe and test traffic
+kept on its own line instead of mixed into the count of genuine use. The default table above is
 unchanged: it counts invocations recovered from transcripts, this view counts ledger rows,
 and the two are never added together.
 
@@ -778,17 +865,22 @@ A skill that survived the red-team loop locally and then actually got used again
 more than a proposal. The `contribute-skill` skill proposes it upstream:
 
 ```
-skillcontrib preflight skills/<name>      # frontmatter parses, name matches the directory
-skillcontrib dedup <name>                 # every PR in any state, not just open ones
-skillcontrib whoami                       # maintainers branch directly, others fork
+skillcontrib preflight skills/<name>                  # frontmatter parses, name matches the directory
+skillcontrib dedup <name> --repo <owner/repo>         # every PR in any state, not just open ones
+skillcontrib whoami --repo <owner/repo>               # maintainers branch directly, others fork
 ```
+
+`--repo` defaults to `ContextLab/claude-skill-compounder`, which is almost never the repo
+you mean: aimed at the wrong tree, the duplicate check answers "clean" for free. Pass it.
 
 The duplicate check reads open, closed, **and** merged pull requests. A hit on a
 closed-unmerged PR blocks resubmission and needs an explicit override, because a rejected
 proposal is a signal rather than noise to route around. `skillcontrib` itself never
-writes anything to the network; every push happens in the skill, behind consent gates
-that show you the identity, the dedup result, the diff, and a `gh pr create --dry-run`
-before anything leaves your machine.
+writes anything to the network; every push happens in the skill, behind consent gates that
+show you the identity, the dedup result, the diff, and the filled-in pull request body with
+the exact `gh pr create` command that would open it, before anything leaves your machine.
+Not `--dry-run`: its own help says it "May still push git changes", so it is not a read-only
+preview and the skill forbids it there.
 
 The bar is both a clean red-team result and evidence of local reuse. See
 [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -800,11 +892,11 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](#what-runs-against-the-api).
-All thirty are environment variables, and they are not the whole set — this prints every
-name any shipped script reads, 99 of them:
+All thirty-four are environment variables, and they are not the whole set — this
+prints every name any shipped script reads, 103 of them:
 
 ```bash
-grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
+grep -ohE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)(_[A-Z0-9_]+)?\b' \
   hooks/*.sh bin/* statusline/*.sh | sort -u
 ```
 
@@ -834,11 +926,15 @@ place in `~/.claude/settings.json`:
 |`CLAIM_GATE_MIN_DIGITS`|`3`|the hook entries|Smallest integer width the gate will flag as an unsupported figure|
 |`CLAIM_GATE_MAX_SESSION`|`10`|the hook entries|Blocks plus denials the gate may spend in one session|
 |`SKILL_COMPOUNDER_REPEAT_GATE`|`1`|the hook entries|Set to `0` to switch the repeat gate off entirely — it denies nothing and learns nothing|
+|`REPEAT_GATE_REFUSE`|`0`|the top-level `env` block|Set to `1` to arm the refusal. Off by default: across 81 recorded sessions it refused nothing, and every signature that reached the threshold was one the gate's own head rules exempt anyway ([#27](https://github.com/ContextLab/claude-skill-compounder/issues/27)). Learning and recovery are unaffected either way. **Two components read it** — the gate, and `bin/skillrepeat`, which says on its own output whether the arm is armed|
 |`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Earlier sessions a call must have failed in, the same way, before the next attempt is denied. **Three components read it** — set it anywhere narrower and they disagree|
 |`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful `Bash`/`Skill` calls — the only ones this hook is delivered — after which an armed failure stops looking for the call that fixed it|
+|`SKILLREPEAT_GATE`|*(resolved from the CLI's own path)*|the top-level `env` block|Where `bin/skillrepeat` finds `hooks/repeat-gate.sh`, so its `GATE` column asks the gate which calls it would exempt instead of keeping a second copy of the rules. Resolved by following the CLI's own symlinks to the checkout; set it only where that fails|
+|`SKILLREPORT_GATE`|*(resolved from the CLI's own path)*|the top-level `env` block|The same, for `bin/skillreport`'s `GATES` block. Separately named because the two CLIs install independently of each other|
 |`SKILL_COMPOUNDER_DOC_GATE`|`1`|the hook entries|Set to `0` to switch the documentation gate off entirely — `git push` is never denied|
 |`DOC_GATE_MAX_COMMITS`|`100`|the hook entries|Most commits the gate will read ahead of the remote before it gives up and stays silent|
 |`DOC_GATE_CODE_EXCLUDE`|*(empty)*|the hook entries|An ERE; a path matching it counts as neither code nor documentation. `^tests?/` is the first knob to reach for if the gate is too loud|
+|`DOC_GATE_NOTES`|`doc`|the hook entries|How a root-level `notes/` path counts: `doc` satisfies the gate, `neither` neither satisfies nor triggers it. Set `neither` where `notes/` is a dated log written every session rather than a description of behaviour — this repo does, in `.claude/settings.json`|
 |`SKILL_COMPOUNDER_APPLY_GATE`|`1`|the hook entries|Set to `0` to switch the apply gate off entirely — a closed forge leaves no debt to answer|
 |`APPLY_GATE_WINDOW`|`86400`|the hook entries|Seconds after a forge closes during which its apply debt still blocks the turn|
 |`SKILL_COMPOUNDER_REMIND`|`1`|the hook entries|Set to `0` to switch reminder delivery off entirely — recorded reminders stay on disk and nothing states them back|
@@ -854,7 +950,8 @@ place in `~/.claude/settings.json`:
 Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
 `SKILL_COMPOUNDER_USE_LOG` is read by `hooks/skill-use.sh`, which is a hook entry too.
 The `CLAIM_GATE_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables, and every `REPEAT_*` one
-**but `REPEAT_MIN_SESSIONS` and `REPEAT_GATE_NOW`**, are each read by exactly one script — `hooks/claim-gate.sh`,
+**but `REPEAT_MIN_SESSIONS`, `REPEAT_GATE_REFUSE` and `REPEAT_GATE_NOW`**, are each read
+by exactly one script — `hooks/claim-gate.sh`,
 `hooks/doc-gate.sh`, `hooks/apply-gate.sh`, `hooks/repeat-gate.sh` — so each belongs on
 that script's own hook entries and nowhere else. Each of the four gates also takes an off
 switch, and setting one to `0` disables that gate completely rather than making it quieter.
@@ -875,9 +972,17 @@ signature that failed in two sessions is listed as `refuses` while a gate raised
 lets it straight through, and nothing says which of the two is lying. It belongs in the
 session-wide `env` block, for the same reason `SKILL_COMPOUNDER_STATE` does.
 
+`REPEAT_GATE_REFUSE` is the second exception, and it is the milder one: `bin/skillrepeat`
+reads it only to print whether the arm is armed, so setting it on the hook entry alone
+costs you a footnote rather than a wrong number. Put it in the `env` block anyway and the
+two cannot disagree at all.
+
 `REPEAT_GATE_NOW` has two readers for a narrower reason: it is a **test clock**, and
 `bin/skillrepeat` falls back to it when `SKILLREPEAT_NOW` is unset so the CLI and the gate
 cannot disagree about what time it is inside one test. Neither belongs in a real config.
+`SKILLREPEAT_GATE` and `SKILLREPORT_GATE` are not gate variables despite the name: each is
+read by one CLI, to find `hooks/repeat-gate.sh` when following its own symlinks back to the
+checkout has not worked. Setting either on a hook entry does nothing.
 `STATUSLINE_BASE_TTL` and `STATUSLINE_CACHE_PRUNE_EVERY` are read by
 `statusline/statusline.sh`, so setting either on a hook entry does nothing.
 `SKILL_COMPOUNDER_STATE` is read by the hooks, the CLIs and the status line alike, so it

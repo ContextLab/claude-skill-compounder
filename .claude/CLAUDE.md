@@ -151,7 +151,7 @@ delays a checkpoint; counting `ls` teaches the user to ignore it. A second branc
 `ai-tell-audit` once per durable-prose file per session, because that skill's description
 names a README but nothing otherwise connects editing one to invoking it.
 
-**`hooks/claim-gate.sh` is the only component here that refuses, and its evidence rule is
+**Four hooks can refuse a turn; `hooks/claim-gate.sh` is the one whose evidence rule is
 an exclusion.** It dispatches on `.hook_event_name` and takes no argv: on `Stop` it judges
 `last_assistant_message`, on `PreToolUse` it judges a `git commit` message, and a figure of
 `CLAIM_GATE_MIN_DIGITS` digits or more is unsupported unless it appears in what this
@@ -169,6 +169,37 @@ belt. And the header's calibration carries **two** false-positive rates, not one
 the corpus the rules were tuned against and 3.4% held out. Quote the held-out figure; the
 tuned one was optimistic by roughly threefold, and the arm the tuned corpus recorded as
 never firing was the arm carrying the difference.
+
+**Of the other three, one refuses nothing by default and one is configured differently in
+this repo.** `hooks/repeat-gate.sh` has three arms -- learn, recover, refuse -- and only
+the first two run unless `REPEAT_GATE_REFUSE=1` (`hooks/repeat-gate.sh:379`). The default
+is measured rather than cautious: on the live store of 2026-09-02 the arm had been wired
+across 81 distinct sessions and had never refused anything, and driving the real hook
+against all ten signatures that had reached `REPEAT_MIN_SESSIONS` denied none of them,
+because every one had a head on the gate's own allowlist (issue #27). A synthetic
+non-allowlisted signature is still denied, so the machinery works and nothing real reaches
+it -- and an arm nobody has watched fire cannot be judged by its false-positive rate. Arms
+1 and 2 stay on, so the store keeps growing whatever the switch says. What turns it back
+on is one non-allowlisted signature reaching the threshold for real, and the reason that
+would be noticed is that `bin/skillrepeat` and `bin/skillreport` now apply the same head
+rules before counting. They apply them by ASKING the gate, through its `--eligible-of`
+door, rather than keeping a second copy. A second copy drifts from the first invisibly, and
+the ten signatures those two CLIs printed as `refuses` while the real hook denied none of
+them are what that drift looks like from outside: a number nobody can act on. Each CLI finds the gate by following its own symlinks
+back to the checkout, since both install paths put a link in the user's bin directory;
+`SKILLREPEAT_GATE` and `SKILLREPORT_GATE` override, and are separate names because the two
+CLIs install independently of each other.
+
+`hooks/doc-gate.sh` classifies a root-level `notes/` path by `DOC_GATE_NOTES`
+(`hooks/doc-gate.sh:461`): `doc`, the default, means a notes-only push satisfies the gate;
+`neither` means such a path neither satisfies nor triggers it. **This repository sets
+`neither`**, in `.claude/settings.json` -- `notes/` here is the dated log the "Notes and
+open threads" section below describes, not a description of behaviour. Which way round the
+default goes, and why it stopped being hardcoded, is in `docs/DESIGN.md`; do not re-argue
+it here. Its command splitter is quote-aware as of the same change, so a `;` or `|` inside
+a quoted argument no longer ends a segment; a backslash-escaped quote and `$'...'` are
+still unmodelled and both fail toward not splitting, which is the direction the whole gate
+errs in.
 
 **With both wirings active every hook fires twice**, so anything a hook counts, stamps,
 appends to, or does once must survive being handed the same event twice. That includes
@@ -264,9 +295,15 @@ or the user's own work, and nothing on disk can tell -- and nothing at all for a
 that proves nothing is reported, not adopted.
 
 **`skills/skill-compounder/SKILL.md` is prose, but it is the primary deliverable**: it
-carries the builder/red-team forging protocol and the retirement protocol.
-Its doctrine is mirrored in `README.md` and in the user's global `~/.claude/CLAUDE.md`
-stanza. Changing the protocol means updating all three.
+carries the three-tier decision, the builder/red-team forging protocol and the retirement
+protocol. The tier rule comes first and it is a gate, not advice: a procedure earns a skill
+only when it has steps a model gets wrong without them AND a trigger a description can route,
+and otherwise it gets a note or a reminder from `bin/skillnote`. Ten days with one output path
+produced zero notes, which is what a missing cheap branch looks like.
+Its doctrine is mirrored in `README.md` and in the global `~/.claude/CLAUDE.md` stanza, which
+`skill_compounder/installer.py` now writes from `DOCTRINE_TEXT` — so the third mirror is a
+constant in this repo rather than a file on somebody's machine, and
+`tests/test_doctrine_sync.py` reads all three. Changing the protocol means updating all three.
 
 ## Constraints specific to this repo
 
@@ -297,14 +334,22 @@ forge whose orchestrator died -- by appending the `fail` row it never got, never
 the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the one
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
-`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ | sort -u` -- 107 names as of Wave 2 -- and
-reading each hit; re-run it rather than trusting the list if the two have drifted. **Three
+`grep -rhoE '\b(CI|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REMIND|APPLY_GATE|APPLY_PENDING)_[A-Z0-9_]+'
+hooks/ bin/ statusline/ skill_compounder/ | sort -u` -- **111** names as of Wave 3. A grep
+that reads a gitignored `.pyc` as source adds one more line, `Binary file
+skill_compounder/__pycache__/installer.cpython-39.pyc matches`, and answers 112; that is
+the same split that makes the `skipTest` count above depend on which grep you have. Each
+hit was then read; re-run the command rather than trusting the list above if the two have
+drifted. **Four
 times now the command has been narrower than the list it introduces**: it named three prefixes when seven were in use,
-seven when fourteen were, and fourteen when sixteen were, so on all three occasions it
-could not produce the list it introduces. The third was Wave 2 adding `SKILLNOTE_NOW`,
-`SKILLNOTE_CLAUDE_DIR` and the six `REMIND_*` names to scripts while leaving the
-alternation at fourteen prefixes. A prefix added to a new script has to be added here too.
+seven when fourteen were, fourteen when sixteen were, and sixteen when seventeen were, so
+on all four occasions it could not produce the list it introduces. The third was Wave 2
+adding `SKILLNOTE_NOW`, `SKILLNOTE_CLAUDE_DIR` and the six `REMIND_*` names to scripts
+while leaving the alternation at fourteen prefixes; the fourth was Wave 3 adding
+`SKILLREPORT_GATE` to `bin/skillreport` and leaving it at sixteen. Nobody has yet widened
+a script's prefixes and this alternation in the same change, which is the argument for
+re-running the command instead of reading this paragraph. A prefix added to a new script
+has to be added here too.
 If new behavior is hard to test without a mock, add a pin like those instead. Tests run with a minimal `PATH` and `HOME` pointed at a
 temp dir, so scripts must not depend on the ambient environment.
 
@@ -331,8 +376,10 @@ temp dir, so scripts must not depend on the ambient environment.
   fails the suite. Adding one means wrapping it, not adding it to that set.
 
 **The red-teamer must never be a fork of either layer** — not of the orchestrator that
-dispatches it, and not of the session that dispatched the orchestrator. This applies to the
-protocol in `SKILL.md` and to any work in this repo that follows it. A forked reviewer
+dispatches it, and not of the session that dispatched the orchestrator. The default forge has
+only one of those layers, the session that dispatched the reviewer, and the rule binds on it
+exactly as written; the second layer exists only on a forge escalated past two rounds. This
+applies to the protocol in `SKILL.md` and to any work in this repo that follows it. A forked reviewer
 inherits the author's blindness and reports that the skill looks fine. Each loop round
 spawns a *new* cold agent, because after round one the previous one is no longer cold. The
 retirement check has the same shape: ask the neutral *"keep, fix, or retire?"*, never
@@ -379,3 +426,12 @@ instrument that would settle them, and it needs real usage across several reposi
 over real time. Do not tune them before that data exists. The skill's own threshold is
 deliberately not a number — it asks for a nameable dead end and a second occurrence — so
 there is nothing there to tune.
+
+<!-- skillnote:begin -->
+## Notes (skill-compounder)
+
+- **2026-09-02** Before editing a SKILL.md's prose or a command block inside one, grep the seed test for the literal string it pins; four rewrites in one session were reverted by a pinned substring. <!-- id:n64622848x189 source:verdict why:"see /Users/jmanning/.claude/skill-compounder/reviews/2026-W36/f7ea3931-3879-4f94-b2ed-df4b8186958b.md" -->
+- **2026-09-02** A mechanism meant to catch a pattern across a session must write the record itself: a checkpoint that depends on the session noticing it fired three times in one session and was disregarded three times. <!-- id:n735026689x210 source:session why:"marker record, session f0feae4c, 2026-08-25T20:05:19Z" -->
+- **2026-09-02** A session audit's 'distinct files touched' is a floor, not a total: most edits here were shell writes the hook records no path for. <!-- id:n1166131302x139 source:session why:"215 of 288 edits had no visible target (skillinsight 2851595b, 2026-08-26T19:12:28Z)" -->
+- **2026-09-02** When a writer and a reader share a format (a hook's counter file and the CLI that reads it, a CLI's stored signature and the hook that compares it), the test must drive the real writer into the real reader; a hand-written fixture pins whichever side its author was looking at and lets the other drift. <!-- id:n2647857843x309 source:session why:"twice on 2026-09-02: test_ledger pinned digit counters the hook never writes (skillreport dead for its whole life); test_skillnote pinned a Bash-prefixed signature remind.sh never compares (every command reminder silent)" -->
+<!-- skillnote:end -->

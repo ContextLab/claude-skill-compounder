@@ -308,6 +308,52 @@ class ItStopsTest(Base):
         out = self.cli("list", "--week", "2025-W34").stdout
         self.assertIn("[declined]", out)
 
+    def test_promoting_everything_silences_it_the_same_way(self):
+        """The other honest way to empty the queue: write the lesson down.
+
+        A decline says "not worth a skill"; a promote says "worth a note". Both are a
+        judgement, so both have to stop the announcement -- a queue that kept offering a
+        record already written into a CLAUDE.md would teach the reader that acting on it
+        changes nothing, which is precisely how a reminder gets muted.
+        """
+        h = self.audits()[0]["hash"]
+        r = self.cli("promote", h[:8], "--to", "note", "--project", str(self.repo),
+                     SKILLNOTE_NOW=T0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertSilent(self.prompt(sid="s9", pid="p9", now=T0 + 60 * DAY),
+                          "a promoted queue is an empty queue")
+
+    def test_a_promoted_record_is_still_on_disk_and_still_listed(self):
+        h = self.audits()[0]["hash"]
+        self.cli("promote", h[:8], "--to", "note", "--project", str(self.repo),
+                 SKILLNOTE_NOW=T0)
+        self.assertEqual(len(self.audits()), 1, "promote must never delete")
+        self.assertIn("[promoted]", self.cli("list", "--week", "2025-W34").stdout)
+
+    def test_the_promoted_lesson_is_where_a_later_session_will_read_it(self):
+        h = self.audits()[0]["hash"]
+        self.cli("promote", h[:8], "--to", "note", "--project", str(self.repo),
+                 SKILLNOTE_NOW=T0)
+        md = self.repo / ".claude" / "CLAUDE.md"
+        self.assertTrue(md.is_file(), "the whole point is that it lands somewhere read")
+        self.assertIn("skillnote:begin", md.read_text())
+
+    def test_promoting_one_of_several_leaves_the_rest_pending(self):
+        self.plant(n=2)
+        h = self.audits()[0]["hash"]
+        self.cli("promote", h[:8], "--to", "note", "--project", str(self.repo),
+                 SKILLNOTE_NOW=T0)
+        line = self.cli("pending", "--format", "tsv").stdout
+        self.assertEqual(line.split("\t")[0], "2")
+
+    def test_bulk_declining_one_source_silences_only_that_source(self):
+        """46 of 57 live rows came from an output-style plugin, not from a session."""
+        self.plant(n=3, source="star-insight")
+        r = self.cli("decline", "--source", "star-insight", "--why", "plugin prose")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        line = self.cli("pending", "--format", "tsv").stdout
+        self.assertEqual(line.split("\t")[0], "1", "the session-audit record survives")
+
     def test_declining_one_of_several_leaves_the_rest_pending(self):
         self.plant(n=2)
         h = self.audits()[0]["hash"]

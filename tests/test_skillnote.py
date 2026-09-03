@@ -198,6 +198,25 @@ class MarkerBlockTest(SkillnoteCase):
                          "a refusal must not have written anything")
         self.assertIn("a lesson", before)
 
+    def test_a_prose_mention_of_the_marker_is_not_a_second_block(self):
+        """Found live on 2026-09-02: .claude/CLAUDE.md MENTIONS `<!-- skillnote:begin -->`
+        inside a sentence, and a substring grep counted that sentence as a block, so the
+        first add succeeded and every later one refused for good. A marker is a line."""
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_md.write_text(
+            "Prose that mentions the `<!-- skillnote:begin -->` marker inline, and also\n"
+            "the `<!-- skillnote:end -->` one, without either being a block.\n",
+            encoding="utf-8")
+        self.ok("add", "--scope", "project", "first lesson")
+        r = self.note("add", "--scope", "project", "second lesson")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = self.claude_md.read_text(encoding="utf-8")
+        self.assertEqual(len(self.block_lines()), 2, text)
+        # And the note went under the real block, not into the prose line.
+        real_end = [i for i, l in enumerate(text.splitlines()) if l == "<!-- skillnote:end -->"]
+        self.assertEqual(len(real_end), 1, text)
+        self.assertIn("second lesson", text.splitlines()[real_end[0] - 1])
+
     def test_a_users_own_prose_inside_the_block_survives_a_remove(self):
         self.ok("add", "--scope", "project", "keep me")
         r = self.ok("add", "--scope", "project", "drop me")
@@ -744,12 +763,14 @@ class ReminderTest(SkillnoteCase):
                 "--command", "./run_tests.sh")
         cmds = self.rows()[0]["match"]["commands"]
         self.assertEqual(len(cmds), 1, cmds)
-        self.assertTrue(cmds[0].startswith("Bash\n"),
-                        "the entry is <tool>\\n<signature>: %r" % cmds[0])
+        # Stored BARE, exactly as --norm-of prints it. This test used to pin a "Bash\n"
+        # prefix, and that pin was the bug: hooks/remind.sh compares the bare signature, so
+        # every --command reminder was silent in a real session (found 2026-09-02).
+        self.assertNotIn("\n", cmds[0], "no tool prefix, no newline: %r" % cmds[0])
         expected = subprocess.run([str(GATE), "--norm-of", "Bash"],
                                   input="./run_tests.sh", capture_output=True, text=True,
                                   timeout=30, env={"PATH": PATH, "HOME": str(self.home)})
-        self.assertEqual(cmds[0], "Bash\n" + expected.stdout.strip(),
+        self.assertEqual(cmds[0], expected.stdout.strip(),
                          "the CLI must store what the gate's own normaliser returns, so "
                          "the two can never disagree about what a call is")
 

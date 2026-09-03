@@ -23,6 +23,13 @@ EVERY subprocess call against the hook passes `input=`. The script reads its pay
 The clock is pinned with REPEAT_GATE_NOW (the hook's own) and SKILLREPEAT_NOW (the CLI's).
 Pinning either one alone would leave the other reading the wall clock, and the tombstone
 tests depend on the ORDER of the two.
+
+THE REFUSE ARM IS OFF IN THE SHIPPED DEFAULT (`REPEAT_GATE_REFUSE`, issue #27), and this
+harness switches it ON for every test. Every refusal test here predates that default and
+is worth keeping exactly as it is: what the default changed is whether the arm runs, not
+what it decides when it does. `RefuseArmDefaultTest` is the one class that takes the
+variable back out -- `run_hook(..., REPEAT_GATE_REFUSE=None)` DELETES it rather than
+setting it empty -- and asserts what a user with no configuration at all actually gets.
 """
 
 import json
@@ -75,10 +82,22 @@ class GateCase(unittest.TestCase):
         return os.path.join(self.state, "repeats", "index.jsonl")
 
     def env(self, **extra):
+        """`REPEAT_GATE_REFUSE=1` is part of the BASELINE here; see the module docstring.
+
+        A value of None DELETES the key instead of stringifying it, which is what lets a
+        test measure a genuinely unset variable. `str(None)` would export the four
+        characters `None`, and a `case` guard reading that is not reading an unset
+        variable -- it happens to reach the same branch here, and a test that depends on
+        that coincidence is testing the wrong thing."""
         e = {"PATH": BASE_PATH, "HOME": self.home,
              "SKILL_COMPOUNDER_STATE": self.state,
-             "REPEAT_GATE_NOW": str(self.clock)}
-        e.update({k: str(v) for k, v in extra.items()})
+             "REPEAT_GATE_NOW": str(self.clock),
+             "REPEAT_GATE_REFUSE": "1"}
+        for k, v in extra.items():
+            if v is None:
+                e.pop(k, None)
+            else:
+                e[k] = str(v)
         return e
 
     def run_hook(self, payload, **env_extra):
@@ -1843,6 +1862,262 @@ class DenyEmitFailureTest(GateCase):
         # The consequence that matters: the next attempt in the SAME session refuses.
         self.tick()
         self.assert_denied(self.run_hook(self.attempt(self.LONG_CMD, "s3")))
+
+
+# ====================================================== the refuse arm's shipped default
+class RefuseArmDefaultTest(GateCase):
+    """ISSUE #27. The refuse arm had never refused anything in 81 real sessions -- there
+    was no `repeats/denied/` directory on the machine at all -- and the ten signatures
+    that had reached the threshold were every one of them exempt by their head, so the
+    population that could ever trigger it was empty. It is now off unless
+    `REPEAT_GATE_REFUSE=1`.
+
+    What must survive the change: the LEARN arm, the RECOVER arm, and both read-only
+    argv doors. Turning off a refusal nobody has ever seen is a small claim; turning off
+    the store that four other components read would be a large one, and these assert the
+    difference rather than trusting the placement of one `if`."""
+
+    def seed_a_refusable_signature(self):
+        """Two distinct earlier sessions of a call the gate does NOT exempt."""
+        self.teach("gh pr list --limit 5", ["s1", "s2"])
+
+    def test_the_default_denies_nothing(self):
+        self.seed_a_refusable_signature()
+        self.tick()
+        r = self.run_hook(self.attempt("gh pr list --limit 5", "s3"),
+                          REPEAT_GATE_REFUSE=None)
+        self.assert_allowed(r)
+        # AND NOTHING WAS CLAIMED. The deny marker is written one line above the emit, so
+        # a gate that refused and failed to speak would still leave this behind -- which
+        # would silence the signature for the rest of the session with nothing on any
+        # surface. Its absence is what says the arm did not run at all.
+        self.assertFalse(os.path.exists(os.path.join(self.state, "repeats", "denied")),
+                         "the default wrote a deny marker for a refusal it never made")
+
+    def test_the_same_store_still_denies_with_the_knob_on(self):
+        """NON-VACUITY for the test above: the store really does hold a refusable
+        signature, so the silence there is the knob and not an empty store."""
+        self.seed_a_refusable_signature()
+        self.tick()
+        self.assert_denied(self.run_hook(self.attempt("gh pr list --limit 5", "s3")))
+        self.assertTrue(os.path.isdir(os.path.join(self.state, "repeats", "denied", "s3")))
+
+    def test_only_the_literal_1_switches_it_on(self):
+        """A knob whose ON state can block a call the session is waiting on must not be
+        switched on by a typo. `true`, `yes` and `0` are all off."""
+        self.seed_a_refusable_signature()
+        for value in ("0", "true", "yes", "", "01", " 1"):
+            self.tick()
+            self.assert_allowed(
+                self.run_hook(self.attempt("gh pr list --limit 5", "s%s" % len(value)),
+                              REPEAT_GATE_REFUSE=value))
+
+    def test_the_learn_arm_still_records_with_the_arm_off(self):
+        self.tick()
+        r = self.run_hook(self.failure("gh pr list --limit 5", "s1"),
+                          REPEAT_GATE_REFUSE=None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        fails = [x for x in self.rows() if x["t"] == "fail"]
+        self.assertEqual(len(fails), 1, "the learn arm stopped recording: %r" % self.rows())
+
+    def test_the_recovery_arm_still_records_with_the_arm_off(self):
+        self.tick()
+        self.run_hook(self.failure("gh pr list --limit 5", "s1"), REPEAT_GATE_REFUSE=None)
+        self.tick()
+        self.run_hook(self.success("brew install gh", "s1"), REPEAT_GATE_REFUSE=None)
+        recs = [x for x in self.rows() if x["t"] == "recover"]
+        self.assertEqual(len(recs), 1, "the recovery arm stopped recording: %r" % self.rows())
+        self.assertEqual(recs[0]["cmd"], "brew install gh")
+
+    def test_both_argv_doors_answer_with_the_arm_off(self):
+        """`--norm-of` is called by hooks/remind.sh and `--eligible-of` by two CLIs.
+        Neither is the refusal, and neither may be switched off by its knob."""
+        r = subprocess.run(["bash", HOOK, "--norm-of", "Bash"], input="gh pr list --limit 5",
+                           capture_output=True, text=True,
+                           env=self.env(REPEAT_GATE_REFUSE=None), timeout=180)
+        self.assertEqual(r.stdout.strip(), "gh pr list --limit <N>")
+        r = subprocess.run(["bash", HOOK, "--eligible-of", "Bash"], input="gh pr list",
+                           capture_output=True, text=True,
+                           env=self.env(REPEAT_GATE_REFUSE=None), timeout=180)
+        self.assertEqual(r.stdout.strip(), "eligible")
+
+
+# ============================================================== the --eligible-of door
+class EligibleDoorTest(GateCase):
+    """The head exemptions, asked of the gate rather than copied into a CLI.
+
+    Every verdict below is checked TWICE: once through the door, and once by driving the
+    REAL refuse arm at the threshold with the same command. A door that answered a
+    different question from the arm would be a second implementation wearing the first
+    one's name, which is the whole defect it exists to prevent."""
+
+    CASES = [
+        ("gh pr list --limit 5", "eligible"),
+        ("curl -sf https://api.github.com/x", "eligible"),
+        ("git clean -nd", "exempt-allowlist"),
+        ("FOO=1 ls -la /nowhere", "exempt-allowlist"),
+        ("./run_tests.sh", "exempt-runner"),
+        ("npm run build --silent", "exempt-runner"),
+        ("python3 -m pytest tests/", "exempt-runner"),
+        ("skillrepeat forget c1x1-e1x1", "exempt-cli"),
+        ("gh pr list && skillrepeat list", "exempt-cli"),
+    ]
+
+    def door(self, command, tool="Bash", **env_extra):
+        argv = ["bash", HOOK, "--eligible-of"]
+        if tool is not None:
+            argv.append(tool)
+        return subprocess.run(argv, input=command, capture_output=True, text=True,
+                              env=self.env(**env_extra), timeout=180).stdout.strip()
+
+    def test_every_verdict(self):
+        for command, want in self.CASES:
+            self.assertEqual(self.door(command), want, command)
+
+    def test_a_non_bash_tool_and_an_empty_command(self):
+        self.assertEqual(self.door('{"command":"x"}', tool="Skill"), "exempt-tool")
+        self.assertEqual(self.door(""), "exempt-empty")
+        # The tool argument defaults to Bash, which is what a caller with a Bash-only
+        # store would otherwise have to remember to pass.
+        self.assertEqual(self.door("gh pr list", tool=None), "eligible")
+
+    def test_the_door_matches_what_the_real_arm_does(self):
+        """NON-VACUITY, and the only assertion here that could catch a drifting copy."""
+        for i, (command, want) in enumerate(self.CASES):
+            self.teach(command, ["a%d" % i, "b%d" % i])
+        for i, (command, want) in enumerate(self.CASES):
+            self.tick()
+            r = self.run_hook(self.attempt(command, "z%d" % i))
+            denied = bool(r.stdout.strip())
+            self.assertEqual(denied, want == "eligible",
+                             "the door says %r and the arm %s: %s"
+                             % (want, "denied" if denied else "allowed", command))
+
+    def test_the_off_switch_does_not_close_the_door(self):
+        """Two scripts, two switches -- the same rule `--norm-of` already holds to. A user
+        who turns the gate off must not silently change what two instruments report."""
+        self.assertEqual(self.door("git status", SKILL_COMPOUNDER_REPEAT_GATE=0),
+                         "exempt-allowlist")
+        self.assertEqual(self.door("gh pr list", SKILL_COMPOUNDER_REPEAT_GATE=0),
+                         "eligible")
+
+
+# ================================================ the CLI's count and the gate's, equal
+class InstrumentAgreementTest(GateCase):
+    """`bin/skillrepeat` says its summary and the gate's "must AGREE about what refuses".
+    It did not: it counted distinct sessions and the self-recovery rule, and applied
+    neither head exemption. Measured on the live store on 2026-09-02 -- 389 rows, 196
+    signatures, 99 sessions -- `skillrepeat stats` printed `refusing: 10` and the real
+    hook, driven against all ten, denied NONE.
+
+    So the claim is now a measurement. The store below is built by the real hook out of
+    commands covering every exemption kind, every threshold signature is put to the real
+    refuse arm in a fresh session, and the CLI's number must equal the denials."""
+
+    MIX = [
+        ("gh pr list --limit 5", True),
+        ("curl -sf https://api.github.com/x", True),
+        ("git clean -nd", False),
+        ("./run_tests.sh", False),
+        ("npm run build --silent", False),
+        ("skillrepeat list --json", False),
+    ]
+
+    def build(self):
+        for i, (command, _) in enumerate(self.MIX):
+            self.teach(command, ["a%d" % i, "b%d" % i])
+
+    def hook_denials(self):
+        """What the REAL arm does, asked one signature at a time in a fresh session."""
+        n = 0
+        for i, (command, _) in enumerate(self.MIX):
+            self.tick()
+            if self.run_hook(self.attempt(command, "q%d" % i)).stdout.strip():
+                n += 1
+        return n
+
+    def cli_refusing(self):
+        r = self.run_cli("stats", "--json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["refusing"]
+
+    def test_stats_and_list_both_equal_what_the_hook_denies(self):
+        self.build()
+        denied = self.hook_denials()
+        # NON-VACUITY IN BOTH DIRECTIONS: some signatures refuse and some do not, so an
+        # instrument that answered "all" or "none" could not pass this.
+        self.assertEqual(denied, len([c for c in self.MIX if c[1]]))
+        self.assertGreater(denied, 0)
+        self.assertLess(denied, len(self.MIX))
+
+        self.assertEqual(self.cli_refusing(), denied,
+                         "skillrepeat stats disagrees with the gate")
+        got = json.loads(self.run_cli("list", "--json").stdout)
+        self.assertEqual(len([g for g in got if g["refuses"]]), denied,
+                         "skillrepeat list --json disagrees with the gate")
+        # ...and the threshold count on its own is the number that used to be printed, so
+        # this test would have failed before the fix rather than passing vacuously.
+        at_threshold = len([g for g in got if g["sessions"] >= 2])
+        self.assertEqual(at_threshold, len(self.MIX))
+        self.assertNotEqual(at_threshold, denied)
+
+    def test_the_gate_column_names_the_exempt_ones(self):
+        self.build()
+        out = self.run_cli("list").stdout
+        self.assertIn("exempt", out, "the table hides the exemption entirely:\n" + out)
+        self.assertIn("refuses", out)
+        # One row per signature, and every one of them at the threshold: no row may be
+        # left as `-`, which would mean the count rule and the table disagree.
+        body = [l for l in out.splitlines() if l.startswith("c")]
+        self.assertEqual(len(body), len(self.MIX))
+        self.assertEqual([l for l in body if " - " in l], [])
+
+    def test_a_skill_signature_at_the_threshold_is_not_reported_as_refusing(self):
+        """The refuse arm is Bash-only and says so; the CLI reported `refuses` for a
+        Skill signature that the arm can never even look at."""
+        self.teach({"name": "some-skill"}, ["a", "b"], tool="Skill")
+        self.tick()
+        self.assert_allowed(self.run_hook(self.attempt({"name": "some-skill"}, "q",
+                                                       tool="Skill")))
+        self.assertEqual(self.cli_refusing(), 0)
+
+    def test_the_live_store_if_this_machine_has_one(self):
+        """THE CLAIM ON REAL DATA, when there is any. This runs against a COPY of
+        `~/.claude/skill-compounder/repeats/index.jsonl` in the temp state root, asserts
+        only on COUNTS, and prints only counts -- the store holds command text and error
+        text and none of it leaves this process. A machine with no store still runs every
+        assertion above; this one adds the live population when it exists, which is the
+        only place the ten-against-zero gap was ever visible."""
+        live = os.path.join(os.path.expanduser("~"), ".claude", "skill-compounder",
+                            "repeats", "index.jsonl")
+        if not os.path.exists(live):
+            print("\n[live] no store on this machine; the synthetic mix above stands alone")
+            return
+        os.makedirs(os.path.dirname(self.store), exist_ok=True)
+        shutil.copyfile(live, self.store)
+        rows = self.rows()
+        sigs = {r.get("sig") for r in rows if r.get("t") == "fail"}
+        cli = self.cli_refusing()
+        got = json.loads(self.run_cli("list", "--json", "--all").stdout)
+        at_threshold = len([g for g in got if g["sessions"] >= 2
+                            and g["transient_sessions"] == 0])
+        # Every threshold signature put to the REAL arm, in a session id no real session
+        # can have used, so guard 1 (this session's own failures never count) cannot
+        # accidentally suppress one.
+        denied = 0
+        for g in got:
+            if g["sessions"] < 2 or g["transient_sessions"] > 0:
+                continue
+            self.tick()
+            payload = self.attempt(g["raw"], "live-probe-%s" % g["sig"], tool=g["tool"])
+            if self.run_hook(payload).stdout.strip():
+                denied += 1
+        print("\n[live] %d rows, %d signatures, %d at threshold, hook denies %d, "
+              "skillrepeat stats says %d" % (len(rows), len(sigs), at_threshold,
+                                             denied, cli))
+        self.assertEqual(cli, denied,
+                         "on the live store skillrepeat says %d and the gate denies %d"
+                         % (cli, denied))
 
 
 if __name__ == "__main__":

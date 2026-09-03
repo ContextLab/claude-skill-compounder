@@ -169,6 +169,40 @@ esac
 
 command -v jq >/dev/null 2>&1 || { echo "skillreport: jq is required" >&2; exit 1; }
 
+# THE REPEAT GATE'S HEAD EXEMPTIONS ARE ASKED OF THE GATE, NOT REIMPLEMENTED HERE. The
+# line below the repeat-gate counts used to say a signature at the session threshold
+# "would be refused", from the session count and the self-recovery rule alone. The gate
+# also exempts, before it counts anything, a Bash command whose HEAD is on either of its
+# two lists, any command reaching for `skillrepeat`, and every non-Bash call. On the live
+# store of 2026-09-02 that was the entire difference: this report said ten would be
+# refused and the real hook, driven against all ten, denied none (issue #27).
+#
+# `hooks/repeat-gate.sh --eligible-of` is that script's read-only door for the question,
+# the same shape as `--norm-of`. A copy of the two lists kept here would drift from the
+# gate's invisibly, and the symptom is the sentence above: a number nobody can act on.
+# Resolved from this script's own path with symlinks followed -- both install paths put a
+# LINK in the user's bin directory, and `dirname "$0"` on the link names that directory
+# rather than the checkout. Reading no file of yours: it is a script this package ships,
+# run with a command on stdin, and it opens no store. The five files above stay five.
+GATE="${SKILLREPORT_GATE:-}"
+if [ -z "$GATE" ]; then
+  gate_self="$0"; gate_hops=0
+  while [ -L "$gate_self" ] && [ "$gate_hops" -lt 32 ]; do
+    gate_link="$(readlink "$gate_self" 2>/dev/null)" || break
+    case "$gate_link" in
+      /*) gate_self="$gate_link" ;;
+      *)  gate_self="$(dirname "$gate_self")/$gate_link" ;;
+    esac
+    gate_hops=$(( gate_hops + 1 ))
+  done
+  GATE="$(cd "$(dirname "$gate_self")/.." 2>/dev/null && pwd)/hooks/repeat-gate.sh"
+fi
+GATE_OK=0
+[ -n "$GATE" ] && [ -x "$GATE" ] && GATE_OK=1
+# US (0x1f) and not a tab between the fields read below: tab is IFS whitespace, so `read`
+# collapses runs of it and one empty field shifts every field after it left by one.
+US="$(printf '\037')"
+
 # --------------------------------------------------------- the fifth question: apply
 #
 # WAS THE NEW SKILL EVER USED ON THE PROBLEM THAT CAUSED IT? One row per `done`, joined
@@ -296,7 +330,10 @@ print_gates() {
   echo
   echo "GATES — the repeat gate's store and the documentation gate's escape hatch"
   if [ -s "$REPEATS" ]; then
-    jq -s -R -r --argjson min "$MIN_SESSIONS" '
+    # ONE PASS OVER THE STORE, PRODUCING FACTS RATHER THAN PROSE, because the deny count
+    # can no longer be computed inside jq: the head exemptions live in the gate and are
+    # asked of it below, per candidate. The prose is rendered from the facts afterwards.
+    rg="$(jq -s -R -c --argjson min "$MIN_SESSIONS" '
       def parse: [ split("\n")[] | select(length > 0) | (fromjson? // empty)
                    | select(type == "object") ];
       parse as $rows
@@ -317,24 +354,76 @@ print_gates() {
           | [ $rec[] | select(.sig == $sig and ((.ts // 0) > $cut)
                               and ((.norm // "") == $fn)) ] as $self
           | { sig: $sig,
+              tool: (($live[-1].tool // "Bash")),
+              # The LITERAL command, which is what the gate judges a head on. `norm` is
+              # the masked shape and is only the fallback for a row that carries no `cmd`.
+              raw:  ((($live[-1].cmd // $live[-1].norm) // "") | gsub("[\\n\\t\\r]"; " ")),
               n:     ($live | map(.session) | unique | length),
               selfn: ($self | map(.session) | unique | length) } ] as $sigs
-      | [ $sigs[] | select(.n >= $min and .selfn == 0) ] as $deny
-      | [ $sigs[] | select(.n >= $min and .selfn > 0) ] as $transient
-      | "  repeat gate:   \($sigs | length) distinct failure signature(s) known,"
-        + " \($f | length) failure row(s), \($rec | length) recovery row(s)",
-        "                 \($deny | length) of them at or past the deny threshold"
-        + " (>= \($min) distinct sessions) with",
-        "                 no self-recovery behind them, so a new session repeating one"
-        + " would be refused."
-        + (if ($tomb | length) > 0 then "  \($tomb | length) signature(s) forgotten." else "" end),
-        (if ($transient | length) == 0 then empty else
-          "                 \($transient | length) more reached that count, but an earlier"
+      | { known: ($sigs | length), fails: ($f | length), recs: ($rec | length),
+          tombs: ($tomb | length),
+          transient: ([ $sigs[] | select(.n >= $min and .selfn > 0) ] | length),
+          candidates: [ $sigs[] | select(.n >= $min and .selfn == 0)
+                        | {sig: .sig, tool: .tool, raw: .raw} ] }
+    ' "$REPEATS" 2>/dev/null)"
+    if [ -z "$rg" ]; then
+      echo "  repeat gate:   the store could not be read ($REPEATS)."
+    else
+      # ONE `--eligible-of` FORK PER CANDIDATE, and candidates are the signatures that
+      # already clear the session rule -- a handful even on a store at the gate's cap,
+      # because reaching the threshold takes two distinct sessions of the same failure.
+      rg_deny=0
+      rg_exempt=0
+      rg_cands="$(printf '%s' "$rg" \
+        | jq -r '.candidates[] | "\(.sig)\u001f\(.tool)\u001f\(.raw)"' 2>/dev/null)"
+      if [ -n "$rg_cands" ]; then
+        while IFS="$US" read -r rg_sig rg_tool rg_cmd; do
+          [ -z "${rg_sig:-}" ] && continue
+          rg_v="eligible"
+          # `REPEAT_GATE_DEBUG_DUMP=` blanked for the child: that variable makes the
+          # gate APPEND its stdin to a file, and this script promises to write nothing
+          # but its own output. A user who exported it for a hook must not find this
+          # report appending to it too.
+          [ "$GATE_OK" = "1" ] && rg_v="$(printf '%s' "${rg_cmd:-}" \
+            | REPEAT_GATE_DEBUG_DUMP="" "$GATE" --eligible-of "${rg_tool:-Bash}" 2>/dev/null)"
+          case "$rg_v" in
+            eligible) rg_deny=$(( rg_deny + 1 )) ;;
+            *)        rg_exempt=$(( rg_exempt + 1 )) ;;
+          esac
+        done <<EOF
+$rg_cands
+EOF
+      fi
+      printf '%s' "$rg" | jq -r --argjson min "$MIN_SESSIONS" \
+        --argjson deny "$rg_deny" --argjson exempt "$rg_exempt" \
+        --argjson gate_ok "$GATE_OK" '
+        "  repeat gate:   \(.known) distinct failure signature(s) known,"
+          + " \(.fails) failure row(s), \(.recs) recovery row(s)",
+        "                 \($deny) of them at or past the deny threshold"
+          + " (>= \($min) distinct sessions) with",
+        "                 no self-recovery behind them and a head the gate does not"
+          + " exempt, so a new",
+        "                 session repeating one would be refused."
+          + (if .tombs > 0 then "  \(.tombs) signature(s) forgotten." else "" end),
+        (if $exempt == 0 then empty else
+          "                 \($exempt) more reached that count with nothing recovering"
+          + " them, but the gate",
+          "                 exempts the command they run -- its head is on one of the two"
+          + " allowlists,",
+          "                 or it reaches for skillrepeat, or the tool is not Bash."
+         end),
+        (if .transient == 0 then empty else
+          "                 \(.transient) more reached that count, but an earlier"
           + " session ran the identical",
           "                 call and it worked. The gate reads those as transient and"
           + " never refuses them."
-         end)
-    ' "$REPEATS" 2>/dev/null
+         end),
+        (if $gate_ok == 1 then empty else
+          "                 The gate script was not found, so the head exemptions could"
+          + " not be applied:",
+          "                 the count above is an upper bound."
+         end)'
+    fi
   else
     echo "  repeat gate:   no store yet ($REPEATS)."
     echo "                 Nothing has been recorded on this machine, which is not the"

@@ -270,14 +270,48 @@ class DocGateTest(unittest.TestCase):
         self.commit({"package-lock.json": '{"lockfileVersion": 3}\n'}, "lockfile only")
         self.assert_allowed(self.push(), "a lockfile is neither")
 
-    def test_notes_are_not_documentation(self):
-        """`notes/` is a dated log, not a description of current behaviour. Counting it
-        as documentation would let this repository's own pushes all pass."""
+    def test_notes_are_not_documentation_under_the_knob(self):
+        """`notes/` in THIS repository is a dated log, not a description of current
+        behaviour, and counting it as documentation would let this repository's own
+        pushes all pass. That argument is sound and it is repo-local, so it is now
+        `DOC_GATE_NOTES=neither` rather than the default -- see the default's own test
+        below, and CLASSIFICATION in the script for why the default went the other way."""
         self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n",
                      "notes/2026-08-26-session.md": "log\n"}, "code plus a note")
-        reason = self.assert_denied(self.push())
+        reason = self.assert_denied(self.push(DOC_GATE_NOTES="neither"))
         self.assertIn("hooks/a.sh", reason)
         self.assertNotIn("notes/2026-08-26-session.md", reason)
+
+    def test_notes_are_documentation_by_default(self):
+        """ISSUE #28. The exclusion was justified by one repository's convention and
+        applied to every repository the hook is installed in. Elsewhere `notes/` is
+        prose, so a push carrying a note and a code file was DENIED for carrying no
+        documentation, with the reason naming the note nowhere -- the one outcome this
+        gate must never produce, and what the single recorded override was taken for."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n",
+                     "notes/hardware/x.md": "how the rig is wired\n"},
+                    "code plus a note in someone else's repository")
+        self.assert_allowed(self.push(), "notes/hardware/x.md is documentation")
+
+    def test_the_notes_default_survives_a_nonsense_setting(self):
+        """A typo'd knob must reach the default, not a third behaviour, and certainly not
+        the stricter branch: being denied for a variable nobody meant to set is the same
+        wrong deny in a new costume."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n",
+                     "notes/hardware/x.md": "how the rig is wired\n"}, "code plus a note")
+        self.assert_allowed(self.push(DOC_GATE_NOTES="NEITHER"))
+        self.assert_allowed(self.push(DOC_GATE_NOTES="", tool_use_id="tu2"))
+
+    def test_a_script_under_root_notes_does_not_become_code_by_default(self):
+        """THE SYMMETRY, and it is why the anchor MOVES rather than being deleted. Simply
+        dropping `^notes?/` from NEITHER_RE would have let CODE_RE claim `notes/x.py`,
+        making the gate STRICTER for exactly the repository that asked for the exclusion.
+        Under the default the anchor is in DOC_RE instead, so everything under a root
+        `notes/` satisfies the gate."""
+        self.commit({"notes/2026-08-26-scratch.py": "x = 1\n"}, "a script under notes/")
+        self.assert_allowed(self.push())
+        # ...and under the knob it is NEITHER, which neither triggers nor satisfies.
+        self.assert_allowed(self.push(DOC_GATE_NOTES="neither", tool_use_id="tu2"))
 
     def test_a_doc_under_a_nested_notes_directory_still_counts_as_documentation(self):
         """The `notes/` exclusion is about THIS repository's root-level dated log, and the
@@ -358,20 +392,26 @@ class DocGateTest(unittest.TestCase):
 
         The two directions are not symmetrical. A sidestepped exclusion costs a MISSED
         deny, which this gate tolerates by design; a case-folded one costs a WRONG deny of
-        work that carries documentation, which it does not tolerate at all."""
+        work that carries documentation, which it does not tolerate at all.
+
+        Asserted under BOTH settings of `DOC_GATE_NOTES`: under the default the anchor is
+        in DOC_RE, which does take the `-i`, so this is documentation directly; under
+        `neither` it is documentation because NEITHER_RE does not fold the case."""
         self.commit_cacheinfo({"bin/tool.sh": "#!/bin/sh\ntrue\n",
                                "Notes/design.md": "prose\n"},
                               "code plus a doc under a capitalised Notes/")
         self.assert_allowed(self.push())
+        self.assert_allowed(self.push(DOC_GATE_NOTES="neither", tool_use_id="tu2"))
 
     def test_the_lowercase_notes_exclusion_still_holds(self):
-        """The partner. Without it the test above is satisfied by a gate that stopped
-        excluding notes altogether, which would let every push this repository makes go
-        through -- the difference between a gate and an ornament."""
+        """The partner, under `DOC_GATE_NOTES=neither` -- the setting the asymmetry above
+        is about. Without it the test above is satisfied by a gate that stopped excluding
+        notes altogether, which under that setting would let every push this repository
+        makes go through: the difference between a gate and an ornament."""
         self.commit_cacheinfo({"hooks/a.sh": "#!/bin/sh\necho bye\n",
                                "notes/2026-08-26-session.md": "log\n"},
                               "code plus a lowercase note")
-        reason = self.assert_denied(self.push())
+        reason = self.assert_denied(self.push(DOC_GATE_NOTES="neither"))
         self.assertIn("hooks/a.sh", reason)
         self.assertNotIn("notes/2026-08-26-session.md", reason)
 
@@ -1163,6 +1203,78 @@ class DocGateTest(unittest.TestCase):
         reason = self.assert_denied(self.push(DOC_GATE_MAX_NAMED="0"))
         self.assertEqual(len(re.findall(r"^    - ", reason, re.M)), 1, reason)
         self.assertIn("... and 2 more.", reason)
+
+    # ============================================ the segment split and quoted reasons
+    def test_a_quoted_override_reason_containing_a_semicolon_is_still_recorded(self):
+        """ISSUE #28, AND IT WAS A SILENT BYPASS RATHER THAN A WRONG ANSWER.
+
+        The command text was split into segments with `tr ';&|()' '\\n\\n\\n\\n\\n'`, which
+        splits on those bytes wherever they appear -- inside the quoted override reason
+        included. `DOC_GATE_OVERRIDE="rename only; no behaviour change" git push` became
+        `DOC_GATE_OVERRIDE="rename only` and ` no behaviour change" git push`; PUSH_RE
+        anchors at a segment start and neither segment starts with an assignment run
+        followed by `git`, so NO push was found, the script exited 0, and a code-only
+        push went through with no deny AND NO OVERRIDE ROW.
+
+        That is the one way to take the escape hatch without being counted, and being
+        counted is the entire reason the hatch is shaped the way it is. So the two things
+        asserted here are that the push still goes through AND that the row exists."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n"})
+        reason = "rename only; no behaviour change"
+        self.assert_allowed(self.push('DOC_GATE_OVERRIDE="%s" git push' % reason))
+        rows = self.overrides()
+        self.assertEqual(len(rows), 1, "the escape was taken and never counted: %r" % rows)
+        self.assertEqual(rows[0]["kind"], "inline")
+        self.assertEqual(rows[0]["reason"], reason)
+
+    def test_every_splitting_character_inside_a_quoted_reason(self):
+        """`;` is the one that was reported. A reason is PROSE, so parentheses and
+        ampersands are ordinary in it too, and each was the same bypass."""
+        cases = ["rename only; no behaviour change",
+                 "chore & vendor bump",
+                 "docs live upstream | nothing to add here",
+                 "revert (see the incident note)",
+                 "a;b&c|d(e)f"]
+        for i, reason in enumerate(cases):
+            with self.subTest(reason=reason):
+                self.setUp()
+                self.commit({"hooks/a.sh": "#!/bin/sh\necho bye %d\n" % i})
+                self.assert_allowed(self.push('DOC_GATE_OVERRIDE="%s" git push' % reason))
+                rows = self.overrides()
+                self.assertEqual(len(rows), 1, rows)
+                self.assertEqual(rows[0]["reason"], reason)
+
+    def test_the_same_push_without_the_override_is_still_denied(self):
+        """NON-VACUITY for all of the above: the commit really does trigger the gate, so
+        `assert_allowed` there is the override working rather than the gate sleeping."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n"})
+        self.assertIn("hooks/a.sh", self.assert_denied(self.push()))
+
+    def test_an_unquoted_separator_still_splits(self):
+        """The split is still a split. A push buried in a chain is what the segmenting
+        exists for, and a quote-aware version that stopped splitting at all would pass
+        every test above while retiring the gate."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n"})
+        # A DISTINCT SESSION PER CASE, not a distinct tool_use_id. The gate refuses one
+        # HEAD once per session and then fails open, so a loop that varied only the id
+        # measured the deny for the first command and the once-per-session guard for
+        # every one after it -- three failures that looked like a broken splitter.
+        for i, cmd in enumerate(["echo hi; git push",
+                                 "echo hi && git push",
+                                 "echo hi | cat; git push origin HEAD",
+                                 "(cd . && git push)"]):
+            with self.subTest(command=cmd):
+                self.assertIn("hooks/a.sh",
+                              self.assert_denied(self.push(cmd, session="split%d" % i,
+                                                           tool_use_id="tu%d" % i)))
+
+    def test_a_quoted_separator_does_not_manufacture_a_push(self):
+        """The other direction of the same rule: text that only LOOKS like a push once
+        the quotes are ignored must not be gated. `git commit -m "...; git push"` writes
+        to no remote."""
+        self.commit({"hooks/a.sh": "#!/bin/sh\necho bye\n"})
+        self.assert_allowed(self.push('git commit -m "fix; git push later"'),
+                            "a push named inside a commit message is not a push")
 
     # ================================================================ script hygiene
     def test_the_script_parses_and_is_brace_wrapped(self):

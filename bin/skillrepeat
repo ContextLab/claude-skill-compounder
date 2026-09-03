@@ -50,6 +50,15 @@
 #   REPEAT_MIN_SESSIONS (2)  the gate's refusal threshold, used here only to report which
 #                            signatures are over it. Read from the same variable the gate
 #                            reads so the two cannot disagree.
+#   REPEAT_GATE_REFUSE  (0)  the gate's refusal switch, read here ONLY to say on the
+#                            output whether the arm this CLI reports on is even armed.
+#                            The GATE column answers "would this signature refuse if the
+#                            arm were on", which is the question worth reporting; whether
+#                            it is on is a second fact and is printed as one.
+#   SKILLREPEAT_GATE         path to hooks/repeat-gate.sh. Resolved from this script's own
+#                            location by default, symlinks followed. The head exemptions
+#                            are ASKED OF THAT SCRIPT (`--eligible-of`) and never
+#                            reimplemented here -- see THE GATE COLUMN below.
 #   SKILLREPEAT_NOW          this CLI's clock, epoch seconds, falling back to
 #                            REPEAT_GATE_NOW. It writes the tombstone timestamp, and a
 #                            tombstone that lands before the rows it is meant to suppress
@@ -84,6 +93,43 @@ case "$MIN_SESSIONS" in ''|*[!0-9]*) MIN_SESSIONS=2 ;; esac
 [ "$MIN_SESSIONS" -lt 1 ] && MIN_SESSIONS=1
 
 command -v jq >/dev/null 2>&1 || { echo "skillrepeat: jq is required" >&2; exit 1; }
+
+# THE GATE COLUMN. `refuses` used to mean "this signature has reached the session
+# threshold", and the gate's answer is not that: before it looks at any count it exempts a
+# Bash command whose HEAD is on either of two lists (`allowlisted_head`, `runner_head`) and
+# any command reaching for this CLI, and it never refuses a non-Bash call at all. On the
+# live store of 2026-09-02 that was the whole difference: ten signatures at the threshold,
+# ten printed here as `refuses`, and NONE of them denied by the real hook (issue #27).
+#
+# So the head rules are ASKED OF THE GATE, through its `--eligible-of` door, rather than
+# copied into this file. A second copy would drift from the first invisibly, and the
+# symptom is a number nobody can act on -- which is exactly the defect being repaired.
+# Same argument, same shape, as `--norm-of` in bin/skillnote and hooks/remind.sh.
+#
+# Resolved from this script's own path with symlinks followed, because both install paths
+# put a LINK in the user's bin directory and `dirname "$0"` on the link points at that
+# directory, not at the checkout. `SKILLREPEAT_GATE` overrides, the way `SKILLUSE_FORGE`
+# does for hooks/skill-use.sh.
+GATE="${SKILLREPEAT_GATE:-}"
+if [ -z "$GATE" ]; then
+  gate_self="$0"; gate_hops=0
+  while [ -L "$gate_self" ] && [ "$gate_hops" -lt 32 ]; do
+    gate_link="$(readlink "$gate_self" 2>/dev/null)" || break
+    case "$gate_link" in
+      /*) gate_self="$gate_link" ;;
+      *)  gate_self="$(dirname "$gate_self")/$gate_link" ;;
+    esac
+    gate_hops=$(( gate_hops + 1 ))
+  done
+  GATE="$(cd "$(dirname "$gate_self")/.." 2>/dev/null && pwd)/hooks/repeat-gate.sh"
+fi
+GATE_OK=0
+[ -n "$GATE" ] && [ -x "$GATE" ] && GATE_OK=1
+
+# US (0x1f), not a tab, between the fields the loop below reads: tab is IFS whitespace, so
+# `read` collapses runs of it and one empty field shifts every field after it. Same trap,
+# same fix, as the gate's pending file and this file's own awk formatter.
+US="$(printf '\037')"
 
 usage() {
   sed -n '2,9p' "$0" | sed -e 's/^# \{0,1\}//'
@@ -123,6 +169,18 @@ rows() {
 # commands as "what worked" would be an invention), and the same self-recovery rule (a
 # success that normalises to the failing call is proof the failure was transient, so it is
 # never named as the fix and its signature never refuses).
+#
+# THAT SENTENCE WAS FALSE FOR A YEAR OF THE FILE'S LIFE, and it is worth saying how: the
+# list above is everything the two queries share, and the gate ALSO exempts a call on its
+# head before it consults any of it. This query has no way to compute that -- the head
+# rules are the gate's -- so it did not, and the claim of agreement was made against the
+# clauses that had been copied rather than against the gate. It is now asked, per
+# signature that clears the session rule, through `--eligible-of`; and
+# tests/test_repeat_gate.py drives the REAL hook over a copy of a real store and asserts
+# the two counts are equal, so the word AGREE above is a measurement rather than a
+# restatement. It is asked only of the signatures that clear the session rule, because
+# those are the only ones whose answer it can change, and that keeps the cost one fork per
+# candidate rather than one per row.
 #
 # THEY ARE NOT THE SAME QUERY, AND MUST NOT BE. The gate cuts to ONE callkey and drops the
 # current session BEFORE it groups, so what it walks is a handful of rows however large the
@@ -210,6 +268,11 @@ SUMMARY_JQ='
           first: (($rr | map(.ts // 0) | min) // 0),
           last: (($rr | map(.ts // 0) | max) // 0),
           call: (($rr[-1].norm // $fs[-1].norm) // ""),
+          # THE LITERAL command of the last surviving fail row, for `--eligible-of` to
+          # judge a head on. `call` above is the masked SHAPE and cannot be used for it:
+          # `<P>/run_tests.sh` and `./run_tests.sh` are one shape and the gate sees the
+          # second. Falls back to the shape when a foreign row carries no `cmd` at all.
+          raw: (($rr[-1].cmd // $fs[-1].cmd // $rr[-1].norm // $fs[-1].norm) // ""),
           error: (($rr[-1].ec // $rr[-1].err) // ""),
           recovery: (if ($g|length) == 0 then ""
                      elif ($g|length) == 1 then $g[0].cmd
@@ -224,10 +287,50 @@ SUMMARY_JQ='
 '
 
 # The one place the refusal rule is spelled out for this CLI, so `list` and `stats` cannot
-# drift apart from each other or from the gate.
-REFUSES_JQ='(.sessions >= $min and .transient_sessions == 0)'
+# drift apart from each other or from the gate. `$elig` is built by elig_map below and
+# holds an entry for EVERY signature that clears the session rule, so `// false` here can
+# only ever be reached by a signature that has already failed the first two clauses.
+REFUSES_JQ='(.sessions >= $min and .transient_sessions == 0 and (($elig[.sig] // false) == true))'
 
 summary() { rows | jq -s -c "$SUMMARY_JQ" 2>/dev/null; }
+
+# {"<sig>": true|false} for the signatures that clear the session rule -- the only ones a
+# head exemption can change the answer for. One `--eligible-of` fork per candidate, and
+# candidates are what a store has a handful of: the cost stores in
+# tests/test_repeat_gate.py::CliCostTest produce one and none respectively.
+#
+# WHEN THE GATE SCRIPT CANNOT BE FOUND every candidate is marked true and GATE_OK stays 0,
+# which is the OLD behaviour, printed under a line that says the exemptions could not be
+# applied. Silently reporting a different number because a path did not resolve is how an
+# instrument starts lying; saying so is not.
+elig_map() {   # summary JSON on stdin -> the object on stdout
+  em_lines="$(jq -r --argjson min "$MIN_SESSIONS" '
+      .[] | select(.sessions >= $min and .transient_sessions == 0)
+      | "\(.sig)\u001f\(.tool)\u001f\((.raw // "") | gsub("[\\n\\t\\r]"; " "))"' \
+    2>/dev/null)"
+  em_pairs=""
+  if [ -n "$em_lines" ]; then
+    while IFS="$US" read -r em_sig em_tool em_cmd; do
+      [ -z "${em_sig:-}" ] && continue
+      em_b=true
+      if [ "$GATE_OK" = "1" ]; then
+        # `REPEAT_GATE_DEBUG_DUMP=` blanked for the child: that variable makes the gate
+        # APPEND its stdin to a file, and reading the store must not write to one.
+        em_v="$(printf '%s' "${em_cmd:-}" \
+          | REPEAT_GATE_DEBUG_DUMP="" "$GATE" --eligible-of "${em_tool:-Bash}" 2>/dev/null)"
+        case "$em_v" in eligible) em_b=true ;; *) em_b=false ;; esac
+      fi
+      em_pairs="$em_pairs$em_sig$US$em_b
+"
+    done <<EOF
+$em_lines
+EOF
+  fi
+  printf '%s' "$em_pairs" | jq -R -s --arg us "$US" '
+      [ split("\n")[] | select(length > 0) | split($us)
+        | {key: .[0], value: (.[1] == "true")} ] | from_entries' 2>/dev/null \
+    || printf '{}'
+}
 
 # ------------------------------------------------------------------------- list
 cmd_list() {
@@ -247,9 +350,19 @@ cmd_list() {
   s="$(printf '%s' "$s" | jq -c --arg t "$want_tool" --argjson all "$show_all" '
         map(select($t == "" or .tool == $t))
         | map(select($all == 1 or .sessions > 0))' 2>/dev/null)"
+  elig="$(printf '%s' "$s" | elig_map)"
+  [ -z "$elig" ] && elig='{}'
+  # THE RULE IS APPLIED ONCE, HERE, and both consumers below read the field it writes.
+  # Interpolating `$REFUSES_JQ` straight into the table's `if` chain worked and cost the
+  # GATE column its DERIVATION: the alignment test reads the alternatives out of that
+  # chain to find the widest value the column can print, and a shell-interpolated
+  # expression reads as one of them. A column whose widest value can no longer be derived
+  # is the fixed-width overflow waiting to happen a third time.
+  s="$(printf '%s' "$s" | jq -c --argjson min "$MIN_SESSIONS" --argjson elig "$elig" \
+        'map(. + {refuses: '"$REFUSES_JQ"'})' 2>/dev/null)"
+  [ -z "$s" ] && s='[]'
   if [ "$json" = "1" ]; then
-    printf '%s\n' "$s" | jq --argjson min "$MIN_SESSIONS" \
-      'map(. + {refuses: '"$REFUSES_JQ"'})'
+    printf '%s\n' "$s" | jq '.'
     return 0
   fi
   n="$(printf '%s' "$s" | jq -r 'length' 2>/dev/null)"
@@ -304,8 +417,12 @@ cmd_list() {
     | [ .sig, (.sessions|tostring), .tool,
         (if .recovery != "" then "agreed" elif .recovery_tied then "disputed"
          elif .candidates > 0 then "unclear" else "none" end),
+        # `exempt` is a fourth value and not a variant of `-`: the difference between "not
+        # enough sessions yet" and "enough sessions and the gate will still never refuse
+        # it" is the whole finding of issue #27, and collapsing the two would hide it again.
         (if .transient_sessions > 0 then "transient"
-         elif .sessions >= $min then "refuses" else "-" end),
+         elif .refuses then "refuses"
+         elif .sessions >= $min then "exempt" else "-" end),
         (.call | .[0:60]) ]
     | @tsv' 2>/dev/null \
   | awk -F'\t' '
@@ -322,9 +439,22 @@ cmd_list() {
         }
       }'
   echo
-  echo "GATE refuses = denied once per session, from >= $MIN_SESSIONS distinct sessions."
+  echo "GATE refuses = denied once per session, from >= $MIN_SESSIONS distinct sessions,"
+  echo "                 with a head the gate does not exempt."
+  echo "     exempt    = at that count, and the gate still never refuses it: the command's"
+  echo "                 head is on one of its two allowlists, or it reaches for this CLI,"
+  echo "                 or the tool is not Bash. Asked of the gate itself, not decided"
+  echo "                 here (\`hooks/repeat-gate.sh --eligible-of\`)."
   echo "     transient = an earlier session re-ran the identical call and it worked, so"
   echo "                 the gate never refuses this one, whatever the count."
+  if [ "$GATE_OK" != "1" ]; then
+    echo "     NOTE: $GATE is not executable, so the head exemptions could NOT be"
+    echo "           applied. Every GATE value above is an upper bound."
+  elif [ "${REPEAT_GATE_REFUSE:-0}" != "1" ]; then
+    echo "     NOTE: the gate's refusal arm is OFF (REPEAT_GATE_REFUSE is not 1), so"
+    echo "           nothing is being refused today whatever this column says. It reports"
+    echo "           what would be refused with the arm switched on."
+  fi
   echo 'CALL is the normalised SHAPE the gate matches on, not a literal command: quoted'
   echo '     arguments, the directory part of an absolute path and bare numbers are masked'
   echo '     out first, so one row can cover more than one command that really ran.'
@@ -458,7 +588,13 @@ cmd_stats() {
   # gate's byte cap that argument is four megabytes -- past ARG_MAX on macOS, where it
   # fails as E2BIG rather than as anything a reader would recognise. `$sum` is derived
   # here from the same slurped array, so the summary is computed once.
-  st="$(rows | jq -s -c --argjson min "$MIN_SESSIONS" '
+  # TWO PASSES OVER THE STORE, and the second is not free: `elig_map` needs the summary
+  # before the head rules can be asked about anything, and the query below needs the
+  # answers before it can count. Measured under CliCostTest, which prints the wall time on
+  # every run, so the cost of the second pass cannot go unnoticed.
+  st_elig="$(summary | elig_map)"
+  [ -z "$st_elig" ] && st_elig='{}'
+  st="$(rows | jq -s -c --argjson min "$MIN_SESSIONS" --argjson elig "$st_elig" '
     ('"$SUMMARY_JQ"') as $sum
     | { rows: length,
         failures: ([.[] | select(.t=="fail" and (.sig|type=="string"))] | length),
@@ -481,7 +617,7 @@ cmd_stats() {
       + (.recoveries|tostring) + " recoveries, " + (.tombstones|tostring) + " tombstones)",
     "signatures:   " + (.signatures|tostring),
     "sessions:     " + (.sessions|tostring),
-    "refusing:     " + (.refusing|tostring) + "  (>= " + (.threshold|tostring) + " distinct sessions)",
+    "refusing:     " + (.refusing|tostring) + "  (>= " + (.threshold|tostring) + " distinct sessions, head not exempt)",
     "with a fix:   " + (.with_recovery|tostring) + "  signatures name a recovery"'
   return 0
 }

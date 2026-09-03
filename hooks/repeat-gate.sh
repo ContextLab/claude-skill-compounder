@@ -29,6 +29,21 @@
 # before", which is worth almost nothing: the session already has to rediscover the
 # workaround. The recovery arm is what turns the refusal into the answer.
 #
+# ARM 3 IS OFF BY DEFAULT (`REPEAT_GATE_REFUSE=1` switches it on). Arms 1 and 2 stay on,
+# so the store keeps learning and `skillrepeat`/`skillreport` keep reporting; what is off
+# is the only arm that can block a call. THE REASON IS MEASURED, not a change of heart
+# about the design. Issue #27, on the live store of 2026-09-02: 356 rows, 182 distinct
+# signatures, 81 distinct sessions, and NO `repeats/denied/` directory at all -- the arm
+# had never refused anything in 81 sessions. Ten signatures had reached
+# REPEAT_MIN_SESSIONS, and driving this real hook against all ten denied NONE of them:
+# every one has a head on the allowlist below, so the population that could ever trigger a
+# refusal was empty. A synthetic non-allowlisted signature IS denied, so the machinery
+# works; nothing real reaches it. An arm that has never fired cannot be judged by its
+# false-positive rate, and the honest default for a refusal nobody has ever seen is off.
+# WHAT WOULD TURN IT BACK ON: one non-allowlisted signature reaching the threshold for
+# real. `skillrepeat list` and `skillreport` both now apply the head rules below before
+# counting, so that number is the one they print -- which is how it would be noticed.
+#
 # ====================================================================================
 # THE SIGNATURE IS TWO PARTS, AND THAT IS FORCED BY THE PLATFORM.
 #
@@ -266,6 +281,12 @@
 # ====================================================================================
 # ENV (defaults in parentheses):
 #   SKILL_COMPOUNDER_REPEAT_GATE (1)  0 disables all three arms.
+#   REPEAT_GATE_REFUSE            (0) 1 switches ARM 3 on. Any other value is off. Off is
+#                                     the default and the paragraph above is why. It gates
+#                                     ONLY the refusal: the learn arm, the recovery arm and
+#                                     `--norm-of`/`--eligible-of` are unaffected, so the
+#                                     store keeps growing and the instruments keep reading
+#                                     it while nothing is ever blocked.
 #   REPEAT_GATE_NOW               ()  this script's clock, epoch seconds. Its own, not
 #                                     borrowed: pinning another script's does nothing here.
 #   REPEAT_MIN_SESSIONS           (2) distinct EARLIER sessions needed before a refusal.
@@ -352,6 +373,11 @@ set -uo pipefail
 : "${HOME:=/tmp}"
 
 ENABLED="${SKILL_COMPOUNDER_REPEAT_GATE:-1}"
+# Exactly `1` switches the refuse arm on; a typo, an empty export or a `true` is OFF. The
+# permissive spelling would be the wrong way round for a knob whose ON state can block a
+# tool call the session is waiting on.
+REFUSE="${REPEAT_GATE_REFUSE:-0}"
+case "$REFUSE" in 1) ;; *) REFUSE=0 ;; esac
 MIN_SESSIONS="${REPEAT_MIN_SESSIONS:-2}"
 WINDOW="${REPEAT_RECOVERY_WINDOW:-5}"
 MAX_BYTES="${REPEAT_GATE_MAX_BYTES:-4194304}"
@@ -359,13 +385,16 @@ ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$ROOT/repeats"
 STORE="$DIR/index.jsonl"
 
-# THE OFF SWITCH STOPS THE GATE, NOT THE SHARED NORMALISER. `--norm-of` is a pure
-# function of its stdin -- it reads no store, writes no row and denies nothing --
-# and hooks/remind.sh calls it to decide whether a command matches a reminder. A user
-# who turns this gate off must not silently turn off command matching in a DIFFERENT
-# hook, with nothing on any surface to say why it stopped.
+# THE OFF SWITCH STOPS THE GATE, NOT THE SHARED READ-ONLY DOORS. `--norm-of` and
+# `--eligible-of` are pure functions of their stdin -- they read no store, write no row
+# and deny nothing -- and other components call them: hooks/remind.sh asks `--norm-of`
+# whether a command matches a reminder, and bin/skillreport and bin/skillrepeat ask
+# `--eligible-of` what this gate's head rules say about a stored command. A user who turns
+# this gate off must not silently turn off command matching in a DIFFERENT hook, or make
+# two instruments start reporting a different number, with nothing on any surface to say
+# why it changed.
 case "${1:-}" in
-  --norm-of) ;;
+  --norm-of|--eligible-of) ;;
   *) [ "$ENABLED" = "0" ] && exit 0 ;;
 esac
 command -v jq >/dev/null 2>&1 || exit 0
@@ -427,20 +456,29 @@ jqr() { printf '%s' "$payload" | jq -r "$1" 2>/dev/null; }
 # does. The four guards between here and there are skipped rather than satisfied with
 # invented values, so nothing downstream can read a session id or an event name this
 # mode never had.
-NORM_OF=""
+# TWO ARGV MODES, ONE VARIABLE. `ARGV_MODE` is what every guard below tests, so adding a
+# third door means adding one `case` arm here and not hunting four `[ -z "$NORM_OF" ]`
+# tests that each had to be found and changed by hand.
+ARGV_MODE=""
+ARGV_TOOL=""
 case "${1:-}" in
-  --norm-of) NORM_OF="${2:-}"; [ -z "$NORM_OF" ] && exit 2 ;;
+  --norm-of)     ARGV_MODE="norm";     ARGV_TOOL="${2:-}"; [ -z "$ARGV_TOOL" ] && exit 2 ;;
+  --eligible-of) ARGV_MODE="eligible"; ARGV_TOOL="${2:-Bash}" ;;
 esac
 
-if [ -z "$NORM_OF" ]; then
+if [ -z "$ARGV_MODE" ]; then
   event="$(jqr '.hook_event_name // empty')"
   case "$event" in
     PreToolUse|PostToolUse|PostToolUseFailure) ;;
     *) exit 0 ;;
   esac
+  # ARM 3 IS OFF UNLESS REPEAT_GATE_REFUSE=1 -- see the stanza under THREE ARMS. Tested
+  # HERE and not down at arm 3 so that a PreToolUse costs one fork and two jq reads when
+  # the arm is off: no store read, no query, and no `denied/` marker written.
+  if [ "$event" = "PreToolUse" ] && [ "$REFUSE" != "1" ]; then exit 0; fi
 fi
 
-if [ -z "$NORM_OF" ]; then
+if [ -z "$ARGV_MODE" ]; then
   now="${REPEAT_GATE_NOW:-}"
   case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
   case "$now" in ''|*[!0-9]*) exit 0 ;; esac
@@ -461,7 +499,11 @@ if [ -z "$NORM_OF" ]; then
   cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
   trap cleanup EXIT
 else
-  tool="$NORM_OF"
+  tool="$ARGV_TOOL"
+  # The arm dispatch below tests `$event`, and under `set -u` an unset one aborts the
+  # script. An argv call has no event and must fall past arms 1 and 2 to reach the
+  # functions the `--eligible-of` door needs, so it is set empty rather than left unbound.
+  event=""
 fi
 
 # ------------------------------------------------------------------- normalisation
@@ -559,7 +601,7 @@ hashof() { printf '%s' "$1" | cksum 2>/dev/null | awk '{printf "%sx%s", $1, $2}'
 # The 500-character cap is `compute_call`'s, applied here for the same reason: the
 # caller must get the signature this gate WOULD have computed, cap included, or byte
 # equality against a stored one is a coin flip on long commands.
-if [ -n "$NORM_OF" ]; then
+if [ "$ARGV_MODE" = "norm" ]; then
   if [ "$tool" = "Bash" ]; then
     printf '%s\n' "$(norm_bash "$(printf '%s' "$payload" | cut -c1-500)")"
   else
@@ -856,6 +898,47 @@ runner_head() {
   esac
   return 1
 }
+
+# ------------------------------------------------------------------ --eligible-of
+# THE HEAD EXEMPTIONS, REACHABLE ON THEIR OWN, and for the same reason `--norm-of` is.
+# bin/skillreport and bin/skillrepeat each report what this gate WOULD refuse, and each
+# answered it from the session count alone, with no head exemption applied at all. On the
+# live store that made both of them print ten signatures the real hook denies none of
+# (issue #27). A second copy of the two lists above, kept in a CLI, would drift from these
+# invisibly, and the symptom is precisely that: a number nobody can act on.
+#
+# Usage: the raw command on STDIN, the tool name as the argument (default Bash). Prints
+#        ONE token and exits 0. It reads no store, writes nothing and denies nothing, and
+#        it answers the same whether or not REPEAT_GATE_REFUSE is set -- the question is
+#        "do the head rules exempt this call", not "is the gate refusing today". A caller
+#        that wants the second question has to ask it separately, which is right: the two
+#        have different answers and folding them would hide the first.
+#
+#   eligible          nothing here exempts it; the session count alone would decide.
+#   exempt-tool       not a Bash call, and the refuse arm is Bash-only.
+#   exempt-empty      no command to judge.
+#   exempt-cli        guard 4: the command reaches for this store's own CLI.
+#   exempt-allowlist  guard 3: `allowlisted_head`.
+#   exempt-runner     `runner_head`: a test or build runner, whose failure is the point.
+#
+# THE ORDER IS THE REFUSE ARM'S OWN, below, because a caller counting exemption KINDS
+# would otherwise attribute one to the wrong rule.
+#
+# WRITTEN AS `[ ... != Bash ]` AND NOT AS A `case "$tool" in`, which is what it was first.
+# tests/test_repeat_gate.py::WiringTest fails the file on any `case` over `$tool` outside a
+# comment, because under the `Bash|Skill` matcher such an arm is the dead guard
+# skills/dead-guard-detection exists to catch. This one is reachable -- a CLI passes the
+# tool as an argument, and a `Skill` signature really does reach it -- but a rule that has
+# to distinguish the two by reading the surrounding code is a rule that stops holding.
+if [ "$ARGV_MODE" = "eligible" ]; then
+  if [ "$tool" != "Bash" ]; then printf 'exempt-tool\n'; exit 0; fi
+  [ -z "$payload" ] && { printf 'exempt-empty\n'; exit 0; }
+  case "$payload" in *skillrepeat*) printf 'exempt-cli\n'; exit 0 ;; esac
+  allowlisted_head "$payload" && { printf 'exempt-allowlist\n'; exit 0; }
+  runner_head "$payload" && { printf 'exempt-runner\n'; exit 0; }
+  printf 'eligible\n'
+  exit 0
+fi
 
 # THE REFUSE ARM IS BASH-ONLY, and the two guards below are why. Both escape hatches --
 # the `*skillrepeat*` reach-for-the-CLI guard and `allowlisted_head` -- live inside this

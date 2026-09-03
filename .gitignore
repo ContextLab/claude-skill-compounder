@@ -15,3 +15,6 @@ venv/
 
 # tooling state (not part of the project)
 .omc/
+
+# skillnote / installer backups of edited config files
+*.bak-skill-compounder-*

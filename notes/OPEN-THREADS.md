@@ -1,8 +1,9 @@
 # Open threads
 
-What is actually open, as of **2026-09-02**, on `ee7cef5` plus the uncommitted Wave 1 tree
-(`skillforge doctor`/`reap`, `skillinsight reindex`, the installer doctrine block, and the
-`skillreport` counter fix). Written so nothing here depends
+What is actually open, as of **2026-09-02**, on `7507a0b` (Waves 1 and 2 committed) plus
+the uncommitted Wave 3 tree — the forge-diet rewrite of `skills/skill-compounder/SKILL.md`,
+`skillinsight promote`/`decline --source`, the repeat gate's default-off refusal arm, and
+the doc-gate fixes. Written so nothing here depends
 on a session remembering it: every entry carries the command or the path that establishes
 it. Delete an entry when it is genuinely closed, not when it is merely in flight. When you
 close one, compress it to a line in "Closed" with the evidence that closed it, or delete it
@@ -43,13 +44,18 @@ What follows, and what is unfinished:
   prompt won every draw, and `partial` otherwise. Re-run the arithmetic rather than quoting
   a call count: it is `len(prompts_for(claims)) * runs`, so one six-prompt skill is 18 calls
   and the eight pinned skills are 48 prompts, ~144 calls, ~12 minutes at the floor.
-- **Eight of the nine shipped skills carry a routing pin** (`grep -l routing-pin
-  skills/*/SKILL.md`). `contribute-skill` has none, and has never been probed. That is the
-  concrete gap.
-- **`skill-compounder`'s own pin says `partial`**, naming the prompt that scored 8/9. It is
-  the only pin recording `runs:`; the other seven still read `verified 3/3 must-fire, 3/3
-  must-not-fire` from single passes on 2026-08-25 and have not been re-probed at the floor.
-  Do not carry any of those seven forward as though three runs were behind them.
+- **All twelve shipped skills now carry a routing pin at the floor** (`grep -l routing-pin
+  skills/*/SKILL.md` returns 12, and every one records `runs: 3`). The gap recorded here
+  earlier — `contribute-skill` unpinned and never probed, and seven pins carrying single
+  passes from 2026-08-25 — is closed.
+- **Six of the twelve say `partial`, not `verified`**: `ai-tell-audit`,
+  `claim-provenance`, `dead-guard-detection`, `destructive-op-preflight`, `finish-task` and
+  `skill-compounder` each read `partial 8/9 must-fire draws, 9/9 must-not-fire draws`. Half
+  the pool losing exactly one must-fire draw out of nine is the finding, not six separate
+  ones, and it is the same shape as the 9/9-then-8/9-then-9/9 result above. Re-derive the
+  split before acting on it (`grep -ho '^result: [a-z]*' skills/*/SKILL.md | sort | uniq -c`
+  answers `6 partial`, `6 verified`);
+  nothing here is a reason to edit six descriptions.
 - Undecided: whether a `partial` pin should block a forge from being reported clean, or
   whether shipping it named-and-recorded is the honest end state. Record the answer here.
 
@@ -103,16 +109,84 @@ both install paths. Two known limits, neither a defect to fix blind:
 
 ## Open: unvalidated constants
 
-Four numbers picked by judgement, none settled by data. `bin/skillreport` is the instrument
-that would settle the first two, and it needs real usage across several repositories over
-real time first. Do not tune any of them before that data exists.
+Six numbers picked by judgement, none settled by data. Do not tune any of them before the
+data exists.
 
 - `CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` in `hooks/compound-improvement.sh`.
+  **These two now have an instrument and still have no data.** `bin/skillreport` grew a
+  `REMINDER CONVERSION` block in Wave 1 (`bin/skillreport:1364`) that divides forges
+  started, all time, by the checkpoints the on-disk edit counters imply at the current
+  `CI_EDIT_EVERY`; it prints its own caveat, because the numerator covers all time and the
+  denominator only the last seven days, so it is a loose upper bound rather than a rate.
+  What is missing is the same thing as before: real usage across several repositories over
+  real time. Having an instrument is not the same as having read one, and neither number
+  should move until `skillreport` has been run against a store that is not this machine's.
+- `REMIND_MAX=2` and `REMIND_COOLDOWN=0` (once per session) in `hooks/remind.sh`, added in
+  Wave 2. Both are guesses of exactly the same kind as the two above, made the same way and
+  with less behind them: the reminder store had existed for hours when they were chosen.
+  Nothing has measured whether two reminders per event is one too many, or whether a
+  reminder a session ignored once should get a second chance later in the same session.
+  `bin/skillreport`'s conversion block counts checkpoints, not reminder deliveries, so it
+  does not answer these; the hit log under `<state>/remind/` is where an answer would come
+  from.
 - `REVIEW_COOLDOWN=75600` (21h) in `hooks/session-review.sh`. The reasoning in that file's
   header is sound — 24h *ratchets* against someone who works the same hours daily — but the
   resulting 1.7 dispatches/week is arithmetic, not observation.
 - `$0.19` per stage-1 review, measured once on 2026-08-25 over a 60 KB digest on sonnet.
   Every weekly-cost figure in that header, and in the README, multiplies one observation.
+
+## Open: `hooks/remind.sh` never prunes its own claim and stamp tree
+
+Wave 2 shipped the reminder hook with per-session state and no sweep. `ROOT/remind/<session
+id>/` (`hooks/remind.sh:144`, `:224`, `:419`) accumulates one directory per session, holding
+a cooldown stamp per reminder that fired and a claim per event, and nothing deletes any of
+it. `hooks/compound-improvement.sh:148`'s `prune_stale_state()` does not reach it: that
+sweep walks `<state>/reminders/`, a **different** directory whose near-collision with
+`reminders.jsonl` is deliberate and pinned by `tests/test_hook.py`, precisely so the sweep
+cannot touch the store.
+
+```bash
+ls ~/.claude/skill-compounder/remind/ | wc -l
+```
+
+Nothing is broken yet and the growth is small — a few files per session — so this is a
+decision rather than a defect: prune on age the way the counters are pruned, prune on a
+sampled invocation the way the status-line cache is, or leave it and say so. The trap to
+avoid if it is pruned is the one `hooks/session-review.sh` shipped: a claim taken before the
+action is really going to happen can never be retried. Record the answer here.
+
+## Open: the user's own `~/.claude/CLAUDE.md` stanza is hand-written and the installer will not touch it
+
+The installer writes the doctrine block between `claude-skill-compounder:doctrine:start` and
+`:end` markers. `install_doctrine()` (`skill_compounder/installer.py:400`) has four
+outcomes, and `user-owned` is the one that applies here: a `CLAUDE.md` already carrying a
+`## Compound Improvement` section written by hand has no markers, and writing the block
+anyway would give the reader the doctrine twice, so **nothing is written**. That is correct
+behaviour and it is also why Wave 3's rewrite of the protocol did not reach the stanza in
+the global file.
+
+`skill_compounder/installer.py`'s `DOCTRINE_TEXT` is what the current protocol says;
+`skills/skill-compounder/SKILL.md` and `README.md` are its other two mirrors, and
+`tests/test_doctrine_sync.py` keeps those three in step. The global stanza is a fourth copy
+that no test can see and no installer will correct. **It has to be updated by hand**, or
+deleted so that the next install writes the current text into it. Until one of those
+happens, a session reading the global file is being told an older protocol than the one the
+skill carries — the three-tier split, the cheap branch, and the round cap are all missing
+from it.
+
+## Open: `#8` PreCompact capture is still unbuilt
+
+The design is settled and nothing has been written. A `PreCompact` hook would capture what a
+session learned at the moment its context is about to be discarded, which is the one moment
+the information is both complete and about to be lost. The settled constraints: no model
+call in the hook, under 100 ms, and the output goes to the same weekly queue
+`hooks/insight-capture.sh` writes, so nothing new has to be read back.
+
+It is issue #8. Waves 1 and 2 did not scope it; Wave 3 scoped it and did not dispatch it,
+alongside #19, and both were pushed to a Wave 4 that has not run. What has changed while it waited is that
+the queue it would write into is no longer write-only — `skillinsight promote` and `decline
+--source` drained it, and `bin/skillnote` gives a promoted record somewhere to land — so a
+`PreCompact` capture would now feed a path that is read rather than one that only fills.
 
 ## Open: stage-2 auto-forge cannot finish its own gate
 
@@ -126,28 +200,27 @@ finish. Turning it on before that is solved means paying ~$3 a time for forges t
 conclude. The stochastic-routing finding above makes this worse, not better: the gate a
 dispatched forge cannot run is now a gate that needs three passes.
 
-## Open: three installed skills exist in exactly one place, and it is not a repository
+## Open: one installed skill still exists in exactly one place, and it is not a repository
 
-`~/.claude/skills` holds 14 skills. Ten are symlinks into this checkout and one
-(`history-surfer`) symlinks into another repository. **Three are real directories that
-appear nowhere else on disk**, and `~/.claude` is not a git repository:
+Two of the three are now in this repository. `skills/` holds twelve directories, and
+`dead-guard-detection` and `parallel-agents-one-codebase` are among them, both promoted on
+2026-09-01 and both re-probed after promotion rather than arriving with a transcribed pin —
+`parallel-agents-one-codebase`'s description had to be cut from 780 characters to 489 to
+meet the cap, which invalidated the pin it came with, and its result line says so.
+
+**`speckit-execute` is the one left.** It is a real directory under `~/.claude/skills`, it
+appears nowhere else on disk, and `~/.claude` is not a git repository:
 
 ```bash
 for d in ~/.claude/skills/*/; do [ -L "${d%/}" ] || basename "$d"; done
 git -C ~/.claude rev-parse --is-inside-work-tree    # fatal: not a git repository
 ```
 
-`dead-guard-detection` (15257 bytes), `parallel-agents-one-codebase` (12825) and
-`speckit-execute` (9295). The first is the whole output of a completed five-round forge:
-`skillforge ledger` carries `dead-guard-check ... done` for 2026-08-26. One `rm -rf` loses
-all three, no test in this repository reads them, and their pins are dated 2026-08-28 with
-nothing scheduled to re-run.
-
-Moving them here is **not** a tidy-up. `main` is public, so importing someone's personal
-skills is a publication decision, and `parallel-agents-one-codebase` carries a 780-character
-description against the 500 cap, so it would fail `test_doctrine_sync.py` on arrival and its
-pin would need re-measuring after the cut. The decision is the owner's; the risk is recorded
-here so it is not discovered by losing them.
+One `rm -rf` loses it, no test in this repository reads it, and nothing is scheduled to
+re-run its pin. Moving it here is **not** a tidy-up: `main` is public, so importing someone's
+personal skill is a publication decision, and unlike the other two it was not forged by this
+package. The decision is the owner's; the risk is recorded here so it is not discovered by
+losing it.
 
 ## Open: a dispatched orchestrator does not survive the host sleeping
 
@@ -267,6 +340,53 @@ evaluating the outputs critically rather than checking exit codes. Never against
 
 Kept as one line each so a returning session does not reopen them.
 
+- **The cheap branch has a mechanism.** `SKILL.md` used to say "write a note or update
+  CLAUDE.md" and name no path, no CLI and no ledger row, so the branch was taken zero
+  times. `bin/skillnote` is that path: `add`/`remove`/`list` against a marker block in a
+  project or global `CLAUDE.md`, `--remind` with `--keyword`/`--path`/`--command` for the
+  reminder store, and a `note` event in the ledger, so a note taken instead of a forge is
+  now counted rather than invisible. The three-tier split (note / reminder / skill) is step
+  0 of the rewritten protocol.
+- **The insight queue is drained and no longer write-only.** It sat 57 in, 0 out, oldest
+  seven days. `skillinsight promote` writes a queued candidate down through `bin/skillnote`
+  and takes it out of the queue; `decline --source <src>` applies one judgement across every
+  undeclined record from a source in one pass. The Wave 3 log records the live drain: 46
+  `star-insight` records declined, 7 promoted to memory scope in other repositories, 2
+  verdicts promoted and 1 note written into this repository's `.claude/CLAUDE.md`.
+- **A CANDIDATE verdict now produces an artifact.** Five reviews had been dispatched and two
+  returned `CANDIDATE`, and nothing consumed either. `hooks/session-review.sh` writes a note
+  on a CANDIDATE verdict, and `skillinsight promote --verdict <session-id>` (alias
+  `promote-review`) promotes one by hand; the protocol wires the verdict in at step 6, so
+  the paid-for answer lands somewhere a later session reads.
+- **The forge has a hard round cap.** `skillforge round` refuses at the budgeted count with
+  exit 3 and records nothing (`bin/skillforge:2239`), and `skillforge escalate` is the only
+  way past it: `--converging` requires blocking findings to have strictly fallen,
+  `--narrowed "<what was cut>"` may be used once, and two grants is the ceiling, so four
+  rounds is the most any forge can reach. The measurement behind it is that rounds 3..N of
+  the builder/reviewer loop were about 60% of a median forge's wall clock and produced no
+  finding that round 1 and one confirming round had not.
+- **The repeat gate keeps its refusal arm, switched off** (issue #27). Driving the real hook
+  against all ten signatures that had reached the threshold denied none of them, because
+  every one had an allowlisted head; a synthetic non-allowlisted signature is denied, so the
+  machinery works and the population that could reach it was empty. `REPEAT_GATE_REFUSE`
+  defaults to `0`; the learn and recovery arms are untouched. `bin/skillrepeat` and
+  `bin/skillreport` were the other half of the defect — both printed `refuses` without
+  applying the head rules — and both now ask the gate through `--eligible-of` instead of
+  keeping a copy.
+- **The doc gate is kept, with two fixes** (issue #28). Three real refusals across three
+  sessions, and all three ended in documentation written and pushed, so it is doing what it
+  was built for. Fixed: the command splitter cut inside a quoted `DOC_GATE_OVERRIDE` reason
+  and silently bypassed the gate, and the `^notes?/` classification that caused the only
+  override in the record is now `DOC_GATE_NOTES`, defaulting to `doc` and set to `neither`
+  by this repository in `.claude/settings.json`.
+- **`skillcontrib` is kept, after a split review.** The first cold read said retire: 47 runs
+  and zero reconnaissance against any upstream, `DEFAULT_REPO` pointing at this repository,
+  and no PR ever opened anywhere. A second cold opinion said keep, on evidence the first had
+  not looked for — deduplication works live, exiting 9 on a real duplicate, 61 tests pass,
+  there is no misfire on record, and its precondition (a skill that has been red-teamed
+  clean and then reused) only just became satisfiable. The retirement protocol needs
+  independent concurrence and did not get it, so nothing was archived. Two README claims it
+  exposed were corrected instead.
 - **The lost session-review report.** The lazy-parse cause is written up in
   `notes/2026-08-25-first-live-review-verdict.md` and in `docs/DESIGN.md`; every shipped
   script is now wrapped in one brace group and ends in `exit`, ratcheted by

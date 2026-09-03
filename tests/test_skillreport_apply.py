@@ -477,10 +477,16 @@ class GateSurfacesTest(Base):
     GH_ERR = "Exit code 127\ngh: command not found"
 
     # ------------------------------------------------------------- the repeat gate
-    def repeat_hook(self, payload, now):
+    def repeat_hook(self, payload, now, **env_extra):
+        """`REPEAT_GATE_REFUSE=1` because the gate's refuse arm ships OFF (issue #27) and
+        the `pre()` deliveries below are here to measure what it decides, not whether it
+        is switched on. The learn and recover arms ignore the variable entirely, so the
+        stores these tests build are the ones a real machine builds."""
+        env = {"REPEAT_GATE_NOW": now, "REPEAT_GATE_REFUSE": "1"}
+        env.update(env_extra)
         return subprocess.run(
             ["bash", str(REPEAT_HOOK)], input=json.dumps(payload), capture_output=True,
-            text=True, env=self.env(REPEAT_GATE_NOW=now), timeout=180)
+            text=True, env=self.env(**env), timeout=180)
 
     # NOT `fail`. `unittest.TestCase.fail(msg)` is what every assertion in this class
     # calls to report itself, and a helper of that name shadowed it: a failing
@@ -613,6 +619,44 @@ class GateSurfacesTest(Base):
         self.assertIn("transient", out,
                       "the transient signature is dropped from the count and never "
                       "accounted for:\n" + out)
+
+    def test_the_deny_count_excludes_a_signature_the_gate_exempts_by_its_head(self):
+        """ISSUE #27, AND IT IS THE SAME DEFECT AS THE TEST ABOVE IN A SECOND COSTUME.
+
+        Before it refuses anything the gate exempts a Bash command whose HEAD is on
+        either of its two lists -- navigation and inspection commands whose failure is
+        nobody's bug, and test and build runners whose failure is the point. This report
+        applied neither, so it counted refusals the gate does not make. Measured on the
+        live store on 2026-09-02: this report said ten would be refused, and the real
+        hook, driven against all ten, denied none.
+
+        Both signatures below reach the threshold with nothing recovering them. Only one
+        of them is refusable, and the real gate is asked, in this same test, which."""
+        self.forge("alpha-gate", start=100, done=400)
+        # Refusable: `gh` is on neither list.
+        self.record_failure("gh pr list --state all", "s1", T0 + 100)
+        self.record_failure("gh pr list --state all", "s2", T0 + 300)
+        # Exempt by `allowlisted_head`: a session orienting itself in a repository, which
+        # is what every one of the live store's ten threshold signatures turned out to be.
+        self.record_failure("git clean -nd", "s3", T0 + 500,
+                            error="Exit code 128\nfatal: not a git repository")
+        self.record_failure("git clean -nd", "s4", T0 + 700,
+                            error="Exit code 128\nfatal: not a git repository")
+
+        # What the real gate does, asked directly rather than assumed.
+        self.assertNotEqual(self.pre("gh pr list --state all", "s9", T0 + 900).strip(), "",
+                            "the gate did not refuse the non-exempt signature at all")
+        self.assertEqual(self.pre("git clean -nd", "s9", T0 + 901).strip(), "",
+                         "the gate refused a signature its own head allowlist exempts")
+
+        out = self.report()
+        self.assertIn("2 distinct failure signature(s) known", out)
+        self.assertIn("1 of them at or past the", out,
+                      "the report counts a refusal the gate would not make:\n" + out)
+        # The exempt one is ACCOUNTED FOR rather than silently dropped: a count that fell
+        # from 2 to 1 with nothing saying why is how a reader concludes the store shrank.
+        self.assertIn("1 more reached that count", out, out)
+        self.assertIn("exempts the command they run", out, out)
 
     def test_a_foreign_row_type_in_the_repeat_store_is_skipped_not_counted(self):
         self.forge("alpha-gate", start=100, done=400)

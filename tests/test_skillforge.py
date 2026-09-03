@@ -203,13 +203,13 @@ class ConcurrentForgeTest(ForgeCase):
     def test_a_second_start_does_not_destroy_the_first(self):
         self.run_cli("start", "first", "8", "the first forge")
         self.run_cli("step", "3", "first is at three")
-        r = self.run_cli("start", "second", "12", "the second forge")
+        r = self.run_cli("start", "second", "6", "the second forge")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(self.slot_files()), 2)
         one = self.state_json("first")
         self.assertEqual(one["step"], 3, "the first forge's progress was overwritten")
         self.assertEqual(one["status"], "active")
-        self.assertEqual(self.state_json("second")["steps"], 12)
+        self.assertEqual(self.state_json("second")["steps"], 6)
 
     def test_start_names_the_other_live_forges(self):
         self.run_cli("start", "first", "8", "one")
@@ -350,13 +350,13 @@ class ConcurrentForgeTest(ForgeCase):
 
     def test_list_shows_every_forge_with_its_progress(self):
         self.run_cli("start", "aaa", "8", "one")
-        self.run_cli("start", "bbb", "12", "two")
-        self.run_cli("step", "--name", "bbb", "7", "the bbb phase")
+        self.run_cli("start", "bbb", "6", "two")
+        self.run_cli("step", "--name", "bbb", "3", "the bbb phase")
         r = self.run_cli("list")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("aaa", r.stdout)
         self.assertIn("bbb", r.stdout)
-        self.assertIn("7/12", r.stdout)
+        self.assertIn("3/6", r.stdout)
         self.assertIn("the bbb phase", r.stdout)
 
     def test_list_and_show_are_quiet_with_no_forges(self):
@@ -365,7 +365,7 @@ class ConcurrentForgeTest(ForgeCase):
 
     def test_the_ledger_records_both_forges_independently(self):
         self.run_cli("start", "aaa", "8", "one")
-        self.run_cli("start", "bbb", "12", "two")
+        self.run_cli("start", "bbb", "6", "two")
         self.run_cli("done", "--name", "aaa", "shipped")
         self.run_cli("fail", "--name", "bbb", "gave up")
         events = [(e["event"], e["name"]) for e in self.forge_ledger()]
@@ -554,7 +554,7 @@ class HeldOutFieldsTest(ForgeCase):
     HELD = ("root", "trigger", "project", "trigger_verbatim")
 
     def start(self, name="iso", trigger="the verbatim thing the user typed"):
-        r = self.run_cli("start", name, "12", "a summary",
+        r = self.run_cli("start", name, "6", "a summary",
                          "--trigger", trigger, "--trigger-kind", "user-prompt")
         self.assertEqual(r.returncode, 0, r.stderr)
         return trigger
@@ -583,7 +583,7 @@ class HeldOutFieldsTest(ForgeCase):
         self.assertEqual(sorted(shown["held_out"]), ["root", "trigger"])
         self.assertIn("--full", shown["held_out_note"])
 
-        self.run_cli("start", "no-trigger", "12", "a summary")
+        self.run_cli("start", "no-trigger", "6", "a summary")
         bare = json.loads(self.run_cli("show", "--name", "no-trigger").stdout)
         self.assertEqual(bare["held_out"], ["root"],
                          "a forge that recorded no trigger must not be reported as one "
@@ -676,7 +676,7 @@ class DoneRecordsWhetherASkillExistsTest(ForgeCase):
         return d
 
     def close(self, name, skill_dir=None):
-        args = ["start", name, "12", "a summary"]
+        args = ["start", name, "6", "a summary"]
         if skill_dir:
             args += ["--skill-dir", str(skill_dir)]
         self.assertEqual(self.run_cli(*args).returncode, 0)
@@ -715,7 +715,7 @@ class DoneRecordsWhetherASkillExistsTest(ForgeCase):
         A field the data does not establish is omitted -- never guessed, never defaulted
         to something plausible. Only `done` claims to have finished something.
         """
-        self.run_cli("start", "abandoned", "12", "a summary")
+        self.run_cli("start", "abandoned", "6", "a summary")
         self.run_cli("fail", "--name", "abandoned", "gave up")
         rows = [json.loads(l) for l in
                 self.run_cli("ledger", "--json").stdout.splitlines() if l.strip()]

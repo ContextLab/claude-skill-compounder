@@ -174,7 +174,7 @@ failure; that is the unquoted colon, and it is the commonest defect here.
 `SkillFrontmatterTest` in `tests/test_plugin.py` covers part of this for skills shipped from
 this repository — it parses, matches `name` to the directory and restricts the keys — but it
 accepts a bare scalar and checks neither budget, so it is not this gate. `skill-compounder`
-step 3 runs a parse of its own; both are local to where they live. A skill forged into `~/.claude/skills/` has nothing watching it.
+step 2 runs a parse of its own; both are local to where they live. A skill forged into `~/.claude/skills/` has nothing watching it.
 To run the same checks over a whole tree of existing skills at once, use the sweep in
 `references/gate-checks.md`.
 

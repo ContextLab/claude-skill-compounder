@@ -277,6 +277,35 @@ class CommandTest(RemindCase):
 
 
 # ==================================================================== the path arm
+class WriterReaderTest(RemindCase):
+    """The row is written by the REAL `skillnote add --remind --command`, through a
+    symlink the way the installer links it, and read by the real hook.
+
+    Every other command test here hand-writes its row, which is how two shipped bugs got
+    past the suite on 2026-09-02: the installed symlink could not find repeat-gate.sh, and
+    skillnote stored `Bash\\n<sig>` while remind.sh compared the bare signature, so every
+    command-keyed reminder was silent in a real session. This test drives both halves.
+    """
+
+    def test_a_command_reminder_written_by_skillnote_fires_in_the_hook(self):
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        link = os.path.join(bindir, "skillnote")
+        os.symlink(os.path.join(REPO, "bin", "skillnote"), link)
+        w = subprocess.run([link, "add", "--remind", "--scope", "global",
+                            "--command", "make deploy",
+                            "Deploys go through make deploy, which runs the preflight."],
+                           capture_output=True, text=True, timeout=120,
+                           env=dict(self.env(), SKILLNOTE_NOW="1756838400"))
+        self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
+        with open(self.store, encoding="utf-8") as fh:
+            row = json.loads(fh.readline())
+        self.assertEqual(row["match"]["commands"], [norm_of("make deploy")],
+                         "the writer must store exactly what --norm-of prints")
+        ctx = self.context_of(self.run_hook(self.bash("make deploy")), event="PreToolUse")
+        self.assertIn("runs the preflight", ctx)
+
+
 class PathTest(RemindCase):
 
     def setUp(self):

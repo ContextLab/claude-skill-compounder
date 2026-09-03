@@ -263,3 +263,56 @@ Execution waves (independent within a wave):
   readback:"via-index". session-review CANDIDATE now writes a note. 72+55+69 tests green.
 - ~18:47 Wave 2 close-out agent dispatched (README grep/tuning/tables, CLAUDE.md counts,
   wrapping ratchet, DESIGN.md, whole suite). Then commit + push, then Wave 3.
+- ~19:55 Wave 2 committed 7507a0b, pushed. Suite green (0 failures, 2 documented skips).
+- ~19:57 Wave 3 dispatched, three agents, disjoint ownership:
+  W3a bin/skillinsight, tests/test_insights.py, tests/test_queue_surfacing.py -- promote (#23),
+      drain live backlog (notes into this repo's .claude/CLAUDE.md; memory scope for other repos;
+      bulk-decline star-insight noise).
+  W3b skills/skill-compounder/**, skills/skill-authoring cross-refs, README, .claude/CLAUDE.md,
+      docs/DESIGN.md, installer DOCTRINE_TEXT, tests/test_installer.py, test_doctrine_sync.py,
+      test_routing_gate.py, test_seed_authoring.py, bin/skillforge (budget 12->6), test_skillforge,
+      test_forge_rounds, test_statusline, test_forge_apply -- the forge diet (#22 docs half).
+  W3c hooks/repeat-gate.sh, bin/skillrepeat, bin/skillreport, hooks/doc-gate.sh + their tests --
+      #27 (REFUSE arm default-off, instruments apply the allowlist) and #28 (doc-gate two fixes).
+  Wave 4 after commit: #8 PreCompact capture; user's hand-written ~/.claude/CLAUDE.md stanza
+  (user-owned, installer skips it) must be updated to the new protocol by hand -- report it.
+- ~20:25 W3a done: skillinsight promote/promote-review (:676), decline --source bulk (:567),
+  judged_json union; live drain: 46 star-insight declined, 7 promoted to memory scope in other
+  repos, 2 verdicts, 1 note into this repo's .claude/CLAUDE.md. BUG found in bin/skillnote:
+  substring grep counted a prose mention of the marker as a block -> second add refused forever.
+  Fixed by orchestrator (grep -x at :395, awk $0==e at :415), regression test added (73 OK),
+  .gitignore gains *.bak-skill-compounder-*. W3a resumed to promote the 5 remaining rows.
+- ~20:45 W3c done: REPEAT_GATE_REFUSE (default 0) at repeat-gate.sh:379; --eligible-of door
+  (:933); skillrepeat GATE column + skillreport GATES block now ask the gate (live copy: 10->0
+  "would refuse", matching 0 real denies, pinned by InstrumentAgreementTest). doc-gate: quote-
+  aware split (:586), DOC_GATE_NOTES default `doc` (:461). Owed to close-out: README tuning rows
+  REPEAT_GATE_REFUSE / DOC_GATE_NOTES; README:806 + CLAUDE.md grep need SKILLREPORT prefix
+  (count 103); this repo's .claude/settings.json should set DOC_GATE_NOTES=neither (notes/ is
+  a dated log here); README:681 skillinsight promote/decline --source lines.
+- ~21:20 W3b done: SKILL.md rewritten (497 lines; steps 0..6; tier block, cheap-branch,
+  tier-before-forge, hard-round-cap, verdict-follows-the-apply, forge-runs-in-the-background;
+  frontmatter + Trigger precision byte-identical); references rewritten; README two diagrams,
+  "Three ways to compound" section, bar 3/6, ledger seven questions, skillcontrib corrections;
+  DOCTRINE_TEXT updated; test_doctrine_sync retire/add/rename per spec; bin/skillforge needed no
+  edit (no literal default budget; fixtures moved to 6). All owned tests green.
+- ~21:22 Wave 3 close-out agent dispatched. Then: commit, push, update user's hand-written
+  ~/.claude/CLAUDE.md stanza to DOCTRINE_TEXT (user-owned; installer skips it), Wave 4 = #8.
+- ~21:30 user's ~/.claude/CLAUDE.md "## Compound Improvement" stanza replaced with the shipped
+  DOCTRINE_TEXT inside the installer's marker block (backup at
+  ~/.claude/CLAUDE.md.bak-skill-compounder-20260902-190156). Future installs now manage it.
+- ~21:35 ./install.sh run against the real config: 14/14 hook entries (remind.sh on UPS and
+  PreToolUse Bash|Write|Edit), 6 CLIs, doctrine block "already current". Mixed counter file
+  repaired by hand (36 + 900 x -> 936 x; backup .bak-mixed). `skillforge doctor`: 8 pass, 0 fail.
+  Real e2e agent dispatched: tier 0 note read back by a real headless session? tier 1 reminder
+  injected on UserPromptSubmit and PreToolUse in a real session? (real config, real state).
+- ~22:05 real e2e (CLI 2.1.259): tier 0 note read back 3/3 (and 3/3 with the script deleted, so
+  the note was the only source); tier 1 UserPromptSubmit 3/3; tier 1 PreToolUse 0/3 -> two
+  package bugs: (1) skillnote SELF from dirname $0 without resolve_link, so the installed
+  symlink could not find ../hooks/repeat-gate.sh and refused --command; (2) skillnote stored
+  "Bash\n<sig>" while remind.sh compares the bare --norm-of output. Both fixed by orchestrator;
+  test_skillnote repinned to the bare form (it had pinned the bug); WriterReaderTest added to
+  test_remind driving the real skillnote through a symlink into the real hook. 73 + 73 OK.
+  This is the audit's thesis in miniature: two rounds of review passed it, one real use broke it.
+- ~22:20 PreToolUse arm re-tested live through the installed symlink (2.1.259): 3/3 hits,
+  3/3 replies quote the reminder verbatim; UserPromptSubmit 0/3 (the prompt had no keyword
+  row), so the arms are distinct. Tier 1 now works end to end where the user will use it.

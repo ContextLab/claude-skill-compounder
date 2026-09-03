@@ -251,25 +251,39 @@
 # Three ordered rules, first match wins. The order is the design, not an accident.
 #
 #   1. NEITHER, checked FIRST so it can override the other two. Lockfiles, binaries and
-#      images assert nothing about behaviour; `LICENSE` is not documentation of code; and
-#      `notes/` is deliberately here. `notes/` in this repository is a DATED LOG, not a
-#      description of current behaviour -- .claude/CLAUDE.md says so in as many words --
-#      and it is written on nearly every session. Counting a note as documentation would
-#      let this gate pass every push this repository makes, which is the difference
-#      between a gate and an ornament.
-#      THE NOTES RULE IS ANCHORED TO THE ROOT (`^notes?/`), AND THE ANCHOR IS THE WHOLE
-#      RULE. Unanchored as `(^|/)notes?/` it matched the segment at ANY depth, so
+#      images assert nothing about behaviour, and `LICENSE` is not documentation of code.
+#      `notes/` USED TO BE HERE UNCONDITIONALLY AND IS NOW A KNOB, DEFAULTING TO DOC.
+#      The argument for excluding it was about THIS repository: `notes/` here is a DATED
+#      LOG, not a description of current behaviour -- .claude/CLAUDE.md says so in as many
+#      words -- written on nearly every session, so counting a note as documentation
+#      would let this gate pass every push this repository makes, which is the difference
+#      between a gate and an ornament. That argument is sound AND IT IS REPO-LOCAL, which
+#      the case-folding stanza below already had to say out loud once, for the same rule.
+#      A hook that ships to other people's repositories cannot hold a rule justified by
+#      one repository's convention, and the cost of holding it fell on the side this gate
+#      is forbidden to pay: in someone else's repository `notes/hardware.md` IS prose, so
+#      a push carrying it and a code file was DENIED for carrying no documentation, with
+#      the reason naming the notes file nowhere. That is the one outcome this gate must
+#      never produce, and it is what the single recorded override on this machine was
+#      taken for. The other direction -- counting a dated log as documentation -- costs a
+#      MISSED deny, which this gate tolerates by design and which the stanza above ranks
+#      as the tolerable one. So the default follows the tolerable direction, and the
+#      repository whose log really is a log sets `DOC_GATE_NOTES=neither`.
+#      IT IS SYMMETRICAL, and that matters: under `doc` the anchor moves to DOC_RE rather
+#      than simply being deleted, so everything under a root `notes/` counts as
+#      documentation -- including `notes/x.py`, which deleting the rule alone would have
+#      turned into CODE and made the gate STRICTER than before for exactly the repository
+#      that asked for the exclusion.
+#      THE ANCHOR ITSELF IS THE WHOLE RULE UNDER EITHER SETTING (`^notes?/`, never
+#      `(^|/)notes?/`). Unanchored it matched the segment at ANY depth, so
 #      `docs/notes/architecture.md` -- a real `.md` inside `docs/` -- was classified
 #      NEITHER, the push was denied for carrying no documentation, and the reason named
-#      the doc file nowhere, so nothing on any surface said why. That is the one outcome
-#      this gate must never produce, and it is the same defect class the REFSPEC section
-#      below already repaired once. The justification above is about THIS repository's
-#      root-level dated log and reaches no further, so neither may the rule. It cut the
-#      other way too, silently: `src/notes/parser.py` was excluded before rule 3 could
-#      count it as CODE, and undercounting CODE only ever makes the gate more permissive,
-#      which is why that half would never have announced itself. Reproduced by a cold
-#      reviewer on 2026-08-26 against a real repository and a real bare remote; both
-#      directions are pinned in tests/test_doc_gate.py.
+#      the doc file nowhere. It cut the other way too, silently: `src/notes/parser.py`
+#      was excluded before rule 3 could count it as CODE, and undercounting CODE only
+#      ever makes the gate more permissive, which is why that half would never have
+#      announced itself. Reproduced by a cold reviewer on 2026-08-26 against a real
+#      repository and a real bare remote; both directions, under both settings, are
+#      pinned in tests/test_doc_gate.py.
 #   2. DOC. `.md`/`.rst`/`.adoc`/`.org`/`.texi`/`.1`, anything under a `doc/`, `docs/`,
 #      `documentation/` or `man/` path segment, and the conventional bare-name files:
 #      README*, CHANGELOG*, CHANGES*, CONTRIBUTING*, HISTORY*, INSTALL*, USAGE*, and the
@@ -302,8 +316,13 @@
 # not tolerate at all. And the justification for the notes rule is repo-local in the first
 # place -- this repository's log is `notes/`, lowercase -- so extending it to spellings this
 # repository does not use buys nothing and pays the price the gate is forbidden to pay.
-# `Notes/x.md` therefore counts as documentation while `notes/x.md` does not. That is the
-# inconsistency, it is deliberate, and it errs in the only safe direction.
+# Under the DEFAULT (`DOC_GATE_NOTES=doc`) that reasoning is carried all the way to its
+# conclusion and the inconsistency is gone: the anchor is in DOC_RE, which DOES take the
+# `-i`, so `Notes/x.md` and `notes/x.md` are both documentation. Under
+# `DOC_GATE_NOTES=neither` the anchor is back in NEITHER_RE, which still does not take the
+# `-i`, so `Notes/x.md` counts as documentation while `notes/x.md` does not -- the same
+# deliberate asymmetry, erring in the same safe direction, for the setting that asks for
+# an exclusion this repository's own convention justifies and no other's does.
 #
 # `DOC_GATE_CODE_EXCLUDE` also stays case-sensitive, for a different reason: it is a regex
 # the user supplies, so the user decides its case, and quietly folding it would be this
@@ -393,6 +412,14 @@
 #                                   hundred commits is noise rather than a finding.
 #   DOC_GATE_CODE_EXCLUDE        ()  ERE; a path matching it is NEITHER rather than CODE.
 #                                   Empty by default. `^tests?/` is the common setting.
+#   DOC_GATE_NOTES            (doc)  how a root-level `notes/` or `note/` path is
+#                                   classified: `doc` (the default -- it satisfies the
+#                                   gate) or `neither` (it neither satisfies nor triggers
+#                                   it). Anything else reads as `doc`. Set `neither` in a
+#                                   repository whose `notes/` is a dated log written every
+#                                   session rather than a description of behaviour; see
+#                                   CLASSIFICATION for why that is the setting and not the
+#                                   default.
 #   DOC_GATE_MAX_NAMED          (8)  code files named in the deny reason. Floored at 1:
 #                                   at 0 the reason listed no file at all and then said
 #                                   "... and 1 more", which is a refusal that names
@@ -428,6 +455,11 @@ set -uo pipefail
 ENABLED="${SKILL_COMPOUNDER_DOC_GATE:-1}"
 MAX_COMMITS="${DOC_GATE_MAX_COMMITS:-100}"
 CODE_EXCLUDE="${DOC_GATE_CODE_EXCLUDE:-}"
+# Only the two spellings are honoured, and anything else -- a typo, an empty export -- is
+# the DEFAULT rather than a third behaviour. A knob whose unrecognised value silently
+# picks the stricter branch is how a repository gets denied for a variable nobody meant.
+NOTES_CLASS="${DOC_GATE_NOTES:-doc}"
+case "$NOTES_CLASS" in neither) ;; *) NOTES_CLASS="doc" ;; esac
 MAX_NAMED="${DOC_GATE_MAX_NAMED:-8}"
 ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 STATE_DIR="$ROOT/doc-gate"
@@ -528,9 +560,46 @@ awk -v out="$TMP/outside.txt" -v q="'" '
 # nothing. Splitting is what lets the push matcher ANCHOR at a segment start instead of
 # hunting the phrase anywhere in the text, and it is what makes `cd X && git push` and a
 # push buried in a long chain both fall out for free.
-# tr's set2 is written out in full rather than relying on the shorter-set2 padding rule,
-# which differs between implementations.
-tr ';&|()' '\n\n\n\n\n' 2>/dev/null < "$TMP/outside.txt" > "$TMP/segments.txt" || exit 0
+#
+# IT ONLY SPLITS OUTSIDE QUOTES, AND THAT IS A FIX RATHER THAN A REFINEMENT. This was
+# `tr ';&|()' '\n\n\n\n\n'`, which splits on those bytes WHEREVER they appear -- and the
+# inline override carries a reason somebody typed:
+#
+#   DOC_GATE_OVERRIDE="rename only; no behaviour change" git push
+#
+# The `;` inside the quotes broke that into `DOC_GATE_OVERRIDE="rename only` and
+# ` no behaviour change" git push`. PUSH_RE anchors at a segment start, and neither
+# segment starts with an assignment run followed by `git`, so the loop below found NO
+# push at all and the script exited 0. A code-only push went through, silently, with no
+# deny AND NO OVERRIDE ROW: the escape hatch's whole purpose is that taking it is
+# COUNTED, and this was the one way to take it without being counted. Any reason
+# containing `;`, `&`, `|`, `(` or `)` did it -- and a reason is prose, so parentheses
+# alone make it an ordinary shape rather than an exotic one.
+#
+# So the split walks the text tracking quote state. Quote state is carried ACROSS lines,
+# because a shell string may span them; a newline still ends a segment, exactly as before.
+# WHAT IT DOES NOT MODEL: a backslash-escaped quote, and `$'...'`. Both fail toward
+# NOT splitting, which is the same direction the whole gate errs in -- a missed split
+# costs a missed deny, which this gate tolerates by design, while a split inside quoted
+# text cost the silent bypass above.
+: 2>/dev/null > "$TMP/segments.txt" || exit 0
+awk -v q="'" '
+  BEGIN { inq = "" }
+  {
+    out = ""
+    n = length($0)
+    for (i = 1; i <= n; i++) {
+      c = substr($0, i, 1)
+      if (inq != "") { out = out c; if (c == inq) inq = ""; continue }
+      if (c == "\"" || c == q) { inq = c; out = out c; continue }
+      if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")") {
+        print out; out = ""; continue
+      }
+      out = out c
+    }
+    print out
+  }
+' "$TMP/outside.txt" 2>/dev/null >> "$TMP/segments.txt" || exit 0
 
 SQ="'"
 DQ='"'
@@ -809,10 +878,17 @@ g diff -z --name-only "$base" HEAD 2>/dev/null > "$TMP/files.txt" || exit 0
 [ -s "$TMP/files.txt" ] || exit 0
 
 # ------------------------------------------------------------------- classification
-# See CLASSIFICATION in the header for why the order is NEITHER, DOC, CODE and why
-# `notes/` is where it is.
-NEITHER_RE='^notes?/|(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|Gemfile\.lock|go\.sum|composer\.lock)$|\.(png|jpg|jpeg|gif|svg|ico|pdf|zip|gz|tgz|bz2|xz|woff2?|ttf|otf|eot|mp4|mp3|wav|bin|so|dylib|dll|exe|class|jar|pyc)$|(^|/)\.(gitignore|gitattributes|editorconfig)$|(^|/)LICEN[CS]E([.-][^/]*)?$'
-DOC_RE='(^|/)(README|CHANGELOG|CHANGES|CONTRIBUTING|HISTORY|INSTALL|USAGE|CLAUDE|AGENTS)([.-][^/]*)?$|\.(md|markdown|rst|adoc|asciidoc|org|texi|1)$|(^|/)(docs?|documentation|man|manpages)/'
+# See CLASSIFICATION in the header for why the order is NEITHER, DOC, CODE and why the
+# `notes/` anchor is a knob rather than a fixed member of the first of them.
+# THE NOTES ANCHOR IS IN EXACTLY ONE OF THE TWO, never both and never neither. Built by
+# concatenation rather than by two whole copies of each regex: a second copy of a 300-byte
+# ERE is a second regex that will drift from the first.
+NOTES_RE='^notes?/|'
+NEITHER_NOTES=""
+DOC_NOTES=""
+if [ "$NOTES_CLASS" = "neither" ]; then NEITHER_NOTES="$NOTES_RE"; else DOC_NOTES="$NOTES_RE"; fi
+NEITHER_RE="$NEITHER_NOTES"'(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|Gemfile\.lock|go\.sum|composer\.lock)$|\.(png|jpg|jpeg|gif|svg|ico|pdf|zip|gz|tgz|bz2|xz|woff2?|ttf|otf|eot|mp4|mp3|wav|bin|so|dylib|dll|exe|class|jar|pyc)$|(^|/)\.(gitignore|gitattributes|editorconfig)$|(^|/)LICEN[CS]E([.-][^/]*)?$'
+DOC_RE="$DOC_NOTES"'(^|/)(README|CHANGELOG|CHANGES|CONTRIBUTING|HISTORY|INSTALL|USAGE|CLAUDE|AGENTS)([.-][^/]*)?$|\.(md|markdown|rst|adoc|asciidoc|org|texi|1)$|(^|/)(docs?|documentation|man|manpages)/'
 CODE_RE='\.(py|pyi|js|jsx|mjs|cjs|ts|tsx|sh|bash|zsh|fish|rb|go|rs|c|h|cc|cpp|cxx|hpp|hh|java|kt|kts|swift|m|mm|cs|php|pl|pm|lua|r|jl|scala|clj|ex|exs|erl|hs|sql|vim|el|tf|proto|gradle|cmake|bat|ps1)$|\.(json|ya?ml|toml|ini|cfg|conf|properties|env)$|(^|/)(Makefile|makefile|GNUmakefile|Dockerfile|Containerfile|Justfile|justfile|Rakefile|Gemfile|Procfile|CMakeLists\.txt|setup\.py|setup\.cfg)$|(^|/)(bin|hooks|scripts|statusline|src|lib|app|cmd|internal|pkg)/'
 
 : 2>/dev/null > "$TMP/code.txt" || exit 0

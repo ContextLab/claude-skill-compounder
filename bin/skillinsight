@@ -112,6 +112,20 @@ skillinsight: review the captured skill-candidate queue.
   skillinsight review  [--week <ISO-week>]   the full reviewable batch, with instructions
   skillinsight decline <hash> [--why <why>]  record that a candidate was judged and
                                              declined; the record is kept, not deleted
+  skillinsight decline --source <src> [--week <ISO-week>] [--why <why>] [--dry-run]
+                                            the same judgement over every undeclined
+                                            record from one source, in one pass
+  skillinsight promote <hash> --to note|reminder
+                       [--scope project|global|memory] [--project <dir>]
+                       [--text <text>] [--why <why>]
+                       [--keyword <k>]... [--path <glob>]... [--command <cmd>]...
+                                            write the candidate down where it will be
+                                            read, through bin/skillnote, and take it
+                                            out of the queue
+  skillinsight promote --verdict <session-id> --to note|reminder [...]
+                                            the same, for a CANDIDATE verdict listed by
+                                            `skillinsight reviews`. `promote-review
+                                            <session-id>` is the same command.
   skillinsight pending [--project <dir>] [--format tsv|text]
                                             what is queued and undeclined right now,
                                             and the one record most worth reading first
@@ -159,6 +173,9 @@ mentioned. Two ways to make it stop, and both are honest about what they mean:
   decline <hash>   this record was judged and is not worth a skill. Permanent, kept,
                    and visible in `list`. Decline them all and the count reaches zero
                    and the nudge stops by itself.
+  promote <hash>   this record IS worth carrying forward, but a note or a reminder is
+                   the right size for it, not a skill. It is written through
+                   bin/skillnote and stops being pending, exactly as a decline does.
   snooze <days>    nothing was judged; do not raise it for a while. Expires on its own.
 
 Set CI_QUEUE_NUDGE=0 to switch the announcement off entirely.
@@ -180,6 +197,11 @@ USAGE
 # -- matched by the hook's `grep -F "\"hash\":\"$h\""`, since a decline record carries
 # exactly that string. Declining a candidate would then silently blocklist its hash.
 DECLINED="$DIR/.declined.jsonl"
+# A DOTFILE for the identical reason, and the reason bites harder here: a promote record
+# carries a `"hash":"..."` string too, so under a non-dotted name the capture hook's
+# `grep -F "\"hash\":\"$h\""` dedup would read it as "this candidate is already
+# queued" and promoting a candidate would silently blocklist its hash for good.
+PROMOTED="$DIR/.promoted.jsonl"
 # Where hooks/compound-improvement.sh keeps a session's live file list. A session-audit
 # record snapshots that list at the moment the threshold was crossed, and the session
 # usually keeps editing afterwards, so `review` re-reads it when it is still there.
@@ -251,9 +273,74 @@ declined_json() {
     | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || printf '[]'
 }
 
+# Every promoted hash, same shape and same tolerance as declined_json.
+promoted_json() {
+  if [ ! -f "$PROMOTED" ]; then printf '[]'; return 0; fi
+  jq -R -r '(fromjson? // empty) | .hash // empty' "$PROMOTED" 2>/dev/null \
+    | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || printf '[]'
+}
+
+# JUDGED = DECLINED OR PROMOTED, and every surface that used to ask "is this declined?"
+# has to ask this instead. A promoted candidate has been dealt with more thoroughly than
+# a declined one -- it is written into a CLAUDE.md or the reminder store -- so a queue
+# that kept offering it would teach the reader that promoting changes nothing, which is
+# precisely how `decline` was nearly made pointless before it excluded its own records.
+# The union, never a negation: `.claude/CLAUDE.md` on the ledger says the same thing
+# about selecting events by name, and the failure mode is the same one.
+judged_json() {
+  jj_d="$(declined_json)"
+  jj_p="$(promoted_json)"
+  # Falling back to the declines alone, not to `[]`: if jq cannot merge the two lists the
+  # honest answer is the smaller exclusion, which shows a record again rather than hiding
+  # one that was never judged.
+  printf '%s\n%s\n' "$jj_d" "$jj_p" | jq -c -s 'add // []' 2>/dev/null \
+    || printf '%s' "$jj_d"
+}
+
 all_files() {
   [ -d "$DIR" ] || return 0
   ls -1 "$DIR"/*.jsonl 2>/dev/null | sort
+}
+
+# bin/skillnote, which owns every decision about where a note lands and what it looks
+# like. Beside $0 first: the installer symlinks both CLIs into the same directory, so
+# that holds in the checkout and in ~/bin alike. Then PATH, then the directory $0's
+# symlink points into, for a bin dir holding only this one.
+skillnote_bin() {
+  sb_d="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+  if [ -n "$sb_d" ] && [ -x "$sb_d/skillnote" ]; then printf '%s' "$sb_d/skillnote"; return 0; fi
+  sb_p="$(command -v skillnote 2>/dev/null)"
+  if [ -n "$sb_p" ] && [ -x "$sb_p" ]; then printf '%s' "$sb_p"; return 0; fi
+  sb_l="$(readlink "$0" 2>/dev/null)"
+  if [ -n "$sb_l" ]; then
+    case "$sb_l" in /*) ;; *) sb_l="$sb_d/$sb_l" ;; esac
+    sb_r="$(cd "$(dirname "$sb_l")" 2>/dev/null && pwd)"
+    if [ -n "$sb_r" ] && [ -x "$sb_r/skillnote" ]; then printf '%s' "$sb_r/skillnote"; return 0; fi
+  fi
+  return 1
+}
+
+# A hash or a unique prefix -> the full hash, in $RESOLVED. Dies, naming the cause.
+#
+# IT SETS A GLOBAL AND IS NOT CALLED IN A COMMAND SUBSTITUTION, and that is the whole
+# reason it is shaped this way: `die` is an `exit`, and an `exit` inside `$(...)` ends
+# the SUBSHELL. The caller would carry on with an empty variable and a zero status,
+# which for `promote` means writing a note for a candidate that does not exist.
+resolve_hash() { # $1 = hash or prefix
+  # One jq per file, driven by a read loop. `jq ... $(all_files)` word-splits, so a
+  # state directory containing a space made every decline fail -- and fail as "no
+  # queued candidate has a hash starting ...", which reads as a mistyped hash rather
+  # than as a broken command.
+  rh_full="$(all_files | while IFS= read -r qf; do
+      [ -n "$qf" ] || continue
+      jq -r --arg h "$1" 'select((.hash // "") | startswith($h)) | .hash' "$qf" 2>/dev/null
+    done | sort -u)"
+  rh_n="$(printf '%s' "$rh_full" | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+  case "$rh_n" in ''|*[!0-9]*) rh_n=0 ;; esac
+  [ "$rh_n" -eq 0 ] && die "no queued candidate has a hash starting '$1'"
+  [ "$rh_n" -gt 1 ] && die "'$1' matches $rh_n candidates; use more of the hash"
+  RESOLVED="$rh_full"
+  return 0
 }
 
 # ------------------------------------------------------------ surfacing the queue
@@ -327,7 +414,7 @@ pending_tsv() {
   # space word-splits the second form, and the failure is silent.
   pt_out="$(all_files | tail -n "$PENDING_WINDOW" | while IFS= read -r qf; do
       [ -n "$qf" ] && tail -c "$PENDING_BYTES" "$qf" 2>/dev/null
-    done | jq -R -r -s --argjson dec "$(declined_json)" --arg proj "$pt_proj" \
+    done | jq -R -r -s --argjson dec "$(judged_json)" --arg proj "$pt_proj" \
                        --argjson now "$now" '
     def clean: gsub("[\t\n\r]"; " ") | gsub("  +"; " ");
     # capture() raises on no match; `?` turns that into no output, and `// null` turns
@@ -452,10 +539,13 @@ case "$cmd" in
       echo "skillinsight: nothing queued for $week"
       exit 0
     fi
-    shown="$(jq -r --argjson dec "$(declined_json)" --arg src "$src" '
+    shown="$(jq -r --argjson dec "$(declined_json)" --argjson pro "$(promoted_json)" \
+                 --arg src "$src" '
       select($src == "" or .source == $src)
       | (.hash) as $h
-      | (if ($dec | index($h)) then "  [declined]" else "" end) as $d
+      | (if ($dec | index($h)) then "  [declined]"
+         elif ($pro | index($h)) then "  [promoted]"
+         else "" end) as $d
       | (.source) + "  " + (.ts) + "  " + (.project) + $d
         + "\n    " + ((.text | gsub("\\s+"; " "))[0:110])' "$f" 2>/dev/null \
       | awk '/^[a-z]/ {n++; printf "%3d  %s\n", n, $0; next} {print}')"
@@ -476,10 +566,86 @@ case "$cmd" in
 
   decline)
     wants_help "$@" && { usage; exit 0; }
-    h="${1:-}"; [ -z "$h" ] && die "usage: skillinsight decline <hash> [--why <reason>]"
-    case "$h" in -*) die "usage: skillinsight decline <hash> [--why <reason>]" ;; esac
-    shift
     why=""
+    dc_bulk=0; dc_src=""; dc_week=""; dc_dry=0
+    case "${1:-}" in --source|--source=*) dc_bulk=1 ;; esac
+
+    if [ "$dc_bulk" = "1" ]; then
+      # THE BULK FORM, AND WHY ONE HASH AT A TIME WAS NOT ENOUGH. The queue's second
+      # feeder is not ours: `★ Insight` blocks come from an output-style plugin, and on
+      # 2026-09-02 they were 46 of the 57 rows in the live queue -- prose about code the
+      # session had just written, not candidates anybody would forge. Judging those one
+      # hash at a time is 46 commands, and the thing a reader reaches for instead is
+      # `snooze`, or CI_QUEUE_NUDGE=0, which buries the eleven real rows with them.
+      #
+      # It is still a decline in every other respect: append-only, nothing deleted,
+      # every record still listed (marked) and still counted by `stats`. And a source
+      # matching nothing REFUSES, for the same reason an unknown hash does -- a typo
+      # that judges nothing silently leaves the reviewer believing the queue is handled.
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --source) shift; dc_src="${1:-}"; [ -z "$dc_src" ] && die "--source needs a source name" ;;
+          --source=*) dc_src="${1#--source=}" ;;
+          --week) shift; dc_week="${1:-}"; [ -z "$dc_week" ] && die "--week needs an ISO week, e.g. 2026-W34" ;;
+          --week=*) dc_week="${1#--week=}" ;;
+          --why) shift; why="${1:-}" ;;
+          --why=*) why="${1#--why=}" ;;
+          --dry-run) dc_dry=1 ;;
+          *) die "unexpected argument '$1'" ;;
+        esac
+        shift
+      done
+      [ -n "$dc_src" ] || die "decline --source needs a source name"
+      if [ -n "$dc_week" ]; then dc_files="$(files_for_week "$dc_week")"; else dc_files="$(all_files)"; fi
+      dc_where="the queue"
+      [ -n "$dc_week" ] && dc_where="$dc_week"
+      dc_all="$(printf '%s\n' "$dc_files" | while IFS= read -r qf; do
+          [ -n "$qf" ] || continue
+          jq -r --arg s "$dc_src" 'select((.source // "") == $s) | .hash // empty' "$qf" 2>/dev/null
+        done | sort -u | grep '[^[:space:]]')"
+      dc_have="$(declined_json | jq -r '.[]' 2>/dev/null)"
+      ts="$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+      dc_new=0; dc_old=0
+      [ "$dc_dry" = "1" ] || mkdir -p "$DIR" 2>/dev/null || die "cannot write to $DIR"
+      while IFS= read -r dc_h; do
+        [ -n "$dc_h" ] || continue
+        if printf '%s\n' "$dc_have" | grep -Fxq "$dc_h"; then
+          dc_old=$(( dc_old + 1 ))
+          continue
+        fi
+        dc_new=$(( dc_new + 1 ))
+        if [ "$dc_dry" = "1" ]; then
+          echo "               would decline $(printf '%s' "$dc_h" | cut -c1-8)"
+          continue
+        fi
+        rec="$(jq -c -n --arg hash "$dc_h" --arg ts "$ts" --arg why "$why" \
+          '{hash:$hash, ts:$ts, why:$why}' 2>/dev/null)"
+        [ -z "$rec" ] && die "could not build the decline record for $dc_h"
+        printf '%s\n' "$rec" >> "$DECLINED" || die "cannot append to $DECLINED"
+      done <<DECLINE_EOF
+$dc_all
+DECLINE_EOF
+      if [ "$(( dc_new + dc_old ))" -eq 0 ]; then
+        die "no queued candidate in $dc_where has source '$dc_src'; \`skillinsight stats\` lists the sources present"
+      fi
+      if [ "$dc_dry" = "1" ]; then
+        echo "skillinsight: would decline $dc_new record(s) with source '$dc_src' in $dc_where"
+      else
+        echo "skillinsight: declined $dc_new record(s) with source '$dc_src' in $dc_where"
+      fi
+      if [ "$dc_old" -gt 0 ]; then
+        echo "               $dc_old already declined and left alone"
+      fi
+      if [ -n "$why" ]; then
+        echo "               why: $why"
+      fi
+      echo "               nothing was deleted; \`skillinsight list\` still shows them, marked"
+      exit 0
+    fi
+
+    h="${1:-}"; [ -z "$h" ] && die "usage: skillinsight decline <hash> [--why <reason>] | decline --source <src>"
+    case "$h" in -*) die "usage: skillinsight decline <hash> [--why <reason>] | decline --source <src>" ;; esac
+    shift
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --why) shift; why="${1:-}" ;;
@@ -491,18 +657,8 @@ case "$cmd" in
     # The hash has to name a real record, or a typo silently declines nothing and the
     # reviewer believes the queue is handled. Prefix matching is allowed because
     # `review` prints only the first eight characters.
-    # One jq per file, driven by a read loop. `jq ... $(all_files)` word-splits, so a
-    # state directory containing a space made every decline fail -- and fail as "no
-    # queued candidate has a hash starting ...", which reads as a mistyped hash rather
-    # than as a broken command.
-    full="$(all_files | while IFS= read -r qf; do
-        [ -n "$qf" ] || continue
-        jq -r --arg h "$h" 'select((.hash // "") | startswith($h)) | .hash' "$qf" 2>/dev/null
-      done | sort -u)"
-    n="$(printf '%s' "$full" | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
-    case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    [ "$n" -eq 0 ] && die "no queued candidate has a hash starting '$h'"
-    [ "$n" -gt 1 ] && die "'$h' matches $n candidates; use more of the hash"
+    resolve_hash "$h"
+    full="$RESOLVED"
     ts="$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
     rec="$(jq -c -n --arg hash "$full" --arg ts "$ts" --arg why "$why" \
       '{hash:$hash, ts:$ts, why:$why}' 2>/dev/null)"
@@ -517,6 +673,204 @@ case "$cmd" in
     fi
     ;;
 
+  promote|promote-review)
+    wants_help "$@" && { usage; exit 0; }
+    # WHY THIS EXISTS. The queue and the review index are both READ surfaces: everything
+    # in them is a lesson somebody still has to retype somewhere else before it can ever
+    # fire again, and nobody does. Two paid-for CANDIDATE verdicts produced no artifact
+    # at all for exactly that reason. `promote` is the one command between a queued
+    # candidate and the cheapest tier that does get read. It writes NOTHING itself: the
+    # text goes to bin/skillnote, which owns the marker block, the backup, the atomic
+    # write and the id, and a second implementation of any of those here would be a
+    # second set of rules that drifts from the first.
+    #
+    # IT DERIVES NOTHING IT WAS NOT GIVEN. `--to reminder` refuses without an explicit
+    # --keyword/--path/--command and never mines the record's prose for keywords. A
+    # reminder built from guessed keywords fires on the wrong turns, and the cost of one
+    # that cries wolf is that the next real one is disregarded too.
+    pr_hash=""; pr_sid=""; pr_to=""; pr_scope="project"; pr_proj=""
+    pr_text=""; pr_why=""; pr_kw=""; pr_pg=""; pr_cm=""
+    if [ "$cmd" = "promote-review" ]; then
+      case "${1:-}" in
+        ""|-*) : ;;
+        *) pr_sid="$1"; shift ;;
+      esac
+    fi
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --verdict) shift; pr_sid="${1:-}"; [ -z "$pr_sid" ] && die "--verdict needs a session id" ;;
+        --verdict=*) pr_sid="${1#--verdict=}" ;;
+        --to) shift; pr_to="${1:-}"; [ -z "$pr_to" ] && die "--to needs 'note' or 'reminder'" ;;
+        --to=*) pr_to="${1#--to=}" ;;
+        --scope) shift; pr_scope="${1:-}"; [ -z "$pr_scope" ] && die "--scope needs a value" ;;
+        --scope=*) pr_scope="${1#--scope=}" ;;
+        --project) shift; pr_proj="${1:-}"; [ -z "$pr_proj" ] && die "--project needs a directory" ;;
+        --project=*) pr_proj="${1#--project=}" ;;
+        --text) shift; pr_text="${1:-}"; [ -z "$pr_text" ] && die "--text needs the note text" ;;
+        --text=*) pr_text="${1#--text=}" ;;
+        --why) shift; pr_why="${1:-}" ;;
+        --why=*) pr_why="${1#--why=}" ;;
+        --keyword) shift; [ -n "${1:-}" ] || die "--keyword needs a value"
+                   pr_kw="$pr_kw$1
+" ;;
+        --keyword=*) pr_kw="$pr_kw${1#--keyword=}
+" ;;
+        --path) shift; [ -n "${1:-}" ] || die "--path needs a glob"
+                pr_pg="$pr_pg$1
+" ;;
+        --path=*) pr_pg="$pr_pg${1#--path=}
+" ;;
+        --command) shift; [ -n "${1:-}" ] || die "--command needs a command"
+                   pr_cm="$pr_cm$1
+" ;;
+        --command=*) pr_cm="$pr_cm${1#--command=}
+" ;;
+        -*) die "unexpected argument '$1'" ;;
+        *) [ -n "$pr_hash" ] && die "promote takes one hash; got '$pr_hash' and '$1'"
+           pr_hash="$1" ;;
+      esac
+      shift
+    done
+
+    [ -n "$pr_to" ] || die "promote needs --to note or --to reminder"
+    case "$pr_to" in note|reminder) ;; *) die "--to takes 'note' or 'reminder'" ;; esac
+    case "$pr_scope" in
+      project|global|memory) ;;
+      *) die "unknown --scope '$pr_scope'. The three are: project, global, memory." ;;
+    esac
+    [ -n "$pr_hash" ] && [ -n "$pr_sid" ] && \
+      die "promote takes a queue hash or --verdict <session-id>, not both"
+    [ -n "$pr_hash$pr_sid" ] || \
+      die "promote needs a candidate hash, or --verdict <session-id> for a review verdict"
+    if [ "$pr_to" = "reminder" ] && [ -z "$pr_kw$pr_pg$pr_cm" ]; then
+      die "--to reminder needs at least one --keyword, --path or --command. They are never derived from the record's prose: a reminder matched on guessed keywords fires on the wrong turns, and one that cries wolf gets the next real one disregarded too."
+    fi
+
+    sn="$(skillnote_bin)" || \
+      die "skillnote is neither beside $0 nor on PATH. promote writes through it and will not reimplement it."
+
+    if [ -n "$pr_hash" ]; then
+      resolve_hash "$pr_hash"
+      pr_key="$RESOLVED"
+      pr_rec="$(all_files | while IFS= read -r qf; do
+          [ -n "$qf" ] || continue
+          jq -c --arg h "$pr_key" 'select((.hash // "") == $h)' "$qf" 2>/dev/null
+        done | head -n 1)"
+      [ -n "$pr_rec" ] || die "could not read the queued record for $pr_key"
+      pr_store="$PROMOTED"; pr_field="hash"; pr_source="session"
+      # First line, whitespace squeezed, capped at 200. The cap is done in jq, on
+      # CODEPOINTS: `cut -c` is locale-dependent for multibyte text and would cut a
+      # candidate's ★ in half.
+      if [ -z "$pr_text" ]; then
+        pr_text="$(printf '%s' "$pr_rec" | jq -r '
+          ((.text // "") | split("\n")[0] | gsub("[\t\r]"; " ")
+           | gsub("^ +"; "") | gsub(" +$"; "") | gsub("  +"; " "))[0:200]' 2>/dev/null)"
+      fi
+      [ -n "$pr_text" ] || \
+        die "the record's text is empty; give the note text yourself with --text \"<one line>\""
+      [ -z "$pr_proj" ] && pr_proj="$(printf '%s' "$pr_rec" | jq -r '.project // ""' 2>/dev/null)"
+      if [ -z "$pr_why" ]; then
+        pr_why="skillinsight promote $(printf '%s' "$pr_key" | cut -c1-8): queued $(printf '%s' "$pr_rec" | jq -r '.ts // "?"' 2>/dev/null) from $(printf '%s' "$pr_rec" | jq -r '.source // "?"' 2>/dev/null)"
+      fi
+      pr_label="$(printf '%s' "$pr_key" | cut -c1-8)"
+    else
+      # THE OTHER QUEUE. hooks/session-review.sh spends real money to produce these and
+      # writes them into a session nobody is in; a CANDIDATE row that nobody turns into
+      # anything is the same waste as an unread queue record, and it has already
+      # happened twice.
+      pr_idx="$REVIEWS/index.jsonl"
+      [ -f "$pr_idx" ] || die "no automatic session reviews on disk yet ($pr_idx)"
+      pr_n="$(reviews_newest_first "$pr_idx" \
+        | jq -r --arg s "$pr_sid" 'select((.session // "") | startswith($s)) | .session' 2>/dev/null \
+        | sort -u | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+      case "$pr_n" in ''|*[!0-9]*) pr_n=0 ;; esac
+      [ "$pr_n" -eq 0 ] && die "no session review has a session id starting '$pr_sid'"
+      [ "$pr_n" -gt 1 ] && die "'$pr_sid' matches $pr_n reviews; use more of the session id"
+      pr_row="$(reviews_newest_first "$pr_idx" \
+        | jq -c --arg s "$pr_sid" 'select((.session // "") | startswith($s))' 2>/dev/null | head -n 1)"
+      [ -n "$pr_row" ] || die "could not read the review row for '$pr_sid'"
+      pr_v="$(printf '%s' "$pr_row" | jq -r '.verdict // ""' 2>/dev/null)"
+      [ "$pr_v" = "CANDIDATE" ] || \
+        die "that review's verdict is '${pr_v:-unrecorded}', not CANDIDATE; there is nothing in it to promote"
+      pr_name="$(printf '%s' "$pr_row" | jq -r '.name // ""' 2>/dev/null)"
+      pr_key="$(printf '%s' "$pr_row" | jq -r '.session // ""' 2>/dev/null)"
+      pr_store="$REVIEWS/.promoted.jsonl"; pr_field="session"; pr_source="verdict"
+      [ -z "$pr_text" ] && pr_text="session review: candidate '$pr_name'"
+      [ -z "$pr_proj" ] && pr_proj="$(printf '%s' "$pr_row" | jq -r '.project // ""' 2>/dev/null)"
+      [ -z "$pr_why" ] && pr_why="see $(printf '%s' "$pr_row" | jq -r '.report // "the report"' 2>/dev/null)"
+      pr_label="$pr_name"
+    fi
+
+    # Already promoted TO THIS TIER? A note and a reminder are different stores with
+    # different ids and are meant to coexist, so the key is the record AND the tier.
+    pr_prev="$(jq -R -r --arg k "$pr_key" --arg to "$pr_to" --arg f "$pr_field" '
+        (fromjson? // empty) | select(type == "object")
+        | select((.[$f] // "") == $k and (.to // "") == $to) | .id // ""' \
+        "$pr_store" 2>/dev/null | head -n 1)"
+
+    # An argv of variable length with no arrays: nothing else in this package uses one,
+    # and `set --` is how the rest of it carries a list. The text goes last, after `--`,
+    # so a lesson that begins with a dash is text and not an option.
+    set -- add --scope "$pr_scope" --source "$pr_source" --why "$pr_why"
+    if [ -n "$pr_proj" ]; then set -- "$@" --project "$pr_proj"; fi
+    if [ "$pr_to" = "reminder" ]; then
+      set -- "$@" --remind
+      while IFS= read -r pr_i; do
+        if [ -n "$pr_i" ]; then set -- "$@" --keyword "$pr_i"; fi
+      done <<PROMOTE_KW_EOF
+$pr_kw
+PROMOTE_KW_EOF
+      while IFS= read -r pr_i; do
+        if [ -n "$pr_i" ]; then set -- "$@" --path "$pr_i"; fi
+      done <<PROMOTE_PG_EOF
+$pr_pg
+PROMOTE_PG_EOF
+      while IFS= read -r pr_i; do
+        if [ -n "$pr_i" ]; then set -- "$@" --command "$pr_i"; fi
+      done <<PROMOTE_CM_EOF
+$pr_cm
+PROMOTE_CM_EOF
+    fi
+    set -- "$@" -- "$pr_text"
+
+    # skillnote's exit code is carried through unchanged: 2 is a refusal the caller can
+    # fix, 3 is an environment they must (a memory slug that does not exist). Collapsing
+    # both into this CLI's own 2 would tell a caller to retype a flag when the real
+    # answer is that Claude Code has never opened that directory.
+    pr_out="$("$sn" "$@" 2>&1)"
+    pr_rc=$?
+    if [ "$pr_rc" -ne 0 ]; then
+      printf '%s\n' "$pr_out" >&2
+      echo "skillinsight: skillnote refused (exit $pr_rc); nothing was promoted and no promote record was written" >&2
+      exit "$pr_rc"
+    fi
+    printf '%s\n' "$pr_out"
+
+    pr_id="$(printf '%s' "$pr_out" | sed -n 's/.*(\(n[0-9][0-9]*x[0-9][0-9]*\)).*/\1/p' | head -n 1)"
+    if [ -z "$pr_id" ]; then
+      echo "skillinsight: skillnote reported no id; the promote record is written without one" >&2
+    fi
+    ts="$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    if [ -n "$pr_prev" ]; then
+      # skillnote was still called: `add` is idempotent by id, so a second run is free
+      # and it puts the line back if someone deleted it out of the CLAUDE.md by hand.
+      echo "skillinsight: already promoted to a $pr_to ($pr_prev); the record was not marked twice"
+    else
+      pr_json="$(jq -c -n --arg k "$pr_key" --arg f "$pr_field" --arg ts "$ts" \
+        --arg to "$pr_to" --arg id "$pr_id" --arg scope "$pr_scope" \
+        '{($f): $k, ts: $ts, to: $to, id: $id, scope: $scope}' 2>/dev/null)"
+      [ -n "$pr_json" ] || die "could not build the promote record"
+      mkdir -p "$(dirname "$pr_store")" 2>/dev/null || die "cannot write to $(dirname "$pr_store")"
+      printf '%s\n' "$pr_json" >> "$pr_store" || die "cannot append to $pr_store"
+      echo "skillinsight: promoted $pr_label to a $pr_to"
+      echo "               recorded in $pr_store"
+    fi
+    if [ "$pr_field" = "hash" ]; then
+      echo "               it is no longer offered by \`skillinsight pending\`; \`list\` still shows it, marked"
+    fi
+    exit 0
+    ;;
+
   review)
     wants_help "$@" && { usage; exit 0; }
     week="$(parse_week_flag "$@")" || exit $?
@@ -525,11 +879,20 @@ case "$cmd" in
       echo "skillinsight: nothing queued for $week"
       exit 0
     fi
-    dec="$(declined_json)"
+    dec="$(judged_json)"
     n="$(jq -r --argjson dec "$dec" '. as $r | select(($dec | index($r.hash)) | not) | .hash' "$f" 2>/dev/null \
       | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    # Counted apart, and reported apart. A promoted record and a declined one are both
+    # out of the batch, but they are opposite judgements -- one was written down where
+    # it will be read, the other was judged not worth writing down -- and one number
+    # covering both would say neither.
+    dskip="$(jq -r --argjson dec "$(declined_json)" '. as $r | select($dec | index($r.hash)) | .hash' "$f" 2>/dev/null \
+      | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+    case "$dskip" in ''|*[!0-9]*) dskip=0 ;; esac
     skipped="$(( $(wc -l < "$f" | tr -d ' ') - n ))"
+    pskip="$(( skipped - dskip ))"
+    [ "$pskip" -lt 0 ] && pskip=0
     cat <<INSTRUCTIONS
 ==============================================================================
 SKILL CANDIDATE REVIEW  |  $week  |  $n candidates
@@ -581,8 +944,13 @@ Instructions for the reviewing session. Do all of this yourself, in this turn.
 
 ------------------------------------------------------------------------------
 INSTRUCTIONS
+    if [ "$dskip" -gt 0 ]; then
+      echo "($dskip already declined and not shown; \`skillinsight list\` still shows them)"
+    fi
+    if [ "$pskip" -gt 0 ]; then
+      echo "($pskip already promoted to a note or a reminder and not shown; \`skillinsight list\` still shows them)"
+    fi
     if [ "$skipped" -gt 0 ]; then
-      echo "($skipped already declined and not shown; \`skillinsight list\` still shows them)"
       echo "------------------------------------------------------------------------------"
     fi
     jq -r --argjson dec "$dec" '
@@ -745,10 +1113,17 @@ STATS_EOF
         | sort -u | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
     fi
     case "$declined" in ''|*[!0-9]*) declined=0 ;; esac
+    promoted=0
+    if [ -f "$PROMOTED" ]; then
+      promoted="$(jq -R -r '(fromjson? // empty) | .hash // empty' "$PROMOTED" 2>/dev/null \
+        | sort -u | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"
+    fi
+    case "$promoted" in ''|*[!0-9]*) promoted=0 ;; esac
     echo "candidates:      $total"
     echo "weeks covered:   $weeks  ($first .. $last)"
     echo "duplicates skipped: $dupes"
     echo "declined:        $declined"
+    echo "promoted:        $promoted"
     echo "by source:"
     while IFS= read -r f; do
       [ -n "$f" ] && jq -r '.source' "$f" 2>/dev/null

@@ -140,6 +140,9 @@ REPO = Path(__file__).resolve().parent.parent
 SKILL_DIR = REPO / "skills" / "skill-authoring"
 SKILL_MD = SKILL_DIR / "SKILL.md"
 REFERENCES = SKILL_DIR / "references"
+# `skill-compounder`'s protocol, read once: two assertions below derive a step number from it
+# rather than pinning one, because that number has already moved.
+COMPOUNDER = (REPO / "skills" / "skill-compounder" / "SKILL.md").read_text()
 
 WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 
@@ -1936,8 +1939,39 @@ class GateChecksReferenceTest(unittest.TestCase):
         return subprocess.run(["bash", "-c", block], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=180)
 
+    def parse_gate_step(self):
+        """The number of `skill-compounder`'s step that runs the parse gate, DERIVED.
+
+        Pinning the literal was wrong twice over: the forge diet renumbered the builder
+        step from 4 to 2, and this file plus `../SKILL.md` were each carrying a hardcoded
+        number that had already drifted once. Split the forging protocol the same way
+        `tests/test_routing_gate.py` does and find the single step whose body names Gate A.
+        """
+        forging = re.search(r"### Forging protocol.*?(?=\n## )", COMPOUNDER, re.S)
+        self.assertIsNotNone(
+            forging, "skills/skill-compounder/SKILL.md no longer has a parseable "
+                     "'### Forging protocol' section, so nothing here can derive the "
+                     "step this reference is supposed to name")
+        parts = re.split(r"\n\*\*(\d+)\. ", "\n" + forging.group(0))
+        steps = {int(parts[i]): parts[i + 1] for i in range(1, len(parts), 2)}
+        named = [n for n, body in steps.items() if "Gate A" in body]
+        self.assertEqual(
+            len(named), 1,
+            "expected exactly one numbered step in skill-compounder's forging protocol to "
+            "invoke the parse gate by name, found %s" % sorted(named))
+        return named[0]
+
     def test_it_points_at_the_enforcement_rather_than_restating_it(self):
-        self.assertIn("`skill-compounder` step 3", self.text)
+        step = self.parse_gate_step()
+        self.assertIn(
+            "`skill-compounder` step %d" % step, self.text,
+            "gate-checks.md names a different step than the one that actually runs the "
+            "parse gate, which is step %d" % step)
+        self.assertIn(
+            "`skill-compounder`\nstep %d runs a parse of its own" % step,
+            (SKILL_DIR / "SKILL.md").read_text(),
+            "../SKILL.md names a different step than the one that runs the parse gate, "
+            "which is step %d" % step)
         self.assertIn("tests/test_plugin.py", self.text)
         self.assertNotIn("GATE A PASS", self.text,
                          "the reference has started duplicating the Phase 3 block")

@@ -5,7 +5,7 @@ holds the two things that do not fit in an always-loaded body: a sweep over a wh
 skills, and the worksheet for Gate B.
 
 Enforcement is not restated here: `SkillFrontmatterTest` in `tests/test_plugin.py` gates
-every skill shipped from this repository, and `skill-compounder` step 3 parses as it forges.
+every skill shipped from this repository, and `skill-compounder` step 2 parses as it forges.
 Neither watches a skill written directly into `~/.claude/skills/`.
 
 ## Sweep an existing tree

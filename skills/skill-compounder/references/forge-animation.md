@@ -10,35 +10,41 @@ second. Nothing streams, which is what lets a forge animate across subagent disp
 
 |`skillforge step`|What just happened|
 |-|-|
-|1|B dispatched C|
+|1|C dispatched|
 |2|C's draft landed and passed the parse gate|
 |3, 4|D round 1: review, then revision|
 |5, 6|D round 2|
 |…|…|
 
-So 12 steps for the usual 5-round cap, 22 for 10. Neither gate takes a number: the parse
-check is part of accepting the draft, and the routing probe is part of closing. Dispatching
-B is not a step either, because the ledger recovers round counts by inverting this budget —
-planned rounds as `(steps - 2) / 2`, completed rounds the same way from the step actually
-reached — and one extra step shifts every count.
+So **6 steps at the default 2-round cap** and **10 at the escalated 4**. Neither gate takes a
+number: the parse check is part of accepting the draft, and the routing probe is part of
+closing. Dispatching an orchestrator is not a step either, because the ledger recovers round
+counts by inverting this budget — planned rounds as `(steps - 2) / 2`, completed rounds the
+same way from the step actually reached — and one extra step shifts every count.
 
-**The protocol's prose sections and the animation's step numbers do not coincide.** Spell
-the mapping out when briefing B rather than saying "the step numbering". An orchestrator
-that calls `skillforge step 2..5` against the pasted section headings stalls the bar and
-records one round where five happened.
+**The protocol's prose sections and the animation's step numbers do not coincide.** Spell the
+mapping out when briefing an orchestrator rather than saying "the step numbering". One that
+calls `skillforge step 2..5` against the pasted section headings stalls the bar and records one
+round where several happened.
 
-**Overrunning is fine, and for a converging loop it is CORRECT.** `skillforge step 15
-"round 7 review"` records 15 against a 12-step budget rather than clamping: the status line
-draws `15/12 over` with the bar's last cell marked `»`, and `rounds` counts what was
-completed.
+**An overrun is now a granted escalation with a row behind it.** `step` still records rather
+than clamps — `skillforge step 11 "round 5 review"` against a 10-step budget draws `11/10 over`
+with the bar's last cell marked `»` — because a budget is a plan and the step reached is an
+observation. But the rounds themselves are capped where they can be counted:
 
-**An overrun is not a verdict, and being past the cap triggers nothing.** This sentence used
-to read "you are past the cap, so the narrow-or-abandon rule applies", which was the old
-doctrine and is now wrong — it survived a rewrite of `SKILL.md` and contradicted it, in the
-one file a converging session lands in at exactly the moment it is overrunning. What decides
-narrow-or-abandon is the convergence assessment `SKILL.md` runs at EVERY round, on the round
-record; a loop that is converging is *supposed* to overrun rather than cut to fit the budget,
-and a loop that is not converging was already made to decide, rounds earlier.
+|command|exit|what it means|
+|-|-|-|
+|`skillforge round`|0|the round is on the record, and budgeted rounds remain|
+|`skillforge round`|3|the budget is spent; no row was written. The message names the last two blocking counts and the two ways past it|
+|`skillforge escalate --converging`|0|granted: the last two rounds show a strictly falling `blocking`. Budget +2 steps, one `escalate` ledger row|
+|`skillforge escalate --converging`|4|refused: the count is flat, rising, or there is only one round to compare|
+|`skillforge escalate --narrowed "<what you cut>"`|0|granted, once per forge|
+|`skillforge escalate`|4|refused: a third grant, or `--narrowed` a second time|
+
+So a forge past its budget is one that asked and was told yes, and the `escalate` row records
+who asked and what the counts were. **An overrun is not a verdict, and being past the cap
+triggers nothing by itself.** What decides narrow-or-abandon is the convergence assessment
+`SKILL.md` runs at EVERY round, on the round record.
 
 Do not free the name by closing the forge first; that records an outcome for work that has
 not finished.
@@ -96,9 +102,9 @@ by a command. `skillforge list` shows what is live; `skillforge show` prints one
 
 `rounds` is always derived from the step, as `(step - 2) / 2`.
 
-- On a `fail` it is the rounds actually completed, overrun included: abandoned at step 8 of
-  12 records `rounds: 3, rounds_planned: 5`; abandoned at step 14 of 12 records `rounds: 6`
-  against the same plan.
+- On a `fail` it is the rounds actually completed, overrun included: abandoned at step 4 of 6
+  records `rounds: 1, rounds_planned: 2`; abandoned at step 8 of 6 records `rounds: 3` against
+  the same plan.
 - On a `done` it carries an overrun the same way, because `done` raises the step to the
   total but never lowers it — but a forge that finished *inside* its budget records `rounds`
   equal to `rounds_planned` whatever it really took. So a clean forge cannot tell you how
@@ -141,16 +147,16 @@ Do not write, or read, the ledger as a record of every invocation.
 
 `<total-steps>` is `2 + 2 × (planned D rounds)`:
 
-- **step 1** when B is dispatched;
+- **step 1** when C is dispatched;
 - **step 2** when C's draft lands and has passed the parse gate;
 - then **one review step and one revision step per planned round**.
 
-Neither gate gets a number of its own, and dispatching B is not a step. That is not
-arbitrary: the ledger inverts this budget to recover the round count as `(steps - 2) / 2`,
+Neither gate gets a number of its own, and dispatching an orchestrator is not a step. That is
+not arbitrary: the ledger inverts this budget to recover the round count as `(steps - 2) / 2`,
 so an extra number anywhere makes every recorded `rounds` wrong by half of it.
 
-Overrunning is fine and is meant to be visible. Keep stepping past the budget; no command can
-re-budget a live forge, and a forge that ran long should read as one that ran long.
+`step` never re-budgets a live forge and never refuses one; `skillforge escalate` is the only
+thing that raises `<total-steps>`, and it raises it by exactly one round at a time.
 
 ## The held-out fields, and the step numbering B needs spelled out
 
@@ -159,8 +165,8 @@ and `skillforge ledger` omit `root`, `trigger`, `project` and `trigger_verbatim`
 pass `--full`, and they name what they left out so nobody reads a redacted record as a
 complete one. The record on disk keeps every field; only the default view is reduced.
 
-**Spell the step numbering out when briefing B**, because the numbers do not coincide with the
-prose headings and an orchestrator that guesses stalls the bar:
+**Spell the step numbering out when briefing an orchestrator**, because the numbers do not
+coincide with the prose headings and one that guesses stalls the bar:
 
 - `step 1` on dispatching C;
 - `step 2` when C's draft lands and passes the parse gate;
@@ -212,6 +218,12 @@ session**. It then records that it has named that skill and lets go, so the same
 stopped twice for the same debt however many turns it runs. The block message says so itself.
 It is a flag raised where it cannot be missed, not a wall, and describing it as refusing to end
 the session overstates it in the direction that makes a reader switch it off.
+
+**And the verdict follows the apply.** `skillforge verdict --name <skill> --verdict
+WORKED|NO-OP|MISFIRED --evidence "<verbatim>"` is the second half of the same turn: `apply`
+says the skill was put on the problem, `verdict` says what happened when it was. Written
+before the apply it judges a text rather than an event, which is why the protocol puts both
+in step 6 and asks for a quote behind each.
 
 **`declined` is a first-class outcome, not a failure row.** The question the debt asks is
 *"was this used on the problem that caused it?"*, and `no` is a real answer to it — the skill
