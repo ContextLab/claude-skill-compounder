@@ -471,3 +471,8 @@ supported versions, upgrade/rollback test). P4 cannot be done in a session.
   Next: on CI green, tag v0.3.0 per docs/releasing.md, GitHub release, verify pinned install
   into a temp claude dir, --update/--rollback between two refs.
 - ~03:10 (Sep 3) CI GREEN on main at cfb2bc6 (run 33719557434), all jobs. First green run since before Sep 1.
+- ~03:50 (Sep 3) docs split + install flags committed a2aa2d4, pushed to branch and main.
+  README 366 lines; docs/architecture 516, operations 356, measurement 139, development 82.
+  CI watch armed. On green: tag v0.3.0, GitHub release, verify pinned install + update/rollback.
+- ~04:05 (Sep 3) E2E journey on a2aa2d4: 12/12 PASS, 6 calls, 41 s; plugin validate strict
+  exit 0; plugin version 0.3.0. Waiting on CI for a2aa2d4, then tag v0.3.0.

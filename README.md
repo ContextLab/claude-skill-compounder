@@ -78,10 +78,10 @@ curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/
 Pinned to a release, which is the form to prefer once a tag exists:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | SKILL_COMPOUNDER_REF=v0.3.0 bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/v0.3.0/install.sh | SKILL_COMPOUNDER_REF=v0.3.0 bash
 ```
 
-`v0.3.0` is the first tagged release and it has not been cut yet;
+`v0.3.0` is the first tagged release, cut on 2026-09-03 from commit `a2aa2d4`;
 `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists the
 tags that exist right now. With `SKILL_COMPOUNDER_REF` unset the installer takes `main`,
 which is whatever was last pushed to it, so two people running the plain one-liner on the
