@@ -210,6 +210,81 @@ class RepeatCliCase(unittest.TestCase):
                                  "id": note_id, "session": "cli"}) + "\n")
 
 
+# ==================================================================== who dismissed it
+class DismissActorTest(RepeatCliCase):
+    """WHO ran `dismiss` is recorded, and only a person's dismissal lifts the gate.
+
+    Measured on 2026-09-04: both of two fresh sessions the lesson gate refused answered
+    by running `skillrepeat dismiss <sig> --why "<a reason they invented>"` and carrying
+    on. The row said `session:"cli"` -- hardcoded -- so nothing on any surface recorded
+    that a model had made the decision. Every assertion below drives the REAL CLI with
+    the REAL environment variable Claude Code exports, and reads the row back off disk.
+    """
+
+    def dismissed_rows(self):
+        return [r for r in self.rows() if r.get("t") == "dismiss"]
+
+    def test_a_dismissal_from_a_terminal_is_actor_human(self):
+        self.fail_then_fix("s1")
+        sig = self.sig_of(FAILING_CMD)
+        r = self.cli("dismiss", sig, "--why", "gh is not installed on this box")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = self.dismissed_rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["actor"], "human")
+        self.assertEqual(rows[0]["session"], "cli")
+
+    def test_CLAUDECODE_in_the_environment_makes_it_actor_model(self):
+        """Claude Code exports CLAUDECODE into every Bash tool call, so this is the
+        variable that is actually there when a session runs the command."""
+        self.fail_then_fix("s1")
+        sig = self.sig_of(FAILING_CMD)
+        r = self.cli("dismiss", sig, "--why", "it is fine", CLAUDECODE=1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = self.dismissed_rows()
+        self.assertEqual(rows[0]["actor"], "model")
+        self.assertIn("LIFTS NOTHING", r.stdout, r.stdout)
+
+    def test_the_session_id_is_recorded_rather_than_the_literal_cli(self):
+        self.fail_then_fix("s1")
+        sig = self.sig_of(FAILING_CMD)
+        self.cli("dismiss", sig, "--why", "x",
+                 CLAUDE_CODE_SESSION_ID="0f7a-real-session")
+        rows = self.dismissed_rows()
+        self.assertEqual(rows[0]["session"], "0f7a-real-session")
+        self.assertEqual(rows[0]["actor"], "model",
+                         "a session id with no CLAUDECODE still means a session")
+
+    def test_the_lesson_column_separates_the_two(self):
+        self.fail_then_fix("s1")
+        sig = self.sig_of(FAILING_CMD)
+        self.cli("dismiss", sig, "--why", "invented", CLAUDECODE=1)
+        self.assertEqual(self.lesson_column(sig), "dismissed-by-model")
+        self.tick()
+        self.cli("dismiss", sig, "--why", "really not a problem")
+        self.assertEqual(self.lesson_column(sig), "dismissed",
+                         "a person's dismissal after a model's did not take over")
+
+    def test_show_says_a_model_dismissal_lifts_nothing(self):
+        self.fail_then_fix("s1")
+        sig = self.sig_of(FAILING_CMD)
+        self.cli("dismiss", sig, "--why", "invented", CLAUDECODE=1)
+        out = self.cli("show", sig).stdout
+        self.assertIn("actor=model", out, out)
+        self.assertIn("lifts nothing", out, out)
+
+    def test_a_row_written_before_the_field_existed_reads_as_human(self):
+        """Append-only store: rows from before `actor` carry none, they predate the
+        model path, and the CLI and the gate must both read them the same way."""
+        self.fail_then_fix("s1")
+        sig = self.sig_of(FAILING_CMD)
+        with open(self.store, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"t": "dismiss", "ts": self.clock, "sig": sig,
+                                 "session": "cli", "why": "from before the field"})
+                     + "\n")
+        self.assertEqual(self.lesson_column(sig), "dismissed")
+
+
 # ==================================================================== dismiss
 class DismissTest(RepeatCliCase):
     """`dismiss` is the other half of the lesson gate, and it is a ROW. The store is the
@@ -624,11 +699,16 @@ class LiveSkillnoteTest(RepeatCliCase):
 
     def test_the_hook_stops_refusing_once_the_real_writer_has_run(self):
         """The whole point of the contract: the refusal lifts because a lesson exists,
-        and nothing in this test writes that fact by hand."""
+        and nothing in this test writes that fact by hand.
+
+        THREE sessions, because REPEAT_MIN_SESSIONS counts EARLIER ones: s1 and s2 are
+        the two the default threshold wants, and s3 is the session that binds the
+        recovery and gets refused."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         sig = self.sig_of("gh pr list --limit 5")
-        attempt = {"hook_event_name": "PreToolUse", "session_id": "s2",
+        attempt = {"hook_event_name": "PreToolUse", "session_id": "s3",
                    "tool_name": "Bash", "tool_use_id": "toolu_probe_1",
                    "tool_input": {"command": "npm install left-pad"}}
         self.tick()

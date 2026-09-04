@@ -41,15 +41,33 @@ LONG_PROMPT = ("Please implement the retry-with-backoff wrapper and wire it into
 
 class Base(unittest.TestCase):
 
+    # A TEST THAT WRITES INTO THE CHECKOUT IS A DEFECT. `skillinsight promote` writes
+    # through `bin/skillnote add`, which appends to the `.claude/CLAUDE.md` of the project
+    # it is given -- and, given none, of the current working directory. Run with the
+    # suite's default cwd that is THIS repository, and it is how two junk notes dated 1970
+    # landed in it from tests whose every assertion passed. Every CLI run below therefore
+    # gets an explicit scratch cwd, and this guard fails on the write rather than on its
+    # consequences.
+    REPO_NOTES = REPO / ".claude" / "CLAUDE.md"
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.state = Path(self.tmp.name) / "state"
         self.state.mkdir(parents=True)
         self.repo = Path(self.tmp.name) / "workrepo"
         self.repo.mkdir(parents=True)
+        self.scratch = Path(self.tmp.name) / "cwd"
+        self.scratch.mkdir(parents=True)
+        self._repo_notes = (self.REPO_NOTES.read_bytes()
+                            if self.REPO_NOTES.exists() else None)
 
     def tearDown(self):
-        self.tmp.cleanup()
+        try:
+            now = self.REPO_NOTES.read_bytes() if self.REPO_NOTES.exists() else None
+            self.assertEqual(now, self._repo_notes,
+                             "this test wrote into the checkout's own .claude/CLAUDE.md")
+        finally:
+            self.tmp.cleanup()
 
     def env(self, **extra):
         e = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
@@ -68,10 +86,13 @@ class Base(unittest.TestCase):
         return subprocess.run([str(PROMPT_HOOK), "prompt"], input=json.dumps(payload),
                               capture_output=True, text=True, env=self.env(**extra))
 
-    def cli(self, *args, now=T0, **extra):
+    def cli(self, *args, now=T0, cwd=None, **extra):
+        """Always with an explicit cwd, and never the suite's default one: `promote`
+        resolves a project from it when the record carries none."""
         extra.setdefault("INSIGHT_NOW", now)
         return subprocess.run([str(INSIGHT)] + list(args), stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, env=self.env(**extra))
+                              capture_output=True, text=True,
+                              cwd=str(cwd or self.scratch), env=self.env(**extra))
 
     # ------------------------------------------------------------ queue fixtures
 
@@ -835,6 +856,92 @@ class ExistingBehaviourTest(Base):
         """The skill check is addressed to the session, not to the person."""
         r = self.prompt(pid="p1")
         self.assertNotIn("systemMessage", r.stdout)
+
+
+class PromoteSaysWhereTest(Base):
+    """`promote` writes into the CANDIDATE's project, and it used to say nothing.
+
+    That target is deliberate -- the finding is about that repository, so the note belongs
+    in that repository, not in whatever directory the reader happened to be in. But the
+    only output was "promoted ... to a note", so a promote run from a scratch directory
+    appended a line to a CLAUDE.md the caller was not looking at and could not name. Three
+    things fix it and all three are driven here: the absolute path is printed FIRST,
+    `--project` overrides it, and a target whose directory is gone is refused rather than
+    created.
+    """
+
+    def setUp(self):
+        Base.setUp(self)
+        self.real_audit_record()
+        self.h = self.audits()[0]["hash"][:8]
+
+    def promote(self, *extra, **kw):
+        return self.cli("promote", self.h, "--to", "note", *extra,
+                        SKILLNOTE_NOW=T0, **kw)
+
+    def test_the_first_line_is_the_absolute_target_path(self):
+        r = self.promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first = r.stdout.splitlines()[0]
+        want = str(self.repo / ".claude" / "CLAUDE.md")
+        self.assertIn(want, first,
+                      "the first line must name where this landed, got %r" % first)
+        self.assertTrue(os.path.isabs(want.split()[-1]))
+
+    def test_the_path_it_printed_is_the_path_it_wrote(self):
+        """Not asserted about -- compared against the file that actually changed."""
+        r = self.promote()
+        first = r.stdout.splitlines()[0]
+        target = Path(first.split("target ", 1)[1].strip())
+        self.assertTrue(target.is_file(), "%s was named and not written" % target)
+        self.assertIn("skillnote:begin", target.read_text(encoding="utf-8"))
+        self.assertEqual(target, self.repo / ".claude" / "CLAUDE.md")
+
+    def test_project_overrides_the_candidates_own_project(self):
+        other = Path(self.tmp.name) / "elsewhere"
+        other.mkdir()
+        r = self.promote("--project", str(other))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(str(other / ".claude" / "CLAUDE.md"), r.stdout.splitlines()[0])
+        self.assertTrue((other / ".claude" / "CLAUDE.md").is_file())
+        self.assertFalse((self.repo / ".claude").exists(),
+                         "--project was printed but not honoured")
+
+    def test_a_target_whose_directory_is_gone_is_refused(self):
+        """skillnote creates `.claude/` but not the project above it, so without this the
+        whole tree would be created for a project that no longer exists and the note
+        written where nobody will ever read it."""
+        shutil.rmtree(self.repo)
+        r = self.promote()
+        self.assertEqual(r.returncode, 2, "it wrote anyway:\n%s" % r.stdout)
+        self.assertIn(str(self.repo), r.stderr + r.stdout)
+        self.assertFalse(self.repo.exists(), "the refusal created the directory")
+        self.assertIn("--project", r.stderr + r.stdout,
+                      "the refusal must name the way out")
+
+    def test_the_refusal_leaves_the_record_unpromoted(self):
+        """A refusal that still marked the record would lose it from `pending` forever."""
+        shutil.rmtree(self.repo)
+        self.promote()
+        line = self.cli("pending", "--format", "tsv").stdout
+        self.assertEqual(line.split("\t")[0], "1",
+                         "the record was consumed by a promote that refused")
+
+    def test_project_is_the_way_out_of_that_refusal(self):
+        shutil.rmtree(self.repo)
+        other = Path(self.tmp.name) / "elsewhere"
+        other.mkdir()
+        r = self.promote("--project", str(other))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((other / ".claude" / "CLAUDE.md").is_file())
+
+    def test_a_reminder_promote_names_the_store_it_writes(self):
+        r = self.cli("promote", self.h, "--to", "reminder", "--keyword", "widget",
+                     SKILLNOTE_NOW=T0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first = r.stdout.splitlines()[0]
+        self.assertIn(str(self.state / "reminders.jsonl"), first)
+        self.assertTrue((self.state / "reminders.jsonl").is_file())
 
 
 if __name__ == "__main__":

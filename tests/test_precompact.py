@@ -379,13 +379,24 @@ class BoundedReadTest(PrecompactTestBase):
                              "bound=%r must fall back to the default, not to zero" % bad)
 
     def test_a_five_megabyte_transcript_does_not_wedge(self):
-        """The number this pins is a ceiling, not the measurement. Measured medians on
-        macOS 25.6.0, 2026-09-02, over 15 runs against a 5 MB transcript: 27.4 ms with no
-        candidate and 86.3 ms with one, at the default 256 KB bound with /usr/bin/jq
-        (jq-1.7.1-apple). The same hook against anaconda's jq-1.6 medians 62.4 ms and
-        147.9 ms, because what this hook spends is process starts -- that jq starts in
-        22.4 ms against the system jq's 9.6 ms -- so issue #8's 100 ms is met on the
-        system jq and not on every PATH, and the ceiling here is set well above both.
+        """The number this pins is a ceiling, not the measurement.
+
+        MEASURED BEFORE ISSUE #32 TOOK THREE PROCESS STARTS OFF THIS PATH, and left here
+        because it is the figure the ceiling was chosen against: macOS 25.6.0, 2026-09-02,
+        medians over 15 runs against a 5 MB transcript, 27.4 ms with no candidate and
+        86.3 ms with one at the default 256 KB bound with /usr/bin/jq (jq-1.7.1-apple);
+        62.4 ms and 147.9 ms against anaconda's jq-1.6. What this hook spends is process
+        starts -- that jq starts in 22.4 ms against the system jq's 9.6 ms -- so issue
+        #8's 100 ms was met on the system jq and not on every PATH.
+
+        THE CURRENT FIGURES ARE IN docs/measurement.md, "The PreCompact budget is per jq
+        build", and they are a different measurement rather than a re-run of this one: a
+        400 KB transcript, 2026-09-03, n=25, median / p90. Post-#32 that table reads
+        31.8 / 36.0 ms with no candidate and 84.7 / 87.7 ms with one on jq-1.7.1-apple,
+        and 59.1 / 63.5 ms and 123.0 / 128.9 ms on jq-1.6; the same 400 KB measurement
+        before #32 read 33.8 / 38.7 and 104.2 / 113.3, and 61.9 / 64.3 and 143.5 / 154.6.
+        Nobody has re-run the 5 MB case since, so the four numbers in the paragraph above
+        are the last ones measured at THIS size and must not be quoted as current.
         """
         path = self.root / "big.jsonl"
         row = json.dumps(self._assistant(FILLER)) + "\n"

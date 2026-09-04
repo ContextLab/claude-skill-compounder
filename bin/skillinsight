@@ -843,6 +843,34 @@ DECLINE_EOF
       pr_lineage="$(lineage_of v "$pr_key")"
     fi
 
+    # WHERE THIS LANDS, SAID FIRST AND OUT LOUD. The target is the CANDIDATE's own
+    # project, not the caller's cwd -- that is where the finding applies and it is
+    # deliberate -- but until this line a promote run from a scratch directory wrote a
+    # note into a repository the caller was not in and reported only "promoted". The
+    # path is asked of bin/skillnote rather than recomputed here: a second copy of the
+    # four scope resolutions is the drift .claude/CLAUDE.md warns about, and this one
+    # would be invisible because both halves would still print something.
+    if [ "$pr_to" = "reminder" ]; then pr_wscope="remind"; else pr_wscope="$pr_scope"; fi
+    if [ -n "$pr_proj" ]; then
+      pr_target="$("$sn" where --scope "$pr_wscope" --project "$pr_proj" 2>/dev/null)"
+    else
+      pr_target="$("$sn" where --scope "$pr_wscope" 2>/dev/null)"
+    fi
+    [ -n "$pr_target" ] || die "skillnote could not say where a $pr_to would be written"
+    echo "skillinsight: target $pr_target"
+    # AND REFUSED IF IT IS NOWHERE. skillnote creates the `.claude/` directory but not
+    # the project above it, so a candidate recorded against a project that has since
+    # been deleted or moved would otherwise have that whole tree created for it and a
+    # note written where nobody will read it. `--project <dir>` is the way out.
+    case "$pr_wscope" in
+      project) pr_need="${pr_target%/.claude/CLAUDE.md}" ;;
+      global)  pr_need="$(dirname "$pr_target")" ;;
+      *)       pr_need="" ;;
+    esac
+    if [ -n "$pr_need" ] && [ ! -d "$pr_need" ]; then
+      die "the $pr_wscope directory for this candidate does not exist: $pr_need -- nothing was promoted. Pass --project <dir> to write it somewhere that does."
+    fi
+
     set -- add --scope "$pr_scope" --source "$pr_source" --why "$pr_why"
     if [ -n "$pr_lineage" ]; then set -- "$@" --candidate "$pr_lineage"; fi
     if [ -n "$pr_proj" ]; then set -- "$@" --project "$pr_proj"; fi
@@ -1020,6 +1048,7 @@ INSTRUCTIONS
         # tests/test_insights.py now compares the two expressions on an id long enough
         # to tell them apart.
         safe="$(printf '%s' "$rsid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+        case "$safe" in ''|.|..) safe=_ ;; esac
         live="$REMINDERS/$safe.paths"
         [ -f "$live" ] || continue
         total="$(sort -u "$live" 2>/dev/null | grep -c '[^[:space:]]' 2>/dev/null | tr -d ' ')"

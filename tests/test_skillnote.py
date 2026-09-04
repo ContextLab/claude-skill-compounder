@@ -1773,5 +1773,81 @@ class HelpDocumentsTheNewFlagsTest(SkillnoteCase):
             self.assertIn(token, out, "the help must document %s" % token)
 
 
+class CandidateIdIsNotAPathTest(SkillnoteCase):
+    """`--candidate` took `.` and `..`, because both are inside `[A-Za-z0-9._-]`.
+
+    The lineage id is written onto the ledger note row and onto the reminder row, and
+    bin/skillreport joins on it; `bin/skillforge start --from` refuses the same two names
+    for the same reason. A space was already refused -- these are the two that were not.
+    """
+
+    def test_dot_and_dotdot_are_refused(self):
+        for bad in (".", ".."):
+            r = self.note("add", "--candidate", bad, "--", "a line")
+            self.assertEqual(r.returncode, 2,
+                             "--candidate %r was accepted:\n%s" % (bad, r.stdout))
+            self.assertIn("--candidate", r.stderr)
+            self.assertFalse(self.claude_md.exists(),
+                             "a refused --candidate still wrote the note")
+            self.assertEqual(self.ledger_rows(), [], "it still wrote a ledger row")
+
+    def test_a_real_lineage_id_is_still_taken(self):
+        r = self.ok("add", "--candidate", "c1a2b3c4", "--", "a line")
+        del r
+        rows = self.ledger_rows()
+        self.assertTrue(rows)
+        self.assertEqual(rows[-1].get("candidate"), "c1a2b3c4")
+
+    def test_a_space_is_still_refused(self):
+        r = self.note("add", "--candidate", "c1 c2", "--", "a line")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+
+class WhereTest(SkillnoteCase):
+    """`skillnote where` exists so bin/skillinsight can SAY where a promote will write.
+
+    It promotes into the candidate's own project, which is very often not the caller's
+    cwd, and it used to say nothing at all -- a promote run from a scratch directory
+    appended a note to a repository the caller was not in. Reimplementing the four scope
+    resolutions in that CLI would be the second copy .claude/CLAUDE.md warns about, so it
+    asks this. Read-only: it must create nothing.
+    """
+
+    def test_project_scope_is_the_cwd_by_default(self):
+        r = self.ok("where", "--scope", "project")
+        self.assertEqual(r.stdout.strip(), str(self.claude_md))
+
+    def test_project_option_overrides_the_cwd(self):
+        other = self.root / "other"
+        other.mkdir()
+        r = self.ok("where", "--scope", "project", "--project", str(other))
+        self.assertEqual(r.stdout.strip(), str(other / ".claude" / "CLAUDE.md"))
+
+    def test_it_agrees_with_where_add_actually_writes(self):
+        """The point of the command: the two must be the same path, driven both ways."""
+        said = self.ok("where", "--scope", "project").stdout.strip()
+        self.ok("add", "--scope", "project", "--", "a line")
+        self.assertTrue(self.claude_md.exists())
+        self.assertEqual(said, str(self.claude_md))
+
+    def test_global_and_remind_scopes_resolve(self):
+        g = self.ok("where", "--scope", "global").stdout.strip()
+        self.assertTrue(g.endswith("/CLAUDE.md"), g)
+        rem = self.ok("where", "--scope", "remind").stdout.strip()
+        self.assertEqual(rem, str(self.reminders))
+
+    def test_it_creates_nothing(self):
+        before = sorted(p.name for p in self.root.iterdir())
+        for scope in ("project", "global", "memory", "remind"):
+            self.ok("where", "--scope", scope)
+        self.assertFalse((self.proj / ".claude").exists(),
+                         "`where` created the directory it only described")
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), before)
+
+    def test_an_unknown_scope_is_refused(self):
+        r = self.note("where", "--scope", "nowhere")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

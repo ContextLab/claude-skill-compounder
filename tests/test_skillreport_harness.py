@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -351,6 +352,116 @@ class ErrorExclusionStillHoldsTest(Base):
         ])
         out = self.report()
         self.assertIn("1 invocation(s) of these skills came from non-interactive", out)
+
+
+class FunnelCostTest(Base):
+    """THE FUNNEL JOIN IS O(rows), NOT O(lineages x rows), AND THAT IS MEASURED HERE.
+
+    It was the second shape. `bin/skillreport` looped over every lineage and, inside that
+    loop, filtered every ledger row with `index` over arrays -- and `index` is a linear
+    scan. At the writers OWN caps (`REMIND_MAX_ROWS`-scale delivery logs and a ledger of
+    5000 rows) the whole report took 47.9 s on the machine this was written on, all of it
+    in that block, and a report nobody waits for reports nothing.
+
+    WHY THE BOUND IS BOTH ABSOLUTE AND RELATIVE. A wall-clock number alone is a test that
+    fails on a slow CI runner for being slow, and a ratio alone is a test that passes on a
+    machine where everything is slow together. So this measures the SAME report twice on
+    the SAME machine, once with the delivery logs in place and once with them moved aside,
+    and asserts the funnel's marginal cost against the report's own baseline as well as
+    against ten seconds. Under the old shape the marginal cost was about eleven times the
+    baseline; under this one it is a fraction of it.
+
+    NO MOCKS: the rows are the shapes the real writers write (`hooks/remind.sh`,
+    `hooks/compound-improvement.sh`, `bin/skillforge`), and the script under test is the
+    real one.
+    """
+
+    NUDGES = 2000
+    LEDGER = 5000
+
+    def build(self):
+        (self.state / "reminders").mkdir(parents=True, exist_ok=True)
+        lineages = ["c%08x" % i for i in range(self.NUDGES)]
+        sessions = ["s-%04d" % i for i in range(400)]
+        with open(self.state / "reminders" / "nudges.jsonl", "w",
+                  encoding="utf-8") as fh:
+            for i, lin in enumerate(lineages):
+                fh.write(json.dumps(
+                    {"id": lin, "ts": T0 + i, "session": sessions[i % len(sessions)],
+                     "kind": "queue", "event": "UserPromptSubmit",
+                     "cc_session": sessions[(i * 7) % len(sessions)]}) + "\n")
+        events = ["note", "start", "use", "apply", "verdict"]
+        with open(self.state / "ledger.jsonl", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": "horizon", "ts": T0 - 1, "known_from": T0 - 1,
+                                 "confidence": "measured", "backfilled": False}) + "\n")
+            for i in range(self.LEDGER):
+                ev = events[i % len(events)]
+                row = {"event": ev, "ts": T0 + i, "name": "sk%d" % (i % 40),
+                       "session": sessions[(i * 3) % len(sessions)]}
+                if i % 5 == 0:
+                    row["from"] = lineages[(i * 11) % len(lineages)]
+                if ev == "note":
+                    row["id"] = "n%dx%d" % (i, i)
+                    row["kind"] = "note"
+                elif ev == "start":
+                    row.update({"steps": 4, "summary": "s", "project": str(self.root)})
+                elif ev == "use":
+                    row.update({"ok": True, "recorded": "live"})
+                elif ev == "apply":
+                    row.update({"outcome": "used", "evidence": "e"})
+                else:
+                    row["verdict"] = "WORKED"
+                fh.write(json.dumps(row) + "\n")
+
+    def timed_report(self):
+        t = time.time()
+        out = self.report()
+        return time.time() - t, out
+
+    def test_the_join_is_not_quadratic_in_the_number_of_lineages(self):
+        self.build()
+        full, out = self.timed_report()
+
+        # The same ledger with the delivery logs moved aside: everything this report does
+        # EXCEPT the join, on this machine, right now.
+        moved = self.state / "nudges.aside"
+        os.replace(str(self.state / "reminders" / "nudges.jsonl"), str(moved))
+        base, _ = self.timed_report()
+        os.replace(str(moved), str(self.state / "reminders" / "nudges.jsonl"))
+
+        self.assertLess(full, 10.0,
+                        "the report took %.1f s at the writers own caps (%d nudge rows, "
+                        "%d ledger rows)" % (full, self.NUDGES, self.LEDGER))
+        marginal = full - base
+        self.assertLess(marginal, max(3.0, 4.0 * base),
+                        "the funnel added %.1f s on top of a %.1f s report; the shape "
+                        "this replaced added about eleven times the baseline"
+                        % (marginal, base))
+        # ...and it really did the work, so the timing above is not of an empty block.
+        self.assertIn("FUNNEL", out)
+        self.assertIn("logged delivery(ies)", out)
+
+    def test_the_table_is_capped_and_the_remainder_is_folded_not_dropped(self):
+        """A store at these caps names thousands of lineages, and a report nobody reads to
+        the end reports nothing. The rows past the cap are FOLDED into one line carrying
+        their counts, so the CHECK below still covers every row in the ledger."""
+        self.build()
+        out = self.report()
+        block = out[out.index("FUNNEL ("):]
+        block = block[:block.index("REMINDER CONVERSION")]
+        rows = [l for l in block.splitlines() if l.startswith("  c")]
+        self.assertEqual(len(rows), 25, "the table printed %d lineage lines" % len(rows))
+        more = [l for l in block.splitlines() if "more)" in l]
+        self.assertEqual(len(more), 1, block)
+        self.assertIn("folds every lineage past the first 25", block)
+        check = [l for l in block.splitlines() if "CHECK:" in l]
+        self.assertEqual(len(check), 1, block)
+        intable = int(check[0].split("CHECK:")[1].split()[0])
+        total = int(check[0].split("=")[1].split()[0])
+        unattr = int(check[0].split("+")[1].split()[0])
+        self.assertEqual(intable + unattr, total, check[0])
+        self.assertEqual(total, self.LEDGER,
+                         "the funnel counted %d of %d ledger rows" % (total, self.LEDGER))
 
 
 if __name__ == "__main__":

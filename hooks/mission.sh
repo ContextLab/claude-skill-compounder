@@ -38,7 +38,7 @@
 # ONE DIVERGENCE FROM history-surfer, STATED RATHER THAN GLOSSED. Its rung 3 reads
 # `CLAUDE_HISTORY_SURFER_CLAUDE_DIR` (`history_surfer/config.py:29-34`), NOT
 # `CLAUDE_CONFIG_DIR`, which appears nowhere in that repository. `CLAUDE_CONFIG_DIR` is
-# what the rest of THIS package falls back to (`bin/skillnote:276`, `bin/skillforge:1350`)
+# what the rest of THIS package falls back to (`bin/skillnote:284`, `bin/skillforge:1381`)
 # and it is what Claude Code itself honours, so it is the rung used here. The two agree
 # whenever neither variable is set, which is the default on every machine; they diverge
 # only for someone who has exported one of them, and MISSION_SURFER_ROOT is the rung that
@@ -261,17 +261,24 @@ PRUNE_EVERY="${MISSION_PRUNE_EVERY:-25}"
 
 # Shape AND magnitude guards on every tunable, so a typo'd export cannot reach an
 # arithmetic test and print `[: integer expected` on the user's stderr from a hook.
-case "$FIRST_CHARS"    in ''|*[!0-9]*) FIRST_CHARS=1200 ;; esac
-case "$RECENT"         in ''|*[!0-9]*) RECENT=3 ;; esac
-case "$EACH_CHARS"     in ''|*[!0-9]*) EACH_CHARS=400 ;; esac
-case "$MAX_CHARS"      in ''|*[!0-9]*) MAX_CHARS=2400 ;; esac
-case "$INTERVAL"       in ''|*[!0-9]*) INTERVAL=1200 ;; esac
-case "$SHORT_WORDS"    in ''|*[!0-9]*) SHORT_WORDS=6 ;; esac
-case "$STOP_MIN_TOOLS" in ''|*[!0-9]*) STOP_MIN_TOOLS=8 ;; esac
-case "$MAX_ROWS"       in ''|*[!0-9]*) MAX_ROWS=2000 ;; esac
-case "$MAX_BYTES"      in ''|*[!0-9]*) MAX_BYTES=33554432 ;; esac
-case "$PRUNE_TTL"      in ''|*[!0-9]*) PRUNE_TTL=604800 ;; esac
-case "$PRUNE_EVERY"    in ''|*[!0-9]*) PRUNE_EVERY=25 ;; esac
+# THE MAGNITUDE HALF WAS MISSING and the shape half cannot stand in for it: a value
+# of 23 nines is all digits, so it passed `*[!0-9]*` untouched and then blew up in
+# `[ "$PRUNE_EVERY" -ge 1 ]`, which is bash reporting `integer expression expected`
+# on a stderr that is still the user's terminal. `???????????*` is 11 `?`, so anything of 11
+# digits or more is out of range and takes the DEFAULT -- not zero, and not a clamp
+# to the ceiling: an out-of-range export is a typo, and the documented default is
+# the only value this header promises. bin/skillforge:327 spells it the same way.
+case "$FIRST_CHARS"    in ''|*[!0-9]*|???????????*) FIRST_CHARS=1200 ;; esac
+case "$RECENT"         in ''|*[!0-9]*|???????????*) RECENT=3 ;; esac
+case "$EACH_CHARS"     in ''|*[!0-9]*|???????????*) EACH_CHARS=400 ;; esac
+case "$MAX_CHARS"      in ''|*[!0-9]*|???????????*) MAX_CHARS=2400 ;; esac
+case "$INTERVAL"       in ''|*[!0-9]*|???????????*) INTERVAL=1200 ;; esac
+case "$SHORT_WORDS"    in ''|*[!0-9]*|???????????*) SHORT_WORDS=6 ;; esac
+case "$STOP_MIN_TOOLS" in ''|*[!0-9]*|???????????*) STOP_MIN_TOOLS=8 ;; esac
+case "$MAX_ROWS"       in ''|*[!0-9]*|???????????*) MAX_ROWS=2000 ;; esac
+case "$MAX_BYTES"      in ''|*[!0-9]*|???????????*) MAX_BYTES=33554432 ;; esac
+case "$PRUNE_TTL"      in ''|*[!0-9]*|???????????*) PRUNE_TTL=604800 ;; esac
+case "$PRUNE_EVERY"    in ''|*[!0-9]*|???????????*) PRUNE_EVERY=25 ;; esac
 [ "$MAX_CHARS" -lt 1 ] && MAX_CHARS=1
 # The emitted text travels in ONE argv element to `jq --arg`. Linux caps a single argv
 # element at MAX_ARG_STRLEN, a hard 131072 bytes that a larger ARG_MAX does not raise, so
@@ -329,69 +336,12 @@ fi
 STORE="$SURFER_ROOT/projects/$slug/prompts.jsonl"
 OVERLAY="$SURFER_ROOT/projects/$slug/overlay.jsonl"
 
-# THE COMMON CASE, and deliberately the cheapest path in the script: no history-surfer
-# store means no mission, and that is true for every user who has not installed it. The
-# hook keeps no fallback capture of its own -- `skillforge doctor` reports the missing
-# dependency instead.
-[ -s "$STORE" ] || exit 0
-[ -n "$sid_raw" ] || exit 0
-
-# ------------------------------------------------------------------- ids and state
-# The session id is sanitised with the IDENTICAL expression every other script in this
-# package uses. 96 characters is far longer than a UUID and safely under NAME_MAX.
-sid="$(printf '%s' "$sid_raw" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
-[ -z "$sid" ] && sid="nosession"
-SDIR="$DIR/$sid"
-
-pid="$pid_raw"
-[ -z "$pid" ] && pid="noprompt"
-pid="$(printf '%s' "$pid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
-
-# Nothing outside this script looks a record up under this digest, so unlike
-# hooks/precompact.sh's `hash_of` it carries no cross-script contract -- but the idiom is
-# the same one, and for the same reason: `awk printf` rather than `print`, because `tr -c`
-# would otherwise fold the trailing newline into the digest.
-hash_of() {
-  if command -v shasum >/dev/null 2>&1; then shasum -a 1
-  elif command -v sha1sum >/dev/null 2>&1; then sha1sum
-  else cksum
-  fi | awk '{printf "%s", $1; exit}' | tr -c 'A-Za-z0-9' '_'
-}
-
-eid=""
-case "$event" in
-  PreToolUse)       eid="$tuid" ;;
-  SubagentStart)    eid="$aid" ;;
-  UserPromptSubmit) eid="$pid_raw" ;;
-  Stop)             eid="$pid_raw" ;;
-  SessionStart)     eid="$pid_raw" ;;
-esac
-# A SessionStart with `source:"resume"` carries no id of any kind. Both wirings receive the
-# SAME payload bytes for one event, so a digest of the payload is a stable event key; a
-# machine with none of the three digest tools falls back to no key, which acts every time
-# rather than never.
-if [ -z "$eid" ]; then
-  eid="$(printf '%s' "$payload" | hash_of 2>/dev/null)"
-fi
-[ -n "$eid" ] && eid="$(printf '%s' "$eid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
-
-# Fail OPEN, like hooks/compound-improvement.sh's reminder claim: `mkdir` failing because
-# the marker exists is a duplicate and must be dropped, while `mkdir` failing for any other
-# reason (a read-only state directory, a full disk) must not silence the mission for the
-# rest of the session. The two are told apart by testing the marker afterwards.
-claim_once() {
-  co_dir="$SDIR/seen"
-  mkdir -p "$co_dir" 2>/dev/null || return 0
-  [ -z "$2" ] && return 0
-  if mkdir "$co_dir/$1-$2" 2>/dev/null; then return 0; fi
-  [ -d "$co_dir/$1-$2" ] && return 1
-  return 0
-}
-
 # ------------------------------------------------------------------- prune
-# Sampled, and with ONE call site: the periodic arm's not-yet-due exit, so a sweep is never
-# paid by an event that is about to emit ("PRUNE" and "IT RUNS WHERE NOTHING IS DUE" in the
-# header). It walks ONE level of directories under $DIR and nothing else -- hits.jsonl and
+# Sampled, and with TWO call sites, neither of which is about to emit anything: the
+# periodic arm's not-yet-due exit, and the missing-store exit above ("PRUNE" and "IT RUNS
+# WHERE NOTHING IS DUE" in the header). The second one is what sweeps a project whose store
+# has gone away, which the first can never reach because the script has already exited.
+# It walks ONE level of directories under $DIR and nothing else -- hits.jsonl and
 # the `.hits.XXXXXX` a trim leaves behind are files, which the directory-only glob never
 # lists, and $ROOT's other trees are siblings of $DIR and out of reach by construction.
 #
@@ -437,6 +387,96 @@ prune_stale_sessions() {
   return 0
 }
 
+# ------------------------------------------------------------------- ids and state
+# ONE sanitising site, called from two places: here and the missing-store exit below, which
+# sweeps before it leaves. Duplicating the expression is how the two spellings of an id
+# that .claude/CLAUDE.md warns about get made, so the second caller calls this instead.
+#
+# The session id is sanitised with the IDENTICAL expression every other script in this
+# package uses. 96 characters is far longer than a UUID and safely under NAME_MAX. `.` and
+# `..` are inside that character class, so the sanitiser passes them through unchanged and
+# `$DIR/$sid` then names $DIR itself or its PARENT -- the state root, beside ledger.jsonl.
+# The guard is one line, byte-identical in every script here that keys on an id, and it
+# subsumes the `nosession` default this block used to carry: every caller has already
+# tested `sid_raw`, so the '' arm is the belt.
+set_sdir() {
+  sid="$(printf '%s' "$sid_raw" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$sid" in ''|.|..) sid=_ ;; esac
+  SDIR="$DIR/$sid"
+}
+
+# THE COMMON CASE, and deliberately the cheapest path in the script: no history-surfer
+# store means no mission, and that is true for every user who has not installed it. The
+# hook keeps no fallback capture of its own -- `skillforge doctor` reports the missing
+# dependency instead.
+#
+# IT SWEEPS BEFORE IT LEAVES, because <state>/mission/<sid>/ OUTLIVES the store. A project
+# whose history-surfer store is deleted, moved, or renamed under it exits here on every
+# event afterwards, and until this branch existed that meant its session trees -- one byte
+# per tool call and one empty directory per claimed event -- were never swept again by
+# anything. `[ -d "$DIR" ]` is a shell builtin and the sweep is sampled behind it, so the
+# user who never installed history-surfer, and therefore has no $DIR either, still reaches
+# `exit 0` with no process start on this path at all: that is what
+# tests/test_mission.py::CostTest measures and it is unchanged.
+if [ ! -s "$STORE" ]; then
+  if [ -d "$DIR" ] && [ -n "$sid_raw" ]; then
+    set_sdir
+    prune_stale_sessions
+  fi
+  exit 0
+fi
+[ -n "$sid_raw" ] || exit 0
+set_sdir
+
+pid="$pid_raw"
+[ -z "$pid" ] && pid="noprompt"
+pid="$(printf '%s' "$pid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$pid" in ''|.|..) pid=_ ;; esac
+
+# Nothing outside this script looks a record up under this digest, so unlike
+# hooks/precompact.sh's `hash_of` it carries no cross-script contract -- but the idiom is
+# the same one, and for the same reason: `awk printf` rather than `print`, because `tr -c`
+# would otherwise fold the trailing newline into the digest.
+hash_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 1
+  elif command -v sha1sum >/dev/null 2>&1; then sha1sum
+  else cksum
+  fi | awk '{printf "%s", $1; exit}' | tr -c 'A-Za-z0-9' '_'
+}
+
+eid=""
+case "$event" in
+  PreToolUse)       eid="$tuid" ;;
+  SubagentStart)    eid="$aid" ;;
+  UserPromptSubmit) eid="$pid_raw" ;;
+  Stop)             eid="$pid_raw" ;;
+  SessionStart)     eid="$pid_raw" ;;
+esac
+# A SessionStart with `source:"resume"` carries no id of any kind. Both wirings receive the
+# SAME payload bytes for one event, so a digest of the payload is a stable event key; a
+# machine with none of the three digest tools falls back to no key, which acts every time
+# rather than never.
+if [ -z "$eid" ]; then
+  eid="$(printf '%s' "$payload" | hash_of 2>/dev/null)"
+fi
+if [ -n "$eid" ]; then
+  eid="$(printf '%s' "$eid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$eid" in ''|.|..) eid=_ ;; esac
+fi
+
+# Fail OPEN, like hooks/compound-improvement.sh's reminder claim: `mkdir` failing because
+# the marker exists is a duplicate and must be dropped, while `mkdir` failing for any other
+# reason (a read-only state directory, a full disk) must not silence the mission for the
+# rest of the session. The two are told apart by testing the marker afterwards.
+claim_once() {
+  co_dir="$SDIR/seen"
+  mkdir -p "$co_dir" 2>/dev/null || return 0
+  [ -z "$2" ] && return 0
+  if mkdir "$co_dir/$1-$2" 2>/dev/null; then return 0; fi
+  [ -d "$co_dir/$1-$2" ] && return 1
+  return 0
+}
+
 # ------------------------------------------------------------------- the turn's tool count
 # Counting happens on EVERY PreToolUse, delivery or not, so its claim is taken here rather
 # than beside the delivery claim: they are two different actions and one must not consume
@@ -445,7 +485,7 @@ prune_stale_sessions() {
 if [ "$event" = "PreToolUse" ]; then
   if claim_once "count" "$eid"; then
     if mkdir -p "$SDIR/tools" 2>/dev/null; then
-      printf 'x' >> "$SDIR/tools/$pid" 2>/dev/null || :
+      printf 'x' 2>/dev/null >> "$SDIR/tools/$pid" || :
     fi
   fi
 fi
@@ -493,9 +533,11 @@ case "$event" in
         # periodic arm for the rest of the session.
         d=$(( now - last_st ))
         [ "$d" -lt 0 ] && d=$(( 0 - d ))
-        # The sweep's one call site: this event delivers nothing, and it is the most
-        # frequent one this hook sees. An event that IS due falls through to the render
-        # with no `stat` in front of it.
+        # One of the sweep's TWO call sites: this event delivers nothing, and it is the
+        # most frequent one this hook sees. An event that IS due falls through to the
+        # render with no `stat` in front of it. The other site is the early return taken
+        # when the prompt store is absent -- without it, a machine with no history-surfer
+        # left before reaching the sweep and its session trees were never swept at all.
         [ "$d" -gt "$INTERVAL" ] || { prune_stale_sessions; exit 0; }
         moment="periodic"
         ;;
@@ -761,11 +803,13 @@ printf '%s\n' "$now" > "$SDIR/last" 2>/dev/null || :
 # backslash.
 aid_json="null"
 if [ -n "$aid" ]; then
-  aid_json="\"$(printf '%s' "$aid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)\""
+  aid_safe="$(printf '%s' "$aid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$aid_safe" in ''|.|..) aid_safe=_ ;; esac
+  aid_json="\"$aid_safe\""
 fi
 mkdir -p "$DIR" 2>/dev/null || :
 printf '{"ts":%s,"session":"%s","moment":"%s","agent_id":%s,"chars":%s,"prompt_count":%s}\n' \
-  "$now" "$sid" "$moment" "$aid_json" "$MCHARS" "$NPROMPTS" >> "$HITS" 2>/dev/null || :
+  "$now" "$sid" "$moment" "$aid_json" "$MCHARS" "$NPROMPTS" 2>/dev/null >> "$HITS" || :
 
 # Bounded on write as well as on read, the way hooks/remind.sh bounds its hits log: one
 # `wc` per DELIVERY, never per event, and the rewrite goes through a `mktemp` in the log's

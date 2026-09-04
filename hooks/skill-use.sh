@@ -99,6 +99,7 @@ sid="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)"
 # NAME_MAX makes each of those fail with ENAMETOOLONG. The two MUST stay in agreement or
 # one of them claims events under a name the other never looks at.
 sid_safe="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sid_safe" in ''|.|..) sid_safe=_ ;; esac
 
 tuid="$(printf '%s' "$payload" | jq -r '.tool_use_id // empty' 2>/dev/null)"
 cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)"
@@ -111,6 +112,7 @@ transcript="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/
 # does carry one still cannot land twice.
 if [ -n "$tuid" ]; then
   claim_id="$(printf '%s' "$tuid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$claim_id" in ''|.|..) claim_id=_ ;; esac
   claim_dir="$STATE_DIR/$sid_safe.seen"
   if mkdir -p "$claim_dir" 2>/dev/null; then
     if ! mkdir "$claim_dir/use-$claim_id" 2>/dev/null; then

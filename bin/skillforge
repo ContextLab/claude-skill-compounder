@@ -1113,7 +1113,7 @@ ledger_close_line() { # <closed record file> <event>
 # and not `echo`: a name of `-n` or `-e` is otherwise eaten by the builtin.
 safe_name() { # <name>
   sn="$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
-  [ -n "$sn" ] || sn="_"
+  case "$sn" in ''|.|..) sn=_ ;; esac
   printf '%s' "$sn"
 }
 
@@ -2172,7 +2172,9 @@ case "$cmd" in
     # Most forges genuinely have no lineage: nothing queued them, somebody just saw the
     # pattern. That is a fact about the forge, not a gap to be filled with a guess.
     if [ -n "$FROM_ID" ]; then
+      # A lineage id becomes a path component -- it names a directory under the state root the moment anything keys on it -- and '.' and '..' are the two names that are not names. They are inside [A-Za-z0-9._-], so the character-class check below passes them; this arm is the reason a space is refused and they are too.
       case "$FROM_ID" in
+        .|..) die "--from cannot be '.' or '..' (got '$FROM_ID')." ;;
         *[!A-Za-z0-9._-]*) die "--from takes a lineage id of [A-Za-z0-9._-] only (got '$FROM_ID'). \`skillinsight promote\` prints one; \`skillnote list --json\` carries it as .candidate." ;;
       esac
       [ "${#FROM_ID}" -le 64 ] || die "--from id is longer than 64 characters"
@@ -2788,6 +2790,15 @@ SLOTS
       esac
     done
     [ -n "$v_name" ] || die "usage: skillforge $cmd --name <skill> ..."
+    # The SAME refusal `start --from` applies, and it was missing here entirely:
+    # `origin` is the other command that takes a lineage id from the caller.
+    if [ -n "$v_from" ]; then
+      case "$v_from" in
+        .|..) die "--from cannot be '.' or '..' (got '$v_from')." ;;
+        *[!A-Za-z0-9._-]*) die "--from takes a lineage id of [A-Za-z0-9._-] only (got '$v_from'). \`skillinsight promote\` prints one; \`skillnote list --json\` carries it as .candidate." ;;
+      esac
+      [ "${#v_from}" -le 64 ] || die "--from id is longer than 64 characters"
+    fi
 
     case "$cmd" in
       origin)

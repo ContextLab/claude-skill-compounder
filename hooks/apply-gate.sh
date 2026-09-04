@@ -240,6 +240,7 @@ event="$(jqr '.hook_event_name // empty')"
 sid_raw="$(jqr '.session_id // empty')"
 [ -n "$sid_raw" ] || exit 0
 sid="$(printf '%s' "$sid_raw" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sid" in ''|.|..) sid=_ ;; esac
 
 # This script's own clock. Every other script here has one, and pinning a different
 # script's does nothing to this one -- that is why the list in .claude/CLAUDE.md exists.
@@ -388,6 +389,7 @@ mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 pid="$(jqr '.prompt_id // empty')"
 [ -z "$pid" ] && pid="noprompt"
 pid="$(printf '%s' "$pid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$pid" in ''|.|..) pid=_ ;; esac
 mkdir "$STATE_DIR/$sid.$pid.turn" 2>/dev/null || exit 0
 
 # Claim markers are small, but a long-lived state root should not keep them forever.

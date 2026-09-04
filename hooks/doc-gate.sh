@@ -509,6 +509,7 @@ sid="$(jqr '.session_id // empty')"
 # the double delivery then goes through both. Truncation matters as well as the character
 # class -- a session id longer than NAME_MAX makes every state write fail ENAMETOOLONG.
 sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sid" in ''|.|..) sid=_ ;; esac
 
 cwd="$(jqr '.cwd // empty')"
 
@@ -979,6 +980,7 @@ if [ -n "$ov_kind" ]; then
   eid="$(jqr '.tool_use_id // .prompt_id // empty')"
   [ -z "$eid" ] && eid="ck$(printf '%s%s' "$cmd" "$head_sha" | cksum 2>/dev/null | tr -c 'A-Za-z0-9' '_')"
   eid="$(printf '%s' "$eid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$eid" in ''|.|..) eid=_ ;; esac
   mkdir -p "$STATE_DIR/claims" 2>/dev/null || exit 0
   claim="$STATE_DIR/claims/$sid.$eid"
   mkdir "$claim" 2>/dev/null || exit 0

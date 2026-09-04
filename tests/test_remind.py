@@ -986,5 +986,110 @@ class CostTest(RemindCase):
         self.timed("PreToolUse/Bash", self.bash("gh pr list"))
 
 
+# ==================================================================== ids that are not names
+class UnsafeSessionIdTest(RemindCase):
+    """`.` and `..` are inside `A-Za-z0-9._-`, so the sanitiser passes them through.
+
+    This hook keys its per-session claims and its cooldown stamps on `<state>/remind/<sid>/`
+    and `<sid>.seen/`, and `prune_stale_sessions()` walks one level under `<state>/remind/`.
+    With `sid` = `.` the stamps land in `<state>/remind/` itself; with `..` they land in the
+    STATE ROOT, beside reminders.jsonl and ledger.jsonl. One guard line, spelled the same
+    way in every script here, maps all three unsafe names to `_`.
+    """
+
+    def setUp(self):
+        RemindCase.setUp(self)
+        self.write_rows(self.row("r1", "The lesson.", keywords=["widget"]))
+
+    def remind_dir(self):
+        return os.path.join(self.state, "remind")
+
+    def test_a_session_id_of_dot_keys_its_state_under_the_safe_name(self):
+        self.context_of(self.run_hook(self.prompt("the widget again", session=".")))
+        rd = self.remind_dir()
+        self.assertTrue(os.path.isdir(os.path.join(rd, "_"))
+                        or os.path.isdir(os.path.join(rd, "_.seen")),
+                        "nothing was keyed under the safe name: %r" % sorted(os.listdir(rd)))
+        # `hits.jsonl` is the only file this hook writes directly into <state>/remind/.
+        for name in sorted(os.listdir(rd)):
+            self.assertTrue(name in ("hits.jsonl", "_", "_.seen") or name.startswith(".hits."),
+                            "`.` put %r straight into <state>/remind/" % name)
+
+    def test_a_session_id_of_dotdot_writes_nothing_into_the_state_root(self):
+        before = sorted(os.listdir(self.state))
+        self.context_of(self.run_hook(self.prompt("the widget again", session="..")))
+        after = sorted(os.listdir(self.state))
+        self.assertEqual(after, sorted(set(before) | {"remind"}),
+                         "`..` put something in the state root: %r -> %r" % (before, after))
+
+    def test_the_hits_row_carries_the_guarded_name(self):
+        self.context_of(self.run_hook(self.prompt("the widget again", session="..")))
+        rows = self.hit_rows()
+        self.assertTrue(rows)
+        self.assertEqual(rows[-1]["session"], "_")
+
+    def test_the_dot_session_is_still_deduplicated_against_itself(self):
+        """The claim has to work under the safe name too, or the guard would have traded
+        one defect for the double delivery this hook exists to survive."""
+        first = self.run_hook(self.prompt("the widget again", session=".", pid="pX"))
+        self.context_of(first)
+        second = self.run_hook(self.prompt("the widget again", session=".", pid="pX"))
+        self.assert_silent(second)
+
+
+# ==================================================================== a log that will not open
+class AppendFailureTest(RemindCase):
+    """`2>/dev/null` after a `>>` silences the COMMAND, not the shell's failure to OPEN
+    the append -- which the shell reports itself, before the later redirection applies.
+    Measured with a directory in place of the log: the wrong order prints
+    "bash: hits.jsonl: Is a directory" onto the user's terminal from inside a hook."""
+
+    def test_a_delivery_whose_hits_log_is_a_directory_is_silent_on_stderr(self):
+        self.write_rows(self.row("r1", "The lesson.", keywords=["widget"]))
+        os.makedirs(self.hits)
+        r = self.run_hook(self.prompt("the widget again"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "",
+                         "the shell's redirection failure reached the user: %r" % r.stderr)
+        self.context_of(r)
+
+    def test_the_same_holds_for_the_row_that_carries_a_candidate(self):
+        """The other append: the two `printf` calls differ only by the lineage field."""
+        self.write_rows(dict(self.row("r1", "The lesson.", keywords=["widget"]),
+                             candidate="c12345678"))
+        os.makedirs(self.hits)
+        r = self.run_hook(self.prompt("the widget again"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "", r.stderr)
+
+
+# ==================================================================== knobs out of range
+class KnobMagnitudeTest(RemindCase):
+    """23 nines is all digits, so `*[!0-9]*` passed it and `[ "$MAX" -lt 1 ]` printed
+    `integer expression expected` on the user's stderr from a hook. Out of range takes the
+    documented DEFAULT; the shape guard alone could never have caught it."""
+
+    HUGE = "99999999999999999999999"
+
+    def test_every_remind_knob_refuses_a_value_that_large(self):
+        self.write_rows(self.row("r1", "The lesson.", keywords=["widget"]))
+        for knob in ("REMIND_MAX", "REMIND_COOLDOWN", "REMIND_MAX_ROWS",
+                     "REMIND_PRUNE_TTL", "REMIND_PRUNE_EVERY"):
+            r = self.run_hook(self.prompt("the widget again", session="s-" + knob),
+                              **{knob: self.HUGE})
+            self.assertEqual(r.returncode, 0, "%s: %s" % (knob, r.stderr))
+            self.assertEqual(r.stderr, "", "%s=%s printed: %r" % (knob, self.HUGE, r.stderr))
+            self.assertTrue(r.stdout.strip(),
+                            "%s=%s silenced the reminder instead of taking the default"
+                            % (knob, self.HUGE))
+
+    def test_a_ten_digit_value_is_still_in_range(self):
+        """Non-vacuity: 11 `?` rejects eleven digits, not ten."""
+        self.write_rows(self.row("r1", "The lesson.", keywords=["widget"]))
+        r = self.run_hook(self.prompt("the widget again"), REMIND_PRUNE_TTL="9999999999")
+        self.assertEqual(r.stderr, "", r.stderr)
+        self.assertTrue(r.stdout.strip())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

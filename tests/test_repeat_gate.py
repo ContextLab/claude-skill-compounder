@@ -1654,11 +1654,14 @@ class CliTest(GateCase):
                     {"t": "fail", "ts": 6, "sig": "cSxS-eSxS", "ck": "cSxS", "ec": "?",
                      "tool": "Bash", "norm": "many --sessions", "cmd": "many --sessions",
                      "err": "e", "session": "many%d" % i, "tuid": "tm%d" % i}) + "\n")
-            # LESSON at ITS widest, `dismissed`, which needs a dismiss row for a signature
-            # already in the table. Appended rather than run through the CLI because the
-            # signature is one this test synthesised in the first place.
+            # LESSON at ITS widest, which is `dismissed-by-model` since 2026-09-04 and
+            # therefore needs a dismiss row whose `actor` is `model`. Appended rather than
+            # run through the CLI because the signature is one this test synthesised in
+            # the first place; tests/test_skillrepeat.py::DismissActorTest is where the
+            # real CLI writes that field.
             fh.write(json.dumps({"t": "dismiss", "ts": 7, "sig": widest_sig,
-                                 "session": "cli", "why": "known"}) + "\n")
+                                 "session": "cli", "why": "known",
+                                 "actor": "model"}) + "\n")
         self.assertGreater(len(long_tool), len("TOOL"))
         self.assertGreater(len(str(sess_count)), len("SESS"))
 
@@ -2444,6 +2447,15 @@ class EligibleDoorTest(GateCase):
         ("python3 -m pytest tests/", "exempt-runner"),
         ("skillrepeat forget c1x1-e1x1", "exempt-cli"),
         ("gh pr list && skillrepeat list", "exempt-cli"),
+        # EVERY SEGMENT'S HEAD, not the first word. The first two are the red team's own
+        # repros of 2026-09-04; the rest are the shapes the split must NOT cost.
+        ("cd build && tar -xf ../release.tgz", "eligible"),
+        ("true && tar -xf ../release.tgz", "eligible"),
+        ("gh issue view 19 | jq .", "eligible"),
+        ("cd repo && ./run_tests.sh", "exempt-runner"),
+        ('git commit -m "fix a && tar -xf x"', "exempt-allowlist"),
+        ("ls -la 2>&1 | head -20", "exempt-allowlist"),
+        ("pwd; echo ---; ls -la", "exempt-allowlist"),
     ]
 
     def door(self, command, tool="Bash", **env_extra):
@@ -2912,8 +2924,14 @@ class SameToolBindingTest(GateCase):
         names = [n for n in os.listdir(markers) if n.startswith("s-")]
         self.assertEqual(len(names), 1, names)
         stored = open(os.path.join(markers, names[0]), encoding="utf-8").read()
-        self.assertEqual(stored, first,
-                         "the stored statement drifted from the one the session was told")
+        # THE MARKER HOLDS THE FACTS, and the statement the session was told is those
+        # facts plus a command block appended at the emit site -- the deny appends a
+        # different one (THE FACTS ARE SHARED; THE COMMAND BLOCK IS NOT, in the hook). So
+        # what must not have drifted is the PREFIX, and `first` was captured before the
+        # second binding, which is what makes this "first binding wins".
+        self.assertGreater(len(stored), 100, stored)
+        self.assertEqual(stored, first[:len(stored)],
+                         "the stored facts drifted from the ones the session was told")
 
     def test_every_signature_a_success_bound_gets_its_own_marker(self):
         """DEFECT: the marker was written once, after the loop, for the FIRST bound
@@ -3199,21 +3217,70 @@ class LessonGateTest(GateCase):
         self.assertIn("No lesson references this signature yet", reason)
         return reason
 
+    def dismiss_rows(self):
+        return [r for r in self.rows() if r.get("t") == "dismiss"]
+
     # ------------------------------------------------------------------ the rule
     def test_the_first_session_is_told_and_not_refused(self):
         self.fail_then_fix("s1")
         self.assert_allowed(self.probe("s1"))
 
-    def test_the_second_session_is_refused(self):
+    def test_the_session_after_two_earlier_ones_is_refused(self):
+        """REPEAT_MIN_SESSIONS counts EARLIER sessions, so s1 and s2 are the two the
+        default wants and s3 is the one that binds a recovery and gets refused."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        reason = self.assert_lesson_deny(self.probe("s2"))
+        self.fail_then_fix("s3")
+        reason = self.assert_lesson_deny(self.probe("s3"))
         self.assertIn("gh pr list --limit <N>", reason)
         self.assertIn("gh: command not found", reason)
         self.assertIn("--repo ContextLab/claude-skill-compounder", reason)
         self.assertIn("skillnote add --lesson %s" % self.sig(), reason)
-        self.assertIn("skillrepeat dismiss %s" % self.sig(), reason)
-        self.assertIn("lifts the moment either command has been run", reason)
+        self.assertIn("EARLIER sessions", reason)
+
+    def test_the_deny_names_no_way_out_but_the_lesson(self):
+        """MEASURED, 2026-09-04: both of two fresh sessions this gate refused answered by
+        running `skillrepeat dismiss <sig> --why "<a reason they invented>"` and carrying
+        on. The deny had printed its own escape. It no longer names one -- the FIRST-TIME
+        statement still does, because that one is addressed to a person reading their own
+        transcript, and the assertion below is what keeps the two apart."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        reason = self.assert_lesson_deny(self.probe("s3"))
+        self.assertNotIn("dismiss", reason,
+                         "the deny still advertises a dismissal:\n" + reason)
+        self.assertIn("skillnote add --lesson", reason)
+
+    # ---------------------------------------------------- THIS session never counts
+    def test_one_earlier_session_plus_this_one_is_not_enough(self):
+        """BOOTSTRAP DEADLOCK guard 1, which this arm did not honour until 2026-09-04:
+        its count included the current session, so at the default of 2 a signature that
+        had failed in ONE earlier session was refused. s1 is that one earlier session and
+        s2 is the session in front of the gate."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_allowed(self.probe("s2"))
+
+    def test_two_earlier_sessions_are(self):
+        """NON-VACUITY for the test above: the identical fixture with one more earlier
+        session IS refused, so what the previous test asserts is the threshold and not a
+        gate that never fires."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3"))
+
+    def test_the_fail_rows_this_session_wrote_are_the_ones_dropped(self):
+        """Sharper than the pair above: s1 and s2 both fail, and the session in front of
+        the gate is s2 -- which has TWO distinct sessions in the store and one of them is
+        its own. Counting rows rather than EARLIER sessions would refuse here."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        sessions = {r["session"] for r in self.rows() if r["t"] == "fail"}
+        self.assertEqual(sessions, {"s1", "s2"},
+                         "the fixture did not record two sessions: %r" % sessions)
+        self.assert_allowed(self.probe("s2"))
 
     def test_a_session_that_recovered_nothing_is_never_refused(self):
         """The gate is keyed on a recovery bound in THIS session, so a session that only
@@ -3225,11 +3292,21 @@ class LessonGateTest(GateCase):
         self.assert_allowed(self.probe("s3"))
 
     def test_the_threshold_is_REPEAT_MIN_SESSIONS(self):
+        """At 3 the gate wants three EARLIER sessions, so s3 -- which has only s1 and s2
+        behind it -- is still allowed and s4 is the first one refused."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.assert_allowed(self.probe("s2", REPEAT_MIN_SESSIONS=3))
         self.fail_then_fix("s3")
-        self.assert_lesson_deny(self.probe("s3", REPEAT_MIN_SESSIONS=3))
+        self.assert_allowed(self.probe("s3", REPEAT_MIN_SESSIONS=3))
+        self.fail_then_fix("s4")
+        self.assert_lesson_deny(self.probe("s4", REPEAT_MIN_SESSIONS=3))
+
+    def test_REPEAT_MIN_SESSIONS_1_refuses_on_the_second_occurrence(self):
+        """The spelling of "refuse on the second occurrence" after the current session
+        stopped counting itself: one earlier session, one recovery bound here."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_lesson_deny(self.probe("s2", REPEAT_MIN_SESSIONS=1))
 
     # ------------------------------------------------------------------ what lifts it
     def write_lesson_row(self, sig, note_id="n1x1"):
@@ -3261,16 +3338,18 @@ class LessonGateTest(GateCase):
     def test_a_lesson_ledger_row_lifts_it(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.write_lesson_row(self.sig())
-        self.assert_allowed(self.probe("s2"))
+        self.assert_allowed(self.probe("s3"))
 
     def test_a_ledger_row_for_another_signature_does_not_lift_it(self):
         """NON-VACUITY: the reader matches on the signature and not on the presence of a
         ledger. A row that names something else leaves the refusal exactly where it was."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.write_lesson_row("c1x1-e1x1")
-        self.assert_lesson_deny(self.probe("s2"))
+        self.assert_lesson_deny(self.probe("s3"))
 
     def test_a_withdrawn_lesson_is_not_a_standing_one(self):
         """The ledger is append-only on both sides: `skillnote remove <id>` appends a
@@ -3279,18 +3358,20 @@ class LessonGateTest(GateCase):
         from the CLAUDE.md it was meant to be read from."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.write_lesson_row(self.sig(), note_id="n7x7")
         self.tick()
         self.write_lesson_removal("n7x7")
-        self.assert_lesson_deny(self.probe("s2"))
+        self.assert_lesson_deny(self.probe("s3"))
 
     def test_a_removal_of_a_different_note_leaves_the_lesson_standing(self):
         """NON-VACUITY: the subtraction is by id, not by the presence of any removal."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.write_lesson_row(self.sig(), note_id="n7x7")
         self.write_lesson_removal("n8x8")
-        self.assert_allowed(self.probe("s2"))
+        self.assert_allowed(self.probe("s3"))
 
     def test_a_lesson_withdrawn_after_the_gate_saw_it_does_not_re_arm_this_session(self):
         """A LIMIT, ASSERTED RATHER THAN LEFT TO BE DISCOVERED, and it is the price of the
@@ -3303,45 +3384,98 @@ class LessonGateTest(GateCase):
         the next session does not offer again."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.write_lesson_row(self.sig(), note_id="n7x7")
-        self.assert_allowed(self.probe("s2", command="npm install a"))
+        self.assert_allowed(self.probe("s3", command="npm install a"))
         self.tick()
         self.write_lesson_removal("n7x7")
-        self.assert_allowed(self.probe("s2", command="npm install b"))
+        self.assert_allowed(self.probe("s3", command="npm install b"))
         # ...and the next session that recovers it is armed again, so this is a delay and
         # not a hole.
-        self.fail_then_fix("s3")
-        self.assert_lesson_deny(self.probe("s3", command="npm install c"))
+        self.fail_then_fix("s4")
+        self.assert_lesson_deny(self.probe("s4", command="npm install c"))
 
     def test_a_row_with_no_action_field_is_read_as_an_add(self):
         """Rows written before `action` existed carry none, and dropping them would
         silently un-record every lesson recorded before that field landed."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         path = os.path.join(self.state, "ledger.jsonl")
         os.makedirs(self.state, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"event": "note", "ts": 1, "id": "nOld",
                                  "lesson_sig": self.sig(),
                                  "text": "an older row"}) + "\n")
-        self.assert_allowed(self.probe("s2"))
+        self.assert_allowed(self.probe("s3"))
 
     def test_a_note_row_with_no_lesson_sig_does_not_lift_it(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         path = os.path.join(self.state, "ledger.jsonl")
         os.makedirs(self.state, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"event": "note", "action": "add", "ts": 1,
                                  "text": "an ordinary note"}) + "\n")
-        self.assert_lesson_deny(self.probe("s2"))
+        self.assert_lesson_deny(self.probe("s3"))
 
-    def test_skillrepeat_dismiss_lifts_it(self):
+    def test_a_dismissal_from_a_terminal_lifts_it(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         r = self.run_cli("dismiss", self.sig(), "--why", "gh is not installed here")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assert_allowed(self.probe("s2"))
+        self.assertEqual(self.dismiss_rows()[0]["actor"], "human")
+        self.assert_allowed(self.probe("s3"))
+
+    def test_a_dismissal_a_model_wrote_lifts_nothing(self):
+        """The refusal is not free any more. `CLAUDECODE` is exported into every Bash
+        tool call, so this is the environment the command really runs in when a session
+        reaches for it -- driven through the REAL CLI, and the row is read back off the
+        store before the gate is asked again."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        r = self.run_cli("dismiss", self.sig(), "--why", "not a real problem",
+                         CLAUDECODE=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = self.dismiss_rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["actor"], "model")
+        self.assert_lesson_deny(self.probe("s3"))
+
+    def test_a_model_dismissal_is_still_written_down(self):
+        """It is refused as an ESCAPE and kept as EVIDENCE. A gate that dropped the row
+        would hide what the session tried to do, which is the fact worth having."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.run_cli("dismiss", self.sig(), "--why", "invented", CLAUDECODE=1)
+        listed = self.run_cli("list", "--all").stdout
+        self.assertIn("dismissed-by-model", listed, listed)
+
+    def test_a_human_dismissal_after_a_model_one_still_lifts_it(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.run_cli("dismiss", self.sig(), "--why", "invented", CLAUDECODE=1)
+        self.tick()
+        self.run_cli("dismiss", self.sig(), "--why", "gh really is missing",
+                     SKILLREPEAT_NOW=self.clock)
+        self.assert_allowed(self.probe("s3"))
+
+    def test_a_dismiss_row_from_before_the_actor_field_lifts_it(self):
+        """Append-only: rows written before `actor` existed carry none. They predate the
+        model path entirely, so there is nothing in them to tell apart and they are read
+        as human -- by this gate and by bin/skillrepeat, with the identical expression."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        with open(self.store, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"t": "dismiss", "ts": self.clock, "sig": self.sig(),
+                                 "session": "cli", "why": "older row"}) + "\n")
+        self.assert_allowed(self.probe("s3"))
 
     def test_a_dismissal_suppresses_nothing_it_only_ends_the_demand(self):
         """`dismiss` is not `forget`. Every count the store reports is identical before
@@ -3357,62 +3491,137 @@ class LessonGateTest(GateCase):
     def test_a_tombstone_takes_the_count_below_the_threshold(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.tick()
         r = self.run_cli("forget", self.sig(), SKILLREPEAT_NOW=self.clock)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assert_allowed(self.probe("s2"))
+        self.assert_allowed(self.probe("s3"))
 
     # ------------------------------------------------------------------ and it lets go
     def test_it_is_capped_at_REPEAT_LESSON_MAX_DENIES(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.assert_lesson_deny(self.probe("s2", command="npm install a"))
-        self.assert_lesson_deny(self.probe("s2", command="npm install b"))
-        self.assert_allowed(self.probe("s2", command="npm install c"))
-        self.assert_allowed(self.probe("s2", command="npm install d"))
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3", command="npm install a"))
+        self.assert_lesson_deny(self.probe("s3", command="npm install b"))
+        self.assert_allowed(self.probe("s3", command="npm install c"))
+        self.assert_allowed(self.probe("s3", command="npm install d"))
 
     def test_the_cap_is_configurable(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.assert_lesson_deny(self.probe("s2", command="npm install a",
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3", command="npm install a",
                                            REPEAT_LESSON_MAX_DENIES=1))
-        self.assert_allowed(self.probe("s2", command="npm install b",
+        self.assert_allowed(self.probe("s3", command="npm install b",
                                        REPEAT_LESSON_MAX_DENIES=1))
 
     def test_a_cap_of_zero_refuses_nothing(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.assert_allowed(self.probe("s2", REPEAT_LESSON_MAX_DENIES=0))
+        self.fail_then_fix("s3")
+        self.assert_allowed(self.probe("s3", REPEAT_LESSON_MAX_DENIES=0))
 
     def test_a_double_delivered_pretooluse_refuses_once_and_spends_one(self):
         """Both wirings deliver the same event twice. Two refusals for one call is the
         outcome ranked worse than a missed one, and a duplicate must not eat the budget."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.tick()
-        p = self.attempt("npm install left-pad", "s2", tuid="toolu_dup")
+        p = self.attempt("npm install left-pad", "s3", tuid="toolu_dup")
         self.assert_lesson_deny(self.run_hook(p))
         self.assert_allowed(self.run_hook(p))
         # ...and the second delivery did not spend the second refusal.
-        self.assert_lesson_deny(self.probe("s2", command="npm install other"))
+        self.assert_lesson_deny(self.probe("s3", command="npm install other"))
 
     # ------------------------------------------------------------------ what it spares
     def test_the_two_commands_that_lift_it_are_never_themselves_refused(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         for command in ('skillnote add --lesson %s "gh is missing"' % self.sig(),
                         "skillrepeat dismiss %s --why x" % self.sig(),
                         "bash -c 'skillnote list' && echo ok"):
-            self.assert_allowed(self.probe("s2", command=command))
+            self.assert_allowed(self.probe("s3", command=command))
 
     def test_the_head_allowlists_are_honoured(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         for command in ("cd /tmp", "git status", "ls -la", "jq . x.json",
                         "./run_tests.sh", "pytest tests/", "npm test"):
-            self.assert_allowed(self.probe("s2", command=command))
+            self.assert_allowed(self.probe("s3", command=command))
         # NON-VACUITY: the same session, one command off both lists, is refused.
-        self.assert_lesson_deny(self.probe("s2", command="npm install left-pad"))
+        self.assert_lesson_deny(self.probe("s3", command="npm install left-pad"))
+
+    def test_a_compound_command_does_not_smuggle_a_head_past_the_allowlist(self):
+        """THE SAME FUNCTION, ASKED BY THE OTHER ARM. The lesson gate ships ON, so this
+        is the arm the red team of 2026-09-04 was actually driving when it got
+        `cd build && tar -xf ../release.tgz` through on its fifth attempt."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        for command in ("cd build && tar -xf ../release.tgz",
+                        "true && tar -xf ../release.tgz",
+                        "cat x.tgz | tar -xf -"):
+            self.assert_lesson_deny(self.probe("s3", command=command,
+                                               REPEAT_LESSON_MAX_DENIES=99))
+        # ...and the shapes the split must not cost are still allowed, by the same call.
+        for command in ("cd /tmp && ls -la", "git commit -m 'a && b'",
+                        "cd repo && ./run_tests.sh", "ls 2>&1 | head"):
+            self.assert_allowed(self.probe("s3", command=command,
+                                           REPEAT_LESSON_MAX_DENIES=99))
+
+    def test_a_compound_command_reaching_for_the_recording_CLI_still_runs(self):
+        """Guard 4 is a SUBSTRING over the whole command and the split does not touch it,
+        which is what keeps `cd repo && skillnote add --lesson ...` runnable: the one
+        command the deny prints has to work from wherever the session is standing."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        for command in ('cd repo && skillnote add --lesson %s "gh is missing"' % self.sig(),
+                        "cd repo && skillrepeat show %s" % self.sig()):
+            self.assert_allowed(self.probe("s3", command=command))
+
+    def test_the_deny_does_not_advertise_its_own_expiry(self):
+        """MEASURED, 2026-09-04: the reason ended "It is spent at most 2 times on one
+        signature in one session, after which the call goes through whatever this store
+        says", and a session read that as a schedule -- it retried until the budget ran
+        out and wrote no lesson at all. A refusal that advertises its expiry is an
+        instruction to wait it out.
+
+        Asserted on the TEXT BEING IDENTICAL under two different budgets rather than on
+        the absence of a digit, because the reason legitimately carries other numbers --
+        the distinct-session count, an exit code, the signature itself -- and a test that
+        forbade `2` would pass or fail on which of those happened to contain it."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        two = self.assert_lesson_deny(self.probe("s3", command="npm install a",
+                                                 REPEAT_LESSON_MAX_DENIES=2))
+        self.assertEqual(
+            two,
+            self.assert_lesson_deny(self.probe("s3", command="npm install b",
+                                               REPEAT_LESSON_MAX_DENIES=9)),
+            "the reason changes with the budget, so it is naming it:\n" + two)
+        for banned in ("REPEAT_LESSON_MAX_DENIES", "goes through", "spent at most",
+                       "after which"):
+            self.assertNotIn(banned, two,
+                             "the deny still advertises its expiry:\n" + two)
+        # NON-VACUITY: what the reason DOES still say is the refusal and the one command.
+        self.assertIn("Nothing ran and nothing was written", two)
+        self.assertIn("skillnote add --lesson", two)
+
+    def test_the_budget_still_works_while_going_unmentioned(self):
+        """The valve is unchanged; only the advertisement is gone. Two refusals on one
+        signature and the third attempt goes through, exactly as before."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3", command="npm install a"))
+        self.assert_lesson_deny(self.probe("s3", command="npm install b"))
+        self.assert_allowed(self.probe("s3", command="npm install c"))
 
     def test_a_skill_call_is_never_refused_by_it(self):
         """Bash-only, for the reason the repeat arm is Bash-only: neither escape hatch
@@ -3420,8 +3629,9 @@ class LessonGateTest(GateCase):
         exists to promote."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.tick()
-        self.assert_allowed(self.run_hook(self.attempt({"skill": "anything"}, "s2",
+        self.assert_allowed(self.run_hook(self.attempt({"skill": "anything"}, "s3",
                                                        tool="Skill")))
 
     def test_a_call_with_no_tool_use_id_is_not_refused(self):
@@ -3429,8 +3639,9 @@ class LessonGateTest(GateCase):
         produce. The learn arm can afford an unclaimed event and a refusal cannot."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         self.tick()
-        p = self.attempt("npm install left-pad", "s2")
+        p = self.attempt("npm install left-pad", "s3")
         del p["tool_use_id"]
         self.assert_allowed(self.run_hook(p))
 
@@ -3460,22 +3671,25 @@ class LessonGateTest(GateCase):
     def test_REPEAT_LESSON_GATE_0_refuses_nothing(self):
         self.fail_then_fix("s1", REPEAT_LESSON_GATE=0)
         self.fail_then_fix("s2", REPEAT_LESSON_GATE=0)
-        self.assert_allowed(self.probe("s2", REPEAT_LESSON_GATE=0))
+        self.fail_then_fix("s3", REPEAT_LESSON_GATE=0)
+        self.assert_allowed(self.probe("s3", REPEAT_LESSON_GATE=0))
 
     def test_only_the_literal_zero_switches_it_off(self):
         """The REVERSE spelling from REPEAT_GATE_REFUSE, and deliberately: this knob ships
         ON, so a typo must land on the documented default rather than silently off."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         for value in ("false", "no", "", "00", "1"):
-            self.assert_lesson_deny(self.probe("s2", command="npm install %s" % value,
+            self.assert_lesson_deny(self.probe("s3", command="npm install %s" % value,
                                                REPEAT_LESSON_GATE=value,
                                                REPEAT_LESSON_MAX_DENIES=99))
 
     def test_the_off_switch_stops_it_with_everything_else(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.assert_allowed(self.probe("s2", SKILL_COMPOUNDER_REPEAT_GATE=0))
+        self.fail_then_fix("s3")
+        self.assert_allowed(self.probe("s3", SKILL_COMPOUNDER_REPEAT_GATE=0))
 
     # ------------------------------------------------------------------ fail open
     def test_an_unreadable_ledger_refuses_nothing(self):
@@ -3483,22 +3697,24 @@ class LessonGateTest(GateCase):
         a refusal whose escape cannot be verified is a trap."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         path = self.write_lesson_row("something-else")
         os.chmod(path, 0)
         try:
-            self.assert_allowed(self.probe("s2"))
+            self.assert_allowed(self.probe("s3"))
         finally:
             os.chmod(path, 0o644)
         # NON-VACUITY: readable again, same store, and it refuses.
-        self.assert_lesson_deny(self.probe("s2", command="npm install other"))
+        self.assert_lesson_deny(self.probe("s3", command="npm install other"))
 
     def test_a_ledger_over_the_byte_cap_refuses_nothing(self):
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
         path = os.path.join(self.state, "ledger.jsonl")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("x" * 4096)
-        self.assert_allowed(self.probe("s2", REPEAT_GATE_MAX_BYTES=2048))
+        self.assert_allowed(self.probe("s3", REPEAT_GATE_MAX_BYTES=2048))
 
     def test_a_session_that_bound_no_recovery_costs_no_store_read(self):
         """The cheap path, which is the one that matters because this arm ships ON: with
@@ -3523,6 +3739,158 @@ class LessonGateTest(GateCase):
         self.assert_allowed(self.probe("s1"))
         self.assertEqual([n for n in os.listdir(marker_dir) if n.startswith("s-")], [],
                          "the marker survived a verdict that cannot change this session")
+
+
+# ============================================== every segment's head, not the first word
+class SegmentHeadTest(GateCase):
+    """AN EXEMPTION READ OFF THE FIRST WORD IS AN EXEMPTION ON `cd`.
+
+    Red team, 2026-09-04, on its fifth attempt and with no hint: `allowlisted_head` read
+    only the first command-position word, so `cd build && tar -xf ../release.tgz` was
+    ALLOWED while the bare `tar -xf ../release.tgz` -- the same signature's own shape --
+    was denied, and `true && <anything>` was the same hole with no pretext at all.
+
+    The repair splits the command the way hooks/doc-gate.sh splits one, quote-aware, and
+    exempts only when EVERY segment's head is exempt. THE FAIL DIRECTION IS THE OPPOSITE
+    OF doc-gate's: there a missed split costs a missed deny, here it would GRANT an
+    exemption, so a command the splitter cannot model is not exempt.
+
+    This class drives the REPEAT arm (`REPEAT_GATE_REFUSE=1`, the harness baseline)
+    because that arm's refusal is decided by the head rules and nothing else; the lesson
+    gate shares the identical function and is checked on the same shapes in
+    LessonGateTest.test_a_compound_command_does_not_smuggle_a_head_past_the_allowlist.
+    """
+
+    ERR = "Exit code 2\ntar: ../release.tgz: Cannot open: No such file or directory"
+
+    def two_sessions(self, cmd, error=None):
+        for s in ("s1", "s2"):
+            self.tick()
+            self.run_hook(self.failure(cmd, s, error=error or self.ERR))
+        self.tick()
+
+    def denies(self, cmd, error=None):
+        self.two_sessions(cmd, error)
+        return self.assert_denied(self.run_hook(self.attempt(cmd, "s3")))
+
+    def allows(self, cmd, error=None):
+        self.two_sessions(cmd, error)
+        return self.assert_allowed(self.run_hook(self.attempt(cmd, "s3")))
+
+    # ------------------------------------------------------------------ the two repros
+    def test_cd_then_an_unallowlisted_head_is_refused(self):
+        self.denies("cd build && tar -xf ../release.tgz")
+
+    def test_true_then_anything_is_refused(self):
+        """`true` is on the allowlist because its failure is nobody's bug. As a FIRST
+        word it was a free pass for whatever followed it, which is the defect at its
+        barest: nothing about `true` is a diagnosis of anything."""
+        self.denies("true && tar -xf ../release.tgz")
+
+    def test_the_bare_command_is_refused_too(self):
+        """NON-VACUITY IN THE OTHER DIRECTION: the two above are only a bypass because
+        this one is denied. The gate is answering the same way about the same operation
+        however it is dressed."""
+        self.denies("tar -xf ../release.tgz")
+
+    def test_a_pipeline_whose_second_head_is_not_allowlisted_is_refused(self):
+        """The mirror of the shape the old rule was written to protect. `gh ... | jq .`
+        stayed refusable because `gh` came first; `cat f | tar -xf -` did not, because
+        `cat` did. Both are refusable now, and for the same reason."""
+        self.denies("cat release.tgz | tar -xf -")
+
+    def test_a_semicolon_and_a_newline_separate_commands_too(self):
+        """A `;` and a newline end a command as surely as `&&` does. The newline case is
+        the one this function used to fold to a SPACE, which made a two-line script read
+        as one command whose head was `cd`."""
+        self.denies("cd build; tar -xf ../release.tgz")
+        self.denies("cd build\ntar -xf ../release.tgz")
+
+    # ---------------------------------------------------------- what the split must not cost
+    def test_a_quoted_separator_does_not_split(self):
+        """QUOTE-AWARE, which is the half of doc-gate's splitter that is a fix rather
+        than a refinement. A `&&` inside an argument is text, and splitting there would
+        invent a segment whose head is prose and refuse a `git commit` -- a command this
+        gate must never refuse."""
+        self.allows('git commit -m "fix a && tar -xf x"',
+                    error="Exit code 1\nnothing to commit, working tree clean")
+        self.allows("git commit -m 'a; tar -xf x | sh'",
+                    error="Exit code 1\nnothing to commit, working tree clean")
+
+    def test_a_redirection_is_not_a_separator(self):
+        """`2>&1` is not two commands. Splitting on the bare `&` produced the segment
+        head `1`, which is on no list -- 124 times over the 310 distinct fail commands of
+        the live store of 2026-09-04, i.e. on nearly every command that kept stderr."""
+        self.allows("ls -la /nowhere 2>&1",
+                    error="Exit code 1\nls: /nowhere: No such file or directory")
+        self.allows("git status 2>&1 | head -20",
+                    error="Exit code 128\nfatal: not a git repository")
+
+    def test_a_heredoc_body_is_not_read_as_shell(self):
+        """A body is not shell. Without the strip, `&&` inside one yields segments whose
+        heads are prose and the exemption is refused for a command that only writes a
+        file."""
+        self.allows("cd /tmp && cat > note.txt <<'EOF'\na && b; c | d\nEOF",
+                    error="Exit code 1\ncd: /tmp: No such file or directory")
+
+    def test_a_runner_after_a_cd_keeps_the_runner_exemption(self):
+        """`cd repo && ./run_tests.sh` is the ordinary shape of running a suite, and `cd`
+        is not a runner. Requiring EVERY head to be a runner would take the exemption
+        away from it and land back on the loop the user's own CLAUDE.md mandates."""
+        self.allows("cd repo && ./run_tests.sh",
+                    error="Exit code 1\nFAILED tests/test_thing.py::test_it")
+
+    def test_a_loop_keyword_is_not_a_command_head(self):
+        """` do echo x` has the command `echo` in it and the head `do`, which is on no
+        list. Nine commands in the live store of 2026-09-04 lost their exemption to that
+        alone, every real head in them being `echo`, `cat` or `ls`."""
+        self.allows('for f in docs/*; do echo "== $f =="; cat "$f"; done',
+                    error="Exit code 1\ncat: docs/x: No such file or directory")
+
+    def test_a_loop_body_is_still_judged(self):
+        """NON-VACUITY for the test above: stepping over the keyword reaches the command
+        behind it, it does not excuse the segment."""
+        self.denies('for f in docs/*; do tar -xf "$f"; done')
+
+    # ------------------------------------------------------- what it cannot model
+    def test_an_unterminated_quote_is_not_exempt(self):
+        """A walk that ends inside a quote closed nothing, so nothing after the opening
+        quote was ever tested for a separator. Refusing the exemption is the direction
+        this whole function errs in, and it is the OPPOSITE of doc-gate's."""
+        self.denies('echo "unterminated ; tar -xf x')
+
+    def test_a_backslash_escaped_quote_beside_a_separator_is_not_exempt(self):
+        """`\\"` can leave the tracker inside a quote where the shell is not. With a
+        separator byte also present, that byte is exactly what a mis-tracked quote can
+        hide, so the exemption goes."""
+        self.denies('echo \\" ; tar -xf x')
+
+    def test_the_same_shapes_without_a_separator_keep_the_exemption(self):
+        """NON-VACUITY, and it is what makes the rule above a conjunction rather than a
+        blanket. With no `;`, `&`, `|`, `(` or `)` anywhere there is ONE segment however
+        the quotes parse, so the head is unambiguous and nothing is given up."""
+        self.allows(r"""sed 's/\"//' missing.txt""",
+                    error="Exit code 1\nsed: missing.txt: No such file or directory")
+
+    # ------------------------------------------------------- the door says the same thing
+    def test_the_door_and_the_arm_agree_on_every_shape_above(self):
+        """`--eligible-of` is what bin/skillrepeat and bin/skillreport ask instead of
+        keeping their own copy of these rules, so a split applied in the arm and not in
+        the door would put the two instruments back where issue #27 found them."""
+        cases = [("cd build && tar -xf ../release.tgz", "eligible"),
+                 ("true && tar -xf ../release.tgz", "eligible"),
+                 ("cat release.tgz | tar -xf -", "eligible"),
+                 ("cd build; tar -xf ../release.tgz", "eligible"),
+                 ("cd build\ntar -xf ../release.tgz", "eligible"),
+                 ('git commit -m "fix a && tar -xf x"', "exempt-allowlist"),
+                 ("ls -la /nowhere 2>&1", "exempt-allowlist"),
+                 ("cd repo && ./run_tests.sh", "exempt-runner"),
+                 ('echo "unterminated ; tar -xf x', "eligible")]
+        for command, want in cases:
+            got = subprocess.run(["bash", HOOK, "--eligible-of", "Bash"], input=command,
+                                 capture_output=True, text=True, env=self.env(),
+                                 timeout=180).stdout.strip()
+            self.assertEqual(got, want, command)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,13 @@
 #   edit    -> PostToolUse on Write|Edit. "Is this pattern worth crystallizing?" Fires
 #              every CI_EDIT_EVERY file modifications.
 #
+# EVERY numeric knob below is shape- and magnitude-guarded before it is used, and an
+# empty, non-numeric, negative or eleven-digit-or-longer value takes the DEFAULT rather
+# than reaching arithmetic or `[`. 0 is an off switch for exactly two of them,
+# CI_PRUNE_EVERY and CI_QUEUE_NUDGE, and both say so where they are read; for every other
+# knob 0 is either a real setting (no cooldown, no minimum length) or the default
+# (CI_EDIT_EVERY, which cannot be 0 without dividing by it).
+#
 # The prompt arm carries a SECOND, unrelated job: it is what makes the skill-candidate
 # queue get read. hooks/insight-capture.sh writes that queue on Stop, and until this
 # was added nothing ever opened it -- `skillinsight review` was a command someone had
@@ -83,6 +90,33 @@ MODE="${1:-edit}"
 EDIT_EVERY="${CI_EDIT_EVERY:-12}"
 PROMPT_COOLDOWN="${CI_PROMPT_COOLDOWN:-1200}"
 PROMPT_MIN_CHARS="${CI_PROMPT_MIN_CHARS:-60}"
+# Shape AND magnitude guards on the three tuning knobs -- the same pair prune_stale_state
+# applies to CI_CLAIM_TTL_MIN and CI_PRUNE_EVERY, for the same reason: a knob the tuning
+# table invites people to set must not be able to put a shell error on the user's stderr.
+# Measured against this script with the guards removed, on bash 3.2.57 (macOS):
+# `CI_EDIT_EVERY=0` printed `n % EDIT_EVERY : division by 0` and left the hook exiting 1
+# on EVERY counted edit, and `CI_PROMPT_MIN_CHARS=abc` printed
+# `[: abc: integer expression expected` on any prompt. Eleven `?` is the magnitude half:
+# eleven digits or more overflows the strtoimax behind `[`, which says
+# `integer expression expected` as loudly as `abc` does, so such a value goes back on
+# the default rather than into a comparison -- measured with
+# `CI_PROMPT_COOLDOWN=99999999999999999999999`, which reached the cooldown test and
+# printed exactly that.
+#
+# 0 IS NOT AN OFF SWITCH HERE, and CI_EDIT_EVERY is the one that had to be decided. It
+# takes the DEFAULT, unlike CI_PRUNE_EVERY where 0 means off. The off reading was
+# available there because hooks/mission.sh and hooks/remind.sh already spelled 0 that way
+# for their own sweeps; nothing spells it that way for the checkpoint. This script's own
+# tuning text says only "Fires every CI_EDIT_EVERY file modifications", and the one knob
+# here that IS an off switch says so in as many words where it is read below --
+# "CI_QUEUE_NUDGE=0 switches the whole thing off". A silent 0-means-off would turn a typo
+# into a session with no checkpoints at all and nothing on any surface to say why.
+# 0 for the other two is a real setting and passes straight through: no cooldown between
+# reminders, and no minimum prompt length.
+case "$EDIT_EVERY"       in ''|*[!0-9]*|???????????*) EDIT_EVERY=12 ;; esac
+[ "$EDIT_EVERY" -ge 1 ] || EDIT_EVERY=12
+case "$PROMPT_COOLDOWN"  in ''|*[!0-9]*|???????????*) PROMPT_COOLDOWN=1200 ;; esac
+case "$PROMPT_MIN_CHARS" in ''|*[!0-9]*|???????????*) PROMPT_MIN_CHARS=60 ;; esac
 ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 STATE_DIR="$ROOT/reminders"
 INSIGHTS_DIR="$ROOT/insights"
@@ -111,10 +145,18 @@ sid="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)"
 # hooks/insight-capture.sh MUST apply the identical expression or it reads a filename
 # that never existed, and reads it as "this session did nothing".
 sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sid" in ''|.|..) sid=_ ;; esac
 
 cwd="$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)"
 
 now="${CI_NOW:-$(date +%s)}"
+# The clock is a knob too, and it is read straight into arithmetic. `CI_NOW=abc` reached
+# `$(( now - last ))`, where bash resolves the string as a variable name and `set -u`
+# turns it into `abc: unbound variable` on the user's stderr with the hook exiting 1 --
+# measured on the SECOND prompt of a session, since the first has no stamp to subtract
+# and never reaches the arithmetic. Same two guards, falling back to the real clock;
+# `CI_NOW=0` is epoch 0 and stays 0.
+case "$now" in ''|*[!0-9]*|???????????*) now="$(date +%s)" ;; esac
 
 # Claim an event exactly once per session, whichever wiring delivered it.
 # UserPromptSubmit carries .prompt_id and PostToolUse carries .tool_use_id; both were
@@ -132,6 +174,7 @@ claim_once() {
   # go silent forever. 96 characters is far longer than any real id and safely under the
   # limit everywhere.
   id="$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$id" in ''|.|..) id=_ ;; esac
   dir="$STATE_DIR/$sid.seen"
   mkdir -p "$dir" 2>/dev/null || return 0
   marker="$dir/$1-$id"
@@ -161,8 +204,32 @@ prune_stale_state() {
   # rather than the one in 25 the sampling claims.
   CLAIM_TTL_MIN="${CI_CLAIM_TTL_MIN:-60}"
   PRUNE_EVERY="${CI_PRUNE_EVERY:-25}"
+  # Shape AND magnitude guards, then a floor, and the floor is the one that was
+  # missing. `CI_PRUNE_EVERY=0` reached `$(( RANDOM % PRUNE_EVERY ))` and bash
+  # reported `division by 0` on the user's stderr and left the hook exiting 1 --
+  # a hook breaking a turn, from a knob the tuning table lists. 0 switches the
+  # sweep off here now, the way it already did in hooks/mission.sh and
+  # hooks/remind.sh, and 11 `?` puts anything of eleven digits or more back on the
+  # default rather than into `[`.
+  case "$CLAIM_TTL_MIN" in ''|*[!0-9]*|???????????*) CLAIM_TTL_MIN=60 ;; esac
+  case "$PRUNE_EVERY"   in ''|*[!0-9]*|???????????*) PRUNE_EVERY=25 ;; esac
+  [ "$PRUNE_EVERY" -ge 1 ] || return 0
   [ $(( ${RANDOM:-0} % PRUNE_EVERY )) -eq 0 ] || return 0
-  find "$STATE_DIR" -type f -mtime +7 -delete 2>/dev/null
+  # BY NAME, NOT BY `-type f`. This swept every regular file under $STATE_DIR, and
+  # since #37 the delivery log lives here too: nudges.jsonl is appended to once per
+  # nudge and then goes untouched for a week on any quiet install, so the sweep
+  # deleted it and bin/skillreport's FUNNEL reported "no deliveries logged yet" for
+  # an install that had been delivering all along -- the funnel dying of the
+  # housekeeping that was written before it existed. The allowlist below is the eight
+  # per-session counter suffixes this hook writes, which is the whole of what the
+  # sweep was ever for; anything else here is either ours to keep or somebody else's.
+  # -mindepth/-maxdepth keep it off the `<sid>.seen/` markers, which age out on
+  # CI_CLAIM_TTL_MIN below and not on seven days.
+  find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type f \
+    \( -name '*.edits' -o -name '*.first' -o -name '*.paths' -o -name '*.opaque' \
+       -o -name '*.checkpoints' -o -name '*.prose' -o -name '*.nudge' \
+       -o -name '*.prompt' \) \
+    -mtime +7 -delete 2>/dev/null
   find "$STATE_DIR" -mindepth 2 -depth -type d -mmin "+$CLAIM_TTL_MIN" -exec rmdir {} + 2>/dev/null
   # No -mmin on this pass: removing the markers above just reset the parent's mtime.
   find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -name '*.seen' -empty -exec rmdir {} + 2>/dev/null
@@ -252,8 +319,12 @@ emit() {
 # caveat saying the numerator and denominator covered different windows. A guess cannot
 # say which delivery produced which outcome, which is the whole question (issue #37).
 #
-# Same directory as every other piece of this hook's per-session state, so nothing new
-# has to be pruned, backed up or documented as a location. One line per delivery:
+# Same directory as every other piece of this hook's per-session state, and that is
+# exactly why prune_stale_state() sweeps it BY NAME. This log is not per-session and
+# must outlive one: the sweep was `-type f -mtime +7` when this landed, so a quiet
+# install lost its whole delivery history every week and the FUNNEL reported "no
+# deliveries logged yet" against a state directory full of them. One line per
+# delivery:
 #
 #   {"id","ts","session","kind","event"[,"cc_session"]}
 #
@@ -295,7 +366,11 @@ log_nudge() { # <lineage id> <kind> <hookEventName>
   [ -n "$ln_row" ] || return 0
   # `2>/dev/null` BEFORE the `>>`: written the other way round the append is opened first
   # and a failure to open it is reported by the SHELL to a stderr that is still the
-  # terminal. The same ordering every append in this package is written in.
+  # terminal -- `2>/dev/null` after it silences the COMMAND and not the redirection.
+  # This was the only append in the package written that way round when it was
+  # claimed to be the house ordering; the rest of this script, hooks/mission.sh,
+  # hooks/remind.sh and hooks/claim-gate.sh were corrected to match it, and
+  # tests/test_hook.py drives a directory in place of each log to prove it.
   printf '%s\n' "$ln_row" 2>/dev/null >> "$NUDGE_LOG" || return 0
   # Bounded on write, the way hooks/remind.sh bounds its own hits log: mktemp in the log's
   # OWN directory so the `mv` is a rename(2) rather than a truncate in place. One `wc` per
@@ -377,11 +452,14 @@ review_notice() {
 # On merit: it fires before anyone has typed anything, so a session opened and abandoned
 # -- and `SessionStart:startup` is the most common source in this machine's transcripts
 # by a wide margin, 339 of 475 -- spends the announcement on nobody. The first
-# UserPromptSubmit proves a person is present. On mechanics: SessionStart is not among
-# the three events this package wires, and adding it means changing the installer and
-# hooks/hooks.json in step, which tests/test_plugin.py exists to enforce. The prompt arm
-# is already wired, already claim_once-guarded, and already fires exactly once per event
-# whichever install path delivered it.
+# UserPromptSubmit proves a person is present. On mechanics, AND THIS HALF HAS SINCE
+# EXPIRED: SessionStart was not among the events this package wired, so adding it meant
+# changing the installer and hooks/hooks.json in step. hooks/mission.sh has since wired
+# it -- OUR_EVENT_MARKERS in skill_compounder/installer.py names eight events now, and
+# SessionStart is the first of them -- so that cost is already paid and the mechanical
+# objection is spent. The objection on merit is the one still holding this arm here.
+# The prompt arm is also already wired, already claim_once-guarded, and already fires
+# exactly once per event whichever install path delivered it.
 #
 # WHAT MAKES IT WORTH SURFACING. Not the count on its own: "you have 6 pending" tells
 # nobody whether to care. The gate is three separate things.
@@ -420,7 +498,14 @@ find_insight_cli() {
 
 queue_nudge() {
   [ "$NUDGE_ON" = "0" ] && return 1
-  case "$NUDGE_MIN$NUDGE_MAX" in ''|*[!0-9]*) return 1 ;; esac
+  # Shape and magnitude, per knob rather than on the concatenation. The joined form
+  # could not say which of the two was wrong, and it let eleven digits through to the
+  # `-lt` comparisons below, where a value past strtoimax prints
+  # `integer expression expected` and returns 2. Out of range takes the default here as
+  # it does everywhere else, rather
+  # than silently switching the announcement off -- CI_QUEUE_NUDGE=0 is how you do that.
+  case "$NUDGE_MIN" in ''|*[!0-9]*|???????????*) NUDGE_MIN=259200 ;; esac
+  case "$NUDGE_MAX" in ''|*[!0-9]*|???????????*) NUDGE_MAX=1209600 ;; esac
   # No queue directory at all is a fresh install with nothing captured yet. Return
   # before claiming the once-per-session marker, so the first session AFTER something
   # is finally captured still gets its announcement.
@@ -614,7 +699,7 @@ DELIVERED_EOF
     # directory. Changing the byte written here without changing that reader silences
     # the only measurement these counters exist to feed.
     counter="$STATE_DIR/$sid.edits"
-    printf 'x' >> "$counter" 2>/dev/null || exit 0
+    printf 'x' 2>/dev/null >> "$counter" || exit 0
     n="$(wc -c < "$counter" 2>/dev/null | tr -d ' ')"
     case "$n" in ''|*[!0-9]*) exit 0 ;; esac
     # ------------------------------------------------------------------- evidence
@@ -626,10 +711,10 @@ DELIVERED_EOF
     # No dedup lock on the path list. A racing duplicate line is harmless because the
     # only consumer counts `sort -u`; a lock here would cost an mkdir on every edit to
     # prevent nothing.
-    [ -f "$STATE_DIR/$sid.first" ] || printf '%s' "$now" > "$STATE_DIR/$sid.first" 2>/dev/null
+    [ -f "$STATE_DIR/$sid.first" ] || printf '%s' "$now" 2>/dev/null > "$STATE_DIR/$sid.first"
     if [ -n "$fpath" ]; then
       grep -Fqx "$fpath" "$STATE_DIR/$sid.paths" 2>/dev/null \
-        || printf '%s\n' "$fpath" >> "$STATE_DIR/$sid.paths" 2>/dev/null
+        || printf '%s\n' "$fpath" 2>/dev/null >> "$STATE_DIR/$sid.paths"
     else
       # A counted edit whose target is invisible: a Bash command writes through a
       # heredoc, a redirect, or an inline interpreter, and the payload carries a
@@ -642,10 +727,10 @@ DELIVERED_EOF
       # one of them 356 shell writes against 4 visible paths. Those are exactly the
       # long autonomous sessions the checkpoint exists for, and a breadth gate that
       # reads only the visible paths goes silent on every one of them.
-      printf 'x' >> "$STATE_DIR/$sid.opaque" 2>/dev/null
+      printf 'x' 2>/dev/null >> "$STATE_DIR/$sid.opaque"
     fi
     if [ $(( n % EDIT_EVERY )) -eq 0 ]; then
-      printf 'x' >> "$STATE_DIR/$sid.checkpoints" 2>/dev/null
+      printf 'x' 2>/dev/null >> "$STATE_DIR/$sid.checkpoints"
       log_nudge ci-checkpoint checkpoint PostToolUse
       emit "[skill-compounder] Checkpoint after $n file edits. (a) Have you fixed two or more defects of the SAME KIND this session? Repeated fixes of a kind are a recurrence even when each one felt like a self-contained task -- count across them, not within one. (b) Is the procedure you are working through right now BOTH costly to have gotten right AND likely to recur? (c) Did a skill you invoked this session misfire? If any is yes, invoke the 'skill-compounder' skill and follow it. If none, disregard." "PostToolUse"
       exit 0
@@ -655,7 +740,7 @@ DELIVERED_EOF
     for path in $(durable_prose "$target"); do
       base="$(basename "$path")"
       grep -Fqx "$base" "$seen" 2>/dev/null && continue
-      printf '%s\n' "$base" >> "$seen" 2>/dev/null || break
+      printf '%s\n' "$base" 2>/dev/null >> "$seen" || break
       log_nudge ci-prose prose PostToolUse
       emit "[skill-compounder] $base is durable prose other people will read. Before it ships, invoke the 'ai-tell-audit' skill over the passages you changed. Disregard if this edit is not prose." "PostToolUse"
       exit 0

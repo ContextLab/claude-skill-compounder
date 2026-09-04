@@ -176,11 +176,18 @@ TEXT_CAP=300
 
 # Shape AND magnitude guards on every tunable, so a typo'd export cannot reach an
 # arithmetic test and print `[: integer expected` on the user's stderr from a hook.
-case "$MAX"      in ''|*[!0-9]*) MAX=2 ;; esac
-case "$COOLDOWN" in ''|*[!0-9]*) COOLDOWN=0 ;; esac
-case "$MAX_ROWS" in ''|*[!0-9]*) MAX_ROWS=2000 ;; esac
-case "$PRUNE_TTL"   in ''|*[!0-9]*) PRUNE_TTL=604800 ;; esac
-case "$PRUNE_EVERY" in ''|*[!0-9]*) PRUNE_EVERY=25 ;; esac
+# THE MAGNITUDE HALF WAS MISSING and the shape half cannot stand in for it: a value
+# of 23 nines is all digits, so it passed `*[!0-9]*` untouched and then blew up in
+# `[ "$PRUNE_EVERY" -ge 1 ]`, which is bash reporting `integer expression expected`
+# on a stderr that is still the user's terminal. `???????????*` is 11 `?`, so anything of 11
+# digits or more is out of range and takes the DEFAULT -- not zero, and not a clamp
+# to the ceiling: an out-of-range export is a typo, and the documented default is
+# the only value this header promises. bin/skillforge:327 spells it the same way.
+case "$MAX"      in ''|*[!0-9]*|???????????*) MAX=2 ;; esac
+case "$COOLDOWN" in ''|*[!0-9]*|???????????*) COOLDOWN=0 ;; esac
+case "$MAX_ROWS" in ''|*[!0-9]*|???????????*) MAX_ROWS=2000 ;; esac
+case "$PRUNE_TTL"   in ''|*[!0-9]*|???????????*) PRUNE_TTL=604800 ;; esac
+case "$PRUNE_EVERY" in ''|*[!0-9]*|???????????*) PRUNE_EVERY=25 ;; esac
 [ "$MAX" -lt 1 ] && exit 0
 [ "$MAX_ROWS" -lt 1 ] && MAX_ROWS=1
 
@@ -241,7 +248,11 @@ esac
 # safely under NAME_MAX everywhere.
 [ -z "$sid" ] && sid="nosession"
 sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
-[ -n "$eid" ] && eid="$(printf '%s' "$eid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sid" in ''|.|..) sid=_ ;; esac
+if [ -n "$eid" ]; then
+  eid="$(printf '%s' "$eid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$eid" in ''|.|..) eid=_ ;; esac
+fi
 
 SDIR="$DIR/$sid"
 
@@ -506,10 +517,10 @@ while IFS=" " read -r p_id p_date p_kind p_cand p_text; do
   # space-separated and an empty field would silently shift `text` into `cand`.
   if [ -n "$p_cand" ] && [ "$p_cand" != "-" ]; then
     printf '{"id":"%s","ts":%s,"session":"%s","event":"%s","candidate":"%s"}\n' \
-      "$p_id" "$now" "$sid" "$event" "$p_cand" >> "$HITS" 2>/dev/null || true
+      "$p_id" "$now" "$sid" "$event" "$p_cand" 2>/dev/null >> "$HITS" || true
   else
     printf '{"id":"%s","ts":%s,"session":"%s","event":"%s"}\n' \
-      "$p_id" "$now" "$sid" "$event" >> "$HITS" 2>/dev/null || true
+      "$p_id" "$now" "$sid" "$event" 2>/dev/null >> "$HITS" || true
   fi
   if [ "$p_kind" = "global" ]; then
     if [ "$p_date" = "-" ]; then p_line="Reminder recorded for this machine: $p_text"

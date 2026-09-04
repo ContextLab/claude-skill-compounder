@@ -70,16 +70,43 @@ your own ledger; the shape below is the instrument, not a result.
   script chose the skill and not a person, recognised by the transcript entrypoint
   (`sdk-cli`) rather than by directory. Reported on its own line rather than dropped,
   because on this repository it is most of the traffic.
-- **`FUNNEL`.** One row per lineage id: deliveries logged, ledger rows that acted on it, and
-  verdicts that came out. The id is derived from the content digest of the queue record the
-  lineage began as, so the candidate, the note, the reminder, every delivery of that reminder
-  and the forge rows downstream all carry the same string and the block is a join rather than
-  an estimate. `ACTED ON` counts a `note`, `start`, `use` or `apply` row that either carries
-  the id or sits in a session that received a delivery of it, which is a sequence and is
-  named as one. `UNATTRIBUTED` counts the ledger rows carrying no id and sitting in no
-  session that was delivered one; they are reported rather than dropped or folded into a
-  rate, on the same rule that records a forge with no `--trigger` as
-  `trigger_kind:"unrecorded"`.
+- **`FUNNEL`.** One row per lineage id: `DELIVERED`, `ACTED ON`, `OUTCOME`. The id is
+  derived from the content digest of the queue record the lineage began as, so the candidate,
+  the note, the reminder, every delivery of that reminder and the forge rows downstream all
+  carry the same string and the block is a join rather than an estimate. `DELIVERED` counts
+  rows in the two delivery logs. `ACTED ON` and `OUTCOME` **partition** the ledger: every
+  `note`, `start`, `use`, `apply` or `verdict` row is attributed to at most one lineage, by
+  the first of four tests that holds — its own `from`, its own `candidate`, a `note` row whose
+  own id is a delivered lineage, or the lineage delivered *first* to the session the row was
+  written in, ties broken by id. `ACTED ON` counts the first four kinds so attributed,
+  `OUTCOME` the verdict rows, and `UNATTRIBUTED` the rows that pass none of the four. They are
+  reported rather than dropped or folded into a rate, on the same rule that records a forge
+  with no `--trigger` as `trigger_kind:"unrecorded"`.
+
+  **A partition is checkable, so the block prints the arithmetic instead of asserting it.**
+  The closing `CHECK:` line reads `<in the table> + <unattributed> = <all note/start/use/
+  apply/verdict rows>`, and prints `CHECK FAILED` naming itself as the defect when they do
+  not balance. It has failed twice, both visible on the live store: a row whose `from` named
+  a lineage no delivery log knew was counted **nowhere**, being excluded from `UNATTRIBUTED`
+  for carrying an id and from the table for not being a delivered lineage; and a row was
+  counted once for every lineage delivered to its session, so `ACTED ON` summed to 104
+  against 69 `DELIVERED` (both recorded in `bin/skillreport`'s own header, from the live
+  store the defect was found on). Attribution by session alone is a sequence and never a cause, and
+  because a session that received two lineages gives its rows to one of them, that half of
+  `ACTED ON` is a floor for the other lineage rather than a total. Both are labelled where
+  they print.
+
+  **The block cost 47.9 s and now has an enforced ceiling.** That figure is a single run on
+  the machine `bin/skillreport`'s header records it from, at the writers' own caps — and it
+  was effectively the whole cost of a `skillreport` run, not a part of it. The old shape was
+  `$G[] as $g | [ $ROWS[] | ... ]` with `index` over arrays inside it, which is O(lineages x
+  rows) because `index` is a linear scan; it is now three `reduce`s into objects and one
+  `group_by`, so every lookup is an object key. What is *checkable* rather than recorded is
+  the bound: `tests/test_skillreport_harness.py::FunnelCostTest` builds 2000 nudge rows and
+  5000 ledger rows — `NUDGES` and `LEDGER` in that class, which are the writers' own caps —
+  and asserts the funnel's marginal cost both against ten seconds and against the report's
+  own baseline. Quote the test's bound rather than the 47.9 s when you need a number
+  somebody can re-run.
 - **`REMINDER CONVERSION`.** Deliveries logged, the sessions they landed in, and how many of
   those sessions went on to start a forge — joined on the session id and on the order, so a
   forge that started before the nudge is not counted as a conversion of it. This block used
@@ -89,6 +116,18 @@ your own ledger; the shape below is the instrument, not a result.
   rows. The counters are still reported, under `UNLOGGED`: they record that a nudge fired
   without recording which session acted on it, so nothing can be joined to them and they are
   not folded into the conversion above.
+
+  **"No deliveries logged yet" on a store older than a week was the housekeeping, not the
+  absence of deliveries.** `prune_stale_state()` in the same hook swept `$STATE_DIR` with
+  `-type f -mtime +7`, which was written when every regular file under there was a
+  per-session counter. `nudges.jsonl` moved in beside them, is appended to only when a nudge
+  is delivered, and therefore goes untouched for a week on any quiet install — so the sweep
+  deleted it, and both this block and `FUNNEL` reported an install that had been delivering
+  all along as one that had never delivered anything. The sweep now names the eight counter
+  suffixes it was always for, so a file it was never meant to touch cannot age into its
+  reach. The general form is worth carrying: a sweep written as "everything of this *type*"
+  silently acquires each new file that lands in its directory, and the loss shows up as a
+  measurement reading zero rather than as an error.
 - **`GATES`.** The repeat gate's store — how many failure signatures are known, how many
   reached the deny threshold, and how many of those the gate's head rules exempt — and the
   documentation gate's overrides, counted rather than only permitted, because an escape
@@ -161,16 +200,22 @@ durable.
 **`<state>/repeats/index.jsonl`** holds the observations: a `fail` row per learned failure
 signature, a `recover` row when a success was bound to one (carrying `cross_tool: true` when
 the success came from a different tool), a `dismiss` row when somebody decided the signature
-needs no lesson, and a `forget` row that cuts off the fail rows before it. **`ledger.jsonl`**
+needs no lesson (carrying `actor`, `human` or `model`), and a `forget` row that cuts off the fail rows before it. **`ledger.jsonl`**
 holds the answer: a `note` row carrying `lesson_sig`, and a later `remove` row that withdraws
 it. Adds minus removed ids is what counts as a lesson, on both the gate's side and the CLI's,
 because both files are append-only and matching on `lesson_sig` alone would go on reporting a
 withdrawn lesson as standing.
 
-`skillrepeat list` joins the two into a `LESSON` column, and its four values are the
-population the gate acts on: `open` is a fail-then-fix whose fix exists nowhere but the
-store, which is what the gate declines a call over; `recorded` and `dismissed` are the two
-ways that ends; and `-` is a signature no session ever recovered from, so nothing is owed.
+`skillrepeat list` joins the two into a `LESSON` column, and its five values are the
+population the gate acts on. `open` is a fail-then-fix whose fix exists nowhere but the
+store, which is what the gate declines a call over. `recorded` and `dismissed` are the two
+ways that ends — a note carrying the signature, or a dismissal a **person** wrote.
+`dismissed-by-model` is the fifth and it is not a variant of the fourth: the dismissal is on
+the record, `show` prints its `actor=model`, and it lifts nothing, so the gate goes on
+declining calls over that signature. Collapsing the two would hide exactly the finding that
+produced the split — both of two refused sessions ran the dismissal the deny text printed,
+with a reason they invented. And `-` is a signature no session ever recovered from, so there
+is no fix to write down and nothing is owed.
 `skillreport`'s `GATES` block reports the older repeat arm's population the same way, and
 both ask `hooks/repeat-gate.sh --eligible-of` rather than keeping a second copy of its head
 rules.

@@ -172,6 +172,35 @@ class AttributionCase(unittest.TestCase):
         self.assertTrue(line, "the report has no UNATTRIBUTED line:\n" + out)
         return int(line[0].split("UNATTRIBUTED:")[1].split()[0])
 
+    def check_line(self, out):
+        """The funnel's own self-consistency line, as three integers.
+
+        The block prints `CHECK FAILED` instead when they do not add up, so a report that
+        lost a row says so on its own surface; this reads the passing form and the caller
+        asserts the arithmetic against the ledger on disk."""
+        line = [l for l in out.splitlines() if "CHECK:" in l]
+        self.assertTrue(line, "the funnel prints no CHECK line:\n" + out)
+        self.assertNotIn("CHECK FAILED", out, out)
+        text = line[0]
+        intable = int(text.split("CHECK:")[1].split()[0])
+        unattr = int(text.split("+")[1].split()[0])
+        total = int(text.split("=")[1].split()[0])
+        return intable, unattr, total
+
+    def assert_every_row_lands_once(self, out):
+        """rows in the table + unattributed = every note/start/use/apply/verdict row the
+        ledger holds, counted off disk rather than off the report."""
+        intable, unattr, total = self.check_line(out)
+        self.assertEqual(intable + unattr, total,
+                         "the funnel does not add up: %d + %d != %d" %
+                         (intable, unattr, total))
+        on_disk = len([r for r in self.ledger_rows()
+                       if r.get("event") in ("note", "start", "use", "apply", "verdict")])
+        self.assertEqual(total, on_disk,
+                         "the funnel counted %d rows; the ledger holds %d" %
+                         (total, on_disk))
+        return intable, unattr, total
+
 
 class TheWholeChainCarriesOneId(AttributionCase):
     """The acceptance criterion of issue #37, end to end, in one test.
@@ -380,6 +409,165 @@ class LegacyRowsAreUnattributedNotDropped(AttributionCase):
         self.assertEqual(self.unattributed(out), 3,
                          "a promoted note changed the legacy count:\n" + out)
         self.assertIn("out of 4 note/start/use/apply/verdict row(s) in all", out, out)
+
+
+class TheFunnelCountsEveryRowExactlyOnce(AttributionCase):
+    """A row lands in the lineage table or in UNATTRIBUTED, and never in neither or both.
+
+    IT DID BOTH, AND A RED TEAM FOUND BOTH ON THE LIVE STORE. UNATTRIBUTED excluded any
+    row carrying a `from` or a `candidate`, but the table listed only lineages a DELIVERY
+    LOG knew -- so a ledger lineage nothing had delivered was counted NOWHERE. And ACTED
+    ON counted a row once for EVERY lineage delivered to its session, so the column summed
+    to 104 against 69 deliveries and totalled nothing a reader could act on.
+
+    Every row below is written by the real CLI or the real hook, and the arithmetic is
+    checked against the ledger read off disk.
+    """
+
+    def skill_dir(self, name):
+        d = self.root / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            "---\nname: %s\ndescription: x\n---\nbody\n" % name, encoding="utf-8")
+        return d
+
+    def test_a_lineage_no_delivery_log_knows_still_gets_a_row(self):
+        """The repro, exactly: a forge started `--from` a lineage with no delivery behind
+        it, judged at the end. Two rows carrying an id nothing delivered."""
+        lineage = "cdeadbeef"
+        d = self.skill_dir("orphan")
+        self.forge("start", "orphan", "4", "s", "--trigger", "t",
+                   "--trigger-kind", "agent-decision", "--from", lineage,
+                   "--session", "sess-orphan", SKILLFORGE_NOW=NOW)
+        self.forge("done", "--name", "orphan", "--skill-dir", str(d), "ok",
+                   SKILLFORGE_NOW=NOW + 10)
+        self.forge("verdict", "--name", "orphan", "--verdict", "WORKED",
+                   "--evidence", "e", SKILLFORGE_NOW=NOW + 20)
+
+        out = self.report()
+        row = self.funnel_row(out, lineage)
+        self.assertEqual(row[1], "0", "DELIVERED is not 0: " + " ".join(row))
+        self.assertEqual(row[2], "1", "ACTED ON missed the start row: " + " ".join(row))
+        self.assertEqual(row[3], "1", "OUTCOME missed the verdict row: " + " ".join(row))
+        self.assertEqual(self.unattributed(out), 0,
+                         "a row carrying a lineage was also called unattributed:\n" + out)
+        self.assert_every_row_lands_once(out)
+
+    def test_a_verdict_row_is_counted_in_exactly_one_column(self):
+        """A verdict was the sharpest case of counted-nowhere: excluded from ACTED ON by
+        construction, and excluded from UNATTRIBUTED whenever its session had received
+        anything at all."""
+        d = self.skill_dir("judged")
+        self.forge("start", "judged", "4", "s", "--trigger", "t",
+                   "--trigger-kind", "agent-decision", "--from", "cfeedface",
+                   "--session", "sess-j", SKILLFORGE_NOW=NOW)
+        self.forge("done", "--name", "judged", "--skill-dir", str(d), "ok",
+                   SKILLFORGE_NOW=NOW + 10)
+        self.forge("verdict", "--name", "judged", "--verdict", "UNKNOWN",
+                   "--evidence", "e", SKILLFORGE_NOW=NOW + 20)
+        out = self.report()
+        intable, unattr, total = self.assert_every_row_lands_once(out)
+        self.assertEqual((intable, unattr, total), (2, 0, 2),
+                         "start and verdict did not land once each:\n" + out)
+
+    def test_a_legacy_ledger_still_adds_up(self):
+        """The other end: rows from before any of this, which must all be unattributed and
+        must still satisfy the same equation."""
+        rows = [
+            {"event": "start", "name": "old", "ts": NOW, "steps": 4, "summary": "s",
+             "project": str(self.project)},
+            {"event": "use", "ts": NOW + 200, "name": "old", "ok": True,
+             "recorded": "live", "session": "some-old-session"},
+            {"event": "verdict", "ts": NOW + 300, "name": "old", "verdict": "UNKNOWN"},
+        ]
+        with open(str(self.ledger), "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        out = self.report()
+        intable, unattr, total = self.assert_every_row_lands_once(out)
+        self.assertEqual((intable, unattr, total), (0, 3, 3), out)
+
+
+class ARowBelongsToOneLineageOnly(AttributionCase):
+    """ACTED ON summed to 104 against 69 DELIVERED because a row in a session that had
+    received two lineages was counted for both. It is now attributed to the one delivered
+    to that session FIRST, ties by id, and the block prints that rule.
+
+    Both deliveries here are written by the REAL hooks/remind.sh from real payloads, so
+    what is under test is the join and not a fixture of it.
+    """
+
+    SECOND_TEXT = (
+        "\u2605 Skill candidate: a funnel that counts one row under two lineages reports "
+        "a column that sums past its own denominator.\nCount each row once, or say which "
+        "one it was given to."
+    )
+
+    def capture_more(self, text, session):
+        """A SECOND candidate into the same weekly queue. `capture` asserts the queue
+        holds exactly one record, which is right for the tests that use it and wrong
+        here, so this reads the digest of whatever the hook just added."""
+        weekly = self.state / "insights" / "2025-W34.jsonl"
+        before = {r["hash"] for r in self.jsonl(weekly)}
+        payload = {"hook_event_name": "Stop", "session_id": session,
+                   "cwd": str(self.project),
+                   "transcript_path": str(self.root / "t.jsonl"),
+                   "last_assistant_message": text}
+        r = self.sh(["bash", CAPTURE], stdin=json.dumps(payload),
+                    INSIGHT_NOW=NOW + 1, INSIGHT_AUDIT_MIN_EDITS=0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        new = [x["hash"] for x in self.jsonl(weekly) if x["hash"] not in before]
+        self.assertEqual(len(new), 1, "the capture hook queued %r" % new)
+        return new[0]
+
+    def test_one_row_in_a_twice_delivered_session_is_counted_once(self):
+        first = self.capture()
+        self.promote(first, "reminder", "--keyword", "sessionid")
+        second = self.capture_more(self.SECOND_TEXT, "cap-2")
+        self.promote(second, "reminder", "--keyword", "denominator")
+        lin_a, lin_b = "c" + first[:8], "c" + second[:8]
+        self.assertNotEqual(lin_a, lin_b)
+
+        # ONE session, BOTH reminders delivered into it, by the real hook.
+        self.deliver("the sessionid and the denominator are both wrong here",
+                     session="two-lineages")
+        hits = self.jsonl(self.state / "remind" / "hits.jsonl")
+        self.assertEqual({h.get("candidate") for h in hits}, {lin_a, lin_b},
+                         "the fixture did not deliver two lineages: %r" % hits)
+        self.assertEqual({h["session"] for h in hits}, {"two-lineages"})
+
+        # ONE ledger row in that session, carrying no lineage of its own.
+        self.forge("start", "ambiguous", "4", "s", "--trigger", "t",
+                   "--trigger-kind", "agent-decision", "--session", "two-lineages",
+                   SKILLFORGE_NOW=NOW + 40)
+        starts = self.ledger_rows("start")
+        self.assertEqual(len(starts), 1, starts)
+        self.assertNotIn("from", starts[0], starts[0])
+
+        out = self.report()
+        acted = {}
+        for lin in (lin_a, lin_b):
+            row = self.funnel_row(out, lin)
+            acted[lin] = int(row[2])
+        self.assertEqual(sum(acted.values()) - 2, 1,
+                         "the start row was counted %d times over the two lineages "
+                         "(each lineage also owns its own note row):\n%s"
+                         % (sum(acted.values()) - 2, out))
+        self.assert_every_row_lands_once(out)
+
+    def test_the_block_states_the_rule_it_used(self):
+        """A tie-break nobody can read is a number nobody can check."""
+        digest = self.capture()
+        self.promote(digest, "note")
+        # The report exits before this block when the ledger holds no `start` row at all,
+        # so the fixture needs a forge for the funnel to be reached.
+        self.forge("start", "anything", "4", "s", "--trigger", "t",
+                   "--trigger-kind", "agent-decision", "--session", "sess-r",
+                   SKILLFORGE_NOW=NOW + 40)
+        out = self.report()
+        self.assertIn("attributed to AT MOST ONE lineage", out, out)
+        self.assertIn("delivered FIRST to the session", out, out)
+        self.assertIn("floor rather than a total", out, out)
 
 
 class TheConversionIsCountedNotEstimated(AttributionCase):

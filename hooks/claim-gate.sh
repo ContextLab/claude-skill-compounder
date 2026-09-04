@@ -291,6 +291,7 @@ sid="$(jqr '.session_id // empty')"
 # fail with ENAMETOOLONG. 96 is far longer than a UUID and safely under the limit anywhere.
 # hooks/compound-improvement.sh applies the identical expression.
 sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sid" in ''|.|..) sid=_ ;; esac
 
 transcript="$(jqr '.transcript_path // empty')"
 
@@ -315,7 +316,7 @@ if [ "$event" = "PostToolUse" ]; then
     | jq -r 'del(.tool_input) | tojson' 2>/dev/null \
     | grep -oE '[0-9]+' 2>/dev/null \
     | grep -E "^[0-9]{$MIN_DIGITS,}$" 2>/dev/null \
-    | sort -u >> "$STATE_DIR/$sid.numbers" 2>/dev/null || :
+    | sort -u 2>/dev/null >> "$STATE_DIR/$sid.numbers" || :
   # Bound the file so a very long session cannot grow it without limit.
   if [ "$(wc -c < "$STATE_DIR/$sid.numbers" 2>/dev/null || echo 0)" -gt 4000000 ] 2>/dev/null; then
     sort -u "$STATE_DIR/$sid.numbers" 2>/dev/null > "$STATE_DIR/$sid.numbers.tmp" \
@@ -516,13 +517,13 @@ awk -v idfile="$TMP/agentids.txt" '
 
 # The accumulator, if the PostToolUse arm is wired. Additive only: it can never turn a
 # passing turn into a blocked one.
-[ -f "$STATE_DIR/$sid.numbers" ] && cat "$STATE_DIR/$sid.numbers" >> "$TMP/evidence.txt" 2>/dev/null
+[ -f "$STATE_DIR/$sid.numbers" ] && cat "$STATE_DIR/$sid.numbers" 2>/dev/null >> "$TMP/evidence.txt"
 
 if [ -n "$EXTRA_EVIDENCE" ]; then
   if [ -d "$EXTRA_EVIDENCE" ]; then
-    find "$EXTRA_EVIDENCE" -type f -size -20000k -exec cat {} + >> "$TMP/evidence.txt" 2>/dev/null || :
+    find "$EXTRA_EVIDENCE" -type f -size -20000k -exec cat {} + 2>/dev/null >> "$TMP/evidence.txt" || :
   elif [ -f "$EXTRA_EVIDENCE" ]; then
-    cat "$EXTRA_EVIDENCE" >> "$TMP/evidence.txt" 2>/dev/null || :
+    cat "$EXTRA_EVIDENCE" 2>/dev/null >> "$TMP/evidence.txt" || :
   fi
 fi
 [ -f "$TMP/evidence.txt" ] || : > "$TMP/evidence.txt"
@@ -853,6 +854,7 @@ fi
 pid="$(jqr '.prompt_id // empty')"
 [ -z "$pid" ] && pid="noprompt"
 pid="$(printf '%s' "$pid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$pid" in ''|.|..) pid=_ ;; esac
 marker="$STATE_DIR/$sid.$pid.blocked"
 if [ -d "$marker" ]; then
   bn="$(cat "$marker/n" 2>/dev/null || echo 1)"

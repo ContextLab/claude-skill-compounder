@@ -372,7 +372,11 @@ print_gates() {
               tool: (($live[-1].tool // "Bash")),
               # The LITERAL command, which is what the gate judges a head on. `norm` is
               # the masked shape and is only the fallback for a row that carries no `cmd`.
-              raw:  ((($live[-1].cmd // $live[-1].norm) // "") | gsub("[\\n\\t\\r]"; " ")),
+              # A newline becomes `;` and not a space: the gate splits a command into
+              # segments on `;`, so a space would fuse two commands into one head and
+              # this door would disagree with the hook. `bin/skillrepeat` does the same.
+              raw:  ((($live[-1].cmd // $live[-1].norm) // "")
+                     | gsub("\\n"; ";") | gsub("[\\t\\r]"; " ")),
               n:     ($live | map(.session) | unique | length),
               selfn: ($self | map(.session) | unique | length) } ] as $sigs
       | { known: ($sigs | length), fails: ($f | length), recs: ($rec | length),
@@ -1332,12 +1336,36 @@ fi
 # written as an explicit list of the five event names it covers, so a new event type is
 # invisible to it until someone adds it here on purpose.
 #
-# WHAT "ACTED ON" MEANS, AND WHAT IT DOES NOT. A ledger row counts as acting on a lineage
-# when it CARRIES that lineage id, or when it sits in a session that received a delivery
-# of it. The second half is weaker than the first and it is why this block reports the
-# two delivery logs' session ids rather than assuming them: a session that was reminded
-# and then forged is evidence of a sequence, not of a cause. It is not called a cause
-# anywhere in the output.
+# WHAT "ACTED ON" MEANS, AND WHAT IT DOES NOT. EVERY note/start/use/apply/verdict row is
+# attributed to AT MOST ONE lineage, by the first of four tests that holds: its own
+# `from`, its own `candidate`, a `note` row whose own id IS a delivered lineage, or the
+# lineage that was delivered FIRST to the session the row was written in. ACTED ON counts
+# the note/start/use/apply rows so attributed; OUTCOME counts the verdict rows; a row that
+# passes none of the four is UNATTRIBUTED. Those three are a partition of the ledger, and
+# the block prints the arithmetic (`CHECK:`) rather than asserting it in prose.
+#
+# IT WAS NOT A PARTITION, TWICE OVER, AND BOTH HALVES WERE VISIBLE ON THE LIVE STORE.
+# A row whose `from` named a lineage that appeared in no delivery log was excluded from
+# UNATTRIBUTED for carrying an id and excluded from the table because the table listed
+# only lineages a delivery log knew, so it was counted NOWHERE. And a row was counted for
+# EVERY lineage delivered to its session, so ACTED ON summed to 104 against 69 DELIVERED
+# and no reader could say what the column totalled. The first is fixed by listing every
+# lineage any store names, with DELIVERED 0 where nothing delivered it; the second by
+# attributing each row once.
+#
+# THE SESSION CLAUSE IS THE WEAK ONE, and it is why this block reports the two delivery
+# logs' session ids rather than assuming them: a session that was reminded and then forged
+# is evidence of a sequence, not of a cause. It is not called a cause anywhere in the
+# output. Its tie-break is stated rather than hidden -- a session that received two
+# lineages gives its rows to whichever was delivered there first, ties by id -- so that
+# half of ACTED ON is a FLOOR for the other lineage, which the output says.
+#
+# ONE JQ PASS, AND EVERY LOOKUP IS AN OBJECT KEY. This was `$G[] as $g | [ $ROWS[] | ... ]`
+# with `index` over arrays inside it, which is O(lineages x rows): at the writers own caps
+# (2000 nudge rows, 5000 ledger rows) the whole report took 47.9 s on this machine, all of
+# it here. It is now three `reduce`s into objects and one `group_by`, and the same case
+# runs in a couple of seconds. tests/test_skillreport_harness.py::FunnelCostTest drives
+# exactly those caps under a bound the old shape could not meet.
 #
 # TWO SESSION ID NAMESPACES, AND BOTH ARE JOINED. The hook payload's `.session_id` is
 # what hooks/remind.sh and hooks/skill-use.sh stamp; $CLAUDE_CODE_SESSION_ID is what
@@ -1359,11 +1387,19 @@ fi
 #
 # Output is TSV, one line per lineage plus one `!` line carrying the unattributed count
 # and the totals, so bash formats and jq only counts.
+#
+# THE SHAPE IS THREE `reduce`s AND ONE `group_by`, AND THAT IS A PERFORMANCE CONTRACT.
+# Nothing below may index a growing ARRAY: `index` is a linear scan, and one of those
+# inside a per-lineage loop is what made this 47.9 s at the writers own caps. Every lookup
+# is an object key, which jq resolves in constant time.
 jq -n -r --rawfile hits "$TMP/f-hits" --rawfile nudges "$TMP/f-nudges" \
         --rawfile ledger "$TMP/f-ledger" '
   def rows($s): $s | split("\n")[] | select(length > 0)
                    | (fromjson? // empty) | select(type == "object");
   def str($f): (($f // "") | tostring);
+  # A `ts` a foreign writer left as a string, or absent, must not make `sort_by` compare
+  # a string against a number and reorder the whole delivery list around it.
+  def num($f): (($f // 0) | if type == "number" then . else 0 end);
   # EVERY FIELD IS READ OFF A BOUND ROW, NEVER OFF `.`. A jq function argument is
   # evaluated against the input of the function it was passed to, so `index(str(.session))`
   # reads `.session` from the ARRAY being indexed and raises "cannot index array with
@@ -1373,68 +1409,122 @@ jq -n -r --rawfile hits "$TMP/f-hits" --rawfile nudges "$TMP/f-nudges" \
   ( [ rows($hits) | . as $r
       | { id: (if (str($r.candidate) | length) > 0
                then str($r.candidate) else str($r.id) end),
+          ts: num($r.ts),
           s: [ str($r.session) ] } ]
     + [ rows($nudges) | . as $r
-      | { id: str($r.id), s: [ str($r.session), str($r.cc_session) ] } ]
+      | { id: str($r.id), ts: num($r.ts),
+          s: [ str($r.session), str($r.cc_session) ] } ]
     | map(select((.id | length) > 0))
     | map(.s |= (map(select(length > 0)) | unique)) ) as $D
-  | [ rows($ledger) ] as $L
-  | ($D | map(.id) | unique) as $IDS
-  | (($D | map(.s) | add) // [] | unique) as $ALLS
-  | ($D | group_by(.id) | map({id: .[0].id, n: length, s: (map(.s) | add | unique)})
-        | sort_by([-.n, .id])) as $G
-  | [ $L[] | select(.event == "note" or .event == "start" or .event == "use"
-                    or .event == "apply" or .event == "verdict") ] as $ROWS
-  | ( [ $G[] | . as $g
-        | ( [ $ROWS[] | . as $r | select($r.event != "verdict")
-              | (str($r.session)) as $rs
-              | select( (str($r.from) == $g.id)
-                     or (str($r.candidate) == $g.id)
-                     or (($r.event == "note") and (str($r.id) == $g.id))
-                     or ((($rs | length) > 0) and (($g.s | index($rs)) != null)) ) ]
-            | length ) as $acted
-        | ( [ $ROWS[] | . as $r | select($r.event == "verdict")
-              | select(str($r.from) == $g.id) ] | length ) as $out
-        | [ $g.id, ($g.n|tostring), ($acted|tostring), ($out|tostring) ] | @tsv ] ) as $LINES
-  | ( [ $ROWS[] | . as $r
-        | (str($r.session)) as $rs
-        | (str($r.id)) as $rid
-        | select((str($r.from) | length) == 0)
-        | select((str($r.candidate) | length) == 0)
-        | select(($r.event != "note") or (($IDS | index($rid)) == null))
-        | select((($rs | length) == 0) or (($ALLS | index($rs)) == null)) ] | length ) as $un
-  | ( $LINES + [ (["!", ($un|tostring), ($ROWS|length|tostring),
-                   ($D|length|tostring), ($G|length|tostring)] | @tsv) ] )[]
+  # HOW MANY DELIVERIES EACH LINEAGE GOT. Also the set of lineages a delivery log knows,
+  # which is what the note-id clause below tests against.
+  | ( reduce ($D[] | .id) as $i ({}; .[$i] = ((.[$i] // 0) + 1)) ) as $DELIV
+  # SESSION -> THE LINEAGE DELIVERED THERE FIRST. Sorted by [ts, id] and taken first-wins,
+  # so a session that received two lineages resolves to ONE of them deterministically and
+  # a row cannot be counted twice. The tie-break is by id and is printed in the block.
+  | ( [ $D[] | . as $d | $d.s[] | {s: ., id: $d.id, ts: $d.ts} ]
+      | sort_by([.ts, .id])
+      | reduce .[] as $x ({}; if has($x.s) then . else .[$x.s] = $x.id end) ) as $SESS
+  # EVERY SELECTOR IS BY EVENT NAME, here and nowhere else in this block.
+  | [ rows($ledger)
+      | select(.event == "note" or .event == "start" or .event == "use"
+               or .event == "apply" or .event == "verdict") ] as $ROWS
+  # ONE LINEAGE PER ROW, OR NONE. The four clauses in order; `lin == ""` is unattributed.
+  | [ $ROWS[] | . as $r
+      | { ev: str($r.event),
+          lin: ( if (str($r.from) | length) > 0 then str($r.from)
+                 elif (str($r.candidate) | length) > 0 then str($r.candidate)
+                 elif (str($r.event) == "note")
+                      and ($DELIV[str($r.id)] != null) then str($r.id)
+                 else ($SESS[str($r.session)] // "") end ) } ] as $A
+  | ( [ $A[] | select(.lin == "") ] | length ) as $un
+  | ( [ $A[] | select(.lin != "") ]
+      | group_by(.lin)
+      | map({ id: .[0].lin,
+              acted: ([ .[] | select(.ev != "verdict") ] | length),
+              out:   ([ .[] | select(.ev == "verdict") ] | length) })
+      | reduce .[] as $g ({}; .[$g.id] = $g) ) as $ACT
+  # THE TABLE IS THE UNION, which is the whole of the first repair: a lineage named only
+  # by a ledger row is listed with DELIVERED 0 rather than counted nowhere.
+  | ( ( ($DELIV | keys_unsorted) + ($ACT | keys_unsorted) ) | unique ) as $ALLIDS
+  | ( [ $ALLIDS[] | . as $i
+        | { id: $i, n: ($DELIV[$i] // 0),
+            acted: (($ACT[$i] | .acted) // 0), out: (($ACT[$i] | .out) // 0) } ]
+      | sort_by([ -.n, -(.acted + .out), .id ]) ) as $T
+  | ( [ $T[] | .acted + .out ] | add // 0 ) as $intable
+  | ( [ $T[] | [ .id, (.n|tostring), (.acted|tostring), (.out|tostring) ] | @tsv ]
+      + [ (["!", ($un|tostring), ($ROWS|length|tostring), ($D|length|tostring),
+            ($DELIV|length|tostring), ($intable|tostring), ($T|length|tostring)]
+           | @tsv) ] )[]
 ' > "$TMP/funnel" 2>/dev/null || : > "$TMP/funnel"
 
-f_un=0; f_all=0; f_deliv=0; f_lineages=0
-while IFS="$(printf '\t')" read -r c1 c2 c3 c4 c5; do
+f_un=0; f_all=0; f_deliv=0; f_lineages=0; f_intable=0; f_rows=0
+while IFS="$(printf '\t')" read -r c1 c2 c3 c4 c5 c6 c7; do
   [ "$c1" = "!" ] || continue
-  f_un="$c2"; f_all="$c3"; f_deliv="$c4"; f_lineages="$c5"
+  f_un="$c2"; f_all="$c3"; f_deliv="$c4"; f_lineages="$c5"; f_intable="$c6"; f_rows="$c7"
 done < "$TMP/funnel"
-for v in f_un f_all f_deliv f_lineages; do
+for v in f_un f_all f_deliv f_lineages f_intable f_rows; do
   eval "n=\$$v"
   case "${n:-}" in ''|*[!0-9]*) eval "$v=0" ;; esac
 done
 
+# HOW MANY LINEAGES GET A LINE OF THEIR OWN. A store at the writers caps can name
+# thousands, and a report nobody reads to the end reports nothing. The rest are FOLDED,
+# never dropped: the remainder line carries their three counts, so `CHECK` below still
+# covers every row in the ledger.
+FUNNEL_SHOW=25
+
 echo
 echo "FUNNEL (counted joins on the lineage id — no estimate anywhere in this block)"
-if [ "$f_deliv" -eq 0 ]; then
+if [ "$f_deliv" -eq 0 ] && [ "$f_rows" -eq 0 ]; then
   echo "  no deliveries logged yet, in either $HITSLOG"
-  echo "  or $NUDGELOG, so there is nothing to join."
+  echo "  or $NUDGELOG, and no ledger row names a lineage, so"
+  echo "  there is nothing to join."
+  echo "  That is an absence of data, not an absence of compounding."
+elif [ "$f_deliv" -eq 0 ]; then
+  echo "  no deliveries logged yet, in either $HITSLOG"
+  echo "  or $NUDGELOG. The $f_rows lineage(s) below are the ones"
+  echo "  ledger rows name, and every one of them is DELIVERED 0."
   echo "  That is an absence of data, not an absence of compounding."
 else
-  echo "  $f_deliv logged delivery(ies) across $f_lineages lineage(s):"
+  echo "  $f_deliv logged delivery(ies) across $f_lineages delivered lineage(s);"
+  echo "  $f_rows lineage(s) below, delivered or named by a ledger row."
+fi
+if [ "$f_rows" -gt 0 ]; then
   printf '  %-18s %9s %9s %9s\n' "LINEAGE" "DELIVERED" "ACTED ON" "OUTCOME"
-  while IFS="$(printf '\t')" read -r c1 c2 c3 c4 c5; do
+  f_shown=0; f_hidden=0; h_d=0; h_a=0; h_o=0
+  while IFS="$(printf '\t')" read -r c1 c2 c3 c4 c5 c6 c7; do
     [ -n "${c1:-}" ] || continue
     [ "$c1" = "!" ] && continue
-    printf '  %-18s %9s %9s %9s\n' "$c1" "$c2" "$c3" "$c4"
+    if [ "$f_shown" -lt "$FUNNEL_SHOW" ]; then
+      printf '  %-18s %9s %9s %9s\n' "$c1" "$c2" "$c3" "$c4"
+      f_shown=$(( f_shown + 1 ))
+    else
+      f_hidden=$(( f_hidden + 1 ))
+      h_d=$(( h_d + c2 )); h_a=$(( h_a + c3 )); h_o=$(( h_o + c4 ))
+    fi
   done < "$TMP/funnel"
-  echo "  DELIVERED counts rows in the two delivery logs. ACTED ON counts note, start, use"
-  echo "  and apply rows that either carry the lineage id or sit in a session that received"
-  echo "  a delivery of it — a sequence, never a cause. OUTCOME counts verdict rows carrying"
-  echo "  the id."
+  if [ "$f_hidden" -gt 0 ]; then
+    printf '  %-18s %9s %9s %9s\n' "(+$f_hidden more)" "$h_d" "$h_a" "$h_o"
+    echo "  The last line folds every lineage past the first $FUNNEL_SHOW, counts included, so"
+    echo "  nothing below is computed over a subset."
+  fi
+  echo "  DELIVERED counts rows in the two delivery logs. ACTED ON and OUTCOME PARTITION the"
+  echo "  ledger: every note/start/use/apply/verdict row is attributed to AT MOST ONE lineage,"
+  echo "  by the first of these that holds — its own \`from\`, its own \`candidate\`, a note row"
+  echo "  whose own id is a delivered lineage, or the lineage delivered FIRST to the session it"
+  echo "  was written in (ties by id). ACTED ON counts the note/start/use/apply rows so"
+  echo "  attributed; OUTCOME counts the verdict rows. A row attributed by its session alone is"
+  echo "  a sequence and never a cause, and a session that received two lineages gives its rows"
+  echo "  to one of them, so that half of ACTED ON is a floor rather than a total."
+fi
+f_sum=$(( f_intable + f_un ))
+if [ "$f_sum" -eq "$f_all" ]; then
+  echo "  CHECK: $f_intable row(s) in the table + $f_un unattributed = $f_all note/start/use/apply/verdict row(s)."
+else
+  echo "  CHECK FAILED: $f_intable in the table + $f_un unattributed = $f_sum, but the ledger"
+  echo "  holds $f_all note/start/use/apply/verdict row(s). That is a defect in this block,"
+  echo "  not in the ledger: some row was counted twice or not at all."
 fi
 echo "  UNATTRIBUTED: $f_un ledger row(s) carry no lineage id and sit in no session that"
 echo "  received a delivery, out of $f_all note/start/use/apply/verdict row(s) in all."

@@ -724,5 +724,69 @@ class DoneRecordsWhetherASkillExistsTest(ForgeCase):
                 self.assertNotIn("skill", row, row)
 
 
+class LineageIdIsNotAPathTest(ForgeCase):
+    """`.` and `..` are inside `[A-Za-z0-9._-]`, so the charset check passed them.
+
+    A lineage id is compared for equality across four stores and becomes a path component
+    the moment anything keys on it, so the two names that are not names have to be refused
+    the way a space already was -- by the CLI, at the point of entry, before a row exists.
+    `origin --from` had no check at all: it shares the flag loop with `verdict` and `apply`
+    and the validation `start --from` carries was never written for it.
+    """
+
+    def start(self, *extra):
+        return self.run_cli("start", "s1", "4", *extra,
+                            *("does", "a", "useful", "thing"))
+
+    def test_start_refuses_dot_and_dotdot(self):
+        for bad in (".", ".."):
+            r = self.start("--from", bad)
+            self.assertEqual(r.returncode, 2, "--from %r was accepted:\n%s" % (bad, r.stdout))
+            self.assertIn("--from", r.stderr)
+            self.assertEqual(self.forge_ledger(), [],
+                             "a refused --from still wrote a row")
+
+    def test_start_refuses_them_in_the_equals_spelling_too(self):
+        for bad in (".", ".."):
+            r = self.start("--from=%s" % bad)
+            self.assertEqual(r.returncode, 2, "--from=%r was accepted" % bad)
+
+    def test_start_still_takes_a_real_lineage_id(self):
+        """Non-vacuity: the refusal must not have eaten the ordinary case."""
+        r = self.start("--from", "c1a2b3c4")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = [e for e in self.ledger() if e.get("event") == "start"]
+        self.assertEqual(rows[-1].get("from"), "c1a2b3c4")
+
+    def test_start_still_refuses_a_space(self):
+        """The refusal these two are being brought into line with."""
+        r = self.start("--from", "c1 c2")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_origin_refuses_dot_and_dotdot(self):
+        for bad in (".", ".."):
+            r = self.run_cli("origin", "--name", "s1", "--origin", "forged",
+                             "--from", bad)
+            self.assertEqual(r.returncode, 2,
+                             "origin --from %r was accepted:\n%s" % (bad, r.stdout))
+            self.assertEqual([e for e in self.ledger() if e.get("event") == "origin"], [],
+                             "a refused --from still wrote an origin row")
+
+    def test_origin_refuses_a_space_and_an_overlong_id(self):
+        """The other two halves of `start`'s check, which `origin` never had either."""
+        r = self.run_cli("origin", "--name", "s1", "--origin", "forged", "--from", "c1 c2")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        r = self.run_cli("origin", "--name", "s2", "--origin", "forged",
+                         "--from", "c" * 65)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_origin_still_records_a_real_lineage_id(self):
+        r = self.run_cli("origin", "--name", "s1", "--origin", "forged",
+                         "--from", "c1a2b3c4")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = [e for e in self.ledger() if e.get("event") == "origin"]
+        self.assertEqual(rows[-1].get("from"), "c1a2b3c4")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

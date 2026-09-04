@@ -27,7 +27,8 @@ sets up for you; this package keeps no second copy of them.
 **The lesson** watches for a tool call that failed and then worked, including when the fix
 came from a different tool. The first time, it states the failure, the fix, and the one
 command that records both. The second time that same signature comes round, it declines the
-next call until the lesson is written down or explicitly dismissed. Neither answer deletes
+next call until the lesson is written down. A person can dismiss the signature instead; a
+model cannot, and its dismissal is recorded rather than refused. Neither answer deletes
 anything: both are rows.
 
 All of it serves one principle:
@@ -49,7 +50,7 @@ the command that re-derives it, because every one of these answers moves.
 |Releases|`v0.3.1` is the latest tag. The plain one-liner still takes `main`, so pin a ref to get the same code twice. `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists what exists right now|
 |CI|`.github/workflows/ci.yml` runs the suite on ubuntu and macos, `shellcheck` on both, and `claude plugin validate --strict`. All five jobs passed on run `33778693837` (2026-09-03), against `e31fe7d`. Read the current one rather than this line, because that commit predates the mission hook and the lesson gate: `gh run list --repo ContextLab/claude-skill-compounder --limit 1`|
 |Dependencies|`jq` and `python3`, plus [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which the mission hook reads its prompts from. Install fetches and wires it when `surfer` is not already on your `PATH`, never fails the install if it cannot, and uninstall leaves it where it is: [Install](#install)|
-|End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report and uninstall against a throwaway config. First real run 2026-09-02: every step PASS, six `sonnet` calls, 34.9 s, no product failures. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
+|End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report, three of the mission's five moments, the lesson's statement and the record that answers it, and uninstall against a throwaway config. Seventeen steps (`grep -c '^def step' tests/e2e/journey.py`); the run of 2026-09-03 against CLI 2.1.259 was thirteen `claude -p` calls in 150.9 s, every step PASS. The six-call, twelve-step figure this row used to carry was the same scenario without the mission and lesson steps. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
 |Automatic session review|Ships **off**, and switching it on spends your quota: [What runs against the API](#what-runs-against-the-api). Stage 1 has been paid for six times. Stage 2, which would forge from a `CANDIDATE` verdict, is off for a structural reason rather than a price: a dispatched forge cannot finish its own routing gate, because `claude --version` inside one came back "This command requires approval" at the permission layer|
 |Usage evidence|One machine. `skillreport` counts genuine reuse and reports probe and test traffic on a separate line, and on this repository that traffic is most of the total. What each figure is and is not evidence for: [docs/measurement.md](docs/measurement.md)|
 |The two hook thresholds|`CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` were picked by judgement, and `skillreport` needs usage across several repositories before either should move|
@@ -187,8 +188,11 @@ The dated line goes in the `CLAUDE.md` for the scope, the reminder is keyed on t
 call's own signature so the fix arrives before that command runs again, and the ledger gets
 one `note` row tying the two together. `--attach` copies the script or file beside the note
 and links it from the line, which is the "and any associated code" half; it works without
-`--lesson` too. `skillrepeat dismiss <sig> --why "..."` is the other answer and is equally
-final: the gate's business is that a decision was recorded, not which way it went.
+`--lesson` too. `skillrepeat dismiss <sig> --why "..."` is the answer for a person who has
+decided the signature needs no lesson, and it is **not** the other half of a pair: the
+refusal names only the `skillnote` command, and a dismissal written from inside a session is
+recorded and lifts nothing. Two of two model sessions handed the older refusal ran the
+dismissal it printed with a reason they had invented, so the row now carries who wrote it.
 
 A lesson that turns out to apply beyond one repository moves up a level:
 
@@ -221,7 +225,7 @@ enough to count as a recurrence:
 
 |What|What is supported|Where that comes from|
 |-|-|-|
-|Claude Code CLI|2.1.241 through 2.1.259|the range every entry in `docs/CLAUDE-CODE-BEHAVIOR.md` was measured against: `grep -ohE '2\.1\.2[0-9]+' docs/CLAUDE-CODE-BEHAVIOR.md \| sort -uV \| sed -n '1p;$p'`|
+|Claude Code CLI|2.1.241 through 2.1.260|the range every entry in `docs/CLAUDE-CODE-BEHAVIOR.md` was measured against: `grep -ohE '2\.1\.2[0-9]+' docs/CLAUDE-CODE-BEHAVIOR.md \| sort -uV \| sed -n '1p;$p'`|
 |`bash`|3.2 and newer|macOS ships 3.2 (`/bin/bash --version`), and the shell rules in `docs/DESIGN.md` are written against it. The ubuntu runner ships a much newer one; both print theirs in the `bash --version \| head -1` step of `.github/workflows/ci.yml`|
 |`zsh`|parsed, not pinned|every shipped script must pass `zsh -n` as well as `bash -n`, on both runners, in that same step|
 |`jq`|1.6 and newer|`skillforge doctor` fails below it and says why: `skillforge backfill` passes `--rawfile`, which jq did not have before 1.6|
@@ -254,10 +258,18 @@ before it, and `--rollback` reads that. With no previous ref recorded it refuses
 so rather than guessing. `SKILL_COMPOUNDER_UPDATE=1` is the environment form of `--update`,
 for the `curl` pipeline where a flag needs `bash -s --`.
 
-Those two names are the only environment variables `install.sh` reads:
-`SKILL_COMPOUNDER_REF` (default `main`) chooses the ref, and `SKILL_COMPOUNDER_UPDATE`
-(unset by default; `1` turns it on) asks for the move. Both are read at install time only,
-so neither belongs in the [Tuning](docs/operations.md#tuning) table or in `~/.claude/settings.json` — set
+Those two are the ones you would set on purpose: `SKILL_COMPOUNDER_REF` (default `main`)
+chooses the ref, and `SKILL_COMPOUNDER_UPDATE` (unset by default; `1` turns it on) asks for
+the move. `install.sh` reads five distinct environment variables in all — run
+`grep -nE '\$\{(SKILL_COMPOUNDER|CLAUDE_SKILL_COMPOUNDER)[A-Z_]*:-' install.sh` for the
+current list, which prints six lines because `SKILL_COMPOUNDER_REF` is read twice. The other three redirect where it works rather than what it installs:
+`SKILL_COMPOUNDER_REPO_URL` is the clone source (the GitHub repository by default, and what
+`tests/test_install_sh.py` points at a local bare repository instead),
+`CLAUDE_SKILL_COMPOUNDER_APP` is the managed checkout's location, and
+`CLAUDE_SKILL_COMPOUNDER_STATE` is the state directory — the last spelled the same way
+`uninstall.sh` spells it, because `curl … | bash` has no checkout around it and the two
+scripts have to agree on where to look. All five are read at install time only, so none
+belongs in the [Tuning](docs/operations.md#tuning) table or in `~/.claude/settings.json` — set
 them on the command that runs the installer, or use `--ref` and `--update`.
 
 All three manage only the checkout `install.sh` cloned. Run them from a clone you made
@@ -402,7 +414,7 @@ The ten wired scripts divide into three kinds. Three carry something into the se
 can be read past: the checkpoint that asks whether a skill already covers this, the
 reminder hook, and four of the mission's five moments. Five can refuse: the claim gate and
 the documentation gate outright, the apply gate once per session, the lesson gate at most
-twice per signature, and the mission once per prompt on a completion claim. The repeat
+twice per signature per session, and the mission once per prompt on a completion claim. The repeat
 gate's older arm can too, and ships off. Three only record: a ledger row per skill
 invocation, and a queue row per candidate, written at the end of a session and again from
 whatever a compaction is about to discard.

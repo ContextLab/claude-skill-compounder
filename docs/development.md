@@ -40,11 +40,15 @@ installer at it with `SKILL_COMPOUNDER_REPO_URL`, and exercises `--ref`, `--upda
 `--rollback` with no network.
 
 The suite never spends a model call. The acceptance journey that does — one pass through
-install, note, reminder, capture, forge, route, apply, report and uninstall against a
-throwaway Claude config — is a script you run by hand, never in CI:
-`python3 tests/e2e/journey.py --out <a fresh dir>`, six `claude -p` calls on your own
-subscription, or `--no-model` to rehearse it for nothing. It is the gate a release tag
-waits on: [e2e.md](e2e.md).
+install, note, reminder, capture, forge, route, apply, report, the mission, the lesson gate
+and uninstall against a throwaway Claude config — is a script you run by hand, never in CI:
+`python3 tests/e2e/journey.py --out <a fresh dir>`. Seventeen steps
+(`grep -c '^def step' tests/e2e/journey.py`); the run of 2026-09-03 spent thirteen
+`claude -p` calls on the author's own subscription and took 150.9 s, every step PASS. Both
+figures move with the scenario — it was six calls over twelve steps before the mission and
+lesson steps existed — so read them off [e2e.md](e2e.md), which records what the last run
+actually cost, rather than from this paragraph. `--no-model` rehearses the whole thing for
+nothing. It is the gate a release tag waits on.
 
 CI runs the suite on both ubuntu and macos, because macOS ships bash 3.2 and that is
 where this repo's shell portability traps actually bite. It also runs

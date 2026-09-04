@@ -250,6 +250,28 @@
 # all (`pwd` has one). Binding it unconditionally is what keeps "a signature with ANY
 # self-recovery behind it is NEVER REFUSED" true after this change.
 #
+# WHAT THE FLOOR OF 2 STILL LETS THROUGH, AND WHY IT IS NOT RAISED. The residual case is
+# two commands whose only shared tokens are PATH COMPONENTS -- a working directory or a
+# file both of them happen to name. A red-team session found this pair, which binds on
+# `{remind, hooks}` and is not a fix for anything:
+#
+#   failed:  <P>/redteam-hooks/... remind ...
+#   worked:  sed -n <S> hooks/remind.sh
+#
+# EXCLUDING SUCH TOKENS WAS TRIED AGAINST THE LIVE STORE AND REJECTED ON THE EVIDENCE.
+# The candidate rule -- drop a shared token that occurs only inside slash-bearing words of
+# BOTH commands -- was run over every same-tool binding in the store of 2026-09-04 (587
+# rows, 254 bindings with a locatable fail row). It would UNBIND 45 of the 254 (17.7%),
+# and in 26 of those 45 the two commands name an IDENTICAL path word, which is the
+# strongest evidence of relatedness this store carries: `cd <P>/livecd-rootfs && grep -rn
+# <S> live-build/` recovered by `cd <P>/livecd-rootfs && sed -n <S> live-build/...` is a
+# real fail-then-fix and the rule would drop it. Nothing in the store labels a binding
+# true or false, so no precision figure can be computed from it; what CAN be measured is
+# the cost, and the cost is a sixth of all bindings with a majority of the sample looking
+# correct. The rule is left alone and the false binding above is a KNOWN LIMIT. Raising
+# the floor was not considered a substitute: it would drop the same true bindings and
+# more.
+#
 # NON-SHELL TOOLS ARE LEFT ALONE, and `shell_tool()` is the single place that decides
 # which is which. `mcp__github__create_issue` names its operation in its own tool name, so
 # a success of it after a failure of it is the same operation by construction. `Skill` is
@@ -309,9 +331,11 @@
 # the knowledge went into a JSONL file nobody reads mid-session.
 #
 #   FIRST TIME -- the recovery arm STATES the fact. Which call failed, with the head of
-#   its error; which call then worked; and the two commands that record or dismiss it. It
-#   is a statement and never an instruction, for the reason under PLATFORM FACTS 4, and it
-#   is emitted once per signature per session. Nothing is blocked.
+#   its error; which call then worked; and the two commands that exist -- the one that
+#   records a lesson, and `skillrepeat dismiss`, named for what it now is: a command for a
+#   PERSON at a terminal, which lifts nothing when a model runs it (WHO MAY DISMISS,
+#   below). It is a statement and never an instruction, for the reason under PLATFORM
+#   FACTS 4, and it is emitted once per signature per session. Nothing is blocked.
 #
 #   THAT DELIVERY IS MEASURED, and it was measured by accident, which is the only reason
 #   it is not still an open question here. `additionalContext` was already established on
@@ -338,22 +362,46 @@
 #
 #   SECOND TIME -- the lesson gate DECLINES the next call, while three things hold at
 #   once: this session bound a recovery for the signature, the signature's fail rows come
-#   from at least REPEAT_MIN_SESSIONS distinct sessions, and no lesson references it.
+#   from at least REPEAT_MIN_SESSIONS distinct EARLIER sessions, and no lesson references
+#   it.
 #
-# THE SESSION COUNT HERE INCLUDES THIS SESSION, AND THE REPEAT ARM'S DOES NOT. That is not
-# an inconsistency, it is the difference between the two questions. The repeat arm asks
-# "is this call broken", which nothing a session did to itself may answer (BOOTSTRAP
-# DEADLOCK guard 1). The lesson gate asks "has this now happened twice", and this
-# session's own occurrence is the second one -- the doctrine's own threshold, which asks
-# for a nameable dead end and a SECOND occurrence. A session that hits a fresh signature
-# for the first time is told and not blocked; the second session is the one that is asked
-# to write it down.
+# EARLIER MEANS EARLIER ON BOTH ARMS, AND THIS ONE USED TO CHEAT. The count below drops
+# every fail row carrying THIS session's id, exactly as the repeat arm's does
+# (`.session != $sid` there, `.session != $cur` here), so BOOTSTRAP DEADLOCK guard 1 --
+# "failures recorded by THIS session never count" -- is a property of the whole file
+# rather than of one arm of it. It was not. Until 2026-09-04 this count included the
+# current session, so at the default REPEAT_MIN_SESSIONS of 2 a signature that had failed
+# in ONE earlier session was refused, while this header, `bin/skillrepeat` and
+# .claude/CLAUDE.md all described a threshold the code did not have. A red-team session
+# found it by counting the sessions in the store against the sessions in the deny.
 #
-# WHAT LIFTS IT, and neither is a deletion: `skillnote add --lesson <sig> "<text>"` writes
-# a `note` row carrying `lesson_sig` into <state>/ledger.jsonl, and `skillrepeat dismiss
-# <sig> --why "<why>"` appends a `dismiss` row to this store. This script READS both and
-# writes neither. A dismissal is as good as a lesson here on purpose: the gate's business
-# is that the decision was made and recorded, not which way it went.
+# WHAT THAT COSTS, STATED RATHER THAN GLOSSED: at the default the refusal now arrives one
+# session later than the doctrine's "second occurrence" reads. Two EARLIER sessions plus
+# the recovery bound in this one is the third occurrence. `REPEAT_MIN_SESSIONS=1` is the
+# spelling of "refuse on the second" and is one export rather than a hidden off-by-one;
+# the default stays at 2, because a threshold that fires on a single earlier observation
+# is one observation away from firing on a fluke.
+#
+# WHAT LIFTS IT, AND WHO MAY DISMISS. Two things lift it and neither is a deletion:
+# `skillnote add --lesson <sig> "<text>"` writes a `note` row carrying `lesson_sig` into
+# <state>/ledger.jsonl, and `skillrepeat dismiss <sig> --why "<why>"` appends a `dismiss`
+# row to this store. This script READS both and writes neither.
+#
+# A DISMISSAL LIFTS IT ONLY WHERE A PERSON WROTE IT. The rows honoured here are those
+# whose `actor` is `human`, plus every `dismiss` row written before that field existed --
+# those predate the model path entirely and carry nothing to tell them apart, so they are
+# read as human. `bin/skillrepeat` stamps `actor:"model"` when it runs inside a Claude
+# Code session (`CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` in its environment), and such a
+# row lifts NOTHING here.
+#
+# THAT RULE IS MEASURED, and it is why the deny below names ONE command and the statement
+# names two. Driven live on 2026-09-04: both of two fresh sessions this gate refused
+# answered by running `skillrepeat dismiss <sig> --why "<a reason it invented>"` and
+# carrying straight on. The gate had printed its own escape and the escape was free. So a
+# LESSON is the only thing a session can do to lift this. A model's dismissal is still
+# appended, still printed by `skillrepeat list`, and still evidence of what that session
+# wanted to do -- refusing to write the row would have hidden that; refusing to HONOUR it
+# is the half that matters.
 #
 # THE LEDGER IS APPEND-ONLY ON BOTH SIDES OF THAT, so the read is not "is there a row".
 # `skillnote remove <id>` appends `{"event":"note","action":"remove","id":...}` and leaves
@@ -363,17 +411,42 @@
 #
 # ONE LIMIT WORTH KNOWING, and it belongs to the other CLI: `skillnote --lesson` refuses a
 # signature whose fail row is not a Bash call, because the reminder half of a lesson is
-# keyed on `.tool_input.command` and a Skill or MCP call has none. The statement below
-# names the command anyway -- what it names is the command that records the lesson, and
-# for such a signature the answer that command gives is the useful one. The refusal is
-# always liftable, because `skillrepeat dismiss` has no such restriction and the deny
-# budget runs out either way.
+# keyed on `.tool_input.command` and a Skill or MCP call has none. Such a signature does
+# reach this arm: the two learning events are wired `Bash|Skill|mcp__.*`, so a Skill or
+# MCP failure is learned and its recovery can deny the next Bash call. The statement
+# below names the command anyway -- what it names is the command that records the lesson,
+# and for such a signature the answer that command gives, which is to write a note and a
+# keyword reminder instead, is the useful one.
 #
-# AND IT LETS GO. At most REPEAT_LESSON_MAX_DENIES refusals per signature per session,
-# after which the call goes through whatever the store says. A wall that never lifts is a
-# wall a session learns to route around, and the one thing this gate may not become is
-# noise. The head allowlists apply unchanged, plus `skillnote`, so the two commands that
-# lift the refusal can never themselves be refused.
+# SO SAY EXACTLY WHAT LIFTS IT. This paragraph used to end "the refusal is always
+# liftable, because `skillrepeat dismiss` has no such restriction", and that stopped
+# being true the day a model's dismissal stopped being honoured. Three things lift the
+# refusal and only three: a STANDING LESSON for the signature, adds minus removed ids,
+# which `--lesson` is the sole writer of and which is the one route it can refuse; a
+# `dismiss` row a PERSON wrote, which carries no Bash restriction and lifts any
+# signature; and the deny budget below, REPEAT_LESSON_MAX_DENIES refusals per signature
+# per session, which runs out either way. A dismissal written from inside a session is
+# stamped `actor:"model"` and lifts NOTHING -- WHO MAY DISMISS, above -- so for a
+# non-Bash signature there is nothing a session can do on its own but spend the budget.
+# That is the honest shape of it, and it is why the deny below prints one command and
+# marks the other "a person at a terminal only".
+#
+# AND IT LETS GO, SILENTLY. At most REPEAT_LESSON_MAX_DENIES refusals per signature per
+# session, after which the call goes through whatever the store says. A wall that never
+# lifts is a wall a session learns to route around, and the one thing this gate may not
+# become is noise. The head allowlists apply unchanged, plus `skillnote`, so neither
+# command this arm names can ever itself be refused.
+#
+# THE DENY DOES NOT SAY SO, AND THAT OMISSION IS AS DELIBERATE AS THE ONE ABOUT
+# `skillrepeat dismiss`. The reason text used to end "It is spent at most 2 times on one
+# signature in one session, after which the call goes through whatever this store says",
+# and a session red-teaming this gate on 2026-09-04 read that as a schedule: it retried
+# until the budget ran out and wrote no lesson at all. A refusal that advertises its own
+# expiry is an instruction to wait it out. So the reason states the refusal, the
+# fail-then-fix facts and the ONE command that lifts it, and says nothing about the
+# budget; REPEAT_LESSON_MAX_DENIES keeps working exactly as before, as the safety valve
+# that stops a false positive trapping a session, which is a property of the gate and not
+# a term offered to the session in front of it.
 #
 # IT IS ON BY DEFAULT AND THE REPEAT ARM IS NOT, and the asymmetry is the population each
 # one can reach. The repeat arm's population was measured and found empty (issue #27): 81
@@ -392,13 +465,16 @@
 #      REPEAT_MIN_SESSIONS distinct EARLIER sessions, so nothing a session does to itself
 #      can lock it out mid-flight.
 #   2. Deny-once-per-session-per-signature, above. Every refusal has a next attempt.
-#   3. A HEAD ALLOWLIST. If the first command-position word of a Bash command is one of
-#      the navigation, inspection, git, jq or skill* commands below, the call is never
-#      refused. `cd`, `ls`, `git`, `jq`, `cat`, `grep`, `find` are how a session diagnoses
-#      anything at all, and this package's own CLIs are how it reads and clears this
-#      store. Only the FIRST head is consulted, not every command position: allowing
-#      `gh issue view 19 | jq .` because `jq` appears after a pipe would retire the gate
-#      for the commonest shape of the exact case it was built for.
+#   3. A HEAD ALLOWLIST, APPLIED TO EVERY SEGMENT AND NOT TO THE FIRST WORD. If the
+#      command's every segment head is one of the navigation, inspection, git, jq or
+#      skill* commands below, the call is never refused. `cd`, `ls`, `git`, `jq`, `cat`,
+#      `grep`, `find` are how a session diagnoses anything at all, and this package's own
+#      CLIs are how it reads and clears this store. EVERY head, because reading only the
+#      first was a bypass: `cd build && tar -xf ../release.tgz` was exempted on `cd` and
+#      `true && <anything>` on `true`, while the bare `tar` was denied (red team,
+#      2026-09-04, found unaided on a fifth attempt). `gh issue view 19 | jq .` is still
+#      refusable, which is what reading only the first head was trying to protect: `jq`
+#      after a pipe no longer exempts anything, because `gh` is a head too.
 #   4. Any command mentioning `skillrepeat` anywhere is never refused, so a compound
 #      command that clears the store cannot itself be blocked.
 #
@@ -481,13 +557,15 @@
 #   {"t":"fail",   ts, sig, ck, ec, tool, norm, cmd, err, session, tuid}
 #   {"t":"recover",ts, sig, ck, tool, norm, cmd, session, tuid[, cross_tool:true]}
 #   {"t":"forget", ts, sig, session, why}          <- written only by bin/skillrepeat
-#   {"t":"dismiss",ts, sig, session, why}          <- written only by bin/skillrepeat
+#   {"t":"dismiss",ts, sig, session, why, actor}   <- written only by bin/skillrepeat
 # `cross_tool` is present only when the recovery was bound by shared content tokens
 # rather than by the tool matching, so a reader can weigh the two kinds of evidence
 # differently; every reader that does not care about it ignores it, since jq's `//`
 # supplies the absent field. A `dismiss` is NOT a tombstone: it suppresses no row and
 # changes no count. It is read by the lesson gate and by `skillrepeat list` and by
-# nothing else.
+# nothing else. Its `actor` is `human` or `model`, and the lesson gate honours only the
+# first (WHO MAY DISMISS, above); a row with no `actor` at all was written before the
+# field existed and is read as human.
 # A tombstone suppresses rows recorded BEFORE its timestamp, and only those, so forgetting
 # is re-armable: a signature that starts failing again after being forgotten accumulates
 # fresh sessions and can refuse again. Nothing is ever rewritten or deleted. Rows that do
@@ -510,13 +588,14 @@
 #                                     it whichever way it is set.
 #   REPEAT_GATE_NOW               ()  this script's clock, epoch seconds. Its own, not
 #                                     borrowed: pinning another script's does nothing here.
-#   REPEAT_MIN_SESSIONS           (2) distinct sessions needed before a refusal, and READ
-#                                     DIFFERENTLY BY THE TWO ARMS ON PURPOSE. The REPEAT
-#                                     refusal counts EARLIER sessions only (BOOTSTRAP
-#                                     DEADLOCK guard 1); the LESSON gate counts this one
-#                                     too, because its question is `has this happened
-#                                     twice` and this session's own occurrence is the
-#                                     second. THE LESSON GATE stanza above argues it.
+#   REPEAT_MIN_SESSIONS           (2) distinct EARLIER sessions needed before a refusal,
+#                                     and read the SAME WAY BY BOTH ARMS: neither counts
+#                                     a fail row carrying the current session's id
+#                                     (BOOTSTRAP DEADLOCK guard 1). The lesson gate
+#                                     counted this session too until 2026-09-04, which
+#                                     made it fire a session early against every
+#                                     description of it; EARLIER MEANS EARLIER ON BOTH
+#                                     ARMS, above, has the repair and what it costs.
 #   REPEAT_RECOVERY_MIN_TOKENS    (2) content tokens two normalised calls must share
 #                                     before a success of a DIFFERENT tool is bound as a
 #                                     recovery. 0 disables cross-tool binding entirely
@@ -827,6 +906,7 @@ if [ -z "$ARGV_MODE" ]; then
   sid="$(jqr '.session_id // empty')"
   [ -z "$sid" ] && exit 0
   sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$sid" in ''|.|..) sid=_ ;; esac
 
   tool="$(jqr '.tool_name // empty')"
   [ -z "$tool" ] && exit 0
@@ -861,7 +941,17 @@ if [ -z "$ARGV_MODE" ]; then
      && [ "${tool#mcp__}" = "$tool" ]; then exit 0; fi
 
   tuid="$(jqr '.tool_use_id // empty')"
-  [ -n "$tuid" ] && tuid="$(printf '%s' "$tuid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  # THE EMPTINESS TEST IS INSIDE THE `if` AND NOT ON THE ASSIGNMENT LINE, and that is
+  # load-bearing twice over. An ABSENT tool_use_id must stay absent -- the lesson gate
+  # declines to claim without one, and an unclaimed deny is emitted twice under the
+  # double delivery -- so this may not fold empty into `_` the way the guard below does
+  # for a `.`. And the one-line `[ -n "$tuid" ] && tuid="$(...)"` shape it replaces is
+  # unreadable to tests/test_script_wrapping.py, which is what checks that every id used
+  # as a path component carries the `.`/`..` guard on the line after its sanitiser.
+  if [ -n "$tuid" ]; then
+    tuid="$(printf '%s' "$tuid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+    case "$tuid" in ''|.|..) tuid=_ ;; esac
+  fi
 
   TMP="$(mktemp -d 2>/dev/null)" || exit 0
   cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
@@ -1014,16 +1104,21 @@ shell_tool() { [ "$1" = "Bash" ]; }
 # sentence and its newlines would end the record.
 oneline() { printf '%s' "$1" | tr '\n\t' '  ' | squeeze; }
 
-# THE STATEMENT the recovery arm emits and the lesson gate quotes back, built in one
-# place so the two can never say different things about the same signature. Every
-# variable part is capped, and the caps are what keep the whole under 700 characters --
-# tests/test_repeat_gate.py measures it against saturating input rather than trusting
-# this sentence. FACT ONLY: it names what happened and what two commands exist. An
-# imperative here is both ignored and misleading about who is asking (PLATFORM FACTS 4).
-lesson_statement() {   # $1 sig, $2 failed norm, $3 error head, $4 what worked
-  ls_f="$(printf '%s' "$2" | cut -c1-90)"
-  ls_e="$(printf '%s' "$3" | cut -c1-70)"
-  ls_w="$(printf '%s' "$4" | cut -c1-90)"
+# THE FACTS the recovery arm emits and the lesson gate quotes back, built in one place and
+# stored ONCE in the marker file, so the two can never say different things about which
+# call failed or which one worked. Every variable part is capped, and the caps are what
+# keep the emitted statement under 700 characters -- tests/test_repeat_gate.py measures it
+# against saturating input rather than trusting this sentence.
+#
+# THE FACTS ARE SHARED; THE COMMAND BLOCK IS NOT, and that split is the whole of the
+# 2026-09-04 change. The statement names both commands, because a person reading their
+# own session's transcript is entitled to know that `skillrepeat dismiss` exists. The DENY
+# names only the one a session can act on. What is quoted back byte for byte is the part
+# that could otherwise disagree, which was never the command list.
+lesson_facts() {   # $1 failed norm, $2 error head, $3 what worked
+  ls_f="$(printf '%s' "$1" | cut -c1-90)"
+  ls_e="$(printf '%s' "$2" | cut -c1-70)"
+  ls_w="$(printf '%s' "$3" | cut -c1-90)"
   printf '%s' "A call that failed in this session has since succeeded a different way, and
 the store recorded that as its recovery.
 
@@ -1031,9 +1126,18 @@ the store recorded that as its recovery.
   error:   $ls_e
   worked:  $ls_w
 
-No lesson references this signature yet. Two commands change that:
+No lesson references this signature yet."
+}
+
+# THE STATEMENT: the facts, plus the two commands that exist, with the second one labelled
+# as what it is. FACT ONLY, and the label is a fact too: a model that runs `skillrepeat
+# dismiss` writes `actor:"model"` and lifts nothing (WHO MAY DISMISS in the header). An
+# imperative here is both ignored and misleading about who is asking (PLATFORM FACTS 4).
+lesson_statement() {   # $1 sig, $2 facts
+  printf '%s' "$2
+A lesson lifts it:
   skillnote add --lesson $1 \"<what was learned>\"
-  skillrepeat dismiss $1 --why \"<why>\""
+  skillrepeat dismiss $1 --why \"<why>\"  (a person at a terminal only)"
 }
 
 # CRC-32 plus byte length. BSD and GNU `cksum` agree on both fields for stdin, and both
@@ -1310,8 +1414,9 @@ if [ "$event" = "PostToolUse" ]; then
           # the one the session was actually told about.
           if [ -n "${pfnorm:-}" ]; then
             bsig="$(printf '%s' "$psig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+            case "$bsig" in ''|.|..) bsig=_ ;; esac
             if mkdir -p "$ldir" 2>/dev/null && [ ! -f "$ldir/s-$bsig" ]; then
-              printf '%s' "$(lesson_statement "$psig" "$pfnorm" "${pferr:-}" "$norm")" \
+              printf '%s' "$(lesson_facts "$pfnorm" "${pferr:-}" "$norm")" \
                 > "$ldir/s-$bsig" 2>/dev/null || :
             fi
             [ -z "$bound_sig" ] && { bound_sig="$psig"; bound_bsig="$bsig"; }
@@ -1351,11 +1456,15 @@ if [ "$event" = "PostToolUse" ]; then
   # reaches here -- claim_once above dropped it -- so what this actually bounds is a
   # SECOND, genuinely different recovery of the same signature later in the session.
   mkdir "$ldir/said-$bsig" 2>/dev/null || exit 0
-  # READ BACK OFF THE MARKER, NOT REBUILT. The file is the single copy of this sentence, so
-  # what the session is told here and what the lesson gate quotes back later are the same
-  # bytes by construction rather than by two builders agreeing. That is the whole of the
-  # fix for the two disagreeing about which call worked.
-  stmt="$(cat "$ldir/s-$bsig" 2>/dev/null)"
+  # THE FACTS ARE READ BACK OFF THE MARKER, NOT REBUILT. The file is the single copy of
+  # them, so what the session is told here and what the lesson gate quotes back later are
+  # the same bytes by construction rather than by two builders agreeing. That is the whole
+  # of the fix for the two disagreeing about which call worked. The command block is
+  # appended here and a DIFFERENT one is appended by the gate, on purpose: see THE FACTS
+  # ARE SHARED; THE COMMAND BLOCK IS NOT.
+  facts="$(cat "$ldir/s-$bsig" 2>/dev/null)"
+  [ -z "$facts" ] && exit 0
+  stmt="$(lesson_statement "$bound_sig" "$facts")"
   [ -z "$stmt" ] && exit 0
   ( jq -nc --arg c "$stmt" \
       '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}' \
@@ -1365,18 +1474,199 @@ if [ "$event" = "PostToolUse" ]; then
 fi
 
 # ==================================================================== arm 3: REFUSE
-# Guard 3 from the header: the head allowlist. Only the FIRST command-position word is
-# consulted, and leading `VAR=value` assignments are stepped over so `FOO=1 ls` reads as
-# `ls`. Everything about this is a lower bound on refusing and an upper bound on trapping
-# the session.
-allowlisted_head() {
-  h="$(printf '%s' "$1" | tr '\n\t' '  ' | squeeze)"
-  # Step over leading `NAME=value` assignments. The name is validated rather than matched
-  # loosely: a pattern like `[A-Za-z_]*=*` also matches `git commit -m x=y`, whose first
-  # word is not an assignment at all, and stepping over it would drop `git` off the front
-  # of a command this gate must never refuse.
+# ------------------------------------------------------------------ segments
+# SPLIT BEFORE JUDGING A HEAD, because an exemption read off the first word alone is an
+# exemption on `cd` that carries every command after the `&&` in with it. A red-team
+# session found it unaided on its fifth attempt on 2026-09-04:
+# `cd build && tar -xf ../release.tgz` was ALLOWED where the bare `tar -xf ../release.tgz`
+# was denied, and `true && <anything>` is the same hole with no pretext at all.
+#
+# THE WALK IS hooks/doc-gate.sh's, IN BUILTINS RATHER THAN awk. `;`, `&`, `|`, `(` and `)`
+# end a segment when they are OUTSIDE quotes, and quote state is tracked so a `&&` inside
+# an argument -- `git commit -m "fix a && b"` -- ends nothing. `&&` and `||` produce an
+# empty segment between their two breaks, which costs nothing: an empty segment has no
+# head and is skipped. A NEWLINE separates two commands as surely as a `;` does, so
+# newlines are folded to `;` BEFORE the walk rather than to a space, which is what this
+# function used to do -- a two-line `cd build<newline>tar -xf x` read as one command whose
+# head was `cd`, the same hole spelled without an operator.
+#
+# THE FAIL DIRECTION IS THE OPPOSITE OF doc-gate's, AND THAT IS THE WHOLE POINT OF SAYING
+# SO. There a missed split costs a missed deny, which that gate tolerates by design; here
+# a missed split GRANTS AN EXEMPTION, so an unsplit compound must be treated as NOT
+# exempt. Concretely: when the walk cannot model the text `split_segments` FAILS, and
+# every caller below refuses the exemption rather than granting it.
+#
+# WHAT IT DOES NOT MODEL is the pair doc-gate names: a backslash-escaped quote and
+# `$'...'`. Either can leave the tracker inside a quote where the shell is not, or outside
+# one where the shell is. Two things follow from the fail direction, and neither is a
+# claim to model them:
+#   * A WALK THAT ENDS INSIDE A QUOTE never closed, so nothing after the opening quote was
+#     tested for a separator at all. The exemption is refused.
+#   * A COMMAND CARRYING ONE OF THOSE SHAPES **AND** ANY SEPARATOR BYTE is refused its
+#     exemption outright. That conjunction is exact rather than cautious: with no `;`,
+#     `&`, `|`, `(` or `)` anywhere in the text there is ONE segment however the quotes
+#     parse, so the head is unambiguous and the exemption stands -- `sed 's/\"//' f` keeps
+#     it. With one present, that byte is exactly what a mis-tracked quote can hide.
+#
+# HEREDOC BODIES ARE STRIPPED FIRST, with hooks/doc-gate.sh's own awk pass. A body is not
+# shell: `python3 - <<'PY'` followed by Python whose lines begin `import`, `print`, `def`
+# yields a head per line, none of them on any list, and the exemption is refused for a
+# command that is only writing a file.
+#
+# IT CHANGED NO VERDICT ON THE LIVE STORE AND IS KEPT ANYWAY, which is worth saying
+# plainly rather than dressing up. Over the 310 distinct fail commands of 2026-09-04 the
+# strip moved 0 of them, because a command writing a heredoc here is nearly always
+# `python3 - <<PY` or `bash -c`, whose own head is on no list either way. What it does
+# move is the shape that is exempt for a real reason -- `cd repo && cat > f <<'EOF'` with
+# a `&&` or a `;` inside the body -- and that is the shape a session writing a note
+# reaches for. The fork is paid for by a `case` test, so a command with no `<<` in it
+# costs nothing, and this function still forks LESS than the `printf | tr | sed` pipeline
+# it replaced.
+#
+# BOUNDED AT 400 separator-or-quote characters walked; past that the answer is "could not
+# model", which is again the non-exempt direction. The cap is a literal and not a knob on
+# purpose: a tunable would have to be carried into two documented tables and a doctrine
+# test for a number no caller has had a reason to move.
+#
+# Sets SEGS to the segments, newline-separated. Returns 1 when it could not model the
+# text, and SEGS is not to be read in that case.
+split_segments() {
+  SEGS=""
+  sg_bsl='\'
+  sg_sq="'"
+  sg_dq='"'
+  sg_t="$1"
+  # THE STRIP RUNS ON THE TEXT WITH ITS NEWLINES STILL IN IT, because a heredoc body is
+  # delimited by lines; the fold to `;` below is what comes after. Each heredoc ends at
+  # its OWN delimiter -- starting at the first `<<` and swallowing the rest is the defect
+  # hooks/claim-gate.sh's first version shipped. `<<<` is a here-STRING and opens no body,
+  # so it is blanked in a same-length probe copy before the delimiter is matched. The
+  # quote character reaches awk as `q` because `\047` inside an awk regex constant is not
+  # portable and the program itself is single-quoted.
+  case "$sg_t" in
+    *'<<'*)
+      sg_t="$(printf '%s' "$sg_t" | awk -v q="'" '
+        BEGIN { re = "<<-?[[:space:]]*([\"][^\"]+[\"]|" q "[^" q "]+" q "|[A-Za-z_][A-Za-z0-9_]*)" }
+        {
+          if (inh) {
+            t = $0
+            if (dash) sub(/^\t+/, "", t)
+            sub(/[[:space:]]+$/, "", t)
+            if (t == delim) inh = 0
+            next
+          }
+          print
+          probe = $0
+          gsub(/<<</, "@@@", probe)
+          if (match(probe, re)) {
+            spec = substr(probe, RSTART, RLENGTH)
+            dash = (spec ~ /^<<-/)
+            sub(/^<<-?[[:space:]]*/, "", spec)
+            gsub(/"/, "", spec); gsub(q, "", spec)
+            delim = spec
+            inh = 1
+          }
+        }' 2>/dev/null)"
+      # An awk that could not run leaves nothing to judge, and nothing to judge is not an
+      # exemption -- the fail direction of this whole function.
+      [ -n "$sg_t" ] || return 1
+      ;;
+  esac
+  sg_t="${sg_t//$'\n'/;}"
+  sg_t="${sg_t//$'\t'/ }"
+  case "$sg_t" in
+    *"$sg_bsl$sg_sq"*|*"$sg_bsl$sg_dq"*|*'$'"$sg_sq"*)
+      case "$sg_t" in *[\;\&\|\(\)]*) return 1 ;; esac ;;
+  esac
+  sg_rest="$sg_t"
+  sg_cur=""
+  sg_n=0
+  while [ -n "$sg_rest" ]; do
+    sg_n=$((sg_n + 1))
+    [ "$sg_n" -gt 400 ] && return 1
+    # ONE PARAMETER EXPANSION PER INTERESTING BYTE, not per character. A character loop
+    # over a pasted heredoc is O(n^2) in string copies and this hook runs on PreToolUse.
+    sg_run="${sg_rest%%[;\&|\(\)\'\"]*}"
+    if [ "$sg_run" = "$sg_rest" ]; then
+      sg_cur="$sg_cur$sg_rest"
+      sg_rest=""
+      break
+    fi
+    sg_cur="$sg_cur$sg_run"
+    sg_rest="${sg_rest#"$sg_run"}"
+    sg_c="${sg_rest%"${sg_rest#?}"}"
+    sg_rest="${sg_rest#?}"
+    # A REDIRECTION IS NOT A SEPARATOR, and `2>&1` is why this is a test rather than
+    # something left to the fail direction. Over the 310 distinct fail commands in the
+    # live store of 2026-09-04 the bare byte rule produced the segment head `1` a hundred
+    # and twenty-four times, every one of them the tail of a `2>&1` somebody wrote to keep
+    # stderr -- a head on no list, refusing the exemption of every command wearing one.
+    # `>&`, `<&` and `&>` are one redirection each and `>|` is the clobber form; `&&`,
+    # `||`, a lone `&` and a lone `|` are the real separators and are left exactly where
+    # they were. `|&` is a PIPE and is deliberately not in here.
+    sg_prev="${sg_cur#"${sg_cur%?}"}"
+    sg_next="${sg_rest%"${sg_rest#?}"}"
+    case "$sg_c$sg_prev$sg_next" in
+      '&>'*|'&<'*) sg_cur="$sg_cur$sg_c"; continue ;;
+      '&'?'>') sg_cur="$sg_cur$sg_c"; continue ;;
+      '|>'*) sg_cur="$sg_cur$sg_c"; continue ;;
+    esac
+    case "$sg_c" in
+      \'|\")
+        sg_in="${sg_rest%%"$sg_c"*}"
+        [ "$sg_in" = "$sg_rest" ] && return 1
+        sg_cur="$sg_cur$sg_c$sg_in$sg_c"
+        sg_rest="${sg_rest#"$sg_in"}"
+        sg_rest="${sg_rest#?}"
+        ;;
+      *)
+        SEGS="$SEGS$sg_cur
+"
+        sg_cur=""
+        ;;
+    esac
+  done
+  SEGS="$SEGS$sg_cur
+"
+  return 0
+}
+
+# The head of ONE segment, into SEG_HEAD. Three things are stepped over or past before the
+# first word is read, and each of them was a wrong answer once the split existed:
+#
+#   * LEADING `VAR=value` ASSIGNMENTS, so `FOO=1 ls` reads as `ls`. The name is validated
+#     rather than matched loosely: a pattern like `[A-Za-z_]*=*` also matches
+#     `git commit -m x=y`, whose first word is not an assignment at all, and stepping over
+#     it would drop `git` off the front of a command this gate must never refuse.
+#   * THE KEYWORDS THAT PRECEDE A COMMAND -- `if`, `then`, `do`, `while` and the rest. A
+#     segment reading ` do echo "== $f =="` has the command `echo` in it and the head `do`,
+#     which is on no list; over the live store of 2026-09-04 that alone refused the
+#     exemption of 9 commands whose every real head was `echo`, `cat` or `ls`.
+#   * THE WORDS THAT CARRY NO PROGRAM AT ALL -- a loop or `case` HEADER, a terminator, and
+#     the two condition forms. `for f in docs/*` runs nothing, `done 2>/dev/null` runs
+#     nothing, and `[ -f x ]` cannot run anything else. SEG_HEAD is left EMPTY for these
+#     and the caller skips the segment. That is not a hole: anything a `for` header
+#     actually executes is a `$(...)`, and `(` and `)` are separators, so it arrives as a
+#     segment of its own and is judged there.
+#
+# Empty when the segment holds no word at all, which is the `&&` case above. It sets a
+# variable rather than printing one, because a fork per segment is a fork this arm cannot
+# afford on PreToolUse.
+segment_head() {
+  h="$1"
+  SEG_HEAD=""
   while :; do
+    case "$h" in ' '*) h="${h# }"; continue ;; esac
     first="${h%% *}"
+    [ -z "$first" ] && return 0
+    case "$first" in
+      'fi'|'done'|'esac'|'}'|';;'|'for'|'case'|'select'|'in'|'['|'[['|']]'|'test')
+        return 0 ;;
+      'if'|'then'|'elif'|'else'|'do'|'while'|'until'|'!'|'time'|'{')
+        [ "$h" = "$first" ] && return 0
+        h="${h#* }"
+        continue ;;
+    esac
     case "$first" in
       *=*) ;;
       *) break ;;
@@ -1389,12 +1679,35 @@ allowlisted_head() {
     h="${h#* }"
   done
   h="${h%% *}"
-  h="${h##*/}"
-  case "$h" in
+  SEG_HEAD="${h##*/}"
+}
+
+# Guard 3 from the header, on ONE head.
+head_allowlisted() {
+  case "$1" in
     cd|ls|pwd|echo|printf|cat|head|tail|less|wc|grep|egrep|fgrep|rg|find|which|command|type|env|export|git|jq|sed|awk|sort|uniq|diff|stat|file|date|true|:|source|.|skillrepeat|skillforge|skillinsight|skillreport|skillcontrib)
       return 0 ;;
   esac
   return 1
+}
+
+# Guard 3, on a whole command: EVERY segment's head, and a command that cannot be split
+# into segments is not exempt. Everything about this is a lower bound on refusing and an
+# upper bound on trapping the session, which is why the empty command is not exempt
+# either -- `ah_any` is what says a head was actually judged.
+allowlisted_head() {
+  split_segments "$1" || return 1
+  ah_any=0
+  while IFS= read -r ah_seg; do
+    segment_head "$ah_seg"
+    [ -z "$SEG_HEAD" ] && continue
+    head_allowlisted "$SEG_HEAD" || return 1
+    ah_any=1
+  done <<EOF
+$SEGS
+EOF
+  [ "$ah_any" = "1" ] || return 1
+  return 0
 }
 
 # A SECOND ALLOWLIST, AND IT IS A DIFFERENT ARGUMENT FROM THE ONE ABOVE. `allowlisted_head`
@@ -1419,23 +1732,8 @@ allowlisted_head() {
 # stripped -- so `./run_tests.sh`, `/abs/path/run_tests.sh` and `CI=1 pytest` all reach here
 # as their bare basename. The `*test*`/`*spec*` script patterns are what catch a repository's
 # own runner without naming it.
-runner_head() {
-  h="$(printf '%s' "$1" | tr '\n\t' '  ' | squeeze)"
-  while :; do
-    first="${h%% *}"
-    case "$first" in
-      *=*) ;;
-      *) break ;;
-    esac
-    name="${first%%=*}"
-    case "$name" in
-      ''|*[!A-Za-z0-9_]*) break ;;
-    esac
-    [ "$h" = "$first" ] && break
-    h="${h#* }"
-  done
-  h="${h%% *}"
-  h="${h##*/}"
+head_runner() {   # $1 = the segment, $2 = its head as `segment_head` left it
+  h="$2"
   # Runners whose whole purpose is to run a suite or a build: unconditional.
   case "$h" in
     pytest|tox|nox|nose2|jest|mocha|vitest|karma|ava|rspec|minitest|phpunit)
@@ -1473,6 +1771,31 @@ runner_head() {
       esac ;;
   esac
   return 1
+}
+
+# The runner exemption on a whole command, and the rule is NOT "every head is a runner".
+# `cd repo && ./run_tests.sh` is the ordinary shape of running a suite, and `cd` is not a
+# runner; requiring every head to be one would take the runner exemption away from it and
+# land back on the loop the user's own CLAUDE.md mandates. So: EVERY head must be exempt
+# by one of the two lists, and AT LEAST ONE must be a runner -- which is what keeps this
+# answering `exempt-runner` where `allowlisted_head` already answered `exempt-allowlist`,
+# so the two verdicts `--eligible-of` prints stay distinguishable.
+runner_head() {
+  split_segments "$1" || return 1
+  rh_any=0
+  while IFS= read -r rh_seg; do
+    segment_head "$rh_seg"
+    [ -z "$SEG_HEAD" ] && continue
+    if head_runner "$rh_seg" "$SEG_HEAD"; then
+      rh_any=1
+      continue
+    fi
+    head_allowlisted "$SEG_HEAD" || return 1
+  done <<EOF
+$SEGS
+EOF
+  [ "$rh_any" = "1" ] || return 1
+  return 0
 }
 
 # ------------------------------------------------------------------ --eligible-of
@@ -1581,21 +1904,30 @@ EOF
   [ -z "$lg_want" ] && return 0
 
   # ONE pass, and it answers both halves of clause (a) and half of clause (b): how many
-  # distinct sessions have failed this way, and whether a dismissal has been recorded.
+  # distinct EARLIER sessions have failed this way, and whether a dismissal a person wrote
+  # has been recorded.
+  # THE CURRENT SESSION IS EXCLUDED, `$cur`, exactly as the repeat arm excludes it. See
+  # EARLIER MEANS EARLIER ON BOTH ARMS in the header for what this cost and why the
+  # default did not move with it.
+  # ONLY A HUMAN'S DISMISSAL COUNTS. `.actor` is `human`, `model`, or absent on a row
+  # written before the field existed -- and absent reads as human, because those rows
+  # predate the model path and there is nothing in them to tell apart.
   # THE TOMBSTONE CUTOFF APPLIES TO THE FAIL ROWS AND NOT TO THE DISMISSAL. A `forget`
   # says "these observations no longer count"; a `dismiss` says "this decision was made",
   # and a decision is not un-made by forgetting the rows that prompted it.
   jq -Rc 'fromjson? // empty | select(type=="object")' "$STORE" > "$TMP/lrows.json" \
     2>/dev/null || return 0
   [ -s "$TMP/lrows.json" ] || return 0
-  jq -s -r --argjson want "$lg_want" '
+  jq -s -r --argjson want "$lg_want" --arg cur "$sid" '
     . as $rows
     | $want[] as $s
     | (([ $rows[] | select(.t=="forget" and .sig==$s) | (.ts // 0) ] | max) // -1) as $cut
     | [ $s,
-        ([ $rows[] | select(.t=="fail" and .sig==$s and ((.ts // 0) > $cut)) | .session ]
+        ([ $rows[] | select(.t=="fail" and .sig==$s and ((.ts // 0) > $cut))
+                   | select((.session // "") != $cur) | .session ]
           | unique | length | tostring),
-        (if ([ $rows[] | select(.t=="dismiss" and .sig==$s) ] | length) > 0
+        (if ([ $rows[] | select(.t=="dismiss" and .sig==$s)
+                       | select((.actor // "human") == "human") ] | length) > 0
          then "yes" else "no" end) ]
     | join("\u001f")' "$TMP/lrows.json" > "$TMP/lsigs" 2>/dev/null || return 0
   [ -s "$TMP/lsigs" ] || return 0
@@ -1644,6 +1976,7 @@ EOF
     [ -z "${lg_sig:-}" ] && continue
     case "${lg_n:-}" in ''|*[!0-9]*) continue ;; esac
     lg_safe="$(printf '%s' "$lg_sig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+    case "$lg_safe" in ''|.|..) lg_safe=_ ;; esac
     # SPENT MARKERS ARE REMOVED, and that is a cost decision rather than a cleanup one.
     # Leaving one makes every later tool call in the session re-parse the store and the
     # ledger to reach the same answer, at the figure the REPEAT_LESSON_GATE stanza prints.
@@ -1679,13 +2012,24 @@ EOF
     mkdir "$lg_dir/deny/$lg_safe/$tuid" 2>/dev/null || return 0
     lg_stmt="$(cat "$lg_dir/s-$lg_safe" 2>/dev/null)"
     [ -z "$lg_stmt" ] && return 0
+    # ONE COMMAND, AND BOTH OMISSIONS ARE THE POINT. `skillrepeat dismiss` is not named
+    # here: measured 2026-09-04, two of two refused sessions ran it with an invented
+    # reason and carried on, so naming it made the refusal free. A dismissal a model
+    # writes is recorded and does not lift this (WHO MAY DISMISS in the header), and a
+    # deny that advertised an escape which no longer works would be worse than one that
+    # omits it. THE BUDGET IS NOT NAMED EITHER, for the reason the AND IT LETS GO stanza
+    # in the header gives: this text used to end by saying how many times it could be
+    # spent and that the call then went through, and a session read that as a schedule
+    # and retried until it expired without writing anything down. What is left is the
+    # refusal, the fail-then-fix facts, and the one command that lifts it -- statements
+    # of fact, no instruction among them.
     lg_reason="$lg_stmt
 
 Nothing ran and nothing was written. Fail rows for this signature come from $lg_n distinct
-sessions and the recovery above was bound in this one, which is the second occurrence this
-gate waits for. It lifts the moment either command has been run, and it is spent at most
-$LESSON_MAX times on one signature in one session, after which the call goes through
-whatever this store says.
+EARLIER sessions, and the recovery above was bound in this one. Writing the lesson down is
+what lifts this:
+
+  skillnote add --lesson $lg_sig \"<what was learned>\"
 
   skillrepeat show $lg_sig"
     ( jq -n --arg r "$lg_reason" \
@@ -1799,6 +2143,7 @@ hitr() { jq -r "$1 // empty" "$TMP/hit.json" 2>/dev/null; }
 sig="$(hitr '.sig')"
 [ -z "$sig" ] && exit 0
 sig="$(printf '%s' "$sig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$sig" in ''|.|..) sig=_ ;; esac
 
 # Deny once per session per signature, and fail CLOSED here -- the opposite of the learn
 # arm's claim. If mkdir fails for any reason at all (a lost race with the duplicate

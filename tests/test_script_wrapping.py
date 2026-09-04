@@ -276,6 +276,97 @@ class IdentitySanitisationTest(unittest.TestCase):
                 "that -- silently, because they agree for every UUID."
                 % (rel, n, self.REQUIRED_CUT, line))
 
+    # ONE guard line, and the only thing that varies is the name of the variable it
+    # guards. `case "$X" in ''|.|..) X=_ ;; esac`, on the line immediately after the
+    # sanitiser and at the same indentation.
+    GUARD = "case \"$%s\" in ''|.|..) %s=_ ;; esac"
+    ASSIGN = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)=\"\$\(printf ")
+
+    def guard_sites(self):
+        """(rel, lineno, indent, var, sanitiser line, the line after it) for every site.
+
+        A site whose sanitiser does not have the `VAR="$(printf ...)"` shape is a FAILURE
+        rather than a skip: a shape this cannot read is a shape it cannot check, and the
+        one that existed (`aid_json="\"$( ... )\""` in hooks/mission.sh, sanitising into
+        the middle of a quoted JSON string) was rewritten to the ordinary shape rather
+        than excused here.
+        """
+        out = []
+        for rel in shipped_scripts():
+            lines = (REPO / rel).read_text().split("\n")
+            for i, line in enumerate(lines):
+                if self.IDENTITY_TR not in line or line.lstrip().startswith("#"):
+                    continue
+                m = self.ASSIGN.match(line)
+                self.assertTrue(
+                    m, "%s:%d applies the identity sanitiser in a shape this test cannot "
+                       "read, so its guard cannot be checked:\n    %s" % (rel, i + 1, line))
+                nxt = lines[i + 1] if i + 1 < len(lines) else ""
+                out.append((rel, i + 1, m.group(1), m.group(2), line, nxt))
+        return out
+
+    def test_every_sanitised_id_is_guarded_against_dot_and_dotdot(self):
+        """`.` and `..` are INSIDE the identity class, so the sanitiser passes them through.
+
+        With a session id of `.`, hooks/mission.sh wrote `seen/` and `tools/` straight into
+        <state>/mission/ and its own sweep then removed the live session's claims; with
+        `..` it wrote into the state root, beside ledger.jsonl. Every script that turns an
+        id into a path component carries the same one-line guard, immediately after the
+        sanitiser, at the same indentation -- adjacency is the point, because a guard three
+        lines down is a guard the next edit moves away from the thing it guards.
+        """
+        sites = self.guard_sites()
+        self.assertTrue(sites, "no identity sanitisation found in any shipped script at "
+                               "all, which means this test is looking for the wrong thing")
+        for rel, n, indent, var, line, nxt in sites:
+            self.assertEqual(
+                nxt, indent + self.GUARD % (var, var),
+                "%s:%d sanitises `%s` and the next line is not its guard:\n"
+                "  sanitiser: %s\n  next:      %s\n  wanted:    %s"
+                % (rel, n, var, line, nxt, indent + self.GUARD % (var, var)))
+
+    def test_the_guard_line_is_byte_identical_everywhere(self):
+        """The same rule the sanitiser itself is held to, and for the same reason.
+
+        Shell cannot make the line literally byte-identical across sites that guard
+        differently-named variables without a fork per sanitisation, which the mission
+        hook's cost budget forbids -- so the check is: replace the variable name with a
+        placeholder and there must be exactly ONE spelling left, over every shipped
+        script. A second spelling here is a second class of unsafe name someone thought
+        of in one file and not the others.
+        """
+        spellings = {}
+        for rel, n, indent, var, line, nxt in self.guard_sites():
+            normalised = nxt.strip().replace(var, "<VAR>")
+            spellings.setdefault(normalised, []).append("%s:%d" % (rel, n))
+        self.assertEqual(
+            len(spellings), 1,
+            "the guard is spelled %d different ways:\n%s"
+            % (len(spellings), "\n".join("  %s\n      %s" % (k, ", ".join(v))
+                                         for k, v in sorted(spellings.items()))))
+        self.assertEqual(list(spellings)[0],
+                         "case \"$<VAR>\" in ''|.|..) <VAR>=_ ;; esac")
+
+    def test_the_sanitiser_really_does_pass_dot_and_dotdot_through(self):
+        """Non-vacuity. If `tr`/`cut` already mangled these two the guard would be
+        decoration and this whole class would be asserting nothing."""
+        for raw in (".", ".."):
+            r = subprocess.run(
+                ["bash", "-c", "printf '%%s' \"$1\" | %s | %s" % (self.IDENTITY_TR,
+                                                                  self.REQUIRED_CUT),
+                 "_", raw], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(r.stdout.rstrip("\n"), raw,
+                             "the sanitiser changed %r, so the guard guards nothing" % raw)
+
+    def test_the_guard_maps_the_three_unsafe_names_to_one_safe_one(self):
+        """Driven through the real expression, not asserted about it."""
+        script = ("v=\"$1\"\n" + self.GUARD % ("v", "v") + "\nprintf '%s' \"$v\"\n")
+        for raw, want in (("", "_"), (".", "_"), ("..", "_"),
+                          ("s1", "s1"), (".hidden", ".hidden"), ("...", "...")):
+            r = subprocess.run(["bash", "-c", script, "_", raw],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(r.stdout, want, "guard turned %r into %r" % (raw, r.stdout))
+
     def test_the_two_spellings_really_do_diverge(self):
         """Non-vacuity: without this guard the drift is invisible, so prove it is real.
 

@@ -844,6 +844,11 @@ class DerivationCommandTest(unittest.TestCase):
                # id a hook payload carries. Ours to read, never ours to set, so it belongs
                # here rather than in a tuning table nobody could act on.
                "CLAUDE_CODE_SESSION_ID",
+               # Also exported by Claude Code into every Bash tool call. `bin/skillrepeat`
+               # reads it to stamp `actor:"model"` on a dismiss row written from inside a
+               # session, which is what stops a model's own dismissal lifting the lesson
+               # gate. Ours to read, never ours to set.
+               "CLAUDECODE",
                # claude-history-surfer's OWN data-directory override, read by
                # hooks/mission.sh so that hook resolves the prompt store exactly the way
                # its writer does (history_surfer/config.py:37-42). Same judgement as

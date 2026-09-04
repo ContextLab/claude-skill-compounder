@@ -148,7 +148,9 @@ to the parent.
 
 **How established.** In one probe, two children ran to completion and neither result was
 delivered. The answers were still recoverable: they had to be read out of the task output
-files.
+files. The CLI version was not recorded when this entry was written (commit `edc2f60`,
+2026-08-25); the probes recorded on that date elsewhere in this file ran on 2.1.245, and
+this one has not been re-run since.
 
 **What it means.** Do not treat a missing result as a child that did not run. Anything
 that depends on a child's answer needs a path to that answer that does not go through
@@ -674,7 +676,9 @@ that only sets `additionalContext` is talking to the model while the human sees 
 before any prompt was entered.
 
 **How established.** By counting `SessionStart:startup` events against sessions carrying at
-least one user prompt, across 475 transcripts on this machine, 2026-08-25.
+least one user prompt, across 475 transcripts on this machine, 2026-08-25. Those transcripts
+span every CLI version installed here up to that date, so no single version is named; the
+count was not re-derived after it.
 
 **What it means.** Anything spent at `SessionStart` — an announcement, a query, a token
 cost — is spent on sessions that are then abandoned without a single prompt. Work that

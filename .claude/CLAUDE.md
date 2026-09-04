@@ -20,9 +20,15 @@ Eight documents under `docs/` carry the rest. Six have an audience of their own 
 listed here; the other two are procedures reached from `docs/development.md`:
 
 - `docs/CLAUDE-CODE-BEHAVIOR.md` is verified behavior of **Claude Code itself**, useful to
-  a project that shares no code with this one. Every entry names the finding, how it was
-  established by running something, and the CLI version where it was recorded. Add a
-  platform finding there, not to `DESIGN.md`, and carry its measured limits with it.
+  a project that shares no code with this one. Each entry is meant to name the finding, how
+  it was established by running something, and the CLI version where it was recorded, and
+  as of 2026-09-04 two do not carry a version -- "A child running and its result arriving
+  are separate events" and "SessionStart fires before anyone has typed". Re-derive the gap
+  rather than trusting this sentence:
+  `awk '/^## /{if(h!=""&&!v)print h; h=$0; v=0} /2\.1\.2[0-9]+/{v=1} END{if(h!=""&&!v)print h}' docs/CLAUDE-CODE-BEHAVIOR.md`
+  (it also prints the "Recorded elsewhere" pointer section, which is not an entry). Add a
+  platform finding there, not to `DESIGN.md`, with the version, and carry its measured
+  limits with it.
 - `docs/DESIGN.md` is the **local rationale**: why each piece of this package is shaped the
   way it is. It links to the platform file rather than restating a finding.
 - `docs/architecture.md` is **what the parts are**: the component table, the two install
@@ -122,6 +128,20 @@ project note -- the line, its attachments and its reminder's scope together -- a
 one-line tombstone that says where it went; never a copy, and `--to project` exits 2, because
 the hierarchy only goes up.
 
+**`skillnote where` exists so that nothing else has to resolve a scope for itself.** It
+prints the absolute path a note or a reminder of a given `--scope` (`project`, `global`,
+`memory`, `remind`) would be written to, and nothing else. `skillinsight promote` is its
+first caller and the reason it exists: that command writes into the CANDIDATE's own project
+rather than the caller's cwd -- which is where the finding applies and is deliberate -- so a
+promote run from a scratch directory used to write a note into a repository the caller was
+not in and report only "promoted". It now prints `skillinsight: target <abspath>` BEFORE it
+writes anything, and refuses outright when the project directory that path sits under does
+not exist, since `skillnote` creates `.claude/` but not the project above it and would
+otherwise conjure a whole tree for a candidate whose repository has been moved or deleted
+(`--project <dir>` is the way out). The path is ASKED of `bin/skillnote` rather than
+recomputed: a second copy of the four scope resolutions is exactly the drift this file warns
+about elsewhere, and it would be invisible, because both halves would still print something.
+
 ## Architecture
 
 **The animation is state-driven, not process-driven.** `bin/skillforge` writes a single
@@ -133,8 +153,8 @@ make it session-keyed without reading `docs/DESIGN.md` first. `hooks/compound-im
 *does* key its reminder counters per session, which is correct: it both reads and writes the
 payload's `.session_id`. So does `hooks/remind.sh`, for its own claims and cooldown stamps --
 name the script, because since Wave 2 "the reminder hook" is two of them. Since 2026-09-03
-(#33) `hooks/remind.sh` also sweeps that per-session tree itself, in `prune_stale_sessions()`
-(`hooks/remind.sh:266`): on a 1-in-`REMIND_PRUNE_EVERY` draw it removes any other session's
+(#33) `hooks/remind.sh` also sweeps that per-session tree itself, in
+`prune_stale_sessions()`: on a 1-in-`REMIND_PRUNE_EVERY` draw it removes any other session's
 `<sid>/` and `<sid>.seen/` whose mtime is more than `REMIND_PRUNE_TTL` behind `REMIND_NOW`,
 and never the sweeping session's own pair, so a claim or a cooldown stamp cannot vanish from
 under a live session. It walks one level under `<state>/remind/` only, so `reminders.jsonl`
@@ -215,19 +235,27 @@ injected context was refused as prompt injection in 2 of 4 measured runs, and th
 probe had the model quote the reason and decline the instruction inside it.
 
 The five moments are five events, and the script dispatches on `.hook_event_name` the way
-`hooks/claim-gate.sh` does, taking no argv. `SessionStart` with `.source` `compact` or
-`resume` delivers the mission (`hooks/mission.sh:344`); `startup` is silent, because
-nothing has been asked yet. `PreToolUse` on `Agent|Task|Workflow` delivers it to the parent
-before an expensive dispatch (`:353`), and `SubagentStart` delivers it to the subagent with
-one closing sentence recording that the parent's instructions to that agent are above it
-(`:349`, `:609`). Any other `PreToolUse` delivers it again once `MISSION_INTERVAL` (1200)
+`hooks/claim-gate.sh` does, taking no argv. Each arm sets one `moment` name, and the name
+is the anchor to grep for rather than a line number: every line number this section carried
+had gone stale within a day of being written, and `grep -n 'moment="' hooks/mission.sh`
+prints seven lines -- the initialiser, then the six assignments in `case` order, six rather
+than five because `PreToolUse` carries two of them.
+`SessionStart` with `.source` `compact` or `resume` delivers the mission
+(`moment="resume"`); `startup` is silent, because nothing has been asked yet. `PreToolUse`
+on `Agent|Task|Workflow` delivers it to the parent before an expensive dispatch
+(`moment="dispatch"`), and `SubagentStart` delivers it to the subagent with one closing
+sentence recording that the parent's instructions to that agent are above it
+(`moment="subagent"`; the sentence is the `The parent's instructions to this agent` line in
+the rendered block). Any other `PreToolUse` delivers it again once `MISSION_INTERVAL` (1200)
 seconds have passed since this session's last delivery of any kind, and never inside a
-subagent, which got the whole mission at `SubagentStart` (`:356-377`). `UserPromptSubmit`
-on a prompt of fewer than `MISSION_SHORT_WORDS` (6) words -- "continue", "yes", "ok do it",
-the prompt that relies on memory -- delivers the last substantive request instead (`:382`).
-And `Stop`, guarded by `stop_hook_active`, blocks ONCE per `prompt_id` with the mission as
-the reason (`:387`, claimed at `:440-441`), when `last_assistant_message` matches a short
-completion regex and the turn made at least `MISSION_STOP_MIN_TOOLS` (8) tool calls.
+subagent, which got the whole mission at `SubagentStart` (`moment="periodic"`).
+`UserPromptSubmit` on a prompt of fewer than `MISSION_SHORT_WORDS` (6) words -- "continue",
+"yes", "ok do it", the prompt that relies on memory -- delivers the last substantive request
+instead (`moment="ambiguity"`). And `Stop`, guarded by `stop_hook_active`, blocks ONCE per
+`prompt_id` with the mission as the reason (`moment="completion"`, claimed by the
+`mkdir -p "$SDIR/stop"` then `mkdir "$SDIR/stop/$pid"` pair), when `last_assistant_message`
+matches a short completion regex and the turn made at least `MISSION_STOP_MIN_TOOLS` (8)
+tool calls.
 
 Each event is claimed once under `<state>/mission/<sid>/`, because both wirings deliver it
 twice: an atomic `mkdir` under `seen/`, keyed on `tool_use_id`, `agent_id` or `prompt_id`
@@ -235,10 +263,19 @@ and, when the payload carries none of those, on a digest of the payload itself, 
 byte-identical across the two deliveries because it is the same event. The turn's tool
 count is one byte per distinct `tool_use_id` appended to `tools/<prompt_id>`, claimed
 separately because counting happens whether or not anything is emitted. The session id goes
-through the IDENTICAL sanitising expression the nine other scripts that key on one use --
-`printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96`, checked byte for byte across
-all ten on 2026-09-03 -- and one spelling difference would make a single event two claims
-under two names. Every delivery appends a row to `<state>/mission/hits.jsonl` (`ts`,
+through the IDENTICAL sanitising expression every other script that keys on one uses --
+`printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96`, in twelve shipped scripts
+(`grep -rlF "tr -c 'A-Za-z0-9._-' '_' | cut -c1-96" hooks/ bin/ statusline/ | wc -l`, as of
+2026-09-04) -- and one spelling difference would make a single event two claims under two
+names. **Every one of those sites is now followed by the same guard line**, at the same
+indentation: `case "$sid" in ''|.|..) sid=_ ;; esac`, with only the variable name changing.
+An id that sanitises to the empty string, `.` or `..` would otherwise name the parent
+directory or the tree itself. `tests/test_script_wrapping.py::IdentitySanitisationTest`
+pins both halves across every shipped script -- the `cut -c1-96` and the guard line after it
+-- and fails on a sanitisation written in a shape it cannot read rather than skipping it.
+`hooks/mission.sh` sanitises the session id in exactly ONE place, `set_sdir()`, which the
+two call sites that need `$SDIR` both go through. Every delivery appends a row to
+`<state>/mission/hits.jsonl` (`ts`,
 `session`, `moment`, `agent_id`, `chars`, `prompt_count`), trimmed to `MISSION_MAX_ROWS`
 (2000) on write as well as on read. `chars` comes from jq's `length` and NOT from `${#CTX}`:
 bash counts characters only in a UTF-8 locale and bytes otherwise, and these hooks run
@@ -249,16 +286,39 @@ One limit stands. `PreToolUse` on `Agent` can rewrite a subagent's prompt throug
 `SubagentStart`, which says the same thing where the parent can read it; the reasoning is
 in `docs/DESIGN.md`. The other one closed on 2026-09-03: `<state>/mission/<sid>/` gains one
 byte per tool call and one empty directory per claimed event, and it now sweeps itself the
-way `hooks/remind.sh` does. `prune_stale_sessions()` (`hooks/mission.sh:413`) removes
+way `hooks/remind.sh` does. `prune_stale_sessions()` removes
 ANOTHER session's `<sid>/` whose mtime is more than `MISSION_PRUNE_TTL` (604800) behind
 `MISSION_NOW`, on a 1-in-`MISSION_PRUNE_EVERY` (25; `0` switches the sweep off) draw,
 walking one level under `<state>/mission/` only -- so `hits.jsonl` is a file the
 directory-only glob never lists, the sweeping session's own tree is skipped whatever its
 age, and a name outside the sanitiser's own charset was put there by something else and is
-left alone. It has ONE call site (`hooks/mission.sh:499`), the periodic `PreToolUse` arm's
-not-yet-due exit: the most frequent event this hook sees and the one that delivers nothing,
-so an event about to emit never pays for a `stat` over every directory.
+left alone. It has TWO call sites (`grep -n prune_stale_sessions hooks/mission.sh` prints
+three lines: the definition and both of them), and
+both are exits that deliver nothing, so an event about to emit never pays for a `stat` over
+every directory. The first is the periodic `PreToolUse` arm's not-yet-due exit, the most
+frequent event this hook sees. The second is the **missing-store exit**, and it is there
+because `<state>/mission/<sid>/` OUTLIVES the store it was written beside: a project whose
+history-surfer store is deleted, moved or renamed leaves on that branch on every event
+afterwards, and with the sweep only on the periodic arm its session trees would never be
+swept again by anything. That branch checks `[ -d "$DIR" ]` with a builtin first, so a user
+who never installed history-surfer still reaches `exit 0` with no process start on that
+path -- which is what `tests/test_mission.py::CostTest` measures.
 `tests/test_mission.py::PruneTest` drives both exclusions.
+
+Every numeric `MISSION_*` and `REMIND_*` tunable, and the two `CI_*` knobs
+`prune_stale_state()` reads, is now taken through a **shape AND magnitude guard** --
+`case "$X" in ''|*[!0-9]*|???????????*) X=<default> ;; esac`, the eleven `?` being the
+magnitude half. A value that is empty, non-numeric, or eleven digits or more takes the
+DEFAULT rather than being clamped or zeroed, because an out-of-range export is a typo and
+the default is the only value the header promises. The shape half alone was not enough: 23
+nines is all digits, so it passed `*[!0-9]*` untouched and then made `[` print `integer
+expression expected` on a stderr that is still the user's terminal. The other half of the
+same defect was `CI_PRUNE_EVERY=0`, which reached `$(( RANDOM % PRUNE_EVERY ))` and had
+bash report `division by 0` and the hook exit 1 -- a hook breaking a turn, from a knob the
+tuning table lists. `0` now switches the sweep off in all three scripts. Re-derive the
+covered set with `grep -n '???????????\*)' hooks/*.sh bin/*` rather than from this
+sentence; the remaining `CI_*` knobs carry a shape guard or none, which is a gap and not a
+claim of coverage.
 
 **Five hooks can refuse a turn; `hooks/claim-gate.sh` is the one whose evidence rule is
 an exclusion.** It dispatches on `.hook_event_name` and takes no argv: on `Stop` it judges
@@ -270,9 +330,17 @@ is what both founding defects were made of. The `PreToolUse` arm is not a nicety
 message never reaches `last_assistant_message`, so the `Stop` arm alone cannot see the shape
 of defect the gate was written for. The five are `apply-gate.sh`, `claim-gate.sh`,
 `doc-gate.sh`, `mission.sh` and `repeat-gate.sh`; the last two are the new ones, one
-blocking a `Stop` and one having gained a second refusing arm, and grepping `hooks/*.sh`
-for `permissionDecision` and `decision` is how to recount them rather than reading this
-sentence.
+blocking a `Stop` and one having gained a second refusing arm. Recount them with
+`grep -lE 'permissionDecision:"deny"|decision:"block"' hooks/*.sh`, which is the jq
+object-literal spelling the emitting `jq -n` actually uses. The looser recipe this line
+used to give -- the bare words `permissionDecision` and `decision` -- does not work, in
+both directions at once, measured 2026-09-04: `grep -l permissionDecision hooks/*.sh`
+answers five files and they are the WRONG five, since `hooks/remind.sh` only explains in a
+comment why it does *not* use `permissionDecision:"allow"` while `hooks/apply-gate.sh`
+emits `decision:"block"` and is missed; and `grep -lE 'permissionDecision|decision'`
+answers eight, picking up `hooks/compound-improvement.sh` and `hooks/precompact.sh` for the
+word alone. A recount that reads a header comment as a refusal is a recount of the
+documentation.
 
 Two of its constants are worth knowing before touching either. `CLAIM_GATE_MAX_BYTES` is
 `16777216`; it was `67108864` and that cap was **dead code on BSD**, because `wc -c < file`
@@ -286,11 +354,15 @@ never firing was the arm carrying the difference.
 **Of the other four, `hooks/repeat-gate.sh` carries two refusals that ship opposite ways
 round, and `hooks/doc-gate.sh` is configured differently in this repo.** The repeat refusal
 is the older of the two: `hooks/repeat-gate.sh` has three arms -- learn, recover, refuse --
-and only the first two run unless `REPEAT_GATE_REFUSE=1` (`hooks/repeat-gate.sh:630`). The default
+and only the first two run unless `REPEAT_GATE_REFUSE=1` (`REFUSE="${REPEAT_GATE_REFUSE:-0}"`
+is the read site; grep for the name, not for a line number). The default
 is measured rather than cautious: on the live store of 2026-09-02 the arm had been wired
 across 81 distinct sessions and had never refused anything, and driving the real hook
 against all ten signatures that had reached `REPEAT_MIN_SESSIONS` denied none of them,
-because every one had a head on the gate's own allowlist (issue #27). A synthetic
+because every one was exempt under the gate's own head rules (issue #27). Those rules were
+narrowed on 2026-09-04, so that clause is re-derived rather than carried: driving the
+current hook over the live store, all 13 signatures at the threshold are still exempt, 12
+by the allowlist and one as a runner. A synthetic
 non-allowlisted signature is still denied, so the machinery works and nothing real reaches
 it -- and an arm nobody has watched fire cannot be judged by its false-positive rate. Arms
 1 and 2 stay on, so the store keeps growing whatever the switch says. What turns it back
@@ -303,6 +375,24 @@ them are what that drift looks like from outside: a number nobody can act on. Ea
 back to the checkout, since both install paths put a link in the user's bin directory;
 `SKILLREPEAT_GATE` and `SKILLREPORT_GATE` override, and are separate names because the two
 CLIs install independently of each other.
+
+**The head exemption both refusals share is judged per SEGMENT, and it fails in the
+OPPOSITE direction to `hooks/doc-gate.sh`'s splitter.** `split_segments` walks the command
+quote-aware in doc-gate's shape, `segment_head` steps over assignments and shell keywords to
+the word that names a program, `head_allowlisted` judges one head, and `allowlisted_head`
+grants the exemption only when EVERY segment's head is on the list; `runner_head` wants
+every head exempt by one of the two lists and at least one of them a runner. Where a missed
+split costs doc-gate a deny it never makes, a missed split here GRANTS an exemption, so
+`split_segments` FAILS -- and every caller refuses the exemption -- on an unterminated
+quote, on a backslash-escaped quote or `$'...'` accompanied by a separator byte, and past
+400 walked characters. The same change strips heredoc bodies before reading them as shell,
+stops `2>&1` splitting at its `&` into a head of `1`, and stops `do`, `for` and `done`
+counting as heads. It is not a tidy-up: over the 310 distinct `fail` commands in the live
+store on 2026-09-04, 141 verdicts change and 134 of them lose a head exemption they should
+never have had (re-run on a store since grown to 312: 143 and 136). The hole it closes came
+from a live red team rather than review -- `cd build && tar -xf ../release.tgz` was ALLOWed
+while the bare `tar -xf ../release.tgz` was denied, and a haiku session found it unaided on
+its fifth attempt.
 
 **The same file carries the lesson arms, and they are the refusal that ships ON.**
 Cross-tool recovery comes first, because without it the fail-then-fix of scenario 2 is
@@ -322,7 +412,7 @@ exactly one, 11 of those only the word `echo`; and a binding CONSUMES its armed 
 an unrelated success does not merely add a wrong row, it destroys the right one -- four
 `gh issue view` failures were disarmed by one `cat`. So a same-tool binding now wants
 `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` (2) shared content tokens whenever `shell_tool()`
-(`hooks/repeat-gate.sh:1010`, `Bash` and nothing else) says the tool is a shell. **That
+(`shell_tool() { [ "$1" = "Bash" ]; }` -- `Bash` and nothing else) says the tool is a shell. **That
 store grows, so re-run the join rather than quoting those figures back** -- late on the same
 day it stood at 241 bindings. A capped floor of `min(2, |fail tokens|)` was tried against it
 and admitted exactly one binding more, on the word `echo`, and was rejected. An exact
@@ -336,8 +426,8 @@ in everywhere else.
 THE FIRST TIME, IT SAYS IT: when a `recover` row is written, the `PostToolUse` arm emits
 `additionalContext` built by `lesson_statement` -- the failed call, the error head, the call
 that worked, and the two commands `skillnote add --lesson <sig> "<text>"` and `skillrepeat
-dismiss <sig> --why "<why>"` -- once per signature per session, as fact and not as an
-instruction. **One row per (signature, `tool_use_id`), and the statement names the call the
+dismiss <sig> --why "<why>"`, the second annotated `(a person at a terminal only)` -- once
+per signature per session, as fact and not as an instruction. **One row per (signature, `tool_use_id`), and the statement names the call the
 row records.** N failures of one signature arm N separate pending lines and one success used
 to bind every one of them, writing N byte-identical `recover` rows -- four under a single
 `tool_use_id` on the live store -- while the `s-<sig>` marker was written after the loop for
@@ -348,11 +438,35 @@ rewritten to `cat notes/OPEN-THREADS.md`. First binding wins now. `claim_once`
 covers only the duplicate the two wirings deliver; no claim can see a duplicate inside one
 event, so the de-duplication is the row's own. THE SECOND TIME, IT REFUSES: `lesson_gate` denies the next `Bash` call when a
 signature recovered in THIS session has fail rows from `REPEAT_MIN_SESSIONS` or more
-distinct EARLIER sessions, no `dismiss` row, and no standing lesson. Nothing else lifts it:
-running either of the two commands it prints does, and so does its own budget running out at
-`REPEAT_LESSON_MAX_DENIES` (2) refusals per signature per session. Allowlisted heads and
-those two recording commands are exempt, so the gate can never refuse the commands that end
-it.
+distinct EARLIER sessions, no dismissal a person wrote, and no standing lesson. EARLIER
+means earlier: the count drops rows whose `.session` is this one, on the lesson arm as well
+as the repeat arm, so nothing a session does to itself can build its own refusal. It used
+to cheat there -- the repeat arm excluded them and this one did not, so a signature that had
+failed in ONE earlier session plus this one was refused, a session earlier than the
+doctrine's "second occurrence".
+
+**The deny reason names ONE command, and the omission is deliberate.** It says
+`skillnote add --lesson <sig> "<what was learned>"` and does not mention `skillrepeat
+dismiss`, even though the first-time statement names both. A live red-team round settled
+that: 2 of 2 haiku sessions denied by the gate ran the dismiss command the refusal printed,
+with a reason they invented, and carried on. So `skillrepeat dismiss` now records WHO ran
+it. Every `dismiss` row carries `actor` -- `model` when `CLAUDECODE` or
+`CLAUDE_CODE_SESSION_ID` is set in the environment, `human` otherwise -- and `session`, the
+real session id or the literal `cli`. **The gate honours only a human's dismissal**
+(`(.actor // "human") == "human"`, so rows written before the field existed count as human).
+A model's dismissal is not refused and not silently dropped: it is written, it is on the
+record, it lifts nothing, and `skillrepeat list` reports that signature's LESSON column as
+`dismissed-by-model`. The gate's own budget still lifts it -- `REPEAT_LESSON_MAX_DENIES`
+(2) refusals per signature per session -- but **the deny text no longer states the budget**.
+The reason used to end by naming it and saying that the call then went through whatever the
+store said, and a session red-teaming this gate on 2026-09-04 read that as a schedule: it
+retried until the budget expired and wrote no lesson at all. A refusal that advertises its
+own expiry is an instruction to wait it out, so the budget is enforced silently, as the
+safety valve that stops a false positive trapping a session rather than as a term offered to
+the session in front of it. The default stays 2 on the live store rather than on nerve: nine
+sessions have armed a lesson marker, one deny has ever been spent, and none reached two. The
+per-segment head exemptions above apply here too, and `skillnote` and `skillrepeat` are
+exempt by name, so the gate can never refuse the command that ends it.
 
 It is ON by default, and `REPEAT_LESSON_GATE=0` is the only spelling that switches it off --
 exactly the reverse of `REPEAT_GATE_REFUSE`, where exactly `1` switches a refusal on. The
@@ -376,7 +490,8 @@ fail row whose tool is not `Bash`, because `hooks/remind.sh` keys a command remi
 note plus a keyword reminder rather than a command reminder.
 
 `hooks/repeat-gate.sh` closes its own stderr with a builtin `exec 2>/dev/null` before its
-first process start (`hooks/repeat-gate.sh:624`; `REPEAT_GATE_STDERR=1` leaves it attached).
+first process start (`case "${REPEAT_GATE_STDERR:-0}" in 1) ;; *) exec 2>/dev/null || : ;; esac`,
+so `REPEAT_GATE_STDERR=1` leaves it attached).
 `execve` charges the environment against `ARG_MAX`, so in a band of about 200 bytes under
 the launch ceiling the hook itself starts, `jq` with its 30-byte argv starts, and every `sed`
 in the normaliser, each carrying a 100-250 byte regex argv, dies with `Argument list too
@@ -388,7 +503,8 @@ payload `cat` dying at the 892000 ceiling. The command text is not the variable:
 knob off and on, and `--norm-of` was byte-identical over all 435 live store rows.
 
 `hooks/doc-gate.sh` classifies a root-level `notes/` path by `DOC_GATE_NOTES`
-(`hooks/doc-gate.sh:461`): `doc`, the default, means a notes-only push satisfies the gate;
+(`NOTES_CLASS="${DOC_GATE_NOTES:-doc}"` is the read site): `doc`, the default, means a
+notes-only push satisfies the gate;
 `neither` means such a path neither satisfies nor triggers it. **This repository sets
 `neither`**, in `.claude/settings.json` -- `notes/` here is the dated log the "Notes and
 open threads" section below describes, not a description of behaviour. Which way round the
@@ -638,7 +754,7 @@ the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the
 own clock: pinning someone else's does nothing to it. This list was derived by running
 `grep -rhoE '\b(CI|CLAUDE_SKILL_COMPOUNDER|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REPEAT_LESSON|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING|MISSION|SKILLCONTRIB)_[A-Z0-9_]+'
 hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **156** names, over
-**22** prefixes, re-run 2026-09-03 on the #43 completion tree. A grep
+**22** prefixes, re-run 2026-09-04 on the #43 completion tree. A grep
 that reads gitignored `.pyc` files as source adds a `Binary file
 skill_compounder/__pycache__/installer.cpython-NN.pyc matches` line per cached bytecode
 file -- two on this checkout, so `/usr/bin/grep` answers 158 where the ugrep an agent
@@ -647,7 +763,18 @@ the same split that makes the `skipTest` count above depend on which grep you ha
 hit was then read; re-run the command rather than trusting the list above if the two have
 drifted. The three names that wave added -- `MISSION_PRUNE_TTL`, `MISSION_PRUNE_EVERY` and
 `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` -- all sit under prefixes the alternation already
-carried, so for once the command printed its own list unaided. **Five
+carried, so the alternation did not have to move for them.
+
+**What the same round turned up instead was a name the command cannot print and must not.**
+`bin/skillrepeat` now reads `CLAUDECODE` to decide whether a `dismiss` row's `actor` is
+`model`. It carries no underscore, so the `_[A-Z0-9_]+` tail cannot match it under any
+prefix, and widening the alternation would have been the wrong repair: it is a name Claude
+Code exports into every `Bash` tool call, ours to read and never ours to set, so a tuning
+table row for it would document somebody else's knob as ours. It went into
+`tests/test_doctrine_sync.py`'s `AMBIENT` allowlist instead, beside `CLAUDE_CODE_SESSION_ID`
+and `CLAUDE_HISTORY_SURFER_DIR`, on the identical judgement those two got. An ambient name
+is exempt from the completeness claim; a knob never is, and the way to tell them apart is
+whether this package is entitled to set it. **Five
 times now the command has been narrower than the list it introduces**: it named three prefixes when seven were in use,
 seven when fourteen were, fourteen when sixteen were, sixteen when seventeen were, and
 eighteen when nineteen were, so
@@ -764,8 +891,22 @@ The two hook constants (12 edits, 20 minutes) are unvalidated. `bin/skillreport`
 instrument that would settle them, and since #37 it counts rather than estimates: its
 `REMINDER CONVERSION` block is a join on session and order, and its `FUNNEL` block reports
 each lineage id as delivered, acted on and outcome, with rows carrying no id reported
-UNATTRIBUTED rather than dropped. Every nudge written before 2026-09-03 carries no id, so
-the funnel's first weeks are mostly that column. Having the instrument is not having read
+UNATTRIBUTED rather than dropped. **`ACTED ON`, `OUTCOME` and `UNATTRIBUTED` are a
+PARTITION of the ledger, and the block prints its own arithmetic on a `CHECK:` line rather
+than asserting the property in prose** -- every `note`/`start`/`use`/`apply`/`verdict` row
+is attributed to AT MOST ONE lineage, by the first of four tests that holds (its own `from`,
+its own `candidate`, a `note` row whose own id is a delivered lineage, or the lineage
+delivered FIRST to the session it was written in, ties by id). It was not a partition
+twice over and both halves showed on the live store: a row whose `from` named a lineage no
+delivery log knew was counted NOWHERE, and a row was counted once for EVERY lineage
+delivered to its session, so `ACTED ON` summed to 104 against 69 DELIVERED and no reader
+could say what the column totalled. `ACTED ON` is now also BOUNDED rather than open: a row
+attributed by its session alone is a sequence and never a cause, and a session that received
+two lineages gives its rows to one of them, so that half of the column is a floor. The
+per-lineage table shows the first `FUNNEL_SHOW` (25) and folds the rest into one `(+N more)`
+row with the counts included, so nothing under it is computed over a subset. Every nudge
+written before 2026-09-03 carries no id, so the funnel's first weeks are mostly the
+UNATTRIBUTED column. Having the instrument is not having read
 one: it needs real usage across several repositories over real time, and neither number
 should move before that data exists. That limit, and the two others
 on every figure this repo quotes, are written up for a reader in

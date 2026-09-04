@@ -322,6 +322,20 @@ statement, which is correct under all of them.
 **`printf '%s' "…%…"` does not need `%%`.** A literal percent inside an *argument* to
 `%s` is not a format string, so escaping it produces a visible `%%`.
 
+**`2>/dev/null` goes BEFORE the `>>`, not after it.** Redirections are applied left to
+right, so `cmd >> file 2>/dev/null` opens the append first and a failure to open it is
+reported by the *shell*, to a stderr that is still the terminal — the `2>/dev/null` arrives
+too late and silences only the command. Measured by putting a directory where the log should
+be, on GNU bash 5.3.3(1) for aarch64-apple-darwin24.4.0: `printf "x\n" >> blocked
+2>/dev/null` printed `bash: line 1: blocked: Is a directory`, and `printf "x\n" 2>/dev/null
+>> blocked` printed nothing. This matters here because a hook must never break a turn, and
+every append in these scripts is to a log the user could have made unwritable in a dozen
+ordinary ways. `hooks/compound-improvement.sh`'s nudge log was the only append written the
+house way round when the house way round was first claimed; the rest of that script,
+`hooks/mission.sh`, `hooks/remind.sh` and `hooks/claim-gate.sh` were corrected to match it,
+and `tests/test_hook.py` drives a directory in place of each log rather than trusting the
+ordering by eye.
+
 **A growable value goes through a file, never through `--arg`.** Linux caps one element of
 the argument vector at `MAX_ARG_STRLEN`, which a larger `ARG_MAX` does not raise; macOS has
 no per-argument cap at all. A value whose size follows the input -- a rendered block reason,
@@ -945,6 +959,38 @@ then widened for no reason. This has now happened twice in this repository, both
 text wrapped at the column limit, which is most prose here. Assert that the mutated file
 differs from the original before you run anything against it.
 
+## A guard line beside the sanitiser, rather than a better sanitiser
+
+`.` and `..` are inside the identity character class, so the sanitiser passes them straight
+through. A session id of `.` therefore names the directory the script is already writing
+into, and `..` names its parent. Both were reachable: with `.`, `hooks/mission.sh` wrote
+`seen/` and `tools/` directly into `<state>/mission/` and its own sweep then removed the
+live session's claims; with `..` it wrote into the state root, beside `ledger.jsonl`.
+
+The obvious repair is to fix the sanitiser — strip a leading dot, or reject a name that is
+all dots — and it is the wrong one here, because the sanitiser is not one expression. It is
+the same expression written out in every script that turns an id into a path component, held
+byte-identical on purpose: a writer and a reader that spell it differently agree for every
+36-character UUID and diverge only past 96 characters, where the writer produces a truncated
+filename, the reader looks for the full-length one, finds nothing, and reports the session as
+having done nothing. No error and no empty result to notice. `tests/test_script_wrapping.py`
+pins that expression across every shipped script for exactly that reason, so changing it
+means changing every copy in step and re-establishing that they still match.
+
+A guard line adds without changing. One line, immediately after the sanitiser and at the
+same indentation, in every script that has one:
+
+```sh
+case "$sid" in ''|.|..) sid=_ ;; esac
+```
+
+Adjacency is the requirement rather than the style. A guard three lines below the thing it
+guards is a guard the next edit moves away from it, so the test asserts that the guard is the
+*next* line, at the *same* indentation, and that exactly one spelling of it exists once the
+variable name is replaced with a placeholder. A second spelling would be a second class of
+unsafe name somebody thought of in one file and not the others — which is the failure the
+byte-identical rule exists to prevent, arriving one level up.
+
 ## Three gates, and the reason there are now three
 
 `hooks/claim-gate.sh` was for a long time the one component here that refused anything, and
@@ -1393,10 +1439,42 @@ occurrence. Shipping that off by default would be shipping the finding without t
 consequence, which is what ten days of one output path already produced.
 
 Three things stop it becoming a wall. It is spent at most `REPEAT_LESSON_MAX_DENIES` times
-on one signature in one session and then lets go for good. Its two escapes are commands,
-and both of their heads are exempt from it, so the refusal can never block the thing that
-lifts it. And a dismissal counts exactly as much as a lesson: what is being asked for is a
-decision on the record, not a particular decision.
+on one signature in one session and then lets go for good — silently, because the deny text
+that named the budget was read as a timetable. A session red-teaming this gate on 2026-09-04
+met a reason ending "after which the call goes through whatever this store says" and retried
+until the budget expired, writing nothing down; an expiry a refusal advertises is an
+instruction to wait it out, and the valve exists against a false positive trapping a session
+rather than as a term offered to the session being refused. It is still there and still 2,
+and the live store says it is barely reached: nine sessions have armed a lesson marker, one
+deny has ever been spent, none reached two. Its escapes are commands, and
+both `skillnote` and `skillrepeat` are exempt from it by name, so the refusal can never
+block the thing that lifts it. And the refusal counts EARLIER sessions only, on both arms:
+until 2026-09-04 this one counted the current session too, so at the default of 2 a single
+earlier failure was enough, and the code was one session stricter than every document
+describing it.
+
+**A dismissal used to count exactly as much as a lesson, and it no longer does.** The
+argument for symmetry was that the gate's business is a decision on the record rather than a
+particular decision, and that argument survives contact with a person and not with a model.
+Driven live on 2026-09-04, both of two fresh sessions the gate refused answered by running
+the `skillrepeat dismiss` the deny text had helpfully printed, with a `--why` they invented
+on the spot, and carried on. The escape was free, so the refusal was free, so the gate bought
+nothing from the only population it can reach.
+
+The repair keeps the row and drops the effect. `bin/skillrepeat` stamps `actor` on every
+`dismiss` row — `model` when `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` is in its environment,
+`human` otherwise — and the gate honours only `human`, plus rows written before the field
+existed, which predate the model path and carry nothing to tell apart. Not writing the row at
+all was the other option and it was rejected: a dismissal a model wrote is evidence of what
+that session wanted to do, and evidence is the thing this package is short of. It is
+appended, `show` prints its `actor=`, and `list` reports the signature as
+`dismissed-by-model` so the difference is visible without opening the store.
+
+The deny text then had to change with it, and the omission is the point. It names
+`skillnote add --lesson` and no longer names the dismissal, because a refusal that advertises
+an escape which no longer works is worse than one that omits it. The `additionalContext` the
+recovery emits still names both — it is a statement of fact rather than a refusal, and the
+second command is labelled for what it is: a person at a terminal only.
 
 The two switches are spelled in opposite directions on purpose. `REPEAT_GATE_REFUSE=1`
 turns an off arm on, and only `REPEAT_LESSON_GATE=0` turns the on arm off. Whichever way a
@@ -1410,6 +1488,34 @@ directory to find. The expensive path parses the store and the ledger, and cost 
 `PYTHONPATH=$PWD python3 tests/test_repeat_gate.py CostTest -v`. It is bounded per
 signature per session rather than per tool call, because the marker is removed the moment
 its signature is judged unable to qualify.
+
+## The head exemption fails closed, where the splitter it borrows fails open
+
+Two hooks now split a command into segments with the same walk and disagree about what to do
+when the walk cannot model the text, and the disagreement is the design rather than an
+oversight. `hooks/doc-gate.sh` splits to find a `git push` it should judge, so a split it
+misses costs a deny it never makes — the direction that gate errs in on purpose, because
+refusing a push on a guess is the worse failure. `hooks/repeat-gate.sh` splits to decide
+whether a command's heads are harmless enough to wave it through, so a split it misses hands
+out an EXEMPTION. An exemption that fails open is a bypass; a refusal that fails closed is
+one wrong denial the next attempt goes through. The two err in opposite directions because
+what a mistake costs is opposite. So `split_segments` returns failure on an unterminated
+quote, on the shapes it does not model — a backslash-escaped quote, `$'...'` — whenever a
+separator byte is present as well, and past 400 walked characters, and every caller treats
+that failure as "not exempt".
+
+The hole this closes was found by a live red team on 2026-09-04 and not by anyone reading
+the code: `cd build && tar -xf ../release.tgz` was allowed where the bare `tar -xf
+../release.tgz` was denied, because the old rule read a single head off the front of the
+whole command. A haiku session found it unaided on its fifth attempt, and `true && <anything>`
+is the same hole with the pretext taken away. Judging every segment's head is the repair,
+along with three smaller ones it exposed: a heredoc body is stripped before its lines are
+read as shell, `2>&1` no longer splits at its `&` into a head of `1`, and `do`, `for` and
+`done` stop counting as heads. The scale is worth stating because it is not a tidy-up.
+Driving both versions of the `--eligible-of` door over every distinct `fail` command in the
+live store on 2026-09-04: of 310 commands, 141 verdicts change, and 134 of those lose a head
+exemption they should never have had. A re-run hours later against a store grown to 312 gave
+143 and 136.
 
 ## `skillnote promote` moves a note and never copies one
 

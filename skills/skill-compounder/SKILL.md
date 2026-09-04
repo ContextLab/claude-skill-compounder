@@ -62,8 +62,8 @@ A lesson is that pair in one command, keyed on the failing call so the fix is in
 runs again; `--attach <path>` carries the script the fix needed, and one recorded again from a second project
 moves up with `skillnote promote <id> --to global`, which moves it and never copies it. Remembering to run it
 is not your job: the repeat gate states the command the first time it sees a failure recovered, and on a
-signature that has now failed in a second session it refuses the next tool call until either that command or
-`skillrepeat dismiss <sig> --why "<why>"`, a row rather than a delete, has run.
+signature that failed in two EARLIER sessions it refuses the next tool call until that command has run. Only
+that one. `skillrepeat dismiss` records who ran it, and a dismissal written from inside a session lifts nothing.
 
 ### The mission is delivered, not remembered
 

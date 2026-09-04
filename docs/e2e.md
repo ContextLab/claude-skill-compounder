@@ -203,16 +203,25 @@ lesson written from it and the reminder that states it back are one chain too.
   are the instrument for the real question, at 72 calls.
 - **Anything about a personal-scope skill roster**, for the credential reason above.
 - **That a subagent ACTS on the mission it is handed.** Step 13 measures arrival, in the
-  subagent's own transcript, because arrival is the part this package controls. On both
-  runs so far the subagent was handed the mission and still answered that it could not
-  tell what the user was working on. The hook's own header records the same class of
-  result from the other direction — imperative wording refused as prompt injection in 2 of
-  4 runs — and a statement of fact can be read and set aside just as easily.
+  subagent's own transcript, because arrival is the part this package controls. On both runs
+  so far, and again in the live red-team of 2026-09-04, the subagent was handed the mission
+  and still answered `NOT KNOWN` when asked what the user was working on. That is now three
+  independent observations of the same thing, so read it as the expected outcome rather than
+  as a flake: delivery is necessary and it is demonstrably not sufficient. The hook's own
+  header records the same class of result from the other direction — imperative wording
+  refused as prompt injection in 2 of 4 runs — and a statement of fact can be read and set
+  aside just as easily.
 - **That the recovery arm binds a failure to its fix in general.** Step 15 tells the
   session to run the two commands one at a time, and the prompt says so because it has to:
   issued as parallel tool calls in one assistant message, the success came back before the
   failure and nothing bound. `hooks/repeat-gate.sh` arms on a failure and binds a later
   success, so a recovery that arrives first is not one.
+- **That the `Stop` block is free.** It costs one empty assistant turn: the blocked turn
+  comes back carrying `Your previous response had no visible output`, and only then does the
+  session act on the mission it was handed as the block's reason. Step 14 asserts that
+  another assistant turn follows the block, so the cost is inside what the step already
+  measures — but it is a real turn spent, and the arm is budgeted at one block per
+  `prompt_id` partly because of it.
 - **Anything statistical.** Every step is one observation. A PASS here means it happened
   once, in this environment, on this build — which is exactly what the report's quoted
   lines let you check.

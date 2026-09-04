@@ -4,7 +4,9 @@ What is actually open, as of the **2026-09-03** completion wave for issue #43 (t
 crossed to 2026-09-04 during it), on `resume/after-v0.3.1` after `adf8a65` (tags
 `v0.3.0` = `a2aa2d4`, `v0.3.1` = `b7f6a47`), with that wave's code and docs on the working
 tree and not yet committed. CI is green on both platforms from `cfb2bc6`
-onward, the end-to-end journey passed 12/12 on `a2aa2d4`, and the paid review is opt-in.
+onward, the end-to-end journey passed 17/17 on 2026-09-03 (thirteen `claude -p` calls,
+150.9 s, against CLI 2.1.259; it was 12/12 on `a2aa2d4` before the mission and lesson steps
+existed), and the paid review is opt-in.
 Issue #31 carries the status table; this file carries the threads behind it.
 
 The GitHub issues are the other half of this picture and they do not duplicate it:
@@ -152,9 +154,9 @@ data exists.
 ## Open: the per-session sweep, answered twice, and its two pairs of constants
 
 Wave 2 shipped the reminder hook with per-session state and no sweep. `ROOT/remind/<session
-id>/` (`hooks/remind.sh:144`, `:224`, `:419`) accumulates one directory per session, holding
+id>/` (grep `hooks/remind.sh` for `SDIR`) accumulates one directory per session, holding
 a cooldown stamp per reminder that fired and a claim per event, and nothing deletes any of
-it. `hooks/compound-improvement.sh:148`'s `prune_stale_state()` does not reach it: that
+it. `prune_stale_state()` in `hooks/compound-improvement.sh` does not reach it: that
 sweep walks `<state>/reminders/`, a **different** directory whose near-collision with
 `reminders.jsonl` is deliberate and pinned by `tests/test_hook.py`, precisely so the sweep
 cannot touch the store.
@@ -169,21 +171,28 @@ sampled invocation the way the status-line cache is, or leave it and say so. The
 avoid if it is pruned is the one `hooks/session-review.sh` shipped: a claim taken before the
 action is really going to happen can never be retried. Record the answer here.
 
-**Answered 2026-09-03 (#33): pruned on a sampled invocation.** `prune_stale_sessions()`
-(`hooks/remind.sh:266`) runs on a 1-in-`REMIND_PRUNE_EVERY` (25) draw and removes `<sid>/`
+**Answered 2026-09-03 (#33): pruned on a sampled invocation.** `prune_stale_sessions()` in
+`hooks/remind.sh` runs on a 1-in-`REMIND_PRUNE_EVERY` (25) draw and removes `<sid>/`
 and `<sid>.seen/` whose mtime is more than `REMIND_PRUNE_TTL` (604800 s) behind `REMIND_NOW`;
 the sweeping session's own pair is never removed, whatever its age, so a claim or stamp
 cannot vanish from under a live session, and the sweep walks one level under `<state>/remind/`
 only, so `reminders.jsonl` and the counters directory are unreachable by construction.
-`hits.jsonl` is trimmed to its last `REMIND_MAX_ROWS` on the delivery path (`:510`).
+`hits.jsonl` is trimmed to its last `REMIND_MAX_ROWS` on the delivery path.
 `tests/test_remind.py::PruneTest` builds the stale tree from real deliveries and proves a
 cooldown is not re-armed in the session that sweeps; `::HitsCapTest` writes past the cap.
 **`hooks/mission.sh` now carries the same sweep**, added 2026-09-03 for #43:
-`prune_stale_sessions()` (`hooks/mission.sh:413`) is the same sweep with its own two knobs
-(`MISSION_PRUNE_TTL`, `MISSION_PRUNE_EVERY`) and ONE call site — the periodic `PreToolUse`
-arm's not-yet-due exit (`hooks/mission.sh:499`), an event that delivers nothing — so no
+`prune_stale_sessions()` there is the same sweep with its own two knobs
+(`MISSION_PRUNE_TTL`, `MISSION_PRUNE_EVERY`) and, since the red-team round, TWO call sites
+(`grep -n prune_stale_sessions hooks/mission.sh` prints three lines, the definition and
+both call sites) — the periodic `PreToolUse` arm's
+not-yet-due exit, and the missing-store exit, which is the branch a project whose
+history-surfer store was deleted or moved takes on every event afterwards and which would
+otherwise have left its trees unswept forever. Both are exits that deliver nothing, so no
 delivering event pays for a `stat` over every directory. Two copies of one procedure
-now, and they are not shared code; a fix to either belongs in both.
+now, and they are not shared code; a fix to either belongs in both. The four
+`MISSION_PRUNE_*`/`REMIND_PRUNE_*` knobs and the two `CI_*` sweep knobs also gained a
+magnitude guard in that round: eleven digits or more takes the default rather than
+reaching `[`.
 Two limits stated rather than fixed: after the first trim `hits.jsonl` carries mktemp's
 `0600`; and a session idle for longer than the TTL whose `REMIND_COOLDOWN` is positive can
 have its stamps swept by another session, because rewriting a stamp does not bump the
@@ -193,7 +202,7 @@ open in #33 is only the two constants, and that waits on data (see "unvalidated 
 ## Open: the user's own `~/.claude/CLAUDE.md` stanza is hand-written and the installer will not touch it
 
 The installer writes the doctrine block between `claude-skill-compounder:doctrine:start` and
-`:end` markers. `install_doctrine()` (`skill_compounder/installer.py:400`) has four
+`:end` markers. `install_doctrine()` in `skill_compounder/installer.py` has four
 outcomes, and `user-owned` is the one that applies here: a `CLAUDE.md` already carrying a
 `## Compound Improvement` section written by hand has no markers, and writing the block
 anyway would give the reader the doctrine twice, so **nothing is written**. That is correct
@@ -344,6 +353,60 @@ Three limits, none of which a code change can lift:
   started by hand from a candidate nobody passed `--from` for is a true gap in the chain,
   recorded as a gap, and no amount of usage closes it by itself.
 
+## Open: what the red team found in round 1, and what was fixed
+
+Three reviews ran against the #43 completion tree on 2026-09-03: an adversarial read of the
+hooks, a live functional stress under the real config on ten `claude -p` calls, and a cold
+docs-accuracy pass. The session log is
+[`2026-09-03-issue43-completion-session.md`](2026-09-03-issue43-completion-session.md);
+this is what is left after the fixes.
+
+**Fixed in the same wave.** The weekly sweep in `hooks/compound-improvement.sh` was
+`find "$STATE_DIR" -type f -mtime +7 -delete`, which deleted `reminders/nudges.jsonl` and
+took the FUNNEL with it on any install quiet for a week; it now names the eight counter
+suffixes it sweeps. `CI_PRUNE_EVERY=0` divided by zero and left the hook exiting 1 on every
+event. Every session-id sanitiser let `.` and `..` through, so a payload could have made
+the mission prune remove the live session's own claims or write above the state root; one
+guard line now follows every one of them, pinned across all shipped scripts by
+`tests/test_script_wrapping.py::IdentitySanitisationTest`. `hooks/mission.sh` left before
+its prune when the surfer store was missing, so a project that lost its store was never
+swept again. The FUNNEL was not a partition in two directions at once. And the lesson
+gate's "earlier sessions only" guard was in the header but not in the code.
+
+**The deny text was answered by running the escape it printed.** Two of two haiku sessions
+denied by the lesson gate ran `skillrepeat dismiss` with a reason they had invented and
+carried on. The refusal now names only `skillnote add --lesson`, and a `dismiss` row carries
+`actor` and `session`, with only a human's lifting the gate. Open under it: nobody has
+watched a *human* dismissal happen either, so the arm that lifts has been exercised only by
+the suite.
+
+**Residual: a same-tool binding can still stand on shared path tokens alone.** The
+`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` floor of 2 does not exclude tokens that are path
+components, so a failure naming `<P>/redteam-hooks/... remind ...` binds to
+`sed -n <S> hooks/remind.sh` on `{remind, hooks}` and is not a fix for anything. The
+candidate rule — drop a shared token occurring only inside slash-bearing words of *both*
+commands — was run over the same-tool bindings in the live store of 2026-09-04: **587 rows,
+254 bindings with a locatable fail row, 45 unbound (17.7%), and in 26 of those 45 the two
+commands name an identical path word**, which is the strongest evidence of relatedness the
+store carries. Nothing in the store labels a binding true or false, so no precision figure
+can be computed from it; the cost can be, and it is a sixth of all bindings with a majority
+of the sample looking correct. Rejected on that, and recorded here as a known limit. The
+header of `hooks/repeat-gate.sh` carries the working; re-run the join rather than quoting
+these figures, because the store grows.
+
+**A subagent receives the mission and still answers "NOT KNOWN". Third observation.** The
+`SubagentStart` context arrives — the canary is in the subagent's transcript — and the agent
+still reports it does not know what the user asked for. Seen in the end-to-end journey, in
+the resume-session live check, and again in this round's functional stress. Nothing here
+distinguishes a delivery the agent did not read from one it read and discounted, and the
+`updatedInput` channel this design declined is the obvious next probe rather than the
+obvious next fix.
+
+**A `Stop` block costs one empty assistant turn.** When `hooks/mission.sh` blocks a `Stop`,
+the model produces a turn with no tool calls and nothing to say before it stops again. That
+is the platform's shape, not this package's, and the block is already once per `prompt_id`;
+the cost is one turn per completion claim, recorded so nobody reads it as a defect here.
+
 ## Known tree-state dependency — do not "fix" it
 
 `tests/test_seed_claim_provenance.py::test_the_measured_sweep_figures_are_re_derived_not_restated`
@@ -371,11 +434,25 @@ editing the prose alone.
 - **Every scope and routing measurement used `--model sonnet`.** The frontmatter findings in
   `docs/CLAUDE-CODE-BEHAVIOR.md` cover all three scopes; the model tier is a remaining limit
   stated in that file, and the same limit applies to every routing pin in `skills/`.
+- **`skillinsight promote --scope project` writes into the CANDIDATE's project, not the
+  caller's.** The target comes from the queue record's own `project` field, out of whatever
+  `SKILL_COMPOUNDER_STATE` names, so promoting from a copied queue still lands a note in the
+  repository the candidate came from. That is deliberate — the finding applies where it was
+  found — and the only warning is the `skillinsight: target <path>` line it prints before
+  writing. A red-team run against a copied queue wrote into this checkout twice on
+  2026-09-04. `--project <dir>` is the override.
+- **A note id is a hash of `<scope word>|<text>`, so identical text in two projects shares
+  one id.** `idof()` in `bin/skillnote` is CRC-32 plus byte length over that string, and the
+  scope word is `project`, not the project's path; a ledger join by id therefore conflates
+  two projects that recorded the same lesson. Not changed, deliberately: a scheme carrying
+  the project would orphan every id already written into a `CLAUDE.md` line, an attachment
+  directory and a ledger row.
 
 ## Open: what the CI-fix wave found and did not fix
 
 - **Fixed 2026-09-03: `hooks/repeat-gate.sh` closes its stderr before its first exec**
-  (`:406`, `REPEAT_GATE_STDERR=1` leaves it attached). The mechanism was not the one
+  (grep for `REPEAT_GATE_STDERR`, which set to `1` leaves it attached; the line number this
+  entry used to give was 333 lines out by the next wave). The mechanism was not the one
   recorded here earlier. The command text never touches an argv — it reaches `sed` by pipe
   from a builtin `printf`, and a 12-byte command died in the same band as a 600-byte one —
   so a cap on it was a dead guard and was not added. What dies is each `sed` stage's own
@@ -391,8 +468,9 @@ editing the prose alone.
   and brew ship different versions and a note-level check added upstream must not turn it
   red alone. `install.sh` and `uninstall.sh`, which were outside the job's globs, are now in
   both the smoke step and the lint step.
-- **`hooks/doc-gate.sh:966` may carry the same argv shape and nobody has measured it.**
-  The override row's file list goes in as `--arg files "$(cat "$TMP/code.txt")"`, and
+- **`hooks/doc-gate.sh` may carry the same argv shape and nobody has measured it.**
+  The override row's file list goes in as `--arg files "$(cat "$TMP/code.txt")"` — grep for
+  `--arg files`, not for a line number — and
   `code.txt` grows with the number of changed code files across up to
   `DOC_GATE_MAX_COMMITS` (100) commits. The jq program truncates to `.[0:8]`, but that
   happens *after* the exec, so the truncation does not bound the argument. On Linux that
@@ -448,7 +526,8 @@ Kept as one line each so a returning session does not reopen them.
   `hooks/insight-capture.sh` writes, with `source:"precompact"`. No model call, string
   extraction only — issue #8 measured why: a `PreCompact` hook blocks compaction and has no
   default timeout, and a timeout instead kills the writer mid-write. The payload was
-  re-measured on 2.1.259 and is recorded at `docs/CLAUDE-CODE-BEHAVIOR.md:510`, including
+  re-measured on 2.1.259 and is recorded in `docs/CLAUDE-CODE-BEHAVIOR.md` under
+  "`PreCompact` carries seven keys", including
   the previously unconfirmed `"trigger":"auto"`; the field is `trigger`, not the documented
   `compaction_trigger`, and there is no `last_assistant_message`, so the bounded transcript
   read is mandatory rather than a fallback. Its cost, and `custom_instructions`, were both

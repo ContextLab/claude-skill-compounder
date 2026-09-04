@@ -1051,23 +1051,10 @@ class StoreRootTest(MissionCase):
 
 
 # ==================================================================== the sweep
-class PruneTest(MissionCase):
-    """<state>/mission/ grows by a <sid>/ per session that reaches this hook, and nothing
-    else sweeps it: `prune_stale_state()` in hooks/compound-improvement.sh walks
-    <state>/reminders/ and hooks/remind.sh's sweep walks <state>/remind/, both of them
-    different directories. So this hook sweeps its own tree, on a sampled event, by age
-    against its own clock -- the same shape tests/test_remind.py::PruneTest pins there.
-
-    THE TREE IS BUILT BY THE HOOK, never by hand: every directory below was written by a
-    real delivery or a real tool-call event, so the sweep is tested against the shape the
-    writer really produces. Age is then set with os.utime, which is the one thing an event
-    cannot do.
-
-    THE SWEEP'S ONE CALL SITE is the periodic arm's not-yet-due exit, so `sweep()` below
-    is an ordinary tool call INSIDE the interval -- an event that delivers nothing. An
-    event that is about to deliver never sweeps, and
-    `test_an_event_that_is_about_to_deliver_never_sweeps` is what pins that.
-    """
+class PruneHelpers:
+    """PruneTest's fixtures, shared with the classes below it that need the same
+    real tree without re-running its assertions. The tree is always built by the
+    HOOK, never by hand."""
 
     DAY = 86400
     TTL = 7 * 86400
@@ -1105,6 +1092,26 @@ class PruneTest(MissionCase):
         return self.assert_silent(self.run_hook(
             self.pretooluse(session=sid, tuid=tuid, pid=pid),
             MISSION_PRUNE_EVERY="1", **env))
+
+
+
+class PruneTest(PruneHelpers, MissionCase):
+    """<state>/mission/ grows by a <sid>/ per session that reaches this hook, and nothing
+    else sweeps it: `prune_stale_state()` in hooks/compound-improvement.sh walks
+    <state>/reminders/ and hooks/remind.sh's sweep walks <state>/remind/, both of them
+    different directories. So this hook sweeps its own tree, on a sampled event, by age
+    against its own clock -- the same shape tests/test_remind.py::PruneTest pins there.
+
+    THE TREE IS BUILT BY THE HOOK, never by hand: every directory below was written by a
+    real delivery or a real tool-call event, so the sweep is tested against the shape the
+    writer really produces. Age is then set with os.utime, which is the one thing an event
+    cannot do.
+
+    THE SWEEP'S ONE CALL SITE is the periodic arm's not-yet-due exit, so `sweep()` below
+    is an ordinary tool call INSIDE the interval -- an event that delivers nothing. An
+    event that is about to deliver never sweeps, and
+    `test_an_event_that_is_about_to_deliver_never_sweeps` is what pins that.
+    """
 
     def test_a_real_stale_tree_is_swept_and_what_should_survive_survives(self):
         for sid in ("stale1", "stale2", "fresh", "future", "cur"):
@@ -1245,6 +1252,227 @@ class PruneTest(MissionCase):
                          "the run with the sweep on did not actually sweep, so this "
                          "comparison proves nothing")
 
+
+
+# ============================================================ ids that are not names
+class UnsafeSessionIdTest(PruneHelpers, MissionCase):
+    """`.` and `..` survive the sanitiser, because both are inside `A-Za-z0-9._-`.
+
+    A session id of `.` made `SDIR` equal to `<state>/mission` itself, so `seen/` and
+    `tools/` were written straight into the shared directory and the sweep -- which
+    skips a directory only when it equals `$SDIR` -- no longer recognised the live
+    session's own tree. A session id of `..` made `SDIR` the STATE ROOT, beside
+    ledger.jsonl, reminders.jsonl and every other store this package keeps.
+
+    Neither is hypothetical input: `.session_id` is whatever the harness puts in the
+    payload, and this hook reads it without asking.
+    """
+
+    def mission_dir(self):
+        return os.path.join(self.state, "mission")
+
+    def test_a_session_id_of_dot_does_not_write_into_the_shared_directory(self):
+        self.default_store(session=".")
+        self.assert_silent(self.run_hook(self.pretooluse(session=".", tuid="t1"),
+                                         MISSION_PRUNE_EVERY="0"))
+        md = self.mission_dir()
+        self.assertTrue(os.path.isdir(os.path.join(md, "_", "tools")),
+                        "the guard did not redirect `.` to the safe name: %r"
+                        % sorted(os.listdir(md)))
+        for stray in ("seen", "tools", "last"):
+            self.assertFalse(os.path.exists(os.path.join(md, stray)),
+                             "%s was written directly into <state>/mission/" % stray)
+
+    def test_the_sweep_does_not_remove_the_dot_sessions_own_tree(self):
+        """The consequence, driven rather than argued.
+
+        With `.` unguarded the live session's directory IS <state>/mission/, which the
+        walk lists as a candidate under a name that is not it, so its own claims and its
+        own tool counts were removable from under it. Here it must survive a sweep that
+        really does remove something else.
+        """
+        self.default_store(session=".")
+        self.assert_silent(self.run_hook(self.pretooluse(session=".", tuid="t1"),
+                                         MISSION_PRUNE_EVERY="0"))
+        own = os.path.join(self.mission_dir(), "_")
+        self.assertTrue(os.path.isdir(own))
+        self.deliver("stale1")
+        self.age("stale1", 30 * self.DAY)
+        t = self.clock - 30 * self.DAY
+        os.utime(own, (t, t))
+        self.assert_silent(self.run_hook(self.pretooluse(session=".", tuid="t2"),
+                                         MISSION_PRUNE_EVERY="1"))
+        self.assertFalse(os.path.exists(self.sdir("stale1")),
+                         "nothing was swept, so this proves nothing")
+        self.assertTrue(os.path.isdir(own),
+                        "the sweep removed the sweeping session's own tree")
+
+    def test_a_session_id_of_dotdot_writes_nothing_into_the_state_root(self):
+        before = sorted(os.listdir(self.state))
+        self.default_store(session="..")
+        self.assert_silent(self.run_hook(self.pretooluse(session="..", tuid="t1"),
+                                         MISSION_PRUNE_EVERY="0"))
+        after = sorted(os.listdir(self.state))
+        self.assertEqual(after, sorted(set(before) | {"mission"}),
+                         "`..` put something in the state root: %r -> %r"
+                         % (before, after))
+        for stray in ("seen", "tools", "last"):
+            self.assertFalse(os.path.exists(os.path.join(self.state, stray)),
+                             "%s was written into the state root" % stray)
+        self.assertTrue(os.path.isdir(os.path.join(self.mission_dir(), "_", "tools")))
+
+    def test_the_hits_row_carries_the_guarded_name(self):
+        """The name on disk and the name in the log are the same name, still."""
+        self.default_store(session=".")
+        self.context_of(self.run_hook(self.session_start(session="."),
+                                      MISSION_PRUNE_EVERY="0"), "SessionStart")
+        rows = self.hit_rows()
+        self.assertTrue(rows)
+        self.assertEqual(rows[-1]["session"], "_")
+
+
+# ============================================================ a log that will not open
+class AppendFailureTest(MissionCase):
+    """`2>/dev/null` AFTER a `>>` silences the COMMAND, not the redirection.
+
+    The shell opens the append first; when that open fails it reports the failure itself,
+    on a stderr the later redirection has not touched yet, and the message reaches the
+    user's terminal from inside a hook. Measured with `mkdir hits.jsonl` as the target:
+    `printf x >> f 2>/dev/null` prints "bash: f: Is a directory" and
+    `printf x 2>/dev/null >> f` prints nothing.
+    """
+
+    def block_the_hits_log(self):
+        os.makedirs(self.hits)
+
+    def test_a_delivery_whose_hits_log_is_a_directory_is_silent_on_stderr(self):
+        self.default_store()
+        self.block_the_hits_log()
+        r = self.run_hook(self.session_start(), MISSION_PRUNE_EVERY="0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "",
+                         "the shell's redirection failure reached the user: %r" % r.stderr)
+        # And it still delivered: the log is best-effort, the mission is not.
+        self.context_of(r, "SessionStart")
+
+    def test_a_tool_count_whose_target_is_a_directory_is_silent_on_stderr(self):
+        """The other append on this hook's hot path: one byte per tool call."""
+        self.default_store()
+        self.assert_silent(self.run_hook(self.pretooluse(tuid="t1"),
+                                         MISSION_PRUNE_EVERY="0"))
+        counter = os.path.join(self.state, "mission", "S1", "tools", "p1")
+        os.remove(counter)
+        os.makedirs(counter)
+        r = self.run_hook(self.pretooluse(tuid="t2"), MISSION_PRUNE_EVERY="0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "", "the shell reported the failed append: %r" % r.stderr)
+
+
+# ============================================================ knobs out of range
+class KnobMagnitudeTest(MissionCase):
+    """A knob of 23 nines is all digits, so the SHAPE guard passed it straight through.
+
+    `[ "$PRUNE_EVERY" -ge 1 ]` then printed `[: 99999999999999999999999: integer
+    expression expected` on the user's stderr, from a hook, on every event. Out of range
+    now takes the DEFAULT -- not zero, which would silence the sweep, and not a clamp to
+    the ceiling, which would invent a value nobody asked for: an out-of-range export is a
+    typo, and the default is the only value the header promises.
+    """
+
+    HUGE = "99999999999999999999999"
+
+    def test_a_huge_prune_knob_is_silent_and_sweeps_at_the_default(self):
+        self.default_store()
+        for knob in ("MISSION_PRUNE_EVERY", "MISSION_PRUNE_TTL"):
+            r = self.run_hook(self.pretooluse(tuid="t-" + knob), **{knob: self.HUGE})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stderr, "",
+                             "%s=%s reached an arithmetic test: %r"
+                             % (knob, self.HUGE, r.stderr))
+
+    def test_every_mission_knob_refuses_a_value_that_large(self):
+        """All eleven, not only the two the sweep reads: the same `case` guard covers
+        them and the same `[` would have blown up on any of them."""
+        self.default_store()
+        knobs = ("MISSION_FIRST_CHARS", "MISSION_RECENT", "MISSION_EACH_CHARS",
+                 "MISSION_MAX_CHARS", "MISSION_INTERVAL", "MISSION_SHORT_WORDS",
+                 "MISSION_STOP_MIN_TOOLS", "MISSION_MAX_ROWS", "MISSION_MAX_BYTES",
+                 "MISSION_PRUNE_TTL", "MISSION_PRUNE_EVERY")
+        for knob in knobs:
+            r = self.run_hook(self.session_start(pid="p-" + knob), **{knob: self.HUGE})
+            self.assertEqual(r.returncode, 0, "%s: %s" % (knob, r.stderr))
+            self.assertEqual(r.stderr, "", "%s=%s printed: %r" % (knob, self.HUGE, r.stderr))
+            self.assertTrue(r.stdout.strip(),
+                            "%s=%s silenced the mission instead of taking the default"
+                            % (knob, self.HUGE))
+
+    def test_a_ten_digit_value_is_still_in_range(self):
+        """Non-vacuity for the cap itself: 11 `?` rejects eleven digits and not ten, so a
+        legitimate large TTL still reaches the sweep."""
+        self.default_store()
+        self.deliver_free_tree()
+        r = self.run_hook(self.pretooluse(tuid="t9"), MISSION_PRUNE_EVERY="1",
+                          MISSION_PRUNE_TTL="9999999999")
+        self.assertEqual(r.stderr, "", r.stderr)
+        self.assertTrue(os.path.isdir(os.path.join(self.state, "mission", "old")),
+                        "a ten-digit TTL was rejected, so nothing survived it")
+
+    def deliver_free_tree(self):
+        self.assert_silent(self.run_hook(self.pretooluse(session="old", tuid="o1"),
+                                         MISSION_PRUNE_EVERY="0"))
+        t = self.clock - 30 * 86400
+        os.utime(os.path.join(self.state, "mission", "old"), (t, t))
+
+
+# ============================================================ the store that went away
+class MissingStoreSweepTest(PruneHelpers, MissionCase):
+    """<state>/mission/<sid>/ OUTLIVES the store, and until now nothing swept it then.
+
+    The sweep's only call site was the periodic arm, which is reached only by a session
+    whose store still exists. Delete, move or rename the history-surfer store for a
+    project and every later event exits at `[ -s "$STORE" ]`, so the trees that project
+    had already accumulated -- one byte per tool call, one directory per claimed event --
+    stayed there for good.
+    """
+
+    def test_a_project_that_lost_its_store_still_gets_swept(self):
+        self.deliver("stale1")
+        self.warm("cur")
+        self.age("stale1", 30 * self.DAY)
+        os.remove(self.store)
+        self.assertFalse(os.path.exists(self.store))
+        r = self.run_hook(self.pretooluse(session="cur", tuid="t2"),
+                          MISSION_PRUNE_EVERY="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "", "the missing-store path must stay silent")
+        self.assertFalse(os.path.exists(self.sdir("stale1")),
+                         "the store is gone and the stale tree was kept forever")
+        self.assertTrue(os.path.isdir(self.sdir("cur")),
+                        "it swept the sweeping session's own tree")
+
+    def test_the_sweep_off_switch_still_holds_on_that_path(self):
+        self.deliver("stale1")
+        self.age("stale1", 30 * self.DAY)
+        os.remove(self.store)
+        self.assert_silent(self.run_hook(self.pretooluse(session="cur", tuid="t3"),
+                                         MISSION_PRUNE_EVERY="0"))
+        self.assertTrue(os.path.isdir(self.sdir("stale1")),
+                        "MISSION_PRUNE_EVERY=0 swept anyway")
+
+    def test_a_user_with_no_mission_directory_at_all_starts_no_process(self):
+        """The cost argument, measured rather than asserted: the common case is a user who
+        never installed history-surfer, who therefore has no <state>/mission/ either, and
+        `[ -d ]` is a builtin. Compared against the same event before the branch existed
+        by comparing it against itself with the sweep switched off."""
+        self.assertFalse(os.path.exists(os.path.join(self.state, "mission")))
+        off = self.run_hook(self.pretooluse(tuid="t1"), MISSION_PRUNE_EVERY="0")
+        on = self.run_hook(self.pretooluse(tuid="t2"), MISSION_PRUNE_EVERY="1")
+        for r in (off, on):
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout, "")
+            self.assertEqual(r.stderr, "")
+        self.assertFalse(os.path.exists(os.path.join(self.state, "mission")),
+                         "the missing-store path created state it had no reason to")
 
 
 if __name__ == "__main__":

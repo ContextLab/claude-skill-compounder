@@ -8,6 +8,7 @@
 #                     [--lesson <sig>] [--attach <path>]... [--candidate <id>]
 #   skillnote promote <id> --to global [--project <dir>]
 #   skillnote list    [--scope project|global|memory|remind] [--json]
+#   skillnote where   [--scope project|global|memory|remind] [--project <dir>]
 #   skillnote remove  <id>
 #   skillnote --help
 #
@@ -158,7 +159,7 @@ HITS="$STATE_ROOT/remind/hits.jsonl"
 REPEAT_STORE="$STATE_ROOT/repeats/index.jsonl"
 TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
 
-# Matches BACKUP_PREFIX / MAX_BACKUPS in skill_compounder/installer.py:137-138. A backup
+# Matches BACKUP_PREFIX / MAX_BACKUPS in skill_compounder/installer.py:206-207. A backup
 # this writes and one the installer writes are the same kind of file and are pruned by the
 # same rule, which is only true while these two agree.
 BACKUP_PREFIX='.bak-skill-compounder-'
@@ -182,7 +183,7 @@ esac
 now() { if [ -n "${SKILLNOTE_NOW:-}" ]; then printf '%s' "$SKILLNOTE_NOW"; else date +%s; fi; }
 
 usage() {
-  sed -n '2,12p' "$0" | sed -e 's/^# \{0,1\}//'
+  sed -n '2,13p' "$0" | sed -e 's/^# \{0,1\}//'
   echo
   echo "State:     $STATE_ROOT"
   echo "Ledger:    $LEDGER"
@@ -262,7 +263,7 @@ fmt_iso_ms() { # <epoch> -> 2026-09-02T12:00:00.000Z, the shape Claude Code writ
 
 # CRC-32 plus byte length. BSD and GNU `cksum` agree on both fields for stdin and both
 # print them whitespace-separated, which is why awk reads them rather than `cut`. The same
-# expression as hashof() in hooks/repeat-gate.sh:556.
+# expression as hashof() in hooks/repeat-gate.sh:1131.
 idof() { printf '%s' "n$(printf '%s' "$1" | cksum 2>/dev/null | awk '{printf "%sx%s", $1, $2}')"; }
 
 # The project root. `--project` wins, because hooks/session-review.sh runs DETACHED after
@@ -301,7 +302,7 @@ name_of() {
 # ------------------------------------------------------ the four file-writing rules
 #
 # 1. RESOLVE THE LINK, WRITE THROUGH IT. Shell twin of _real_file_path()
-#    (skill_compounder/installer.py:158-175). stow, chezmoi and hand-rolled dotfiles all
+#    (skill_compounder/installer.py:227-242). stow, chezmoi and hand-rolled dotfiles all
 #    present CLAUDE.md as a symlink into a dotfiles repo, and renaming ONTO the link
 #    deletes it and leaves a regular file, orphaning the source with exit 0 and no
 #    warning. The 40-iteration cap is not paranoia: a symlink loop would otherwise hang
@@ -329,7 +330,7 @@ SELF="$(resolve_link "$0")"
 SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")"
 
 # 2. BACK UP BESIDE THE *CONFIGURED* PATH, NOT THE RESOLVED ONE. Twin of backup_file()
-#    (installer.py:211-252). A symlinked CLAUDE.md must not sprinkle .bak- files through
+#    (installer.py:280-319). A symlinked CLAUDE.md must not sprinkle .bak- files through
 #    someone's dotfiles git repo. Nothing is written when an existing backup is already
 #    byte-identical, so repeated `add`s do not accumulate copies; a same-second collision
 #    takes a -2, -3 suffix rather than clobbering the pre-change copy, which is the one
@@ -384,7 +385,7 @@ mode_of() {
 }
 
 # 3. WRITE ATOMICALLY, ON THE SAME FILESYSTEM, and 4. NEVER TRUNCATE IN PLACE. Twin of
-#    write_text_file() (installer.py:253-276). The temp lands in the RESOLVED file's own
+#    write_text_file() (installer.py:322-343). The temp lands in the RESOLVED file's own
 #    directory so `mv` is a rename(2) and not a copy, and the name is unique per writer: a
 #    fixed one lets two concurrent runs interleave their bytes into one file and then
 #    rename the result into place. A half-written CLAUDE.md is prose the model reads as if
@@ -700,7 +701,9 @@ cmd_add() {
       --lesson)  [ $# -ge 2 ] && [ -n "$2" ] || die "--lesson needs a repeat-gate signature ('skillrepeat list' prints them)"
                  lesson="$2"; shift 2 ;;
       --candidate) [ $# -ge 2 ] && [ -n "$2" ] || die "--candidate needs a lineage id"
+                 # A lineage id becomes a path component -- it names a directory under the state root the moment anything keys on it -- and '.' and '..' are the two names that are not names. They are inside [A-Za-z0-9._-], so the character-class check below passes them; this arm is the reason a space is refused and they are too.
                  case "$2" in
+                   .|..) die "--candidate cannot be '.' or '..' (got '$2')" ;;
                    *[!A-Za-z0-9._-]*|"") die "--candidate takes a lineage id of [A-Za-z0-9._-] only (got '$2')" ;;
                  esac
                  [ "${#2}" -le 64 ] || die "--candidate id is longer than 64 characters"
@@ -1388,11 +1391,42 @@ cmd_list() {
   return 0
 }
 
+# WHERE A NOTE WOULD LAND, PRINTED AND NOT GUESSED AT. bin/skillinsight's `promote`
+# writes through this CLI and has to be able to say, before it writes, which file the
+# line is going into -- it promotes into the CANDIDATE's project, which is very often
+# not the caller's cwd, and it used to say nothing at all. Reimplementing the four
+# resolutions over there would be the second copy .claude/CLAUDE.md warns about, so
+# this asks the writer instead. Read-only: it creates nothing and writes nothing.
+cmd_where() {
+  wh_scope="project"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope)   [ $# -ge 2 ] || die "--scope needs one of: project global memory remind"
+                 wh_scope="$2"; shift 2 ;;
+      --scope=*) wh_scope="${1#--scope=}"; shift ;;
+      --project) [ $# -ge 2 ] || die "--project needs a directory"
+                 PROJECT_OPT="$2"; shift 2 ;;
+      --project=*) PROJECT_OPT="${1#--project=}"; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option '$1' for skillnote where" ;;
+    esac
+  done
+  wh_root="$(project_root)"
+  case "$wh_scope" in
+    project) printf '%s\n' "$wh_root/.claude/CLAUDE.md" ;;
+    global)  printf '%s\n' "$(claude_dir)/CLAUDE.md" ;;
+    memory)  printf '%s\n' "$TRANSCRIPTS/$(slug_of "$wh_root")/memory" ;;
+    remind)  printf '%s\n' "$REMINDERS" ;;
+    *) die "unknown --scope '$wh_scope'. The four are: project, global, memory, remind." ;;
+  esac
+}
+
 sub="${1:-}"
 [ $# -gt 0 ] && shift
 case "$sub" in
   add)     cmd_add "$@" ;;
   list)    cmd_list "$@" ;;
+  where)   cmd_where "$@" ;;
   remove)  cmd_remove "$@" ;;
   promote) cmd_promote "$@" ;;
   -h|--help|help|"") usage ;;

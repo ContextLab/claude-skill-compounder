@@ -24,7 +24,7 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`skills/skill-authoring/`|How to write the SKILL.md itself: the description that decides when it fires, and the gates that prove it parses|
 |`skills/<the rest>/`|The seed pool, below. Useful before you have forged anything|
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
-|`hooks/mission.sh`|States the user's own requests back, verbatim, at five moments. Wired on `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse` and `Stop`, and the `PreToolUse` entry is the one of ours with no matcher: [The mission](#the-mission). Off switch `MISSION_ENABLED=0`. It reads its prompts from `claude-history-surfer` and stores none of its own. It sweeps its own per-session directories on a `MISSION_PRUNE_EVERY` draw, at the one call site that was going to deliver nothing anyway, and never the running session's own|
+|`hooks/mission.sh`|States the user's own requests back, verbatim, at five moments. Wired on `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse` and `Stop`, and the `PreToolUse` entry is the one of ours with no matcher: [The mission](#the-mission). Off switch `MISSION_ENABLED=0`. It reads its prompts from `claude-history-surfer` and stores none of its own. It sweeps its own per-session directories on a `MISSION_PRUNE_EVERY` draw, at the two exits that were going to deliver nothing anyway — the periodic arm inside its interval, and the early return when the prompt store is absent — and never the running session's own|
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?" Every nudge it delivers is written to `<state>/reminders/nudges.jsonl` with the lineage id it is about, which is what makes `skillreport`'s conversion a count rather than an estimate|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
@@ -40,7 +40,7 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again. Its `FUNNEL` block joins the two delivery logs to the ledger on the lineage id, and its conversion figure is counted from those rows instead of estimated from an edit counter|
 |`bin/skillinsight`|Reads and prunes the candidate queue. `promote` prints the `lineage <id>` it stamps on the note and reminder it writes, derived from the queue record's own hash rather than minted|
 |`bin/skillcontrib`|The reconnaissance behind `contribute-skill` (duplicate check, push-access check, preflight), plus `propose`, the one subcommand that writes: it forks, pushes and opens the pull request, and running it without `--dry-run` is the consent: [Level C](#three-levels-project-user-general)|
-|`bin/skillrepeat`|Reads, inspects and clears the repeat gate's store of learned failure signatures. `list` carries a `LESSON` column, `show` marks the recoveries bound across tools, and `dismiss <sig> --why` is the answer that lifts the lesson gate without writing a lesson|
+|`bin/skillrepeat`|Reads, inspects and clears the repeat gate's store of learned failure signatures. `list` carries a `LESSON` column, `show` marks the recoveries bound across tools and prints each `dismiss` row's `actor=`, and `dismiss <sig> --why` records a decision that the signature needs no lesson — which lifts the lesson gate only when a person at a terminal wrote it|
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
 |`claude-history-surfer`|Not ours, and installed anyway. `hooks/mission.sh` reads its per-project prompt JSONL and keeps no copy, so it is a dependency: install clones it beside its own checkout and runs its installer, unless `surfer` is already on `PATH` or `SKILL_COMPOUNDER_NO_SURFER=1`. It never fails the install, it never clones twice, uninstall never removes it, and `skillforge doctor` has a row for it|
 
@@ -557,35 +557,63 @@ context it needs is still in the window.
 **The second time, it declines the next call.** The `PreToolUse` lesson gate refuses while
 three things hold at once: this session bound a recovery for the signature, the signature's
 `fail` rows come from at least `REPEAT_MIN_SESSIONS` distinct sessions, and neither a lesson
-nor a dismissal references it. The session count here includes this session and the repeat
-arm's does not. That reads as an inconsistency and is the difference between the two
-questions: the repeat arm asks whether a call is broken, which nothing a session did to
-itself may answer, and the lesson gate asks whether this has now happened twice, where this
-session's own occurrence is the second one. That is the doctrine's own threshold, made
-deterministic.
+nor a dismissal a person wrote references it. **Both arms count EARLIER sessions only**, and
+this one did not until 2026-09-04. Its count included the current session, so at the default
+`REPEAT_MIN_SESSIONS` of 2 a signature that had failed in ONE earlier session was refused —
+while this document, the script's own header and `bin/skillrepeat` all described a threshold
+the code did not have. A red-team session found it by counting the sessions in the store
+against the sessions named in a deny. What the fix costs, stated rather than glossed: at the
+default the refusal now arrives one session later than the doctrine's "second occurrence"
+reads, because two earlier sessions plus the recovery bound in this one is the third.
+`REPEAT_MIN_SESSIONS=1` is the spelling of "refuse on the second" and is one export rather
+than a hidden off-by-one.
 
-**And it lets go.** At most `REPEAT_LESSON_MAX_DENIES` refusals per signature per session,
-after which the call goes through whatever the store says. Only `Bash` calls are ever
-refused, the head allowlist applies unchanged, and `skillnote` and `skillrepeat` are exempt
-by name, so the two commands that end the refusal can never themselves be refused. Every
+**And it lets go, silently.** At most `REPEAT_LESSON_MAX_DENIES` refusals per signature per
+session, after which the call goes through whatever the store says — and the deny text does
+not say so. It used to. The reason ended by naming the budget and stating that the call then
+went through, and a session red-teaming the gate on 2026-09-04 read that as a schedule: it
+retried until the budget expired and wrote no lesson at all. The budget is a valve against a
+false positive trapping a session, not a term offered to the session in front of it, so it is
+enforced and unadvertised. The live store says the valve is barely reached — nine sessions
+have armed a lesson marker, one deny has ever been spent, none reached two — so the default
+stays 2. Only `Bash` calls are ever refused, the head exemptions are judged per segment
+rather than on one head per command, and `skillnote` and `skillrepeat` are exempt
+by name, so neither recording command can ever itself be refused. Every
 read that could go wrong fails toward allowing: an unreadable ledger means the escape cannot
 be verified, and a refusal whose escape cannot be verified is a trap.
 
 **What lifts it, and neither is a deletion.** `skillnote add --lesson <sig> "<text>"`
 appends a `note` row carrying `lesson_sig` to `<state>/ledger.jsonl`; `skillrepeat dismiss
 <sig> --why "<why>"` appends a `dismiss` row to `<state>/repeats/index.jsonl`. The gate
-reads both and writes neither. A dismissal counts as much as a lesson on purpose: the gate's
-business is that the decision was made and recorded, not which way it went. Because both
-stores are append-only, the read is not "is there a row". `skillnote remove <id>` appends a
-`remove` row and leaves the `add` exactly where it was, so what counts is adds minus removed
-ids, and a withdrawn lesson stops holding the gate open.
+reads both and writes neither. Because both stores are append-only, the read is not "is
+there a row". `skillnote remove <id>` appends a `remove` row and leaves the `add` exactly
+where it was, so what counts is adds minus removed ids, and a withdrawn lesson stops holding
+the gate open.
+
+**A dismissal lifts it only where a person wrote it, and that is measured.** Driven live on
+2026-09-04, both of two fresh sessions this gate refused answered by running `skillrepeat
+dismiss <sig> --why "<a reason it invented>"` and carrying straight on: the gate had printed
+its own escape and the escape was free. So `bin/skillrepeat` now stamps every `dismiss` row
+with an `actor` — `model` when it runs inside a Claude Code session (`CLAUDECODE` or
+`CLAUDE_CODE_SESSION_ID` in its environment), `human` otherwise — and the gate honours only
+the human ones, plus every row written before the field existed, which predates the model
+path entirely and carries nothing to tell apart. A model's dismissal is still appended, still
+printed by `skillrepeat list` as `dismissed-by-model`, and still evidence of what that session
+wanted to do: refusing to write the row would have hidden that, and refusing to *honour* it is
+the half that matters. The deny text names one command for the same reason — `skillnote add
+--lesson` and not the dismissal — because a refusal advertising an escape that no longer works
+would be worse than one that omits it. The statement the recovery emits still names both, with
+the second labelled as what it is: a person at a terminal only.
 
 **It ships on while the repeat arm ships off**, and the asymmetry is the population each one
 can reach. The repeat arm's population was measured and found empty: 81 sessions, no refusal
-ever, and every signature that reached the threshold sat on the gate's own head allowlist.
+ever, and every signature that reached the threshold was exempt under the gate's own head
+rules. Those rules were narrowed to a per-segment test on 2026-09-04, so that last clause is
+re-derived and not carried forward: driving the current hook over the live store, all 13
+signatures at the threshold are still exempt — 12 by the allowlist, one as a runner.
 The lesson gate fires only where a failure and its recovery were both observed in the
 session it is speaking to, so it acts on a fact about the session in front of it where the
-repeat arm infers from other people's history, and it names the two commands that end it. What would
+repeat arm infers from other people's history, and it names the command that ends it. What would
 switch it off is a measured false-positive rate, which is what `REPEAT_LESSON_GATE=0` exists
 to make collectable.
 
@@ -593,7 +621,10 @@ to make collectable.
 `.tool_input.command`, so `skillnote --lesson` refuses a signature whose `fail` row is not a
 `Bash` call: a `Skill` or MCP failure has no command for `hooks/remind.sh` to match. Such a
 lesson lands as a note plus a keyword reminder, with the command reminder the one thing it
-cannot have, and the refusal is always liftable because `skillrepeat dismiss` carries no such restriction. Separately, the
+cannot have. A session that meets that refusal has the deny budget and nothing else: the
+dismissal carries no such restriction, but a dismissal written from inside a session lifts
+nothing either, so what ends the refusal there is `REPEAT_LESSON_MAX_DENIES` running out.
+Separately, the
 gate's wiring matcher is `Bash|Skill` and MCP tool names are deliberately not matched at
 all: `mcp__.*` may well work, and nothing here has measured that a matcher regex is applied
 to an MCP tool name. A wiring that silently matches nothing is worse than one that admits

@@ -353,6 +353,7 @@ session_audit() {
   # and it would fail SILENTLY, finding no counters and concluding the session did
   # nothing. Keep the two expressions the same.
   sa_sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$sa_sid" in ''|.|..) sa_sid=_ ;; esac
 
   # The claim key is the session id and nothing else, so it is known before any state
   # is read. Checking it FIRST is what keeps this arm off the per-turn hot path: a

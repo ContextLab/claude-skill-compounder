@@ -403,6 +403,7 @@ command -v jq >/dev/null 2>&1 || refuse 14 "no jq"
 # be the same expression: this name is a claim directory and a report filename, and two
 # spellings of one session id means two dispatches for it.
 SID_SAFE="$(printf '%s' "$SID" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+case "$SID_SAFE" in ''|.|..) SID_SAFE=_ ;; esac
 
 mkdir -p "$REVIEWS/.claims" "$REVIEWS/$WEEK" 2>/dev/null || \
   refuse 19 "cannot create $REVIEWS"

@@ -12,7 +12,7 @@
 #   {"t":"fail",    ts, sig, ck, ec, tool, norm, cmd, err, session, tuid}
 #   {"t":"recover", ts, sig, ck, tool, norm, cmd, session, tuid[, cross_tool:true]}
 #   {"t":"forget",  ts, sig, session, why}
-#   {"t":"dismiss", ts, sig, session, why}      <- written only by `dismiss`, below
+#   {"t":"dismiss", ts, sig, session, why, actor}  <- written only by `dismiss`, below
 #
 # `cross_tool` marks a recovery bound because a DIFFERENT tool's call shared content
 # tokens with the failed one, rather than because the tool matched. It is present only
@@ -33,7 +33,23 @@
 # count" and suppresses rows; `dismiss` says "this was looked at and needs no lesson"
 # and suppresses nothing -- every count on every surface here is identical before and
 # after one. What it changes is the LESSON column and the lesson gate in
-# hooks/repeat-gate.sh, which stops refusing once either a dismissal or a lesson exists.
+# hooks/repeat-gate.sh, which stops refusing once a lesson exists or a PERSON dismissed it.
+#
+# WHO DISMISSED IT, AND WHY THIS CLI HAS TO SAY. Every `dismiss` row carries `actor`:
+# `model` when this command ran inside a Claude Code session (`CLAUDECODE` is exported
+# into every Bash tool call, and `CLAUDE_CODE_SESSION_ID` into every process a session
+# starts), and `human` otherwise. `session` is that same `CLAUDE_CODE_SESSION_ID` when
+# there is one and the literal `cli` when there is not, so a dismissal can be traced to
+# the session that wrote it rather than to a placeholder every row shared.
+#
+# THE GATE HONOURS ONLY `human`, AND THE REASON IS MEASURED. On 2026-09-04 both of two
+# fresh sessions that the lesson gate refused answered by running `skillrepeat dismiss
+# <sig> --why "<a reason they invented>"` and carrying on: the refusal named its own
+# escape and the escape was free. A model may still write the row -- it is appended, it is
+# printed by `show`, and the LESSON column reports it as `dismissed-by-model` -- because
+# it is evidence of what that session wanted to do. What it no longer does is lift
+# anything. Rows written before the field existed carry no `actor` and are read as human;
+# they predate the model path and there is nothing in them to tell apart.
 #
 # `norm` -- printed as `shape` by `show` and as CALL by `list` -- IS A NORMALISED SHAPE AND
 # NOT A LITERAL COMMAND. hooks/repeat-gate.sh masks ordinary quoted arguments, the directory
@@ -321,8 +337,16 @@ SUMMARY_JQ='
      | from_entries) as $recs
   # NOT cut by a tombstone, and the header says why: forgetting the observations does
   # not un-make the decision that they needed no lesson.
-  | ([ $rows[] | select(.t=="dismiss" and (.sig|type=="string")) | .sig ]
+  #
+  # SPLIT BY ACTOR, because the gate is. A row with no `actor` predates the field and is
+  # read as human, which is the identical `(.actor // "human")` the gate applies -- the
+  # two must agree or this column reports a refusal that is still happening as lifted.
+  | ([ $rows[] | select(.t=="dismiss" and (.sig|type=="string"))
+                | select((.actor // "human") == "human") | .sig ]
      | unique) as $dism
+  | ([ $rows[] | select(.t=="dismiss" and (.sig|type=="string"))
+                | select((.actor // "human") != "human") | .sig ]
+     | unique) as $dism_model
   | [ [ $rows[] | select(.t=="fail" and (.sig|type=="string")) ]
       | group_by(.sig)[]
       | . as $fs
@@ -364,7 +388,12 @@ SUMMARY_JQ='
           # recovery was a self-recovery has candidates 0 and is still a fail-then-fix.
           recovered: (($rec | length) > 0),
           cross_tool: ([ $rec[] | select(.cross_tool == true) ] | length),
-          lesson_dismissed: (($dism | index($s)) != null) }
+          lesson_dismissed: (($dism | index($s)) != null),
+          # A dismissal the gate does NOT honour. Reported separately rather than folded
+          # into the line above, because "a decision was recorded" and "the refusal is
+          # over" stopped being the same fact on 2026-09-04.
+          lesson_dismissed_by_model: (($dism | index($s)) == null
+                                      and ($dism_model | index($s)) != null) }
     ]
   | sort_by(-.sessions, .sig)
 '
@@ -386,10 +415,20 @@ summary() { rows | jq -s -c "$SUMMARY_JQ" 2>/dev/null; }
 # which is the OLD behaviour, printed under a line that says the exemptions could not be
 # applied. Silently reporting a different number because a path did not resolve is how an
 # instrument starts lying; saying so is not.
+# A NEWLINE BECOMES `;` AND NOT A SPACE, and that is a correctness fix rather than
+# cosmetics. The record below is one line per candidate, so a raw command's newlines have
+# to go before it is written -- but the gate's head rules now judge EVERY segment of a
+# command, and a newline separates two commands exactly as a `;` does. Folded to a space,
+# `cd build<newline>tar -xf x` reached the door as one command whose only head was `cd`
+# and came back `exempt-allowlist`, while the real hook, reading the payload's own
+# newlines, calls it eligible. `;` is the byte the gate folds a newline to itself, so the
+# door sees the segmentation the hook sees. Tabs and carriage returns stay spaces: neither
+# separates a command.
 elig_map() {   # summary JSON on stdin -> the object on stdout
   em_lines="$(jq -r --argjson min "$MIN_SESSIONS" '
       .[] | select(.sessions >= $min and .transient_sessions == 0)
-      | "\(.sig)\u001f\(.tool)\u001f\((.raw // "") | gsub("[\\n\\t\\r]"; " "))"' \
+      | "\(.sig)\u001f\(.tool)\u001f\((.raw // "")
+          | gsub("\\n"; ";") | gsub("[\\t\\r]"; " "))"' \
     2>/dev/null)"
   em_pairs=""
   if [ -n "$em_lines" ]; then
@@ -517,6 +556,9 @@ cmd_list() {
         # fail-then-fix with the fix nowhere but this store.
         (if .lesson_dismissed then "dismissed"
          elif .lesson_recorded then "recorded"
+         # AFTER `recorded`, not before it: a lesson lifts the gate and a dismissal
+         # written by a model does not, so a signature carrying both is `recorded`.
+         elif .lesson_dismissed_by_model then "dismissed-by-model"
          elif .recovered then "open" else "-" end),
         (.call | .[0:60]) ]
     | @tsv' 2>/dev/null \
@@ -547,7 +589,10 @@ cmd_list() {
   echo "                   outside this store says what was learned. That is what the"
   echo "                   lesson arm of hooks/repeat-gate.sh declines a call over."
   echo "       recorded  = a note carries this signature (\`skillnote add --lesson <sig>\`)."
-  echo "       dismissed = \`skillrepeat dismiss <sig>\` recorded that it needs none."
+  echo "       dismissed = a PERSON ran \`skillrepeat dismiss <sig>\`: it needs none."
+  echo "       dismissed-by-model = the dismissal was written from inside a Claude Code"
+  echo "                   session (actor=model). It is on the record and it lifts NOTHING:"
+  echo "                   the lesson gate goes on declining calls over this signature."
   echo "       -         = no recovery was ever observed, so there is no fix to write down."
   echo "       Lessons are read from $LEDGER"
   if [ "$GATE_OK" != "1" ]; then
@@ -622,13 +667,18 @@ cmd_show() {
       echo "           was; for a shell both rules now want shared tokens."
     fi
     if [ "$(printf '%s' "$one" | jq -r '.lesson_dismissed' 2>/dev/null)" = "true" ]; then
-      echo "lesson:    dismissed -- see the dismiss row below for the reason given."
+      echo "lesson:    dismissed by a person -- see the dismiss row below for the reason."
     elif printf '%s' "$(noted_sigs)" \
          | jq -e --arg s "$sig" 'index($s) != null' >/dev/null 2>&1; then
       echo "lesson:    recorded in $LEDGER"
+    elif [ "$(printf '%s' "$one" | jq -r '.lesson_dismissed_by_model' 2>/dev/null)" = "true" ]
+    then
+      echo "lesson:    dismissed from inside a session (actor=model), which lifts nothing."
+      echo "           hooks/repeat-gate.sh goes on declining a call over this until a"
+      echo "           lesson is written (\`skillnote add --lesson $sig\`)."
     elif [ "$(printf '%s' "$one" | jq -r '.recovered' 2>/dev/null)" = "true" ]; then
       echo "lesson:    none written. hooks/repeat-gate.sh declines a call over this once"
-      echo "           the fail rows come from >= $MIN_SESSIONS distinct sessions."
+      echo "           the fail rows come from >= $MIN_SESSIONS distinct EARLIER sessions."
     fi
     # A self-recovery is why the gate is silent about a signature that otherwise looks
     # well over the threshold, so `show` has to say it or the count reads as a bug.
@@ -642,6 +692,10 @@ cmd_show() {
   echo "rows, oldest first (verbatim):"
   printf '%s' "$all" | jq -r 'sort_by(.ts)[]
     | "  [" + (.ts|tostring) + "] " + .t + "  session=" + (.session // "?")
+      # ACTOR IS PRINTED ONLY WHERE IT DECIDES SOMETHING. A `dismiss` written from inside
+      # a session lifts nothing, and a row that did not say so read exactly like one that
+      # did. Absent means the row predates the field, which is read as human everywhere.
+      + (if .t == "dismiss" then "  actor=" + (.actor // "human") else "" end)
       + (if .t == "fail" then
            "\n      call:  " + (.cmd // "")
            + "\n      error: " + ((.err // "") | gsub("\n"; "\n             "))
@@ -715,6 +769,11 @@ cmd_forget() {
 # suppresses nothing: the call is as broken as it was, the counts are unchanged, and what
 # ends is only the demand that the fix be written down. A session that dismisses when it
 # meant to forget still gets the repeat refusal, which is the safe direction.
+#
+# AND WHO RAN IT IS RECORDED. See WHO DISMISSED IT in the header: `actor` is `model` when
+# this runs inside a Claude Code session and `human` otherwise, the lesson gate honours
+# only the second, and the row is written either way. The environment is read and nothing
+# is asked, because a flag would be answered by whoever ran the command.
 cmd_dismiss() {
   sig=""; why=""
   while [ $# -gt 0 ]; do
@@ -743,13 +802,34 @@ cmd_dismiss() {
   case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
   case "$now" in ''|*[!0-9]*) echo "skillrepeat: no usable clock" >&2; return 1 ;; esac
 
+  # EITHER VARIABLE IS ENOUGH, AND THEY ARE SET BY DIFFERENT THINGS. Claude Code exports
+  # `CLAUDECODE` into every Bash tool call and `CLAUDE_CODE_SESSION_ID` into the processes
+  # a session starts, so a shell script a session launched still reads as `model` through
+  # the second even where the first did not survive. Neither is ours to set.
+  actor="human"
+  if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then actor="model"; fi
+  # THE REAL SESSION ID, when there is one. `cli` was hardcoded, so every row said `cli`
+  # and nothing recorded that a session had made the decision -- which is exactly the
+  # column that was missing when this was measured.
+  dsession="${CLAUDE_CODE_SESSION_ID:-cli}"
+
   mkdir -p "$DIR" 2>/dev/null || { echo "skillrepeat: cannot write $DIR" >&2; return 1; }
   row="$(jq -nc --arg ts "$now" --arg sig "$sig" --arg why "$why" \
-    '{t:"dismiss", ts:($ts|tonumber), sig:$sig, session:"cli", why:$why}' 2>/dev/null)"
+    --arg session "$dsession" --arg actor "$actor" \
+    '{t:"dismiss", ts:($ts|tonumber), sig:$sig, session:$session, why:$why,
+      actor:$actor}' 2>/dev/null)"
   [ -z "$row" ] && { echo "skillrepeat: could not build the dismissal" >&2; return 1; }
   printf '%s\n' "$row" >> "$STORE" 2>/dev/null || {
     echo "skillrepeat: cannot append to $STORE" >&2; return 1; }
-  echo "dismissed $sig as of $(fmt_ts "$now") -- no lesson is owed for it."
+  if [ "$actor" = "human" ]; then
+    echo "dismissed $sig as of $(fmt_ts "$now") -- no lesson is owed for it."
+  else
+    echo "recorded a dismissal of $sig as of $(fmt_ts "$now"), actor=model."
+    echo "IT LIFTS NOTHING. The lesson gate honours a dismissal only from a person at a"
+    echo "terminal; from inside a session the row is a record of the decision and the gate"
+    echo "goes on declining the call. \`skillnote add --lesson $sig \"<what was learned>\"\`"
+    echo "is what ends it."
+  fi
   echo "Nothing was suppressed: its $cnt row(s) still count, and the repeat gate still"
   echo "refuses the call if it ever did. \`skillrepeat forget $sig\` is the other one."
   return 0
