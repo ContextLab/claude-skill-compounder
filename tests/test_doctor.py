@@ -413,7 +413,14 @@ class TheStatusLineCheck(DoctorCase):
         r = self.doctor(SKILLFORGE_NOW=T0)
         self.assertEqual(verdict(r.stdout, "statusline"), "WARN",
                          line_for(r.stdout, "statusline"))
-        self.assertEqual(r.returncode, 0)
+        # A machine without history-surfer has one legitimate FAIL, the `surfer` row,
+        # and this test is about the statusline row; the clean-state test above spells
+        # out why that row is named rather than skipped.
+        self.assertEqual(r.returncode, 0 if SURFER else 1, r.stdout)
+        if SURFER is None:
+            others = [l for l in r.stdout.splitlines()
+                      if l.startswith("FAIL") and l.split()[1] != "surfer"]
+            self.assertEqual(others, [], "\n".join(others))
 
 
 # --------------------------------------------------------------------------- skills
@@ -925,6 +932,15 @@ class TheJsonForm(DoctorCase):
         self.write_settings()
         r = self.json_doctor(SKILLFORGE_NOW=T0)
         obj = json.loads(r.stdout)
+        if SURFER is None:
+            # The one FAIL a machine without history-surfer legitimately carries; the
+            # JSON exit field must agree with the process exit either way.
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertEqual(obj["exit"], 1)
+            self.assertEqual(obj["fail"], 1)
+            failed = [c for c in obj["checks"] if c.get("status") == "FAIL"]
+            self.assertEqual([c.get("name") for c in failed], ["surfer"], failed)
+            return
         self.assertEqual(r.returncode, 0)
         self.assertEqual(obj["exit"], 0)
         self.assertEqual(obj["fail"], 0)

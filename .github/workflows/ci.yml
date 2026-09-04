@@ -73,6 +73,19 @@ jobs:
           done
           echo "all scripts parse under bash and zsh"
 
+      - name: Install history-surfer, the dependency hooks/mission.sh reads
+        # A clean install wires hooks/mission.sh, which reads claude-history-surfer's
+        # prompt store and keeps no copy; `skillforge doctor` therefore FAILs its `surfer`
+        # row on a machine without it, and tests/test_doctor.py names that row rather
+        # than skipping. Cloning the dependency here makes the runner the machine the
+        # package is documented for, so the suite exercises the dependency path rather
+        # than the no-dependency branch on every run. ~/claude-history-surfer is one of
+        # the locations tests/test_doctor.py's real_surfer() and the installer probe.
+        run: |
+          git clone --depth 1 https://github.com/ContextLab/claude-history-surfer "$HOME/claude-history-surfer"
+          "$HOME/claude-history-surfer/bin/surfer" --help >/dev/null
+          echo "surfer: $("$HOME/claude-history-surfer/bin/surfer" --help | head -1)"
+
       - name: Run the suite
         run: ./run_tests.sh
 
