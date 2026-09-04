@@ -120,3 +120,44 @@ tokens {remind, hooks}. (6) a Stop block costs one empty assistant turn (platfor
 Verified clean: 20/10/8, 12 skills, 6 CLIs, 11 doctor checks in order, 14 clocks, 22
 prefixes, 156/158 names, 53 test files, every header-documented env default, install/
 uninstall leaves a user's own SessionStart hook, README five-minute path runs verbatim.
+
+## Fix wave (uncommitted at the time of writing, on top of `807665d`)
+
+- Lesson gate: deny names only `skillnote add --lesson`; `skillrepeat dismiss` writes
+  `actor` (model when CLAUDECODE / CLAUDE_CODE_SESSION_ID is set) and the real session; only
+  a human dismissal lifts; the gate excludes THIS session's fail rows from the
+  REPEAT_MIN_SESSIONS count (the header had promised it; the code did not).
+- FUNNEL: single jq pass, a printed partition definition and a `CHECK:` line; 47.9 s -> 5.9 s
+  at the writers' caps; live store CHECK 40+973=1013 (later 42+973=1015).
+- Sanitiser guard line (`''|.|..` -> `_`) after every session-id sanitiser in 12 scripts,
+  pinned by `test_script_wrapping.py::IdentitySanitisationTest`.
+- compound-improvement.sh sweep is by counter-file name (was deleting `nudges.jsonl`);
+  `CI_PRUNE_EVERY=0` divide-by-zero; magnitude guards on all numeric CI_/MISSION_/REMIND_
+  knobs (out of range takes the default; `CI_NOW=abc` used to exit 1 on the second prompt).
+- `2>/dev/null` moved BEFORE `>>` at 14 sites (the shell's own redirection error reached
+  the user's stderr otherwise).
+- mission prune also runs on the missing-store exit; `set_sdir()` is the one sanitising site.
+- `skillinsight promote` prints its absolute target first, refuses a missing project dir;
+  `skillnote where`. `--from`/`--candidate` refuse `.`/`..`.
+- Test isolation: `tests/test_skillrepeat.py::RepeatCliCase.note_cli` was the writer of the
+  1970-stamped backups (clock 2_000_000 -> local stamp 19700123-2233xx); byte guards on the
+  repo's own `.claude/CLAUDE.md` in test_skillrepeat and test_queue_surfacing.
+- Docs touch-up for all of the above and the cold review's ten contradictions; `.claude/
+  CLAUDE.md` now cites mission moments by `moment="…"` anchor + grep instead of line numbers.
+- `CLAUDECODE` added to `tests/test_doctrine_sync.py` AMBIENT (platform-exported, like
+  CLAUDE_CODE_SESSION_ID); the derivation alternation did not need widening.
+
+## Red-team round 2 (live, 6 haiku calls): dismiss fix holds
+
+The denied model wrote the lesson (after one wasted retry) and never reached for dismiss,
+even when told to record nothing. New: (1) allowlist bypass — `cd build && tar ...` is
+ALLOWed because only the first word is read (a haiku session found it unaided on attempt 5);
+(2) the deny advertised its 2-refusal budget and a session waited it out; (3) `skillinsight
+promote` writes into the candidate's project regardless of SKILL_COMPOUNDER_STATE (it wrote
+into this checkout's CLAUDE.md again; removed with `skillnote remove n1240016210x82`);
+(4) note ids hash `<scope word>|<text>`, so identical text in two projects shares one id
+(limit, not changed). Fix 3 in flight for (1) and (2).
+
+Suite after the fix wave (smoke, docs agents editing): one failure, the new isolation guard
+in test_queue_surfacing tripped by the red-teamer's live promote writing into the checkout
+mid-run — the guard working, not the test failing. Authoritative run pending on a quiet tree.
