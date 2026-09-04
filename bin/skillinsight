@@ -121,7 +121,10 @@ skillinsight: review the captured skill-candidate queue.
                        [--keyword <k>]... [--path <glob>]... [--command <cmd>]...
                                             write the candidate down where it will be
                                             read, through bin/skillnote, and take it
-                                            out of the queue
+                                            out of the queue. The note and its reminder
+                                            are stamped with this record's lineage id
+                                            (c<first 8 of the hash>), so every later
+                                            delivery, forge and verdict joins back here.
   skillinsight promote --verdict <session-id> --to note|reminder [...]
                                             the same, for a CANDIDATE verdict listed by
                                             `skillinsight reviews`. `promote-review
@@ -330,6 +333,24 @@ skillnote_bin() {
 # reason it is shaped this way: `die` is an `exit`, and an `exit` inside `$(...)` ends
 # the SUBSHELL. The caller would carry on with an empty variable and a zero status,
 # which for `promote` means writing a note for a candidate that does not exist.
+# ------------------------------------------------------------------- the lineage id
+#
+# ONE ID PER LINEAGE, AND IT IS DERIVED RATHER THAN MINTED. A queue record already
+# carries the only stable name it will ever have: `hash`, the digest of its normalised
+# text, computed identically by hooks/insight-capture.sh and hooks/precompact.sh so that
+# whichever hook sees the sentence first, both look the record up under the same name.
+# Minting a fresh random id at capture would have needed BOTH hooks changed and would
+# have given one sentence two ids depending on which hook won the race.
+#
+# The prefix says which store the key came from -- `c` a queue candidate, `v` a session
+# review verdict -- and the key is its first eight characters, which is the length this
+# CLI already prints and accepts everywhere else (`decline`, `promote`, `pending`). A
+# record queued before any of this existed therefore HAS a lineage id already; nothing
+# has to be backfilled.
+lineage_of() { # <prefix char> <full key>
+  printf '%s%s' "$1" "$(printf '%s' "$2" | cut -c1-8)"
+}
+
 resolve_hash() { # $1 = hash or prefix
   # One jq per file, driven by a read loop. `jq ... $(all_files)` word-splits, so a
   # state directory containing a space made every decline fail -- and fail as "no
@@ -812,7 +833,18 @@ DECLINE_EOF
     # An argv of variable length with no arrays: nothing else in this package uses one,
     # and `set --` is how the rest of it carries a list. The text goes last, after `--`,
     # so a lesson that begins with a dash is text and not an option.
+    # The lineage id, derived from the key of whichever store this came out of. It is
+    # passed rather than recomputed downstream: bin/skillnote writes it onto the ledger
+    # note row and onto the reminder row, hooks/remind.sh carries it into every delivery,
+    # and bin/skillreport's FUNNEL is that chain read back as a join.
+    if [ "$pr_field" = "hash" ]; then
+      pr_lineage="$(lineage_of c "$pr_key")"
+    else
+      pr_lineage="$(lineage_of v "$pr_key")"
+    fi
+
     set -- add --scope "$pr_scope" --source "$pr_source" --why "$pr_why"
+    if [ -n "$pr_lineage" ]; then set -- "$@" --candidate "$pr_lineage"; fi
     if [ -n "$pr_proj" ]; then set -- "$@" --project "$pr_proj"; fi
     if [ "$pr_to" = "reminder" ]; then
       set -- "$@" --remind
@@ -859,7 +891,9 @@ PROMOTE_CM_EOF
     else
       pr_json="$(jq -c -n --arg k "$pr_key" --arg f "$pr_field" --arg ts "$ts" \
         --arg to "$pr_to" --arg id "$pr_id" --arg scope "$pr_scope" \
-        '{($f): $k, ts: $ts, to: $to, id: $id, scope: $scope}' 2>/dev/null)"
+        --arg cand "$pr_lineage" \
+        '{($f): $k, ts: $ts, to: $to, id: $id, scope: $scope}
+         + (if $cand == "" then {} else {candidate: $cand} end)' 2>/dev/null)"
       [ -n "$pr_json" ] || die "could not build the promote record"
       mkdir -p "$(dirname "$pr_store")" 2>/dev/null || die "cannot write to $(dirname "$pr_store")"
       printf '%s\n' "$pr_json" >> "$pr_store" || die "cannot append to $pr_store"
@@ -869,6 +903,7 @@ PROMOTE_CM_EOF
     if [ "$pr_field" = "hash" ]; then
       echo "               it is no longer offered by \`skillinsight pending\`; \`list\` still shows it, marked"
     fi
+    [ -n "$pr_lineage" ] && echo "               lineage $pr_lineage"
     exit 0
     ;;
 

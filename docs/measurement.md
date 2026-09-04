@@ -70,10 +70,25 @@ your own ledger; the shape below is the instrument, not a result.
   script chose the skill and not a person, recognised by the transcript entrypoint
   (`sdk-cli`) rather than by directory. Reported on its own line rather than dropped,
   because on this repository it is most of the traffic.
-- **`REMINDER CONVERSION`.** Forges started, all time, over the checkpoints the on-disk
-  edit counters imply at the current `CI_EDIT_EVERY`. It prints its own caveat: the
-  numerator covers all time and the denominator the last seven days, so it is a loose
-  upper bound and not a rate.
+- **`FUNNEL`.** One row per lineage id: deliveries logged, ledger rows that acted on it, and
+  verdicts that came out. The id is derived from the content digest of the queue record the
+  lineage began as, so the candidate, the note, the reminder, every delivery of that reminder
+  and the forge rows downstream all carry the same string and the block is a join rather than
+  an estimate. `ACTED ON` counts a `note`, `start`, `use` or `apply` row that either carries
+  the id or sits in a session that received a delivery of it, which is a sequence and is
+  named as one. `UNATTRIBUTED` counts the ledger rows carrying no id and sitting in no
+  session that was delivered one; they are reported rather than dropped or folded into a
+  rate, on the same rule that records a forge with no `--trigger` as
+  `trigger_kind:"unrecorded"`.
+- **`REMINDER CONVERSION`.** Deliveries logged, the sessions they landed in, and how many of
+  those sessions went on to start a forge — joined on the session id and on the order, so a
+  forge that started before the nudge is not counted as a conversion of it. This block used
+  to divide an all-time count of `start` rows by the checkpoints the on-disk edit counters
+  implied, and printed a paragraph admitting that its numerator and denominator covered
+  different windows. `hooks/compound-improvement.sh` logs every delivery now, so both are
+  rows. The counters are still reported, under `UNLOGGED`: they record that a nudge fired
+  without recording which session acted on it, so nothing can be joined to them and they are
+  not folded into the conversion above.
 - **`GATES`.** The repeat gate's store — how many failure signatures are known, how many
   reached the deny threshold, and how many of those the gate's head rules exempt — and the
   documentation gate's overrides, counted rather than only permitted, because an escape
@@ -91,6 +106,23 @@ cannot grow without bound and cannot be truncated in place.
 ```bash
 jq -r .moment ~/.claude/skill-compounder/mission/hits.jsonl | sort | uniq -c
 ```
+
+**The log is the instrument and the session directories are not, now that they age out.**
+`<state>/mission/<sid>/` holds one byte per tool call and one empty directory per claimed
+event, and a sampled sweep removes other sessions' trees once they are `MISSION_PRUNE_TTL`
+behind. So a count of directories under `<state>/mission/` answers "how many sessions have
+been active lately" and never "how many sessions this has reached". The count that does
+answer the second question is a count of rows, and the sweep cannot touch those: it lists
+directories, and `hits.jsonl` is a file.
+
+```bash
+jq -r .session ~/.claude/skill-compounder/mission/hits.jsonl | sort -u | wc -l
+```
+
+Two things bound that number. `MISSION_MAX_ROWS` trims the log on write, so a store past the
+trim under-reports every session whose rows fell off the front; and a session that received
+no delivery has no row at all, which is the correct answer to "delivered to" and the wrong
+one to "sessions that ran this hook".
 
 **Six labels for five moments.** `resume`, `dispatch`, `subagent`, `periodic`, `ambiguity`
 and `completion`. The expensive-task moment writes two of them, because the parent being
@@ -150,6 +182,46 @@ which is what enforces at most `REPEAT_LESSON_MAX_DENIES` per signature per sess
 is answerable for about 48 hours and not afterwards. Every figure about the lesson gate's
 false-positive rate needs that fixed first, and the arm ships on.
 
+## The PreCompact budget is per jq build
+
+Issue #8 gave `hooks/precompact.sh` a 100 ms budget; issue #32 asked which `jq` that was.
+It is both, measured: the two builds on the measuring machine were run interleaved, run for
+run, so a loaded box charged each arm alike. 400 KB transcript at the default 256 KB bound,
+macOS 25.6.0, 2026-09-03, load average 9.5, n=25, wall-clock median / p90:
+
+|jq|no candidate|one candidate|
+|-|-|-|
+|`/usr/bin/jq` (jq-1.7.1-apple)|31.8 / 36.0 ms|84.7 / 87.7 ms|
+|anaconda's jq-1.6 first on `PATH`|59.1 / 63.5 ms|123.0 / 128.9 ms|
+
+Before issue #32 took three process starts off the candidate path, the same measurement read
+33.8 / 38.7 and 104.2 / 113.3 on the system jq, and 61.9 / 64.3 and 143.5 / 154.6 on jq-1.6.
+So the budget now holds on the system build at the median and at p90, where its p90 had been
+over, and it is missed by about a quarter on jq-1.6. Quote the second row to anyone whose
+`PATH` resolves `jq` to a slow build.
+
+Two things make that a figure to state rather than a defect to fix. It is 0.1% of the
+128-second median real compaction this hook delays, which issue #8 measured alongside the
+300-second stall that decided there would be no model in this hook. And the slow build
+cannot be made to fit: on jq-1.6 the no-candidate path alone costs 59 ms, and writing a
+record cannot cost less than a third `jq` (17 ms), the `hash_of` pipeline (18 ms), two claim
+`mkdir`s and a `grep`, which already puts the floor past 100 ms. Shedding `git rev-parse` as well was measured
+at 106 ms, still over, and its replacement disagrees with it on symlinked paths.
+[`DESIGN.md`](DESIGN.md#why-the-precompact-capture-is-a-second-script-and-not-a-third-arm-of-the-first)
+carries that argument and what was decided from it.
+
+CPU time tracked wall time to within 2 ms on every row, so these are the costs of starting
+programs and not of scheduling. The program count is the part that does not move with the
+machine, and it is what the suite pins rather than a stopwatch:
+`tests/test_precompact.py::ProcessCountTest` caps the candidate path at 13 programs besides
+`date` and the empty path at 4, with `date` bounded separately because one stamp is one
+start on BSD and two on GNU. There is no slack left in it — adding a process was measured to
+fail the pin.
+
+This figure carries a qualification of its own, alongside the three limits at the end of this
+document: it belongs to a build of a program the hook shells out to, so a change to somebody's
+`PATH` moves it with nothing in this repository changing at all.
+
 ## What the destructive-op measurement actually showed
 
 `destructive-op-preflight` ships on a behavioural result rather than on reading well.
@@ -180,6 +252,28 @@ would score.
 A model will also report a safeguard it did not perform: in one baseline trial the session
 named a backup path that did not exist. Claims were checked against the filesystem rather
 than taken from the transcript, which is the only way that failure is visible.
+
+## What the level B search measurement showed
+
+A mechanism that would show a related past prompt from another project unasked was measured
+before it was built, and the figure is the reason nothing was built. Under a
+rare-token rule — a token counts only if it appears in at least two prompts and in under 1%
+of the store — at its best-behaved threshold of four shared tokens, level B keyword search
+has a measured false-positive rate of **0.72**: precision 0.28, 95% Wilson interval
+[0.19, 0.41], over 60 judged pairs. Two rounds, 260 judge calls, judged by
+`claude-haiku-4-5-20251001` with a pair scored relevant only when both of two independent
+runs said so.
+
+Four of the five limits the note records bound that figure directly. The judge is Haiku and
+was checked against neither a human nor a stronger model, and it disagreed with itself on
+roughly one pair in six to eight. "Relevant" is one templated question's reading rather than
+a person's. The store is one user's, on one machine. And 60 to 65 pairs per round places an
+interval without pinning a value inside it — which is why the claim made from it is the one
+the interval supports, that 0.6 is excluded, and not a claim about where in [0.19, 0.41] the
+truth sits. The method, the scripts, the fifth limit and the five follow-ups that would
+change the verdict are in
+[`notes/research/level-b-search-measurement.md`](../notes/research/level-b-search-measurement.md);
+the decision taken from it is in [`DESIGN.md`](DESIGN.md).
 
 ## What these figures are and are not evidence for
 

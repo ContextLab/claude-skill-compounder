@@ -422,10 +422,12 @@ jq -R -s -r --arg cwd "$cwd" --arg event "$event" --arg prompt "$PROMPT" \
          kind: (if ($r.scope == "global") then "global" else "project" end),
          date: (if (($r.created | type) == "number")
                 then ($r.created | gmtime | strftime("%Y-%m-%d")) else "-" end),
+         cand: (((($r.candidate // "") | tostring)
+                 | select(test("^[A-Za-z0-9._-]{1,64}$"))) // "-"),
          text: ($r.text | tostring | gsub("[\n\t\r\u001f]"; " ") | .[0:'"$TEXT_CAP"'])}
     ]
   | sort_by([(-.score), .hits, (-.created)])[]
-  | "\(.id) \(.date) \(.kind) \(.text)"
+  | "\(.id) \(.date) \(.kind) \(.cand) \(.text)"
 ' "$TMP/store" > "$TMP/ranked" 2>/dev/null
 
 [ -s "$TMP/ranked" ] || exit 0
@@ -435,7 +437,7 @@ jq -R -s -r --arg cwd "$cwd" --arg event "$event" --arg prompt "$PROMPT" \
 # of REMIND_MAX slots that a reminder which has never fired could have used.
 picked=0
 : > "$TMP/pick" 2>/dev/null || exit 0
-while IFS=" " read -r r_id r_date r_kind r_text; do
+while IFS=" " read -r r_id r_date r_kind r_cand r_text; do
   [ -z "$r_id" ] && continue
   [ "$picked" -ge "$MAX" ] && break
   if [ -f "$SDIR/$r_id" ]; then
@@ -453,7 +455,7 @@ while IFS=" " read -r r_id r_date r_kind r_text; do
         ;;
     esac
   fi
-  printf '%s %s %s %s\n' "$r_id" "$r_date" "$r_kind" "$r_text" >> "$TMP/pick"
+  printf '%s %s %s %s %s\n' "$r_id" "$r_date" "$r_kind" "$r_cand" "$r_text" >> "$TMP/pick"
   picked=$(( picked + 1 ))
 done < "$TMP/ranked"
 
@@ -485,7 +487,7 @@ claim_once "$mode" || exit 0
 # ------------------------------------------------------------------- stamp, hit, emit
 mkdir -p "$SDIR" 2>/dev/null || exit 0
 CTX=""
-while IFS=" " read -r p_id p_date p_kind p_text; do
+while IFS=" " read -r p_id p_date p_kind p_cand p_text; do
   [ -z "$p_id" ] && continue
   # The stamp is written BEFORE the emit and a reminder whose stamp cannot be written is
   # dropped: firing every event because the cooldown cannot be recorded is worse than not
@@ -495,8 +497,20 @@ while IFS=" " read -r p_id p_date p_kind p_text; do
   # validated: `id` passed ^[A-Za-z0-9._-]{1,96}$ in `live`, `sid` came through the
   # sanitiser above, `now` is digits-only, and `event` is one of two literals matched by
   # the case above. Nothing here can carry a quote or a backslash.
-  printf '{"id":"%s","ts":%s,"session":"%s","event":"%s"}\n' \
-    "$p_id" "$now" "$sid" "$event" >> "$HITS" 2>/dev/null || true
+  # THE LINEAGE ID RIDES ALONG. `id` names which reminder fired; `candidate` names the
+  # thing the reminder descends from -- the queue record a `skillinsight promote` turned
+  # into this note, carried here through bin/skillnote's reminder row. It is what makes
+  # bin/skillreport's FUNNEL a join rather than an estimate. A row whose reminder has no
+  # lineage is written exactly as before and reported as UNATTRIBUTED, never guessed at.
+  # `-` is the ranked line's placeholder for "none", chosen because the ranked format is
+  # space-separated and an empty field would silently shift `text` into `cand`.
+  if [ -n "$p_cand" ] && [ "$p_cand" != "-" ]; then
+    printf '{"id":"%s","ts":%s,"session":"%s","event":"%s","candidate":"%s"}\n' \
+      "$p_id" "$now" "$sid" "$event" "$p_cand" >> "$HITS" 2>/dev/null || true
+  else
+    printf '{"id":"%s","ts":%s,"session":"%s","event":"%s"}\n' \
+      "$p_id" "$now" "$sid" "$event" >> "$HITS" 2>/dev/null || true
+  fi
   if [ "$p_kind" = "global" ]; then
     if [ "$p_date" = "-" ]; then p_line="Reminder recorded for this machine: $p_text"
     else p_line="Reminder recorded on $p_date for this machine: $p_text"; fi

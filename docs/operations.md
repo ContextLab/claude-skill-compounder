@@ -74,11 +74,23 @@ There is no model in it, and the reason was measured. A `PreCompact` hook blocks
 compaction: a 300-second hook stalled one for 300.9 seconds and ran to completion, and
 putting a timeout on it instead killed a writer mid-write and left a truncated `CLAUDE.md`
 that the next session then loaded as project context with no error. So this hook
-tails the transcript, runs the same extractor, appends, and exits. Against a 5 MB
-transcript it medians 27.4 ms when it finds nothing and 86.3 ms when it queues a
-candidate, over 15 runs on macOS 25.6.0 with `/usr/bin/jq`; on a `PATH` that resolves `jq`
-to a slower build those become 62.4 ms and 147.9 ms, because what it spends is process
-starts rather than bytes. Nothing writes `CLAUDE.md` from a hook — that is `skillinsight
+tails the transcript, runs the same extractor, appends, and exits.
+
+What it spends is process starts rather than bytes, so **the cost is per `jq` build** and
+the budget is stated per build. The two builds on the measuring machine were interleaved
+run for run, so a loaded box charged each alike: 400 KB transcript at the default 256 KB
+bound, macOS 25.6.0, 2026-09-03, n=25, wall-clock median / p90.
+
+|jq|no candidate|one candidate|
+|-|-|-|
+|`/usr/bin/jq` (jq-1.7.1-apple)|31.8 / 36.0 ms|84.7 / 87.7 ms|
+|anaconda's jq-1.6 on `PATH`|59.1 / 63.5 ms|123.0 / 128.9 ms|
+
+The 100 ms budget holds on the system jq at the median and at p90, and is missed by about
+a quarter on jq-1.6, which cannot be made to fit — what was tried, and what it would cost,
+is in [measurement.md](measurement.md). Two costs to know either way: the hook fires even
+when the compaction is then refused for having too little to compact, and it blocks the
+compaction while it runs. Nothing writes `CLAUDE.md` from a hook — that is `skillinsight
 promote` and `skillnote`, under your judgement.
 
 Neither hook can double-queue the other's find. The queue is addressed by a hash of the
@@ -94,7 +106,8 @@ skillinsight review        # emit the batch, with the reviewing instructions
 skillinsight decline <hash> [--why <why>]   # judged and declined; the record is kept
 skillinsight decline --source <src> [--week <ISO-week>] [--dry-run]
                            # the same judgement over every undeclined record from one source
-skillinsight promote <hash> --to note|reminder   # write it down now instead of forging it
+skillinsight promote <hash> --to note|reminder   # write it down now instead of forging it,
+                                                 # and print the lineage id it stamps
 skillinsight snooze [<days>] | --clear      # stop announcing the queue without judging it
 skillinsight reviews [--show <n>] [--all]   # the automatic session reviews, newest first
 skillinsight reindex       # recovers a paid-for verdict that never reached index.jsonl
@@ -119,6 +132,52 @@ records cannot be scored at all. The measurements are in
 [`notes/research/insight-capture.md`](../notes/research/insight-capture.md).
 
 Nothing here auto-forges. The queue feeds the same threshold as everything else.
+
+## Following one candidate through
+
+A queue record, the note it becomes, the reminder that delivers that note, the forge that
+follows and the verdict on it all carry **one id**. Before it existed, no figure in this
+package could say which delivery produced which outcome: anything spanning two stores was
+reconstructed by counting one of them and dividing.
+
+The id is derived rather than minted — `c` and the first eight characters of the queue
+record's hash, or `v` and eight for a session-review verdict — so a record queued before any
+of this shipped already has one, and nothing was backfilled. `skillinsight promote` prints
+it and stamps it on the note and the reminder it writes:
+
+```bash
+skillinsight promote <hash> --to note                       # prints: lineage c1a2b3c4
+skillnote add --candidate c1a2b3c4 "<what was learned>"     # by hand, the same id
+skillforge start <name> <steps> "<summary>" --from c1a2b3c4 [--session <id>]
+skillforge origin --name <skill> --origin forged --from c1a2b3c4
+```
+
+**A missing `--from` warns and is never refused**, on `--trigger`'s argument: a CLI that
+refuses is one callers stop calling, and most forges descend from nothing at all because
+nobody queued them. A forge started without one is recorded as carrying none and counted
+as `UNATTRIBUTED`. An id that is *malformed* is a different case and does exit non-zero —
+the charset is `[A-Za-z0-9._-]` and the length 64 — because the id is only ever compared
+for equality, so one carrying a space or a quote joins to nothing and reports as a lineage
+that was delivered and never acted on.
+
+`--session` defaults to `$CLAUDE_CODE_SESSION_ID`. Neither `skillforge apply` nor
+`skillforge verdict` needs the id typed again — `apply` never takes one and `verdict` falls
+back when none is given, and both read it off the forge's own `start` or `origin` row.
+A verdict written by hand months later is the moment nobody remembers which record began
+it, and a field a caller has to retype is a field that goes unrecorded.
+
+Two blocks of `skillreport` read the chain back. **FUNNEL** prints one line per lineage —
+deliveries, the ledger rows that acted on it, and the verdicts carrying it — and reports
+rows carrying no id as `UNATTRIBUTED` rather than dropping them. **REMINDER CONVERSION** is
+counted now instead of reconstructed: `hooks/compound-improvement.sh` writes every nudge it
+delivers to `<state>/reminders/nudges.jsonl`, and one converts when a `start` row exists in
+the same session at or after that delivery. The old edit-counter estimate is still printed
+below the line, labelled as the deliveries made before the log existed, and it is not added
+in.
+
+A ledger row that merely sits in a session which received a delivery also counts as having
+acted on that lineage. That is weaker evidence than carrying the id, it is a sequence and
+not a cause, and the block says so where it prints it.
 
 ## The mission
 
@@ -195,9 +254,24 @@ asks for it in writing.
 **A recovery no longer has to be the same tool.** A failure of one tool followed, within
 `REPEAT_RECOVERY_WINDOW` later calls, by a success of a *different* tool whose normalised
 input shares at least `REPEAT_RECOVERY_MIN_TOKENS` content tokens with the failed one is
-bound as its recovery, and the row is tagged `"cross_tool":true` so the two kinds of
-evidence stay tellable apart. That is the shape of "the GitHub skill failed and `gh`
-worked", which nothing bound before.
+bound as its recovery, and the row is tagged `"cross_tool":true`, which records that the
+fix was found somewhere other than where the failure was. That is the shape of "the GitHub
+skill failed and `gh` worked", which nothing bound before.
+
+**And a same-tool recovery has to earn it too, once the tool is a shell.** `Bash` names no
+operation, so two calls being the same tool was never evidence that they were the same
+work. Over the 231 distinct same-tool `Bash` bindings on this machine's store on
+2026-09-03, 52 shared not one content token with the failure they were filed under, and a
+binding *consumes* its armed failure, so an unrelated success ate the arming the real fix
+needed (the counts are in `hooks/repeat-gate.sh`'s header, under THE SAME-TOOL RULE IS NOT
+EVIDENCE FOR A SHELL). A same-tool binding for a shell now wants
+`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared tokens, the floor and the comparison the
+cross-tool rule already used. Two carve-outs: a success whose normalised call equals the
+failed one binds whatever that is set to, because the refusal's self-recovery exclusion
+rests on those rows and `pwd` carries one token; and every other tool is untouched, since
+`mcp__github__create_issue` names its operation in its own name. What the change gives up
+is a real fix sharing no text with the failure, which now degrades to silence rather than
+to a sentence the gate made up.
 
 **The first time, it is stated.** When a recovery is bound, the `PostToolUse` arm states
 the failed call, the error, the call that worked, and the two commands that record what
@@ -310,14 +384,21 @@ uninstall touch; `skill_compounder/installer.py`'s `install()` reports each one 
 - `insights/` holds the weekly candidate queue, one `<ISO-week>.jsonl` per week, and
   `reviews/` holds the session-review verdicts and their `index.jsonl`.
 - `reminders.jsonl` holds the reminder rules, `remind/` their per-session delivery log,
-  and `reminders/` the per-session edit and prompt counters the checkpoint hook keeps.
+  and `reminders/` the per-session edit and prompt counters the checkpoint hook keeps,
+  plus `reminders/nudges.jsonl`, one row per nudge that hook actually delivered — its
+  lineage id, when, and both session ids. It is what `skillreport` counts the conversion
+  from; the counters beside it are what the estimate it replaced was made of.
 - `repeats/` holds the repeat gate's learned failure signatures, and `repeats/lessons/`
   the per-session markers the lesson arm arms and spends; `claim-gate/`, `doc-gate/`,
   `apply-gate/` and `apply-pending/` hold each gate's per-session budget and the debt a
   closed forge leaves behind.
 - `mission/` holds one directory per session of the mission hook's per-event claims and
-  its per-turn tool counts, plus `hits.jsonl`, the one record that a delivery happened.
-  Nothing sweeps the session directories yet.
+  its per-turn tool counts, plus `hits.jsonl`, the one record that a delivery happened. A
+  sampled sweep removes the session directories once they have gone `MISSION_PRUNE_TTL`
+  unchanged, and never the running session's own, whatever its age: a claim removed from
+  under a live session re-opens the double delivery, and a tool count removed zeroes the
+  turn the `Stop` arm is about to judge. It walks one level of directories and nothing
+  else, so `hits.jsonl` is out of its reach by construction.
 - `contrib/` holds one work tree per `skillcontrib propose`, named `<name>-<timestamp>`.
   It is a clone of the upstream repository with the branch that was pushed, kept so a run
   that failed part way through can be looked at rather than guessed about.
@@ -392,8 +473,8 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](../README.md#what-runs-against-the-api).
-All fifty-seven are environment variables, and they are not the whole set — this
-prints every name the hooks, the six CLIs, the status line and `install.sh` read, 140 of
+All sixty are environment variables, and they are not the whole set — this
+prints every name the hooks, the six CLIs, the status line and `install.sh` read, 143 of
 them as of 2026-09-03 (`uninstall.sh` and `scripts/` are outside it):
 
 ```bash
@@ -453,6 +534,7 @@ place in `~/.claude/settings.json`:
 |`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Distinct sessions a call must have failed in, the same way, before an attempt is denied. The repeat arm counts only **earlier** sessions, so nothing a session does to itself can lock it out; the lesson arm counts this one too, because its question is whether the failure has now happened twice. **Three components read it** — set it anywhere narrower and they disagree|
 |`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful calls of a tool this hook is wired for, after which an armed failure stops looking for the call that fixed it, by either the same-tool rule or the cross-tool one|
 |`REPEAT_RECOVERY_MIN_TOKENS`|`2`|the hook entries|Content tokens two normalised calls must share before a success of a **different** tool binds as the recovery. `0` disables cross-tool binding and leaves the same-tool rule untouched. A floor, not a calibration|
+|`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`|`2`|the hook entries|The same floor for a success of the **same** tool, applied only where that tool is a general-purpose shell (`Bash`), which names no operation of its own. `0` restores the unconditional same-tool binding this script shipped until 2026-09-03. A success whose normalised call equals the failed one binds whatever this is set to, and no other tool is affected|
 |`REPEAT_LESSON_GATE`|`1`|the hook entries|Set to `0` to switch the lesson refusal off. On by default, which is the reverse of `REPEAT_GATE_REFUSE`, because this arm fires only where a failure and its recovery were both seen in the session it is speaking to. Exactly `0` is off and any other value is on, so a typo lands on the shipped default|
 |`REPEAT_LESSON_MAX_DENIES`|`2`|the hook entries|Refusals the lesson arm may spend on one signature in one session before it lets go for good. `0` means it never refuses|
 |`REPEAT_GATE_STDERR`|`0`|the hook entries|Set to `1` to leave the repeat gate's stderr connected, for `bash -x`. By default the gate closes it with a builtin `exec` before its first process start: `execve` charges the environment against `ARG_MAX`, and in a 200-byte band of environment size just under the one at which the hook cannot launch at all, `jq` launched and every `sed` in the normaliser could not, so bash printed `Argument list too long` up to seven times per tool call on the terminal. Exit status and the store are unaffected either way|
@@ -481,6 +563,8 @@ place in `~/.claude/settings.json`:
 |`MISSION_STOP_MIN_TOOLS`|`8`|the hook entries|Tool calls the turn must have made before the `Stop` arm may block a completion claim|
 |`MISSION_MAX_ROWS`|`2000`|the hook entries|Store lines read for one session, and the length `hits.jsonl` is trimmed back to on write|
 |`MISSION_MAX_BYTES`|`33554432`|the hook entries|Bytes read from the tail of the prompt store. A larger store loses its oldest rows, so a very old session in a very large project can lose its first request|
+|`MISSION_PRUNE_TTL`|`604800`|the hook entries|Seconds a session's claim-and-tool-count directory under `mission/` may go unchanged before a sweep removes it. The sweeping session's own directory is never removed, whatever its age|
+|`MISSION_PRUNE_EVERY`|`25`|the hook entries|Hook invocations between sweeps of `mission/`. `0` switches the sweep off. It runs at one site only, the periodic arm's not-yet-due exit, so no event that is about to deliver pays for it|
 |`SKILLCONTRIB_GH`|`gh`|the top-level `env` block|The `gh` executable every GitHub call goes through. It exists so the write half of `propose` can be exercised against a stand-in rather than opening real pull requests|
 |`SKILLCONTRIB_UPSTREAM_URL`|*(derived from the repo name)*|the top-level `env` block|Where the clone comes from. Unset in normal use; the tests point it at a local bare repository so a clone, branch, commit and push all happen for real with no network|
 |`SKILLCONTRIB_FORK_URL`|*(derived from the repo name)*|the top-level `env` block|The same, for where the branch is pushed|

@@ -7,6 +7,7 @@
 #   skillforge start <name> <total-steps> <one-line summary...> [--skill-dir <dir>]
 #                    --trigger "<verbatim text that set this off>"
 #                    --trigger-kind <user-prompt|hook-checkpoint|review-dispatch|agent-decision>
+#                    [--from <lineage id>] [--session <id>]
 #   skillforge step  [--name <forge>] <step-number> <what is happening now...>
 #   skillforge round --name <forge> --blocking <k> --total <m>
 #                    [--subsystems "<what the blocking findings named>"]
@@ -22,6 +23,7 @@
 #   skillforge install <name> [--skill-dir <dir>]
 #   skillforge origin  --name <skill> --origin <forged|workflow|seeded|adopted|unknown>
 #                      [--skill-dir <dir>] [--trigger <text> --trigger-kind <kind>]
+#                      [--from <lineage id>]
 #   skillforge use     --name <skill> [--ok|--failed] [--session <id>] [--cwd <dir>]
 #                      [--entrypoint <cli|sdk-cli|...>] [--harness|--genuine]
 #                      [--tool-use-id <id>] [--recorded live|derived]
@@ -751,6 +753,7 @@ ledger_line() { # <event> <name> <steps> <summary> [step] [phase] [duration] [ro
     --arg planned "${9:-}" \
     --arg trigger "${TRIGGER_TEXT:-}" --arg tkind "${TRIGGER_KIND:-}" \
     --arg skill "${SKILL_PRESENT:-}" \
+    --arg from "${FROM_ID:-}" --arg fsession "${START_SESSION:-}" \
     '{event:$event, name:$name, ts:$ts, steps:$steps, summary:$summary, project:$project}
      + (if $step     == "" then {} else {step:     ($step|tonumber)}     end)
      + (if $phase    == "" then {} else {phase:     $phase}              end)
@@ -759,7 +762,9 @@ ledger_line() { # <event> <name> <steps> <summary> [step] [phase] [duration] [ro
      + (if $planned  == "" then {} else {rounds_planned: ($planned|tonumber)} end)
      + (if $trigger  == "" then {} else {trigger_verbatim: $trigger}     end)
      + (if $tkind    == "" then {} else {trigger_kind: $tkind}           end)
-     + (if $skill    == "" then {} else {skill:        $skill}           end)' 2>/dev/null
+     + (if $skill    == "" then {} else {skill:        $skill}           end)
+     + (if $from     == "" then {} else {from:         $from}            end)
+     + (if $fsession == "" then {} else {session:      $fsession}        end)' 2>/dev/null
 }
 
 # A ledger failure must never break a forge, hence the bare returns.
@@ -845,6 +850,30 @@ commit_here() {
 # both a syntax error and, less kindly, a way to make the check answer whatever the name
 # says. A ledger that cannot be read answers "no": a duplicate row is recoverable and a
 # row never written is not.
+# THE LINEAGE ID, READ BACK OFF THE LEDGER. `apply` and `verdict` are written long after
+# the forge -- by hand, in another session, sometimes months later -- and asking a caller
+# to retype the id that started it is asking for a field that goes unrecorded. So it is
+# looked up instead, from the rows that already carry it.
+#
+# BOTH EVENTS ARE SELECTED BY NAME, never by negation: `start` carries the id the forge was
+# begun with, `origin` carries the one the finished skill inherited, and the two names can
+# differ -- a forge is named for the job, a skill for its directory (see origin_for_forge).
+# Whichever is newer wins, which is the origin row when there is one, because that is the
+# row written closest to what the skill actually became.
+ledger_from_of() { # <name> -> the lineage id, or nothing
+  [ -n "${1:-}" ] || return 0
+  [ -s "$LEDGER" ] || return 0
+  # `-R -n` with `inputs` reads a raw line at a time and `fromjson? // empty` drops one
+  # that does not parse; `jq -s` aborts on the first malformed line and would take the
+  # whole lookup with it, and this ledger is append-only and hand-editable.
+  jq -R -n -r --arg n "$1" '
+    [ inputs | (fromjson? // empty) | select(type == "object")
+      | select(.event == "start" or .event == "origin")
+      | select((.name // "") == $n)
+      | select((((.from // "") | tostring) | length) > 0) ]
+    | sort_by(.ts // 0) | (last // {}) | ((.from // "") | tostring)' < "$LEDGER" 2>/dev/null
+}
+
 ledger_has_origin() { # <name>
   [ -s "$LEDGER" ] || return 1
   jq -e -s -R --arg n "$1" '
@@ -916,7 +945,7 @@ ledger_raw_append() { # <compact json line>
 # entirely. A skill forged into a user's personal directory is the normal case in the
 # field, not an edge case, and a model that could only describe repo-shipped skills would
 # be blind to most of what this package actually builds.
-origin_append() { # <name> <origin> <skill_dir> <trigger> <trigger_kind> <created_at>
+origin_append() { # <name> <origin> <skill_dir> <trigger> <trigger_kind> <created_at> [from]
   oa_name="${1:-}"; [ -n "$oa_name" ] || return 0
   ledger_has_origin "$oa_name" && return 0
   oa_dir="${3:-}"
@@ -927,7 +956,7 @@ origin_append() { # <name> <origin> <skill_dir> <trigger> <trigger_kind> <create
   fi
   oa_line="$(jq -n -c --arg name "$oa_name" --arg origin "${2:-unknown}" \
     --arg dir "$oa_dir" --argjson shipped "$oa_shipped" \
-    --arg tv "${4:-}" --arg tk "${5:-}" --arg created "${6:-}" \
+    --arg tv "${4:-}" --arg tk "${5:-}" --arg created "${6:-}" --arg from "${7:-}" \
     --arg commit "$(commit_here)" --arg project "$(project_root)" \
     --argjson ts "$(now)" \
     '{event:"origin", ts:$ts, name:$name, origin:$origin, project:$project,
@@ -936,7 +965,8 @@ origin_append() { # <name> <origin> <skill_dir> <trigger> <trigger_kind> <create
      + (if $tv      == "" then {} else {trigger_verbatim:$tv}   end)
      + (if $tk      == "" then {} else {trigger_kind:$tk}       end)
      + (if $commit  == "" then {} else {created_commit:$commit} end)
-     + (if $created == "" then {} else {created_at:($created|tonumber)} end)' 2>/dev/null)"
+     + (if $created == "" then {} else {created_at:($created|tonumber)} end)
+     + (if $from    == "" then {} else {from:$from}            end)' 2>/dev/null)"
   ledger_raw_append "$oa_line"
 }
 
@@ -953,7 +983,8 @@ origin_for_forge() { # <forge name> <record file>
   find_skill_dir "$of_name" "$of_rec" || return 0
   origin_append "$(basename "$FOUND")" forged "$FOUND" \
     "$(field "$of_rec" trigger)" "$(field "$of_rec" trigger_kind)" \
-    "$(int_or_zero "$(field "$of_rec" started)")"
+    "$(int_or_zero "$(field "$of_rec" started)")" \
+    "$(field "$of_rec" from)"
 }
 
 # Red-team rounds are not stored during a forge, only the step budget and the step
@@ -2012,6 +2043,15 @@ case "$cmd" in start|done|install) ALLOW_SKILLDIR=1 ;; *) ALLOW_SKILLDIR=0 ;; es
 # and ledger_line writes nothing for an empty one rather than an empty string.
 TRIGGER_TEXT=""; TRIGGER_KIND=""
 case "$cmd" in start) ALLOW_TRIGGER=1 ;; *) ALLOW_TRIGGER=0 ;; esac
+# --from <lineage id>, on `start` only, and gated the same way for the same reason. It
+# answers a question `--trigger` cannot: the trigger is what was SAID, the lineage is
+# WHICH RECORD it descends from -- the queue candidate, the note, the reminder whose
+# delivery led here. A verbatim quote cannot be joined to another store; an id can.
+# `--session` is on `start` for the same reason `apply` already takes one: it is the id
+# a delivery log carries, and without it a `start` row can never be joined to the nudge
+# that preceded it.
+FROM_ID=""; START_SESSION=""
+case "$cmd" in start) ALLOW_FROM=1 ;; *) ALLOW_FROM=0 ;; esac
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2038,6 +2078,20 @@ while [ $# -gt 0 ]; do
                     else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --trigger-kind=*) if [ "$ALLOW_TRIGGER" -eq 1 ]; then
                       TRIGGER_KIND="${1#--trigger-kind=}"; shift
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --from)         if [ "$ALLOW_FROM" -eq 1 ]; then
+                      [ $# -ge 2 ] || die "--from requires the lineage id this forge descends from"
+                      FROM_ID="$2"; shift 2
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --from=*)       if [ "$ALLOW_FROM" -eq 1 ]; then
+                      FROM_ID="${1#--from=}"; shift
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --session)      if [ "$ALLOW_FROM" -eq 1 ]; then
+                      [ $# -ge 2 ] || die "--session requires a session id"
+                      START_SESSION="$2"; shift 2
+                    else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
+    --session=*)    if [ "$ALLOW_FROM" -eq 1 ]; then
+                      START_SESSION="${1#--session=}"; shift
                     else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
     --all)     if [ "$ALLOW_ALL" -eq 1 ]; then ALL_OPT=1; shift
                else ARGS[${#ARGS[@]}]="$1"; shift; fi ;;
@@ -2109,6 +2163,23 @@ case "$cmd" in
       echo "skillforge: WARNING — no --trigger given, so this forge will record nothing about why it started, and the ledger will read 'trigger not recorded' for it forever." >&2
       echo "skillforge:   Add: --trigger \"<verbatim text that set this off>\" --trigger-kind <$(printf '%s' "$TRIGGER_KINDS" | tr ' ' '|')>" >&2
     fi
+
+    # --from WARNS, IT DOES NOT REFUSE, and the argument is `--trigger`'s word for word:
+    # refusing does not produce a lineage id, it produces no forge record at all, and the
+    # cheapest way past a CLI that refuses is to stop calling it. A forge nobody could
+    # attribute is recorded as one -- no `from` field at all, which bin/skillreport counts
+    # as UNATTRIBUTED, the same positive statement `trigger_kind:"unrecorded"` makes.
+    # Most forges genuinely have no lineage: nothing queued them, somebody just saw the
+    # pattern. That is a fact about the forge, not a gap to be filled with a guess.
+    if [ -n "$FROM_ID" ]; then
+      case "$FROM_ID" in
+        *[!A-Za-z0-9._-]*) die "--from takes a lineage id of [A-Za-z0-9._-] only (got '$FROM_ID'). \`skillinsight promote\` prints one; \`skillnote list --json\` carries it as .candidate." ;;
+      esac
+      [ "${#FROM_ID}" -le 64 ] || die "--from id is longer than 64 characters"
+    else
+      echo "skillforge: no --from given, so nothing joins this forge to the candidate, note or reminder that led to it; skillreport will count it as UNATTRIBUTED." >&2
+    fi
+    [ -n "$START_SESSION" ] || START_SESSION="${CLAUDE_CODE_SESSION_ID:-}"
 
     # Does a forge by this name already exist? An ACTIVE one is refused: overwriting it
     # is exactly the defect this multi-slot scheme exists to remove, and silently
@@ -2189,10 +2260,11 @@ SLOTS
     # directory -- and the record is the only thing that still remembers what was said.
     { jq -n --arg n "$name" --arg s "$summary" --argjson t "$steps" --argjson now "$(now)" \
       --arg id "$(new_forge_id)" --arg root "$(project_root)" --arg sd "$SKILLDIR_OPT" \
-      --arg tg "$TRIGGER_TEXT" --arg tk "$TRIGGER_KIND" \
+      --arg tg "$TRIGGER_TEXT" --arg tk "$TRIGGER_KIND" --arg fr "$FROM_ID" \
       '{name:$n, summary:$s, phase:"initializing", step:0, steps:$t,
         status:"active", started:$now, updated:$now, id:$id}
        + {root:$root}
+       + (if $fr == "" then {} else {from:$fr} end)
        + (if $sd == "" then {} else {skill_dir:$sd} end)
        + (if $tg == "" then {} else {trigger:$tg} end)
        + (if $tk == "" then {} else {trigger_kind:$tk} end)' > "$tmp"; } 2>/dev/null \
@@ -2683,6 +2755,11 @@ SLOTS
     v_name="$NAME_OPT"; v_ok="true"; v_session=""; v_cwd=""; v_ep=""; v_harness=""
     v_id=""; v_recorded="live"; v_verdict=""; v_evidence=""; v_usets=""; v_usesession=""
     v_by=""; v_origin=""; v_dir=""; v_created=""; v_trigger=""; v_tkind=""
+    # The lineage id. `origin` takes it explicitly; `verdict` and `apply` never do -- they
+    # READ it off the forge's own `start` row, because a verdict typed by hand months later
+    # is exactly the moment nobody remembers which queue record started it, and a field a
+    # caller has to retype is a field that goes unrecorded.
+    v_from=""
     for a in "$@"; do
       k="${a%%=*}"; v="${a#*=}"
       case "$k" in
@@ -2704,6 +2781,7 @@ SLOTS
         --origin)      v_origin="$v" ;;
         --skill-dir)   v_dir="$(abspath "$v")" ;;
         --created-at)  v_created="$v" ;;
+        --from)        v_from="$v" ;;
         --trigger)     v_trigger="$v" ;;
         --trigger-kind) v_tkind="$v" ;;
         *)             die "unknown option '$k' for skillforge $cmd" ;;
@@ -2727,7 +2805,7 @@ SLOTS
           echo "skillforge: '$v_name' already has an origin row; nothing was written"
           exit 0
         fi
-        origin_append "$v_name" "$v_origin" "$v_dir" "$v_trigger" "$v_tkind" "$v_created"
+        origin_append "$v_name" "$v_origin" "$v_dir" "$v_trigger" "$v_tkind" "$v_created" "$v_from"
         echo "skillforge: recorded origin '$v_origin' for '$v_name'"
         ;;
 
@@ -2787,8 +2865,10 @@ SLOTS
           die "--evidence is required for $v_verdict: a verdict with no verbatim quote behind it is not written (UNKNOWN may be written bare)"
         fi
         case "${v_usets:-0}" in ''|*[!0-9]*) v_usets="" ;; esac
+        [ -n "$v_from" ] || v_from="$(ledger_from_of "$v_name")"
         vd_line="$(jq -n -c --arg name "$v_name" --arg verdict "$v_verdict" \
           --arg evidence "$v_evidence" --arg by "$v_by" --arg usesession "$v_usesession" \
+          --arg from "${v_from:-}" \
           --arg usets "$v_usets" --argjson ts "$(now)" \
           '{event:"verdict", ts:$ts, name:$name, verdict:$verdict,
             judged_at:$ts, confidence:"measured", backfilled:false,
@@ -2796,7 +2876,8 @@ SLOTS
            + (if $evidence   == "" then {} else {evidence:$evidence}       end)
            + (if $by         == "" then {} else {judged_by:$by}            end)
            + (if $usesession == "" then {} else {use_session:$usesession}  end)
-           + (if $usets      == "" then {} else {use_ts:($usets|tonumber)} end)' 2>/dev/null)"
+           + (if $usets      == "" then {} else {use_ts:($usets|tonumber)} end)
+           + (if $from       == "" then {} else {from:$from}             end)' 2>/dev/null)"
         [ -n "$vd_line" ] || die "could not build a verdict row for '$v_name'"
         ledger_raw_append "$vd_line"
         ;;
@@ -3031,8 +3112,10 @@ SNAP
     fi
     a_marker_flag=false
     [ "$a_have" -eq 1 ] && a_marker_flag=true
+    a_from="$(ledger_from_of "$a_name")"
     a_line="$(jq -n -c --arg name "$a_name" --arg outcome "$a_outcome" \
       --arg evidence "$a_evidence" --arg forge "$a_forge" --arg session "$a_session" \
+      --arg from "${a_from:-}" \
       --arg elapsed "$a_elapsed" --arg installed "$a_installed" \
       --argjson marker "$a_marker_flag" --argjson ts "$a_ts" \
       '{event:"apply", ts:$ts, name:$name, outcome:$outcome, evidence:$evidence,
@@ -3040,7 +3123,8 @@ SNAP
        + (if $forge     == "" then {} else {forge:$forge}                 end)
        + (if $session   == "" then {} else {session:$session}             end)
        + (if $elapsed   == "" then {} else {elapsed:($elapsed|tonumber)}  end)
-       + (if $installed == "" then {} else {installed:($installed|test("true"))} end)' 2>/dev/null)"
+       + (if $installed == "" then {} else {installed:($installed|test("true"))} end)
+       + (if $from      == "" then {} else {from:$from}                  end)' 2>/dev/null)"
     [ -n "$a_line" ] || die "could not build an apply row for '$a_name'"
 
     # THE SAME CLAIM SCHEME `done` USES. `ln` of a fully-written file onto a path that has

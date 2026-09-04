@@ -1411,13 +1411,23 @@ class SkillBudgetTest(unittest.TestCase):
     def test_every_description_is_inside_the_documented_budget(self):
         desc_max, front_max, _ = self.budgets()
         for name, front, _body in self.shipped():
-            meta = __import__("yaml").safe_load(front)
+            try:
+                description = __import__("yaml").safe_load(front)["description"]
+            except ImportError:
+                # A clean-environment run (`env -i ... /usr/bin/python3`) has no
+                # PyYAML. The routing gate's own parser reads the same field with
+                # the stdlib, so the budget is checked by the reader that enforces
+                # it rather than skipped where the wheel is absent.
+                import sys
+                sys.path.insert(0, str(ROOT / "scripts"))
+                from routing_claims import _frontmatter_description
+                description = _frontmatter_description("---\n" + front + "---\n")
             self.assertLessEqual(
-                len(meta["description"]), desc_max,
+                len(description), desc_max,
                 "skills/%s description is %d characters against the %d `skill-authoring` "
                 "documents. Padding makes the listing drop it under context pressure, "
                 "which is the failure the budget is for"
-                % (name, len(meta["description"]), desc_max))
+                % (name, len(description), desc_max))
             self.assertLessEqual(
                 len(front), front_max,
                 "skills/%s frontmatter block is %d characters against %d"

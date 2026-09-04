@@ -18,6 +18,16 @@
 # tokens with the failed one, rather than because the tool matched. It is present only
 # when true, so every reader that does not care about it goes on ignoring it.
 #
+# IT NO LONGER MEANS "THE WEAKER KIND", and rows written before 2026-09-03 are the ones it
+# separates. Until then a same-tool `Bash` recovery was bound on the tool name alone, which
+# for a universal shell is no evidence at all -- 52 of the 231 such bindings on the live
+# store that day shared not one content token with the failure they were filed under. Since
+# then a same-tool binding for a SHELL wants the same shared tokens the cross-tool rule
+# wants (REPEAT_SAME_TOOL_MIN_TOKENS in hooks/repeat-gate.sh), so the two kinds now rest on
+# comparable evidence and the flag says which RULE bound the row rather than how much it is
+# worth. What it still separates is the tool: a cross-tool row names a fix found somewhere
+# other than where the failure was.
+#
 # A `dismiss` IS NOT A TOMBSTONE, and the difference is the whole reason there are two
 # row types rather than one with a flag. `forget` says "these observations no longer
 # count" and suppresses rows; `dismiss` says "this was looked at and needs no lesson"
@@ -608,7 +618,8 @@ cmd_show() {
     if [ "$xn" -gt 0 ]; then
       echo "cross-tool: $xn of the recoveries were bound because a DIFFERENT tool's call"
       echo "           shared content tokens with the failed one, not because the tool"
-      echo "           matched -- weaker evidence than a same-tool recovery."
+      echo "           matched. The fix was found somewhere other than where the failure"
+      echo "           was; for a shell both rules now want shared tokens."
     fi
     if [ "$(printf '%s' "$one" | jq -r '.lesson_dismissed' 2>/dev/null)" = "true" ]; then
       echo "lesson:    dismissed -- see the dismiss row below for the reason given."

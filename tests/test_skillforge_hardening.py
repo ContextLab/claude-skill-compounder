@@ -543,7 +543,10 @@ class ReportKnobTest(Base):
                                    env=self.env(CI_EDIT_EVERY=value))
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual(r.stderr, "", r.stderr)
-                self.assertIn("rough conversion:", r.stdout,
+                # The estimate line this used to pin was replaced by a counted join
+                # (issue #37); the counters it guards are still read and reported, and
+                # this is the line that proves the section is still there.
+                self.assertIn("checkpoints they imply:", r.stdout,
                               "the reminder section was lost:\n" + r.stdout)
                 self.assertNotIn("no checkpoints implied yet", r.stdout,
                                  "60 edits implied no checkpoints:\n" + r.stdout)

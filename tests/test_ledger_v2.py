@@ -687,7 +687,28 @@ class BackCompatTest(LedgerV2Case):
                    and r.get("text") == "a lesson worth one line"]
         self.assertEqual(len(written), 1, "the CLI wrote no ledger row")
         self.assertEqual(self.forge("ledger").stdout, before_forge)
-        self.assertEqual(self.report().stdout, before_report)
+
+        # EVERY OLD COUNT IS STILL UNMOVED, and the assertion is still whole-output
+        # equality -- over the whole report MINUS the funnel, which is the one block a
+        # note row is SUPPOSED to move (issue #37: a note is a lineage's second hop, so a
+        # funnel that ignored note rows would be the estimate again in a new shape).
+        # Splitting it here rather than deleting it keeps the guarantee this class rests
+        # on: a reader classifying by exclusion would still fold the note into the forge
+        # count, the reuse denominator or the conversion, and every one of those is above
+        # the split.
+        after_report = self.report().stdout
+        head = lambda o: o[:o.index("\nFUNNEL (")]
+        self.assertEqual(head(after_report), head(before_report),
+                         "a note row moved a count outside the funnel")
+
+        # And the funnel moved by EXACTLY one unattributed row: the note the CLI just
+        # wrote, which carries no --candidate and so has no lineage to be attributed to.
+        def unattributed(out):
+            line = [l for l in out.splitlines() if "UNATTRIBUTED:" in l][0]
+            return int(line.split("UNATTRIBUTED:")[1].split()[0])
+        self.assertEqual(unattributed(after_report), unattributed(before_report) + 1,
+                         "the funnel did not count the new note row exactly once:\n"
+                         + after_report)
 
     def test_an_event_from_the_future_is_ignored_rather_than_miscounted(self):
         """Forward compatibility, stated as a test: a row this build has never heard of

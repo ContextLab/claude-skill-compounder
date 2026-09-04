@@ -147,6 +147,26 @@
 # subagent's own tool calls too: they carry the parent's prompt_id and they are work done
 # in the turn. It is a FLOOR -- a tool call this hook never saw is not in it.
 #
+# PRUNE. <state>/mission/<sid>/ is one directory per session that reached this hook, and
+# nothing else sweeps it: `prune_stale_state()` in hooks/compound-improvement.sh walks
+# <state>/reminders/ and hooks/remind.sh's own sweep walks <state>/remind/, both of them
+# deliberately different directories. So this script sweeps its own tree, in the same shape
+# that one does: on a 1-in-MISSION_PRUNE_EVERY draw it removes every session directory
+# under <state>/mission/ whose mtime is more than MISSION_PRUNE_TTL seconds behind its own
+# clock, and NEVER the current session's, whatever its age. Age is measured against
+# MISSION_NOW and not by `find -mtime`, which reads the wall clock and would put the sweep
+# beyond a pinned test.
+#
+# IT RUNS WHERE NOTHING IS DUE. The one call site is the periodic arm's not-yet-due exit --
+# the ordinary tool call that delivers nothing, which is by a wide margin the most frequent
+# event this hook sees. So every path that is about to emit reaches its `jq` with no `stat`
+# in front of it, and the sweep is charged neither to a subagent (that branch has already
+# exited on `agent_id`) nor to the first tool call of a session (which seeds `last` and
+# exits). It walks ONE level of directories under <state>/mission/ and nothing else, so
+# hits.jsonl -- a file, like the `.hits.XXXXXX` a trim leaves behind -- is out of reach by
+# construction, and a name that is not a sanitised session id is left alone whatever its
+# age.
+#
 # COST, MEASURED. One `cat` for the payload, one `jq` for the payload's scalars, a
 # `tail -c | grep -F | tail -n` pipeline over the store, one `jq` for the render, one
 # `tail` to split its first line off, and one `jq` for the emit. On a 200-prompt store:
@@ -161,8 +181,12 @@
 #     project can lose its first request. 32 MB is roughly 130,000 prompts.
 #   - Level B (relevant prompts from OTHER projects) is not read here. `surfer search
 #     --all` is one command away through the `history-surfer` skill.
-#   - <state>/mission/<sid>/ is not swept. One session directory holds one byte per tool
-#     call and one empty directory per claimed event; nothing removes them yet.
+#   - <state>/mission/<sid>/ holds one byte per tool call and one empty directory per
+#     claimed event, and the sweep below removes only OTHER sessions' directories, by age.
+#     A session that stays live longer than MISSION_PRUNE_TTL keeps its own tree whatever
+#     it has grown to, which is the right way round: a claim removed from under a live
+#     session re-opens the double delivery, and a tool count removed zeroes the turn the
+#     Stop arm is about to judge.
 #   - Every constant below is unvalidated, like the other six in this package. Do not tune
 #     them before bin/skillreport has real data (docs/measurement.md).
 #
@@ -185,6 +209,9 @@
 #   MISSION_MAX_ROWS       (2000)     store lines read for one session, and the length
 #                                     hits.jsonl is trimmed to on write.
 #   MISSION_MAX_BYTES      (33554432) bytes read from the tail of the store.
+#   MISSION_PRUNE_TTL      (604800)   seconds a session directory under <state>/mission/
+#                                     may go unchanged before a sweep removes it.
+#   MISSION_PRUNE_EVERY    (25)       events between sweeps; 0 switches the sweep off.
 #   MISSION_NOW            ()         pinned clock, epoch seconds. Its own, not borrowed:
 #                                     pinning another script's clock does nothing to this
 #                                     one.
@@ -229,6 +256,8 @@ SHORT_WORDS="${MISSION_SHORT_WORDS:-6}"
 STOP_MIN_TOOLS="${MISSION_STOP_MIN_TOOLS:-8}"
 MAX_ROWS="${MISSION_MAX_ROWS:-2000}"
 MAX_BYTES="${MISSION_MAX_BYTES:-33554432}"
+PRUNE_TTL="${MISSION_PRUNE_TTL:-604800}"
+PRUNE_EVERY="${MISSION_PRUNE_EVERY:-25}"
 
 # Shape AND magnitude guards on every tunable, so a typo'd export cannot reach an
 # arithmetic test and print `[: integer expected` on the user's stderr from a hook.
@@ -241,6 +270,8 @@ case "$SHORT_WORDS"    in ''|*[!0-9]*) SHORT_WORDS=6 ;; esac
 case "$STOP_MIN_TOOLS" in ''|*[!0-9]*) STOP_MIN_TOOLS=8 ;; esac
 case "$MAX_ROWS"       in ''|*[!0-9]*) MAX_ROWS=2000 ;; esac
 case "$MAX_BYTES"      in ''|*[!0-9]*) MAX_BYTES=33554432 ;; esac
+case "$PRUNE_TTL"      in ''|*[!0-9]*) PRUNE_TTL=604800 ;; esac
+case "$PRUNE_EVERY"    in ''|*[!0-9]*) PRUNE_EVERY=25 ;; esac
 [ "$MAX_CHARS" -lt 1 ] && MAX_CHARS=1
 # The emitted text travels in ONE argv element to `jq --arg`. Linux caps a single argv
 # element at MAX_ARG_STRLEN, a hard 131072 bytes that a larger ARG_MAX does not raise, so
@@ -357,6 +388,55 @@ claim_once() {
   return 0
 }
 
+# ------------------------------------------------------------------- prune
+# Sampled, and with ONE call site: the periodic arm's not-yet-due exit, so a sweep is never
+# paid by an event that is about to emit ("PRUNE" and "IT RUNS WHERE NOTHING IS DUE" in the
+# header). It walks ONE level of directories under $DIR and nothing else -- hits.jsonl and
+# the `.hits.XXXXXX` a trim leaves behind are files, which the directory-only glob never
+# lists, and $ROOT's other trees are siblings of $DIR and out of reach by construction.
+#
+# The current session's own <sid>/ is skipped whatever its age. `seen/` is what stops the
+# second wiring delivering the same event twice and `tools/<pid>` is the count the Stop arm
+# reads; removing either from under a live session is the trap hooks/session-review.sh
+# shipped in the other direction, a record whose absence is indistinguishable from
+# never-fired.
+#
+# A name that is not a sanitised session id is left alone. Every directory this script
+# creates under $DIR is named by `tr -c 'A-Za-z0-9._-' '_' | cut -c1-96`, so anything
+# outside that charset, or longer than that, was put there by something else and is not
+# ours to remove.
+#
+# One `stat` over every directory, GNU form first and VALIDATED, then BSD: on GNU `-f`
+# means --file-system, the bogus `%m` there still prints the valid part of the format, and
+# a bare `A || B` chain would capture it (statusline/statusline.sh has the same note). A
+# directory whose mtime does not parse is left alone, and so is one from the future.
+prune_stale_sessions() {
+  [ "$PRUNE_EVERY" -ge 1 ] || return 0
+  [ $(( ${RANDOM:-0} % PRUNE_EVERY )) -eq 0 ] || return 0
+  [ -d "$DIR" ] || return 0
+  set -- "$DIR"/*/
+  [ -d "$1" ] || return 0
+  ps_lines="$(stat -c '%Y %n' "$@" 2>/dev/null)"
+  ps_first="${ps_lines%% *}"
+  case "$ps_first" in
+    ''|*[!0-9]*) ps_lines="$(stat -f '%m %N' "$@" 2>/dev/null)" ;;
+  esac
+  [ -n "$ps_lines" ] || return 0
+  printf '%s\n' "$ps_lines" | while read -r ps_m ps_p; do
+    case "$ps_m" in ''|*[!0-9]*) continue ;; esac
+    ps_p="${ps_p%/}"
+    case "$ps_p" in "$DIR"/*) ;; *) continue ;; esac
+    [ "$ps_p" = "$SDIR" ] && continue
+    ps_b="${ps_p##*/}"
+    case "$ps_b" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    [ "${#ps_b}" -le 96 ] || continue
+    ps_age=$(( now - ps_m ))
+    [ "$ps_age" -gt "$PRUNE_TTL" ] || continue
+    rm -rf "$ps_p" 2>/dev/null
+  done
+  return 0
+}
+
 # ------------------------------------------------------------------- the turn's tool count
 # Counting happens on EVERY PreToolUse, delivery or not, so its claim is taken here rather
 # than beside the delivery claim: they are two different actions and one must not consume
@@ -413,7 +493,10 @@ case "$event" in
         # periodic arm for the rest of the session.
         d=$(( now - last_st ))
         [ "$d" -lt 0 ] && d=$(( 0 - d ))
-        [ "$d" -gt "$INTERVAL" ] || exit 0
+        # The sweep's one call site: this event delivers nothing, and it is the most
+        # frequent one this hook sees. An event that IS due falls through to the render
+        # with no `stat` in front of it.
+        [ "$d" -gt "$INTERVAL" ] || { prune_stale_sessions; exit 0; }
         moment="periodic"
         ;;
     esac

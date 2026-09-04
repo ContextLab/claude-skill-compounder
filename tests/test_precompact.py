@@ -112,15 +112,22 @@ class PrecompactTestBase(unittest.TestCase):
                 e[k] = str(v)
         return e
 
-    def payload(self, transcript, trigger="auto", session="s1", prompt="p1", cwd=None):
-        """The seven keys the live capture carried, in the shape it carried them."""
+    def payload(self, transcript, trigger="auto", session="s1", prompt="p1", cwd=None,
+                custom_instructions=None):
+        """The seven keys the live capture carried, in the shape it carried them.
+
+        `custom_instructions` defaults to `None` because that is what a bare `/compact` and
+        every automatic compaction put there. It is a parameter because a
+        `/compact <instructions>` puts the argument in it verbatim -- measured on 2.1.260,
+        see CustomInstructionsTest.
+        """
         return {"session_id": session,
                 "transcript_path": str(transcript) if transcript is not None else "",
                 "cwd": str(cwd if cwd is not None else self.root),
                 "prompt_id": prompt,
                 "hook_event_name": "PreCompact",
                 "trigger": trigger,
-                "custom_instructions": None}
+                "custom_instructions": custom_instructions}
 
     def run_hook(self, payload, raw=None, hook=None, **extra):
         data = raw if raw is not None else json.dumps(payload)
@@ -431,25 +438,53 @@ class ProcessCountTest(PrecompactTestBase):
             return []
         return [l for l in self.execlog.read_text().splitlines() if l]
 
+    def counts(self, runs):
+        c = {}
+        for name in runs:
+            c[name] = c.get(name, 0) + 1
+        return c
+
+    @staticmethod
+    def without_date(runs):
+        """`date` is the ONE program whose count is a platform fact rather than a choice.
+
+        The hook tries the BSD form first (`date -u -r <seconds>`) and falls back to the
+        GNU one (`date -u -d @<seconds>`), so one stamp costs one start on macOS and two
+        on Linux, where the BSD probe fails before the fallback runs. Folding that
+        variance into the total is what forced the old pins to carry five programs of
+        slack, and slack is what lets an added process through. Excluding `date` and
+        bounding it separately makes the rest an exact ratchet: any added program fails.
+        """
+        return [r for r in runs if r != "date"]
+
     def test_the_candidate_path_runs_no_more_programs_than_it_has_to(self):
         t = self.write_transcript(MARKER)
         r = self.run_hook(self.payload(t), PATH=self.shim_path())
         self.assertSilent(r)
         self.assertEqual(len(self.records()), 1)
         runs = self.execs()
-        counts = {}
-        for name in runs:
-            counts[name] = counts.get(name, 0) + 1
+        counts = self.counts(runs)
         # jq: one for the payload fields, one for the transcript-and-scan, one to build
         # the record. The middle one is a merge: reading the transcript in one process and
         # scanning it in another cost a whole extra start for nothing.
         self.assertLessEqual(counts.get("jq", 0), 3,
-                             "jq starts: %r -- each one is 10-22 ms on the machines this "
+                             "jq starts: %r -- each one is 8-22 ms on the machines this "
                              "was measured on" % counts)
-        self.assertLessEqual(len(runs), 26,
-                             "the hook ran %d programs (%r); it blocks a compaction, so "
-                             "an added process needs a reason recorded next to it"
-                             % (len(runs), counts))
+        self.assertLessEqual(counts.get("date", 0), 2,
+                             "one stamp, so one start on BSD and two on GNU: %r" % counts)
+        # 13, observed on macOS 25.6.0, 2026-09-03, and the list is the whole of it:
+        #   cat  jq jq tail  mkdir mkdir  git  awk tr shasum  mkdir  grep  jq
+        # Three fewer than the 16 this path ran before issue #32: the queue directory and
+        # its .claims are made by ONE `mkdir -p`, and the per-compaction event claim is
+        # named by bash parameter expansion instead of `hash_of` -- which cost `shasum`,
+        # `awk` and `tr`, three starts for a name nothing outside precompact.sh reads.
+        # `hash_of` itself is untouched; the CONTENT hash still goes through it, because
+        # that digest is the shared name insight-capture.sh looks a record up under.
+        nd = self.without_date(runs)
+        self.assertLessEqual(len(nd), 13,
+                             "the hook ran %d programs besides date (%r); it blocks a "
+                             "compaction, so an added process needs a reason recorded "
+                             "next to it" % (len(nd), counts))
 
     def test_the_empty_path_costs_almost_nothing(self):
         """Most compactions carry no candidate, so this is the path that actually runs.
@@ -462,7 +497,161 @@ class ProcessCountTest(PrecompactTestBase):
             self.assertNotIn(never, runs,
                              "a compaction with nothing to capture ran %s: %r"
                              % (never, runs))
-        self.assertLessEqual(len(runs), 8, "no-candidate path ran %r" % runs)
+        # 4, and the list is the whole of it: cat, jq, jq, tail.
+        self.assertLessEqual(len(self.without_date(runs)), 4,
+                             "no-candidate path ran %r" % runs)
+
+    def test_a_populated_custom_instructions_costs_nothing(self):
+        """The field is real as of 2.1.260 (see CustomInstructionsTest) and this hook
+        ignores it. This is the assertion that fails if someone wires it into the payload
+        jq's output and pays a `read` -- or worse, a process -- for a value that has
+        nowhere to go, since a PreCompact hook's only channel back is `systemMessage` on
+        stdout and this one never writes there."""
+        t = self.write_transcript(MARKER)
+        r = self.run_hook(self.payload(t, custom_instructions="focus on the greeting"),
+                          PATH=self.shim_path())
+        self.assertSilent(r)
+        self.assertEqual(len(self.records()), 1)
+        runs = self.execs()
+        self.assertLessEqual(len(self.without_date(runs)), 13,
+                             "a populated custom_instructions changed the process count: "
+                             "%r" % self.counts(runs))
+
+
+class GnuDateFallbackTest(PrecompactTestBase):
+    """One `date` produces BOTH stamps, on GNU as well as on BSD.
+
+    `stamp` asks for `date -u -r <seconds>` first and falls back to `date -u -d @<seconds>`,
+    because those are the two platforms' spellings. Since issue #32 that call happens ONCE
+    and asks for both values in one format string, separated by strftime's `%n` -- so the
+    fallback now has to carry two lines rather than one, and a macOS developer never
+    exercises it. On Ubuntu the real `date` makes this path live and CI would notice; the
+    point of this test is that a laptop notices first.
+
+    This is not a mock of `date`. The ANSWER always comes from the real program: the shim
+    below rejects the BSD argument shape the way GNU's `date` rejects it -- `-r` there
+    means "reference FILE", so a bare number is a stat failure -- and then `exec`s the real
+    `date` for the form it accepts. Only the argument-acceptance shape is borrowed; every
+    byte of output is genuine.
+    """
+
+    SHIM = """#!/bin/sh
+u=""; ref=""; d=""; fmt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u) u=1 ;;
+    -r) ref="$2"; shift ;;
+    -d) d="$2"; shift ;;
+    +*) fmt="$1" ;;
+  esac
+  shift
+done
+if [ -n "$ref" ]; then
+  echo "date: cannot stat '$ref': No such file or directory" >&2
+  exit 1
+fi
+case "$d" in
+  @*) secs="${d#@}"; exec %s -u -r "$secs" "$fmt" ;;
+esac
+exit 1
+"""
+
+    def gnu_date_path(self):
+        real = shutil.which("date", path=PATH)
+        self.assertTrue(real, "no real date on the test PATH")
+        bindir = self.root / "gnudate"
+        bindir.mkdir()
+        p = bindir / "date"
+        p.write_text(self.SHIM % real)
+        p.chmod(0o755)
+        return "%s:%s" % (bindir, PATH)
+
+    def test_the_gnu_spelling_still_yields_both_stamps(self):
+        t = self.write_transcript(MARKER)
+        r = self.run_hook(self.payload(t), PATH=self.gnu_date_path())
+        self.assertSilent(r)
+        recs = self.records()
+        self.assertEqual(len(recs), 1,
+                         "the queue landed in no week the pinned clock names, so the "
+                         "fallback lost one of the two stamps")
+        self.assertEqual(recs[0]["week"], WEEK)
+        self.assertEqual(recs[0]["ts"], "2025-08-24T00:00:00Z")
+
+    def test_a_date_that_refuses_both_spellings_captures_nothing_and_stays_silent(self):
+        """The guard behind the stamps, exercised through the same door: no stamps, no
+        week filename to write under, and still a clean exit -- a capture never breaks a
+        compaction."""
+        bindir = self.root / "nodate"
+        bindir.mkdir()
+        p = bindir / "date"
+        p.write_text("#!/bin/sh\nexit 1\n")
+        p.chmod(0o755)
+        t = self.write_transcript(MARKER)
+        r = self.run_hook(self.payload(t), PATH="%s:%s" % (bindir, PATH))
+        self.assertSilent(r)
+        self.assertEqual(self.records(), [])
+        self.assertFalse(self.queue.exists(),
+                         "a broken clock must not even create the queue directory")
+
+
+class CustomInstructionsTest(PrecompactTestBase):
+    """`custom_instructions` had only ever been observed `null` (issue #32). It is not.
+
+    Measured on Claude Code 2.1.260, macOS 25.6.0, 2026-09-03, with the same probe recipe
+    docs/CLAUDE-CODE-BEHAVIOR.md records for the earlier PreCompact captures: a scratch
+    directory, one dumping hook wired through its own `--settings` file with
+    `--setting-sources ''` and `SKILL_COMPOUNDER_DISPATCHED=1`, and two arms against ONE
+    resumed session so the only thing that differed was the argument.
+
+        /compact focus on the greeting  ->  "custom_instructions":"focus on the greeting"
+        /compact                        ->  "custom_instructions":null
+
+    So the populated shape is a plain JSON string carrying the argument VERBATIM: no
+    `/compact` prefix, no surrounding whitespace, not an object and not an array.
+
+    This hook does not read the field and must not start. A PreCompact hook's only channel
+    back is `systemMessage` on stdout, and this one's first promise is that it never writes
+    to stdout at all -- a capture must not be able to break a compaction. What is pinned
+    here is therefore the two halves of "ignores it safely": a populated field changes
+    nothing about what gets captured, and a hostile one does not break the hook or leak
+    into the queue.
+    """
+
+    def hostile(self):
+        """Quotes, a backslash, a tab, a newline, and two shell expansions that leave
+        evidence behind if anything ever evaluates them."""
+        self.canary = self.root / "pwned"
+        return ('focus on "the greeting" \\ and\ton $(touch %s) `touch %s` \n'
+                'two lines, ${HOME}, and a trailing quote "' % (self.canary, self.canary))
+
+    def test_a_populated_field_captures_exactly_what_a_null_one_captures(self):
+        """One transcript, one temp root, one payload differing in one key. Only the
+        state directory is cleared between the two runs, so `project` and `session` are
+        the same on both sides and any difference at all is the field's doing."""
+        t = self.write_transcript(MARKER)
+        self.assertSilent(self.run_hook(self.payload(t, custom_instructions=None)))
+        without = self.records()
+        self.assertEqual(len(without), 1)
+
+        shutil.rmtree(str(self.state))
+        self.assertSilent(self.run_hook(
+            self.payload(t, custom_instructions="focus on the greeting")))
+        self.assertEqual(without, self.records(),
+                         "the hook reads four payload fields and custom_instructions is "
+                         "not one of them; a populated one must change nothing")
+
+    def test_a_hostile_field_neither_breaks_the_hook_nor_reaches_the_queue(self):
+        t = self.write_transcript(MARKER)
+        self.assertSilent(self.run_hook(
+            self.payload(t, custom_instructions=self.hostile())))
+        recs = self.records()
+        self.assertEqual(len(recs), 1)
+        blob = json.dumps(recs)
+        for leak in ("greeting", "trailing quote"):
+            self.assertNotIn(leak, blob,
+                             "custom_instructions leaked into the queue: %r" % blob)
+        self.assertFalse(self.canary.exists(),
+                         "the payload's custom_instructions reached a shell")
 
 
 class DoubleDeliveryTest(PrecompactTestBase):

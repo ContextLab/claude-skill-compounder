@@ -10,6 +10,25 @@ Working on this repository rather than using the package.
 ./run_tests.sh
 ```
 
+`run_tests.sh` loops over `tests/test_*.py` and runs each as its own process, so a new file
+needs no registration; there are 53 of them (`ls tests/test_*.py | wc -l`).
+
+**A suite green here has gone red on CI twice in one day**, both times because this machine
+carries something the runner does not. So run at least the files you touched under a clean
+environment before pushing:
+
+```bash
+env -i HOME=$(mktemp -d) PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin \
+  PYTHONPATH=$PWD python3 tests/test_doctrine_sync.py
+```
+
+That `python3` is `/usr/bin/python3`, which has no PyYAML. The one place that parsed
+frontmatter with it unguarded — the description-budget test in `test_doctrine_sync.py` —
+now falls back to `scripts/routing_claims.py`'s stdlib parser instead of erroring, which is
+the same reader the routing gate reads the description with. The two other `yaml` users,
+in `test_contribute.py` and `test_plugin.py`, skip when the wheel is absent; a budget the
+routing gate enforces is checked rather than skipped.
+
 No mocks, anywhere: real temporary Claude directories, real `settings.json` files, real
 subprocess invocations of the shell scripts, real git repositories built and then
 destroyed to prove the destructive-op fixtures, a real virtual environment to prove the
@@ -54,8 +73,8 @@ brew install vhs
 Three of them are in `.claude/CLAUDE.md` at length, and each has bitten somebody here:
 
 - **No mocks, ever.** Nondeterminism is pinned with environment variables the scripts read
-  for exactly that purpose, and there are nine such clocks rather than one — a new script
-  needs its own, because pinning someone else's does nothing to it. `.claude/CLAUDE.md`
+  for exactly that purpose, and there are fourteen such clocks rather than one — a new
+  script needs its own, because pinning someone else's does nothing to it. `.claude/CLAUDE.md`
   names all of them and carries the `grep` that re-derives the list; run it rather than
   trusting the list if the two have drifted.
 - **Shell portability traps.** Appending a multibyte glyph needs braces, there is no

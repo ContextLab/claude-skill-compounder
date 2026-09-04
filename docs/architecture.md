@@ -24,21 +24,21 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`skills/skill-authoring/`|How to write the SKILL.md itself: the description that decides when it fires, and the gates that prove it parses|
 |`skills/<the rest>/`|The seed pool, below. Useful before you have forged anything|
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
-|`hooks/mission.sh`|States the user's own requests back, verbatim, at five moments. Wired on `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse` and `Stop`, and the `PreToolUse` entry is the one of ours with no matcher: [The mission](#the-mission). Off switch `MISSION_ENABLED=0`. It reads its prompts from `claude-history-surfer` and stores none of its own|
-|`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
+|`hooks/mission.sh`|States the user's own requests back, verbatim, at five moments. Wired on `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse` and `Stop`, and the `PreToolUse` entry is the one of ours with no matcher: [The mission](#the-mission). Off switch `MISSION_ENABLED=0`. It reads its prompts from `claude-history-surfer` and stores none of its own. It sweeps its own per-session directories on a `MISSION_PRUNE_EVERY` draw, at the one call site that was going to deliver nothing anyway, and never the running session's own|
+|`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?" Every nudge it delivers is written to `<state>/reminders/nudges.jsonl` with the lineage id it is about, which is what makes `skillreport`'s conversion a count rather than an estimate|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
-|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, and is off until you switch it on** with `SKILL_COMPOUNDER_REVIEW=1`. After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and how to enable it: [What runs against the API](../README.md#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
-|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic|
-|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver. `--lesson <sig>` writes both tiers as one record keyed to a failure the repeat gate learned, `--attach <path>` puts the script beside the note and links it from the line, and `promote <id> --to global` moves a project note up a level: [The lesson](#the-lesson)|
-|`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
-|`bin/skillinsight`|Reads and prunes the candidate queue|
+|`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic. `start --from <id>` and `origin --from <id>` record which candidate a forge descends from, and `start --session` the session it began in|
+|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver. `--lesson <sig>` writes both tiers as one record keyed to a failure the repeat gate learned, `--attach <path>` puts the script beside the note and links it from the line, and `promote <id> --to global` moves a project note up a level: [The lesson](#the-lesson). `--candidate <id>` carries the lineage the note descends from onto the reminder and the ledger row|
+|`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again. Its `FUNNEL` block joins the two delivery logs to the ledger on the lineage id, and its conversion figure is counted from those rows instead of estimated from an edit counter|
+|`bin/skillinsight`|Reads and prunes the candidate queue. `promote` prints the `lineage <id>` it stamps on the note and reminder it writes, derived from the queue record's own hash rather than minted|
 |`bin/skillcontrib`|The reconnaissance behind `contribute-skill` (duplicate check, push-access check, preflight), plus `propose`, the one subcommand that writes: it forks, pushes and opens the pull request, and running it without `--dry-run` is the consent: [Level C](#three-levels-project-user-general)|
 |`bin/skillrepeat`|Reads, inspects and clears the repeat gate's store of learned failure signatures. `list` carries a `LESSON` column, `show` marks the recoveries bound across tools, and `dismiss <sig> --why` is the answer that lifts the lesson gate without writing a lesson|
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
@@ -506,7 +506,12 @@ readers being told the same thing.
 
 Idempotence is keyed per event under `<state>/mission/<session>/`, on the payload's
 `prompt_id`, `tool_use_id` or `agent_id`, because [both wirings](#as-a-plugin) deliver every
-event twice. Every delivery appends one row to `<state>/mission/hits.jsonl`, which is what
+event twice. That tree is the one thing here that sweeps itself: on a `MISSION_PRUNE_EVERY`
+draw, at the single call site where nothing was going to be delivered anyway, it removes
+other sessions' directories once they have gone `MISSION_PRUNE_TTL` unchanged, and never
+the running session's own — a claim taken out from under a live session re-opens the double
+delivery it exists to close ([DESIGN.md](DESIGN.md)). Every delivery appends one row to
+`<state>/mission/hits.jsonl`, which is what
 makes the question "did any of this land" answerable at all:
 [measurement.md](measurement.md#what-the-mission-counts).
 
@@ -531,9 +536,17 @@ binds the next success as its recovery. It now binds across tools as well: a suc
 at least `REPEAT_RECOVERY_MIN_TOKENS` content tokens with the failed one. A content token is
 what survives splitting the normalised call on non-word characters, lowercased, three
 characters or longer, and not all digits, so a repository name, a path or a URL counts and
-`the` and `-v` do not. Those rows carry `cross_tool: true`, which keeps the two kinds of
-evidence apart for anything reading the store later. This is what "the skill fails, `gh`
+`the` and `-v` do not. Those rows carry `cross_tool: true`, which records which rule bound
+them and so which place the fix was found in. This is what "the skill fails, `gh`
 works" looks like on the wire, and before this it was never bound to anything.
+
+**A same-tool recovery is held to the same test once the tool is a shell.** `Bash` names no
+operation, so the tool name alone bound commands that had nothing to do with each other, and
+because a binding consumes its armed failure the wrong one also destroyed the right one.
+A same-tool binding for a shell now wants `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared
+tokens; an exact self-recovery binds regardless, and every other tool is untouched, since a
+name like `mcp__github__create_issue` carries its operation in itself. The measured counts
+behind the change, and what it gives up, are in [DESIGN.md](DESIGN.md).
 
 **The first time, it says it.** When a recover row is written, the `PostToolUse` arm emits
 `additionalContext`: the call that failed, the call that worked, and the two commands that
@@ -691,6 +704,24 @@ a forge, plus the two the cheap tiers and the round cap added — and to say so 
 
 `note`, `apply` and `escalate` are invisible to every reader written before them: each reader
 picks its events by name, and no selector lists any of the three.
+
+Three fields cut across the rows instead of belonging to one. `from` is the lineage id a
+`start`, `origin`, `apply` or `verdict` descends from; `candidate` is the same id on a
+`note`. `apply` and `verdict` read theirs back off the forge's own `start` or `origin` row —
+`apply` always, `verdict` whenever it was not handed one — because a verdict typed by hand
+months later is exactly when nobody remembers which queue record began it, and a field a
+caller has to retype is a field that goes unrecorded. `session` on a `start` is
+whatever `$CLAUDE_CODE_SESSION_ID` held, which is a different id from the one a hook payload
+stamps, so both are recorded wherever a join has to reach across the two.
+
+Those fields are what make the funnel a join rather than a count. `skillreport` reads
+`<state>/remind/hits.jsonl` and `<state>/reminders/nudges.jsonl` for deliveries, groups them
+by lineage, and matches the ledger rows that carry the id — or that sit in a session which
+received a delivery of it, which it prints as a sequence and never as a cause. Rows carrying
+no id are reported as `UNATTRIBUTED`. The rule about selectors binds there too: the
+unattributed count is the one place a negation would have read naturally, and it is written
+out as the five event names it covers, so a new event type stays invisible to it until
+somebody adds it on purpose.
 
 A single `horizon` row records where the record begins, because a ledger holding nothing
 before Tuesday says nothing whatever about Monday. A row reconstructed after the fact

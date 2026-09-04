@@ -380,12 +380,17 @@ class NoExistingCountMovedTest(Base):
         self.assertEqual(self.reuse_line(after_out), before,
                          "an apply row moved the reuse headline")
         # And every other pre-existing count on the page, line for line, apart from the
-        # APPLIED block this change adds.
+        # APPLIED block this change adds -- and the FUNNEL block, which issue #37 added
+        # and which an apply row is SUPPOSED to move: an apply row is a lineage's last
+        # hop but one, so a funnel blind to it would be the estimate again in a new
+        # shape. The equality below still covers the reuse headline, the forge table,
+        # the harness lines and the conversion, which are the counts this class exists
+        # to hold still.
         def strip(out):
             lines = out.splitlines()
             keep, skip = [], False
             for l in lines:
-                if l.startswith("APPLIED: "):
+                if l.startswith("APPLIED: ") or l.startswith("FUNNEL ("):
                     skip = True
                 elif skip and (l == "" or l.startswith("REUSE") or not l.startswith(" ")):
                     skip = False
@@ -393,6 +398,15 @@ class NoExistingCountMovedTest(Base):
                     keep.append(l)
             return "\n".join(keep)
         self.assertEqual(strip(after_out), strip(before_out))
+
+        # The funnel moved by EXACTLY the two apply rows, neither of which carries a
+        # lineage id (nothing started those forges from a candidate), so both are
+        # reported as unattributed rather than dropped or guessed at.
+        def unattributed(out):
+            line = [l for l in out.splitlines() if "UNATTRIBUTED:" in l][0]
+            return int(line.split("UNATTRIBUTED:")[1].split()[0])
+        self.assertEqual(unattributed(after_out), unattributed(before_out) + 2,
+                         "the funnel did not count the two apply rows:\n" + after_out)
 
     def test_apply_rows_are_not_counted_as_forge_starts(self):
         self.forge("alpha-gate", start=100, done=400)
@@ -561,7 +575,11 @@ class GateSurfacesTest(Base):
     def test_recoveries_are_counted_and_named_by_row_type(self):
         self.forge("alpha-gate", start=100, done=400)
         self.record_failure("gh pr list --state all", "s1", T0 + 100)
-        self.succeed("brew install gh", "s1", T0 + 200)
+        # A same-tool shell binding needs REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS (2)
+        # shared content tokens since 2026-09-03; `brew install gh` shares none with
+        # the failure (`gh` is two characters, below the token floor) and would no
+        # longer bind, which is the rule working rather than the report breaking.
+        self.succeed("gh pr list --state all --limit 200", "s1", T0 + 200)
         out = self.report()
         self.assertIn("1 recovery row(s)", out)
 

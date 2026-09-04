@@ -515,21 +515,44 @@ class ReportTest(LedgerTestBase):
                          "the hook no longer writes one tally byte per edit; "
                          "bin/skillreport counts bytes and must be changed with it")
 
-    def test_reminder_conversion_is_derived_and_labelled_an_estimate(self):
+    def test_the_edit_counters_are_reported_as_unjoinable_not_as_a_rate(self):
+        """The block STOPPED being an estimate (issue #37) and this is what replaced it.
+
+        The counters are still read, still reported, and are now explicitly the part
+        nothing can be joined to: a counter says a checkpoint fired, never which session
+        acted on it. What must not come back is a conversion computed out of them --
+        an all-time numerator over a seven-day denominator, printed as a percentage with
+        a paragraph underneath explaining that it was not one.
+        """
         self.forge("start", "widget", "8", "summary", now=T0)
         self.forge("done", "ok", now=T0 + 600)
         self.real_edits("sess-a", 30)   # 2 checkpoints at 12
         self.real_edits("sess-b", 11)   # 0 checkpoints
         r = self.report()
-        self.assertIn("estimate", r.stdout)
         self.assertIn("2 session(s)", r.stdout)
         self.assertIn("checkpoints they imply:     2", r.stdout)
         self.assertIn("CI_EDIT_EVERY=12", r.stdout)
         self.assertIn("forges started, all time:   1", r.stdout)
+        self.assertIn("UNLOGGED", r.stdout,
+                      "the counters are no longer marked as the unjoinable half:\n"
+                      + r.stdout)
+        self.assertNotIn("rough conversion", r.stdout,
+                         "the estimate came back:\n" + r.stdout)
+        self.assertIn("counted rows", r.stdout,
+                      "the heading no longer says what it counted:\n" + r.stdout)
 
-    def test_the_conversion_is_a_number_and_not_not_computable(self):
-        """The defect this pins: counters written by the real hook, on disk, in the
-        directory the reader reads, and the reader answering `not computable`."""
+    def test_the_conversion_is_counted_off_the_deliveries_the_real_hook_logged(self):
+        """The defect this pinned first: counters written by the real hook, on disk, in
+        the directory the reader reads, and the reader answering `not computable`. It
+        now pins the successor measurement -- the same real hook, whose deliveries are
+        LOGGED, joined by session to the forges that followed them.
+
+        `real_edits` drives the real hook thirty times for one session, so it crosses
+        the twelve-edit checkpoint twice and writes two delivery rows under one session
+        id. Neither session starts a forge (the forge here is started by the CLI, with
+        no session id of its own), so the counted conversion is a real 0% and NOT the
+        `not computable` a missing log would give.
+        """
         self.forge("start", "widget", "8", "summary", now=T0)
         self.forge("done", "ok", now=T0 + 600)
         self.real_edits("sess-a", 30)
@@ -537,7 +560,10 @@ class ReportTest(LedgerTestBase):
         r = self.report()
         self.assertNotIn("not computable", r.stdout,
                          "the reader still cannot parse what the hook writes:\n" + r.stdout)
-        self.assertIn("rough conversion:           50%", r.stdout)
+        self.assertIn("nudge deliveries logged:    2 in 1 session(s)", r.stdout,
+                      "the hook's own delivery log was not counted:\n" + r.stdout)
+        self.assertIn("of those sessions, forged:  0", r.stdout)
+        self.assertIn("conversion:                 0%", r.stdout)
 
     def test_reminder_conversion_honours_ci_edit_every(self):
         self.forge("start", "widget", "8", "summary", now=T0)

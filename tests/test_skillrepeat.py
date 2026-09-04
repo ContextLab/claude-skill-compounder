@@ -43,6 +43,16 @@ NOTE_CLI = os.path.join(REPO, "bin", "skillnote")
 BASE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
 GH_ERR = "Exit code 127\ngh: command not found"
 
+# THE CANONICAL FAIL-THEN-FIX PAIR, AND IT SHARES CONTENT TOKENS ON PURPOSE.
+# Since 2026-09-03 a same-tool `Bash` binding wants REPEAT_SAME_TOOL_MIN_TOKENS (2) content
+# tokens in common with the call that failed (THE SAME-TOOL RULE IS NOT EVIDENCE FOR A
+# SHELL, in hooks/repeat-gate.sh). `gh pr list --limit 5` -> `curl -s https://...` shares
+# NONE of them -- the URL is masked to `<P>` before tokens are taken -- so a fixture built
+# on that pair records no recovery at all and every column that reads one goes empty.
+# These two share `list` and `limit`.
+FAILING_CMD = "gh pr list --limit 5"
+FIX_CMD = "gh pr list --limit 5 --repo ContextLab/claude-skill-compounder"
+
 
 def skillnote_has_lesson():
     """Does THIS checkout's bin/skillnote take `--lesson`? Run it and read the answer,
@@ -156,8 +166,7 @@ class RepeatCliCase(unittest.TestCase):
         return p
 
     # ------------------------------------------------------------------- scenarios
-    def fail_then_fix(self, session, command="gh pr list --limit 5",
-                      fix="curl -s https://api.github.com/repos/a/b/pulls", tool="Bash"):
+    def fail_then_fix(self, session, command=FAILING_CMD, fix=FIX_CMD, tool="Bash"):
         self.tick(); self.run_hook(self.failure(command, session, tool=tool))
         self.tick(); self.run_hook(self.success(fix, session))
 

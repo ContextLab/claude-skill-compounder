@@ -206,6 +206,58 @@
 # callkey.
 #
 # ====================================================================================
+# THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL, AND THE STORE SAID SO.
+#
+# `Bash` is a universal shell. Two calls being "the same tool" says nothing whatever about
+# whether they are the same operation, so the rule above -- bind the first later success of
+# the same TOOL -- binds ANY later command to ANY earlier failure. Measured on the live
+# store of 2026-09-03, over the 231 distinct same-tool Bash bindings it had accumulated:
+# 52 of them (22.5%) share NOT ONE content token with the failure they were bound to, and
+# a further 31 share exactly one, of which 11 share only the word `echo`. The bindings this
+# produces read as
+#
+#   failed:  gh issue view <N> --comments <N>>&<N>
+#   worked:  cat notes/OPEN-THREADS.md <N>>&<N>
+#
+# which is a sentence the recovery arm then STATED to the session that had just done both
+# things. That is the arm inventing, in a script whose whole claim is that it reports what
+# was measured.
+#
+# THE COST IS NOT ONLY NOISE, WHICH IS WHY THE ROW IS WITHHELD RATHER THAN MERELY TAGGED.
+# A binding CONSUMES its armed failure -- "one recovery per armed failure, then it is
+# disarmed" -- so an unrelated success eats the arming, and the genuine fix arriving two
+# calls later inside the same window can never be recorded at all. The permissive rule does
+# not just add wrong rows; it destroys the right one. On the live store four `gh issue view`
+# failures were disarmed by one `cat`.
+#
+# SO A SHELL'S SAME-TOOL BINDING NOW WANTS WHAT THE CROSS-TOOL ONE WANTS:
+# REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS shared content tokens, by the same definition and
+# the same comparison. The floor is the same 2 for a plain reason -- nothing here establishes that
+# `Bash` following `Bash` is BETTER evidence than one tool following another, and for a
+# universal shell it is plainly not -- and the knob exists to say the number is a floor
+# rather than a calibration, exactly as REPEAT_RECOVERY_MIN_TOKENS does.
+#
+# WHAT IT GIVES UP, said plainly: a real fix whose text shares nothing with the failure --
+# `gh pr list` recovered by `curl` against the same API, where the URL is masked to `<P>`
+# before tokens are taken -- is no longer bound. It degrades to SILENCE, and the refusal
+# then says "No recovery was ever recorded for this", which is true. A missed recovery
+# costs a fix nobody wrote down; a wrong one is announced to the session as fact. This
+# gate errs toward silence everywhere else and errs toward it here.
+#
+# THE EXACT SELF-RECOVERY IS CARVED OUT and it is not a convenience. A success whose
+# normalised call EQUALS the failed one is what the section above builds the refusal's
+# self-recovery exclusion on, and short calls carry too few tokens to clear any floor at
+# all (`pwd` has one). Binding it unconditionally is what keeps "a signature with ANY
+# self-recovery behind it is NEVER REFUSED" true after this change.
+#
+# NON-SHELL TOOLS ARE LEFT ALONE, and `shell_tool()` is the single place that decides
+# which is which. `mcp__github__create_issue` names its operation in its own tool name, so
+# a success of it after a failure of it is the same operation by construction. `Skill` is
+# the unmeasured middle -- one tool name over every skill -- and it is left permissive
+# because no store here holds a Skill-to-Skill binding to judge it on. Widening the test is
+# a one-line change when one turns up.
+#
+# ====================================================================================
 # CROSS-TOOL RECOVERY, and the whole of the evidence it has.
 #
 # The same-tool rule above cannot see the shape the maintainer actually described: a
@@ -470,6 +522,18 @@
 #                                     recovery. 0 disables cross-tool binding entirely
 #                                     and leaves the same-tool rule untouched. A floor,
 #                                     not a calibration: see CROSS-TOOL RECOVERY.
+#   REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS
+#                                 (2) content tokens a success must share with the failed
+#                                     call before the SAME-TOOL rule binds it, WHEN THE
+#                                     TOOL IS A GENERAL-PURPOSE SHELL (`Bash`). 0 restores
+#                                     the unconditional same-tool binding this script
+#                                     shipped until 2026-09-03. An EXACT self-recovery --
+#                                     the success's normalised call equal to the failed
+#                                     one -- binds whatever this is set to, because the
+#                                     refusal arm's self-recovery exclusion is built on
+#                                     those rows and a short call like `pwd` carries only
+#                                     one token. Non-shell tools are unaffected: see
+#                                     THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL.
 #   REPEAT_LESSON_GATE            (1) 0 switches the lesson refusal off. Exactly `0` is
 #                                     off and everything else is on -- the opposite
 #                                     spelling from REPEAT_GATE_REFUSE, and deliberately:
@@ -632,6 +696,13 @@ case "$REFUSE" in 1) ;; *) REFUSE=0 ;; esac
 MIN_SESSIONS="${REPEAT_MIN_SESSIONS:-2}"
 WINDOW="${REPEAT_RECOVERY_WINDOW:-5}"
 MIN_TOKENS="${REPEAT_RECOVERY_MIN_TOKENS:-2}"
+# The same floor for the same-tool rule when the tool is a shell, and validated as a number
+# where the cross-tool one is not: this value is compared with `-le` on a path that runs for
+# every armed failure, and a non-numeric export would put a `[: integer expression expected`
+# on a stderr this script closes -- a knob that silently changed the binding rule and said
+# nothing. A misspelling lands on the documented default.
+SAME_TOKENS="${REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS:-2}"
+case "$SAME_TOKENS" in ''|*[!0-9]*) SAME_TOKENS=2 ;; esac
 # EXACTLY `0` IS OFF AND EVERYTHING ELSE IS ON, which is the reverse of REFUSE above and
 # is argued in the ENV stanza: this knob ships ON, so the spelling that survives a typo
 # has to be the documented default rather than the safest-looking one.
@@ -933,6 +1004,11 @@ overlap_count() {
   printf '%s' "$oc_n"
 }
 
+# WHICH TOOLS THE TOOL NAME IS EVIDENCE ABOUT, and the only place that decides it. See
+# THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL in the header: `Bash` names no operation,
+# so its same-tool binding is content-tested; every other tool name does, so it is not.
+shell_tool() { [ "$1" = "Bash" ]; }
+
 # ONE LINE, so it can travel through the pending file's US-separated record. The error
 # head is deliberately multi-line where it is stored in the row; here it is a label in a
 # sentence and its newlines would end the record.
@@ -1158,37 +1234,90 @@ if [ "$event" = "PostToolUse" ]; then
   claim_once "s" || exit 0
 
   : > "$TMP/pending.new" 2>/dev/null || exit 0
-  # Computed at most once, and only if a pending line actually needs it: a session with
-  # nothing but same-tool bindings pays no extra process at all.
+  # Both computed at most once, and only if a pending line actually needs them: a session
+  # whose every binding is a non-shell same-tool one pays no extra process at all.
   ctoks=""; ctoks_done=0
+  snorm=""; snorm_done=0
+  # ONE ROW PER SIGNATURE PER SUCCESS. N failures of one signature arm N SEPARATE pending
+  # lines, and one success binds every one of them -- which wrote N BYTE-IDENTICAL
+  # `recover` rows, four of them under a single tool_use_id on the live store of
+  # 2026-09-03. The pending lines are still consumed one at a time, because each really is
+  # a separate armed failure; what is de-duplicated is the ROW, so `(sig, tuid)` is unique
+  # in the store and a reader counting rows counts recoveries rather than arming events.
+  # `claim_once` above handles the OTHER duplicate, the one both wirings deliver; this one
+  # is inside a single event and no claim can see it.
+  #
+  # A signature is matched as a QUOTED case pattern, so a foreign pending line carrying a
+  # glob character is compared literally rather than matched as a pattern.
+  done_sigs=" "
   # The first binding of this event, kept for the statement below. `read` runs in this
   # shell -- the loop is fed by a redirection and not a pipe -- so what it sets survives.
-  bound_sig=""; bound_fnorm=""; bound_ferr=""
+  bound_sig=""; bound_bsig=""
+  ldir="$DIR/lessons/$sid"
   while IFS=$'\037' read -r psig pck ptool prem ptoks pfnorm pferr; do
     [ -z "${psig:-}" ] && continue
     case "${prem:-}" in ''|*[!0-9]*) continue ;; esac
     [ "$prem" -gt 0 ] || continue
     bind=""
     if [ "${ptool:-}" = "$tool" ]; then
-      bind="same"
+      # THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL (header). For `Bash` the tool
+      # matching means nothing, so the content test the cross-tool rule uses is applied
+      # here too -- with the exact self-recovery carved out, since the refusal arm's
+      # self-recovery exclusion is built on those rows and `pwd` carries one token.
+      if ! shell_tool "$tool" || [ "$SAME_TOKENS" -le 0 ]; then
+        bind="same"
+      else
+        if [ "$snorm_done" = "0" ]; then snorm="$(oneline "$norm")"; snorm_done=1; fi
+        if [ -n "${pfnorm:-}" ] && [ "$pfnorm" = "$snorm" ]; then
+          bind="same"
+        elif [ -n "${ptoks:-}" ]; then
+          if [ "$ctoks_done" = "0" ]; then ctoks=" $(toks_of "$norm")"; ctoks_done=1; fi
+          if [ "$(overlap_count "$ctoks" "$ptoks")" -ge "$SAME_TOKENS" ]; then bind="same"; fi
+        fi
+      fi
     elif [ -n "${ptoks:-}" ] && [ "$MIN_TOKENS" -gt 0 ]; then
       if [ "$ctoks_done" = "0" ]; then ctoks=" $(toks_of "$norm")"; ctoks_done=1; fi
       if [ "$(overlap_count "$ctoks" "$ptoks")" -ge "$MIN_TOKENS" ]; then bind="cross"; fi
     fi
     if [ -n "$bind" ]; then
-      # `cross_tool` is written only when it is true. An absent field and a `false` one
-      # read the same through jq's `//`, and the store is read by three programs; a key
-      # that appears on every row to say `no` is a key every one of them has to explain.
-      rrow="$(jq -nc --arg ts "$now" --arg sig "$psig" --arg ck "$pck" --arg tool "$tool" \
-        --arg norm "$norm" --arg cmd "$cmd" --arg session "$sid" --arg tuid "$tuid" \
-        --arg x "$bind" \
-        '{t:"recover", ts:($ts|tonumber), sig:$sig, ck:$ck, tool:$tool, norm:$norm,
-          cmd:$cmd, session:$session, tuid:$tuid}
-         + (if $x == "cross" then {cross_tool:true} else {} end)' 2>/dev/null)"
-      [ -n "$rrow" ] && printf '%s\n' "$rrow" >> "$STORE" 2>/dev/null
-      if [ -z "$bound_sig" ] && [ -n "${pfnorm:-}" ]; then
-        bound_sig="$psig"; bound_fnorm="$pfnorm"; bound_ferr="${pferr:-}"
-      fi
+      case "$done_sigs" in
+        *" $psig "*) ;;   # this success already recorded a recovery for this signature
+        *)
+          # `cross_tool` is written only when it is true. An absent field and a `false` one
+          # read the same through jq's `//`, and the store is read by three programs; a key
+          # that appears on every row to say `no` is a key every one of them has to explain.
+          rrow="$(jq -nc --arg ts "$now" --arg sig "$psig" --arg ck "$pck" --arg tool "$tool" \
+            --arg norm "$norm" --arg cmd "$cmd" --arg session "$sid" --arg tuid "$tuid" \
+            --arg x "$bind" \
+            '{t:"recover", ts:($ts|tonumber), sig:$sig, ck:$ck, tool:$tool, norm:$norm,
+              cmd:$cmd, session:$session, tuid:$tuid}
+             + (if $x == "cross" then {cross_tool:true} else {} end)' 2>/dev/null)"
+          [ -n "$rrow" ] && printf '%s\n' "$rrow" >> "$STORE" 2>/dev/null
+          done_sigs="$done_sigs$psig "
+          # THE MARKER IS WRITTEN BESIDE THE ROW, FOR EVERY SIGNATURE THIS SUCCESS BOUND,
+          # and that is the second half of the same defect. It used to be written once,
+          # after the loop, for the FIRST bound signature only -- so a success that bound
+          # two signatures wrote two rows and left the second invisible to the lesson gate,
+          # which reads its signatures off these filenames and can never refuse one that
+          # has no marker.
+          #
+          # AND AN EXISTING MARKER IS NEVER OVERWRITTEN. It used to be, on every later
+          # binding of the same signature, while `said-` below stopped the session being
+          # told a second time -- so the store held a statement naming one command and the
+          # session had been told another. Observed live on 2026-09-03: the session was
+          # told `TEST_TIMEOUT=... ./run_tests.sh` and the marker was rewritten to
+          # `cat notes/OPEN-THREADS.md`. First binding wins, because the first binding is
+          # the one the session was actually told about.
+          if [ -n "${pfnorm:-}" ]; then
+            bsig="$(printf '%s' "$psig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+            if mkdir -p "$ldir" 2>/dev/null && [ ! -f "$ldir/s-$bsig" ]; then
+              printf '%s' "$(lesson_statement "$psig" "$pfnorm" "${pferr:-}" "$norm")" \
+                > "$ldir/s-$bsig" 2>/dev/null || :
+            fi
+            [ -z "$bound_sig" ] && { bound_sig="$psig"; bound_bsig="$bsig"; }
+          fi
+          ;;
+      esac
       continue          # bound: one recovery per armed failure, then it is disarmed
     fi
     prem=$((prem - 1))
@@ -1212,18 +1341,22 @@ if [ "$event" = "PostToolUse" ]; then
   #
   # THE MARKER FILE IS WRITTEN WHETHER OR NOT THE STATEMENT IS EMITTED, and it is what the
   # lesson gate tests before it reads anything. It carries the statement so that gate does
-  # not rebuild it from a store it would otherwise not have to open.
+  # not rebuild it from a store it would otherwise not have to open. It is written up in
+  # the loop now, next to the row it belongs to, and this block only decides whether to
+  # SAY it.
   [ -z "$bound_sig" ] && exit 0
-  bsig="$(printf '%s' "$bound_sig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
-  ldir="$DIR/lessons/$sid"
-  mkdir -p "$ldir" 2>/dev/null || exit 0
-  stmt="$(lesson_statement "$bound_sig" "$bound_fnorm" "$bound_ferr" "$norm")"
-  printf '%s' "$stmt" > "$ldir/s-$bsig" 2>/dev/null || exit 0
+  bsig="$bound_bsig"
   # ONCE PER SIGNATURE PER SESSION, claimed with mkdir so it is decided by the filesystem
   # and not by a read-then-write. The duplicate delivery both wirings produce never
   # reaches here -- claim_once above dropped it -- so what this actually bounds is a
   # SECOND, genuinely different recovery of the same signature later in the session.
   mkdir "$ldir/said-$bsig" 2>/dev/null || exit 0
+  # READ BACK OFF THE MARKER, NOT REBUILT. The file is the single copy of this sentence, so
+  # what the session is told here and what the lesson gate quotes back later are the same
+  # bytes by construction rather than by two builders agreeing. That is the whole of the
+  # fix for the two disagreeing about which call worked.
+  stmt="$(cat "$ldir/s-$bsig" 2>/dev/null)"
+  [ -z "$stmt" ] && exit 0
   ( jq -nc --arg c "$stmt" \
       '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}' \
       > "$TMP/say.json" ) 2>/dev/null

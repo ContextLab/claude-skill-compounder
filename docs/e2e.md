@@ -93,9 +93,16 @@ The obvious isolation — point `CLAUDE_CONFIG_DIR` at `<out>/claude` — does n
 credentials, because on macOS the subscription credential lives in the Keychain and is
 reached through the ambient environment. **Step 0 re-measures that rather than trusting
 it**, and prints this machine's own answer into the report. Measured on 2026-09-02, CLI
-2.1.259:
+2.1.259, and the same answer came back when it was re-run on 2026-09-03 against CLI
+2.1.260:
 
 > `Not logged in · Please run /login`
+
+Neither `ANTHROPIC_API_KEY` nor `CLAUDE_CODE_OAUTH_TOKEN` was set in that environment
+either, so there was nothing to hand a fresh config directory instead of the Keychain.
+[Issue #42](https://github.com/ContextLab/claude-skill-compounder/issues/42) stays open for
+exactly that: a run under a genuinely fresh `CLAUDE_CONFIG_DIR` waits on a token being
+available to hand in.
 
 So every later session takes the fallback path:
 

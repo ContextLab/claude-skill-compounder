@@ -37,7 +37,7 @@
 # non-interactively, they call these very skills, and they are counted and reported on
 # their own line rather than folded into the headline.
 #
-# PRIVACY. This script reads 5 files, all already on your disk, and writes nothing
+# PRIVACY. This script reads 7 files, all already on your disk, and writes nothing
 # except its own output to the terminal. THAT NUMBER IS NOT MAINTAINED BY HAND ANY MORE.
 # It said "three" while the list below held five, because the repeat store and the
 # override store were appended to the list and the sentence was left alone -- an
@@ -57,6 +57,14 @@
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/*.edits
 #       per-session edit counters written by the reminder hook: a unary tally, one 'x'
 #       byte per edit, appended with >> so parallel writers cannot lose a count.
+#   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/remind/hits.jsonl
+#       one row per reminder hooks/remind.sh stated back: which reminder, when, which
+#       session, which event, and the lineage id it descends from. No reminder TEXT is
+#       read out of it and none is printed; only the ids and the session are counted.
+#   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/reminders/nudges.jsonl
+#       one row per nudge hooks/compound-improvement.sh delivered: a fixed nudge name or
+#       a queue candidate's lineage id, when, and the two session ids. It holds no prompt
+#       text, no file path and no command, and nothing in it is printed except the counts.
 #   ${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}/repeats/index.jsonl
 #       the repeat gate's append-only failure/recovery store. THAT FILE HOLDS THE TEXT OF
 #       THE COMMAND THAT FAILED AND THE ERROR IT PRINTED, so it is worth saying what is
@@ -126,6 +134,12 @@ LEDGER="$STATE_ROOT/ledger.jsonl"
 REMINDERS="$STATE_ROOT/reminders"
 # The two gate surfaces. Both are append-only stores written by hooks, and both are read
 # here for counts alone -- see the GATES section near the bottom of this file.
+# The two delivery logs the FUNNEL joins against. `hits.jsonl` is one row per reminder
+# hooks/remind.sh stated back; `nudges.jsonl` is one row per nudge
+# hooks/compound-improvement.sh delivered. Both are append-only, both are capped by their
+# own writer, and both carry the lineage id that makes the funnel a join.
+HITSLOG="$STATE_ROOT/remind/hits.jsonl"
+NUDGELOG="$STATE_ROOT/reminders/nudges.jsonl"
 REPEATS="$STATE_ROOT/repeats/index.jsonl"
 DOC_OVERRIDES="$STATE_ROOT/doc-gate/overrides.jsonl"
 TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
@@ -1298,13 +1312,154 @@ if [ "$found_any" -eq 0 ]; then
   echo "         for want of data, not for want of reuse."
 fi
 
-# ---------------------------------------------- reminder-to-forge conversion
+# ------------------------------------------------------------------ the funnel
+#
+# ONE ID, FOLLOWED ACROSS SIX STORES. Until this block existed nothing in this package
+# could say which delivery produced which outcome: every figure spanning two artifact
+# kinds was reconstructed by counting one store and dividing (issue #37). A count cannot
+# answer that question at any precision, so the chain is joined instead.
+#
+# THE ID IS DERIVED, NEVER MINTED HERE. hooks/insight-capture.sh and hooks/precompact.sh
+# both write a queue record under the same content digest; `skillinsight promote` stamps
+# `c<first 8 of that digest>` onto the note and its reminder; hooks/remind.sh copies it
+# onto every delivery; `skillforge start --from` carries it onto the start row, and the
+# origin, apply and verdict rows read it back off that. So a lineage is one string and
+# every store holds the same one.
+#
+# EVERY SELECTOR IS BY EVENT NAME. `.claude/CLAUDE.md`: "Add an event type freely; never
+# widen a selector to a negation." The unattributed count below is the one place a
+# negation would have been natural -- "anything not carrying an id" -- and it is still
+# written as an explicit list of the five event names it covers, so a new event type is
+# invisible to it until someone adds it here on purpose.
+#
+# WHAT "ACTED ON" MEANS, AND WHAT IT DOES NOT. A ledger row counts as acting on a lineage
+# when it CARRIES that lineage id, or when it sits in a session that received a delivery
+# of it. The second half is weaker than the first and it is why this block reports the
+# two delivery logs' session ids rather than assuming them: a session that was reminded
+# and then forged is evidence of a sequence, not of a cause. It is not called a cause
+# anywhere in the output.
+#
+# TWO SESSION ID NAMESPACES, AND BOTH ARE JOINED. The hook payload's `.session_id` is
+# what hooks/remind.sh and hooks/skill-use.sh stamp; $CLAUDE_CODE_SESSION_ID is what
+# `skillnote`, `skillforge start` and `skillforge apply` record, and it is a DIFFERENT id
+# (bin/skillforge's header measures this). hooks/compound-improvement.sh records both on
+# every delivery, so a row keyed on either can be joined; a delivery that carries only one
+# of them simply matches fewer rows, and nothing is matched to the wrong session.
+: > "$TMP/f-hits" 2>/dev/null || true
+: > "$TMP/f-nudges" 2>/dev/null || true
+[ -f "$HITSLOG" ]  && cat "$HITSLOG"  > "$TMP/f-hits"   2>/dev/null
+[ -f "$NUDGELOG" ] && cat "$NUDGELOG" > "$TMP/f-nudges" 2>/dev/null
+: > "$TMP/f-ledger" 2>/dev/null || true
+[ -f "$LEDGER" ] && cat "$LEDGER" > "$TMP/f-ledger" 2>/dev/null
 
-# The reminder hook does not log when it fires, only the running edit count per
-# session. Checkpoints are therefore reconstructed: a session with N edits must have
-# hit floor(N / CI_EDIT_EVERY) checkpoints. This is an estimate, and it is a loose one:
-# the hook prunes counters older than 7 days, so the denominator is a rolling window
-# while the ledger numerator is the whole history.
+# --rawfile, never --arg. A ledger or a delivery log can grow past MAX_ARG_STRLEN, which
+# Linux caps at a hard 131072 bytes per argv element regardless of ARG_MAX, and the
+# failure is the whole block emitting nothing (docs/DESIGN.md; hooks/apply-gate.sh shipped
+# exactly that). A file path is bounded; the file behind it is not.
+#
+# Output is TSV, one line per lineage plus one `!` line carrying the unattributed count
+# and the totals, so bash formats and jq only counts.
+jq -n -r --rawfile hits "$TMP/f-hits" --rawfile nudges "$TMP/f-nudges" \
+        --rawfile ledger "$TMP/f-ledger" '
+  def rows($s): $s | split("\n")[] | select(length > 0)
+                   | (fromjson? // empty) | select(type == "object");
+  def str($f): (($f // "") | tostring);
+  # EVERY FIELD IS READ OFF A BOUND ROW, NEVER OFF `.`. A jq function argument is
+  # evaluated against the input of the function it was passed to, so `index(str(.session))`
+  # reads `.session` from the ARRAY being indexed and raises "cannot index array with
+  # string" -- behind a 2>/dev/null, that is a funnel that silently reports nothing at all.
+  # bin/skillinsight carries a comment about the identical trap in `pending_tsv`; this is
+  # the second time it has bitten in this package. Bind the row, then read from the binding.
+  ( [ rows($hits) | . as $r
+      | { id: (if (str($r.candidate) | length) > 0
+               then str($r.candidate) else str($r.id) end),
+          s: [ str($r.session) ] } ]
+    + [ rows($nudges) | . as $r
+      | { id: str($r.id), s: [ str($r.session), str($r.cc_session) ] } ]
+    | map(select((.id | length) > 0))
+    | map(.s |= (map(select(length > 0)) | unique)) ) as $D
+  | [ rows($ledger) ] as $L
+  | ($D | map(.id) | unique) as $IDS
+  | (($D | map(.s) | add) // [] | unique) as $ALLS
+  | ($D | group_by(.id) | map({id: .[0].id, n: length, s: (map(.s) | add | unique)})
+        | sort_by([-.n, .id])) as $G
+  | [ $L[] | select(.event == "note" or .event == "start" or .event == "use"
+                    or .event == "apply" or .event == "verdict") ] as $ROWS
+  | ( [ $G[] | . as $g
+        | ( [ $ROWS[] | . as $r | select($r.event != "verdict")
+              | (str($r.session)) as $rs
+              | select( (str($r.from) == $g.id)
+                     or (str($r.candidate) == $g.id)
+                     or (($r.event == "note") and (str($r.id) == $g.id))
+                     or ((($rs | length) > 0) and (($g.s | index($rs)) != null)) ) ]
+            | length ) as $acted
+        | ( [ $ROWS[] | . as $r | select($r.event == "verdict")
+              | select(str($r.from) == $g.id) ] | length ) as $out
+        | [ $g.id, ($g.n|tostring), ($acted|tostring), ($out|tostring) ] | @tsv ] ) as $LINES
+  | ( [ $ROWS[] | . as $r
+        | (str($r.session)) as $rs
+        | (str($r.id)) as $rid
+        | select((str($r.from) | length) == 0)
+        | select((str($r.candidate) | length) == 0)
+        | select(($r.event != "note") or (($IDS | index($rid)) == null))
+        | select((($rs | length) == 0) or (($ALLS | index($rs)) == null)) ] | length ) as $un
+  | ( $LINES + [ (["!", ($un|tostring), ($ROWS|length|tostring),
+                   ($D|length|tostring), ($G|length|tostring)] | @tsv) ] )[]
+' > "$TMP/funnel" 2>/dev/null || : > "$TMP/funnel"
+
+f_un=0; f_all=0; f_deliv=0; f_lineages=0
+while IFS="$(printf '\t')" read -r c1 c2 c3 c4 c5; do
+  [ "$c1" = "!" ] || continue
+  f_un="$c2"; f_all="$c3"; f_deliv="$c4"; f_lineages="$c5"
+done < "$TMP/funnel"
+for v in f_un f_all f_deliv f_lineages; do
+  eval "n=\$$v"
+  case "${n:-}" in ''|*[!0-9]*) eval "$v=0" ;; esac
+done
+
+echo
+echo "FUNNEL (counted joins on the lineage id — no estimate anywhere in this block)"
+if [ "$f_deliv" -eq 0 ]; then
+  echo "  no deliveries logged yet, in either $HITSLOG"
+  echo "  or $NUDGELOG, so there is nothing to join."
+  echo "  That is an absence of data, not an absence of compounding."
+else
+  echo "  $f_deliv logged delivery(ies) across $f_lineages lineage(s):"
+  printf '  %-18s %9s %9s %9s\n' "LINEAGE" "DELIVERED" "ACTED ON" "OUTCOME"
+  while IFS="$(printf '\t')" read -r c1 c2 c3 c4 c5; do
+    [ -n "${c1:-}" ] || continue
+    [ "$c1" = "!" ] && continue
+    printf '  %-18s %9s %9s %9s\n' "$c1" "$c2" "$c3" "$c4"
+  done < "$TMP/funnel"
+  echo "  DELIVERED counts rows in the two delivery logs. ACTED ON counts note, start, use"
+  echo "  and apply rows that either carry the lineage id or sit in a session that received"
+  echo "  a delivery of it — a sequence, never a cause. OUTCOME counts verdict rows carrying"
+  echo "  the id."
+fi
+echo "  UNATTRIBUTED: $f_un ledger row(s) carry no lineage id and sit in no session that"
+echo "  received a delivery, out of $f_all note/start/use/apply/verdict row(s) in all."
+echo "  They are reported here and nowhere dropped, guessed at, or folded into a rate —"
+echo "  the same way a forge with no --trigger is recorded as trigger_kind:\"unrecorded\"."
+
+# ---------------------------------------------- reminder-to-forge conversion
+#
+# COUNTED, NOT RECONSTRUCTED. This block divided each session's `.edits` tally by
+# CI_EDIT_EVERY, guessed how many checkpoints that session must have hit, compared the
+# guess to the all-time count of `start` rows, and printed a paragraph explaining that the
+# numerator and the denominator covered different windows. The hook logs every delivery
+# now (`<state>/reminders/nudges.jsonl`), so the numerator and the denominator are rows.
+#
+# THE JOIN IS ON THE SESSION AND THE ORDER. A nudge delivered in session S counts toward
+# the conversion when a `start` row exists in S at or after that delivery's timestamp. A
+# forge that started BEFORE the nudge is not a conversion of it, and the ordering is what
+# keeps this from becoming the same all-time-over-a-window comparison in new words.
+# `start` rows are matched on BOTH session id namespaces, for the reason the funnel above
+# gives.
+#
+# THE EDIT COUNTERS ARE STILL REPORTED, BELOW THE LINE, AND ARE NOT FOLDED IN. They are
+# the deliveries made before the log existed. A checkpoint they imply is a checkpoint
+# nothing can join to anything, which is exactly what the estimate was; stating them as
+# unjoinable is the honest form of the number the old block printed as a rate.
 #
 # THE COUNTER IS A UNARY TALLY, NOT A DECIMAL NUMBER. `hooks/compound-improvement.sh`
 # appends ONE BYTE per counted edit (`printf 'x' >> "$STATE_DIR/$sid.edits"`), so the
@@ -1361,18 +1516,67 @@ starts="$(jq -R -n '[inputs | fromjson? // empty
             < "$LEDGER" 2>/dev/null || echo 0)"
 case "${starts:-}" in ''|*[!0-9]*) starts=0 ;; esac
 
-echo
-echo "REMINDER CONVERSION (estimate, see the comment in this script)"
-echo "  edit counters on disk:      $sessions session(s)"
-echo "  checkpoints they imply:     $checkpoints (assuming CI_EDIT_EVERY=$EDIT_EVERY)"
-echo "  forges started, all time:   $starts"
-if [ "$checkpoints" -gt 0 ]; then
-  echo "  rough conversion:           $(( starts * 100 / checkpoints ))%"
-else
-  echo "  rough conversion:           not computable, no checkpoints implied yet"
+# nudged sessions, and how many of them went on to start a forge.
+conv="$(jq -n -r --rawfile nudges "$TMP/f-nudges" --rawfile ledger "$TMP/f-ledger" '
+  def rows($s): $s | split("\n")[] | select(length > 0)
+                   | (fromjson? // empty) | select(type == "object");
+  def str($f): (($f // "") | tostring);
+  # ONE DELIVERY IS ONE SESSION, recorded under two names. Keyed on the payload session id
+  # -- the one hooks/skill-use.sh and hooks/remind.sh also stamp -- and falling back to
+  # $CLAUDE_CODE_SESSION_ID only where the payload carried none, so a row carrying both
+  # cannot inflate the denominator to two.
+  [ rows($nudges) | . as $r
+    | { key: (if (str($r.session) | length) > 0 then str($r.session)
+              else str($r.cc_session) end),
+        ids: ([ str($r.session), str($r.cc_session) ] | map(select(length > 0))),
+        ts: (($r.ts // 0) | if type == "number" then . else 0 end) }
+    | select((.key | length) > 0) ] as $N
+  | [ rows($ledger) | . as $r | select($r.event == "start")
+      | { s: str($r.session),
+          ts: (($r.ts // 0) | if type == "number" then . else 0 end) }
+      | select((.s | length) > 0) ] as $S
+  | ($N | group_by(.key)
+        | map({ ids: (map(.ids) | add | unique), first: (map(.ts) | min) })) as $SESS
+  | ( [ $SESS[] | . as $g
+        | select( [ $S[] | . as $st
+                    | select(($g.ids | index($st.s)) != null)
+                    | select($st.ts >= $g.first) ] | length > 0 ) ] | length ) as $CONV
+  | [ ($N | length), ($SESS | length), $CONV ] | @tsv
+' 2>/dev/null)"
+n_deliv=0; n_sess=0; n_conv=0
+if [ -n "${conv:-}" ]; then
+  n_deliv="$(printf '%s' "$conv" | cut -f1)"
+  n_sess="$(printf '%s' "$conv" | cut -f2)"
+  n_conv="$(printf '%s' "$conv" | cut -f3)"
 fi
-echo "  The numerator covers all time and the denominator only the last 7 days, so read"
-echo "  the conversion as a loose upper bound rather than a rate."
+for v in n_deliv n_sess n_conv; do
+  eval "n=\$$v"
+  case "${n:-}" in ''|*[!0-9]*) eval "$v=0" ;; esac
+done
+
+echo
+echo "REMINDER CONVERSION (counted rows: logged deliveries joined to later forges)"
+echo "  nudge deliveries logged:    $n_deliv in $n_sess session(s)"
+echo "  of those sessions, forged:  $n_conv"
+if [ "$n_sess" -gt 0 ]; then
+  echo "  conversion:                 $(( n_conv * 100 / n_sess ))% of nudged sessions started a forge afterwards"
+else
+  echo "  conversion:                 not computable, no nudge delivery has been logged yet"
+fi
+echo "  forges started, all time:   $starts"
+echo "  Counted, not estimated: the first three lines are rows in $NUDGELOG"
+echo "  joined to start rows in the same session at or after the delivery. A start that"
+echo "  came first is not a conversion of a nudge that came second, and is not counted."
+echo "  UNLOGGED, from before the hook wrote a delivery down:"
+echo "  edit counters on disk:      $sessions session(s)"
+if [ "$checkpoints" -gt 0 ]; then
+  echo "  checkpoints they imply:     $checkpoints (assuming CI_EDIT_EVERY=$EDIT_EVERY)"
+else
+  echo "  checkpoints they imply:     0 (assuming CI_EDIT_EVERY=$EDIT_EVERY) — no checkpoints implied yet"
+fi
+echo "  A checkpoint those counters imply is one nothing can be joined to: the counter"
+echo "  records that a nudge fired, never which session acted on it. They are reported"
+echo "  here and are not folded into the conversion above."
 
 print_gates
 exit

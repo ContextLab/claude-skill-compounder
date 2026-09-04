@@ -1167,16 +1167,36 @@ and the next session loaded the truncated file as project context with no error.
 whole design of this hook is "do less", and it starts from a different place than a hook
 that gets `last_assistant_message` free.
 
-**The cost model is process starts, not bytes.** Measured against a 5 MB transcript, 15 runs
-each, macOS 25.6.0: 27.4 ms with no candidate and 86.3 ms with one, at the default 256 KB
-bound with `/usr/bin/jq` (jq-1.7.1-apple). The same hook on a `PATH` whose first `jq` is
-anaconda's 1.6 medians 62.4 ms and 147.9 ms. Doubling the bound to 512 KB costs 11 ms;
-swapping the jq costs 62 ms. That is why the transcript read and the candidate scan are one
-`jq` rather than two, and why `tests/test_precompact.py` pins the number of programs the
-hook runs rather than a wall-clock figure: a stopwatch assertion tight enough to catch one
-added `jq` flakes on a loaded machine, and one loose enough not to flake catches nothing.
-Issue #8's 100 ms holds on the system jq and not on every `PATH`, and the honest way to
-state it is with the `PATH` attached.
+**The cost model is process starts, not bytes, and the budget belongs to a `jq` build
+rather than to the hook.** Issue #8 set 100 ms; issue #32 asked which `jq` that was, and the
+answer is that it holds for the system one and misses on a `PATH` whose first `jq` is
+anaconda's 1.6. Both builds are tabled in
+[measurement.md](measurement.md#the-precompact-budget-is-per-jq-build). What belongs here is
+what was done about it. Three process starts came off the candidate path, taking it from 16
+programs to 13: one `date` where the script had been calling two, one `mkdir -p` where it
+had made the queue directory and its `.claims` in separate calls, and a per-compaction claim
+named by parameter expansion rather than by `hash_of`, which had been spending `shasum`,
+`awk` and `tr` on a name nothing outside this script ever reads. That bought about 20 ms on
+both builds and moved the system `jq` inside the budget at p90, where it had been over. It
+is also why the transcript read and the candidate scan are one `jq` and not two.
+
+**The slow build cannot be brought inside 100 ms, and both ways of trying were measured.**
+Under jq-1.6 the no-candidate path costs 59 ms on its own, so the rest of the budget cannot
+pay for a third `jq`, the `hash_of` pipeline, two claim `mkdir`s and a `grep`. Dropping
+`git rev-parse` as well came to 106 ms — still over, and the replacement costs more than the
+saving, because a bash walk-up for `.git` disagrees with `git rev-parse --show-toplevel` on
+a symlinked path, and on macOS every path under `/tmp` is one. Then the repository a record
+is filed under would depend on where the session happened to be standing. The only start
+left is `hash_of`, and that is the one that must not move: its digest is the shared name
+`hooks/insight-capture.sh` looks a record up under, so the saving there buys a silently
+doubled queue.
+
+So `tests/test_precompact.py` pins the count of programs rather than a wall-clock figure: 13
+besides `date` on the candidate path and 4 on the empty one, with `date` bounded separately
+because it is one start on BSD and two on GNU. Folding that variance into one number is what
+had forced the old pin to carry five programs of slack. A stopwatch assertion tight enough
+to catch one added `jq` flakes on a loaded machine, and one loose enough not to flake
+catches nothing.
 
 **Where the per-compaction claim sits, and what it is actually for.** It is taken after the
 candidates are in hand, not at the top of the script, and two rules point at that line.
@@ -1231,6 +1251,33 @@ Uninstall never removes it, on the same judgement that leaves the state director
 The checkout holds every prompt the user has typed at Claude Code, which this package did
 not create and could not put back, so uninstall says where it is and how to remove it.
 
+## The mission's sweep is paid for by the event that emits nothing
+
+`<state>/mission/<sid>/` is one directory per session that has ever reached this hook,
+holding one byte per tool call and one empty directory per claimed event, and no other
+script goes near it: `prune_stale_state()` in `hooks/compound-improvement.sh` walks
+`<state>/reminders/`, and `hooks/remind.sh` walks `<state>/remind/`. So `hooks/mission.sh`
+sweeps its own tree, in the shape `remind.sh` already uses — a 1-in-`MISSION_PRUNE_EVERY`
+draw, one level of directories, ages taken against `MISSION_NOW` rather than through
+`find -mtime`, so a pinned clock still pins the sweep.
+
+Where to pay for it is the part with a choice in it. Every path this hook takes ends in
+either a render or an early exit, and one of the exits is both silent and much the most
+frequent: the ordinary `PreToolUse` whose cooldown has not expired. That is the sweep's only
+call site. Nothing that is about to emit runs a `stat` first, a subagent never pays for it
+at all (that branch has already left on `agent_id`), and neither does a session's first tool
+call, which seeds the timestamp and exits. An event that is due falls through to the render
+untouched.
+
+Two things the sweep may never remove, and they are one mistake in two guises. The
+sweeping session's own goes untouched whatever its age, because `seen/` is what stops the
+second wiring delivering an event twice and `tools/<prompt_id>` is the count the `Stop` arm
+is about to judge; removing either under a live session turns a record into an absence that
+reads exactly like never-fired, which is the trap `hooks/session-review.sh` shipped from the
+other direction. And a name the sanitiser could not have produced is left where it is, since
+this script did not put it there. `hits.jsonl` needs no rule at all: the sweep lists
+directories, and that is a file.
+
 ## The subagent channel is `SubagentStart`, and the writable one was declined
 
 A subagent starts with the parent's instructions and none of the user's. Two channels reach
@@ -1277,6 +1324,56 @@ an imperative in that field was obeyed in 2 of 4 runs and refused as an injectio
 in the other two, while the same fact worded neutrally came back in 3 of 3. A reminder
 that gets refused is worse than one that is merely ignored, because it teaches the session
 that this channel carries prompt injection.
+
+## A same-tool recovery is not evidence when the tool is a shell
+
+The recovery rule binds a failed call to the success that fixed it, and its same-tool half
+used to bind on the tool name alone: a `Bash` failure was recovered by the next `Bash`
+success inside the window, whatever that command happened to be. For a tool like
+`mcp__github__create_issue` that reasoning holds, because the tool name is the operation.
+For `Bash` it holds for nothing. One tool name covers every command a shell can run, so
+"the same tool" and "the same operation" are unrelated questions.
+
+The store settled it. Join every `recover` row in `<state>/repeats/index.jsonl` against the
+`fail` rows sharing its signature, and take content tokens by `toks_of`'s own rule
+(lowercased runs of word characters, three or more, not all digits): of the 231 distinct
+same-tool `Bash` bindings the live store held on 2026-09-03, 52 of them (22.5%) shared not
+one token with the failure they were bound to, another 31 shared exactly one, and 11 of
+those shared only the word `echo`. The store grows, so re-run that join rather than quoting
+the figures back — late on the same day it stood at 241 bindings, 53 of them at zero and 156
+kept by the floor below.
+
+Wrong rows are not the whole cost, which is why a binding is withheld rather than merely
+tagged. A binding CONSUMES its armed failure: one recovery per arming, then the failure is
+disarmed, so an unrelated success eats the arming and the real fix, arriving two calls later
+inside the same window, can never be recorded at all. On that store one `cat` had disarmed
+four `gh issue view` failures. Nor is the row silent — the recovery arm states its pair back
+to the session as fact, and one such statement read `gh issue view <N> --comments`
+recovered by `cat notes/OPEN-THREADS.md`, in a script whose whole claim is that it reports
+what it measured.
+
+So a shell's same-tool binding now asks what the cross-tool one asks:
+`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared content tokens, same definition, same
+comparison. The floor is 2 for a plain reason and not a calibrated one — nothing establishes
+that `Bash` following `Bash` is better evidence than one tool following another, and for a
+universal shell it is worse — and the knob exists to say the number is a floor rather than a
+measurement. A capped variant that would let a very short failed command still bind,
+`min(2, tokens in the failure)`, was tried against the same store: it admitted exactly one
+binding more, whose only shared token was `echo`, and was dropped.
+
+Two carve-outs. A success whose normalised call equals the failed one binds unconditionally,
+because the refusal arm's rule that a signature with any self-recovery behind it is never
+refused is built on those rows, and a call as short as `pwd` carries too few tokens to clear
+any floor. And non-shell tools are left exactly as they were, with `shell_tool()` the single
+place that decides which is which. `Skill` is the unmeasured middle — one tool name over
+every skill — and it stays permissive because no store here holds a Skill-to-Skill binding
+to judge it on.
+
+What the change gives up belongs in the same paragraph as what it buys. A real fix that
+shares no text with the failure, `gh pr list` recovered by `curl` against the same API where
+the URL is masked before tokens are taken, is no longer bound. It degrades to silence, and
+the refusal then says that no recovery was ever recorded, which is true. A missed recovery
+costs a fix nobody wrote down; a wrong one is announced to the session as a fact.
 
 ## The lesson refusal ships on, and the repeat refusal does not
 
@@ -1376,3 +1473,58 @@ been seen reaching a hook on this machine, so this is an unproven widening rathe
 proven one, and the store is the only surface that can settle it: a `fail` row whose tool
 begins `mcp__` is the evidence, and until one exists the MCP half of the cross-tool rule is
 still exercised only by hand.
+
+## The lineage id is derived from a digest and never minted
+
+Issue #37 asked for one question to be answerable: did the thing that was captured, the
+reminder that arrived, and the forge that followed all descend from the same observation?
+That is a join, and a join needs a key every store spells the same way.
+
+Minting a fresh id at capture is the obvious move and the wrong one, because the capture end
+has two writers. `hooks/insight-capture.sh` and `hooks/precompact.sh` both queue a candidate,
+both under the same content digest, and which of them reaches a sentence first is a race. A
+minted id would therefore have to be minted in both, would give one sentence two names
+depending on who won, and would have added a write path to the one script in this package
+where a single process start is argued over.
+
+The digest is already the shared name, so the id is read off it: `skillinsight promote`
+stamps `c` plus its first eight characters onto the note and the reminder it writes, and `v`
+plus eight is the same derivation over a session-review verdict. Eight is the prefix length
+that CLI already prints and accepts in `decline`, `promote` and `pending`. Two things follow
+at no cost. A record queued before any of this existed already carries a lineage id, so
+nothing had to be backfilled. And `hooks/precompact.sh` needed no change whatever, which
+`tests/test_attribution.py::PrecompactNeedsNoChangeToShareTheLineage` pins by queueing a
+record through that hook alone and reading the same id back out of it.
+
+`--from` warns and does not refuse, on `--trigger`'s argument word for word: refusing
+produces no lineage, it produces no forge row at all, and the cheapest way past a CLI that
+refuses is to stop calling it. A forge nothing queued is the ordinary case, so a start
+without one is recorded as it is and counted as UNATTRIBUTED rather than guessed at.
+
+## Level B search stays a command a session runs, and not a mechanism
+
+Habit 1 of `SKILL.md` sends a session looking for an existing skill, and `surfer search
+"<keyword>" --all` is the level B half of that search: has this user hit this before, in
+some other project. The tempting next step is to run it for them: show a related past prompt
+unasked, the way `hooks/mission.sh` states this session's own requests back.
+
+It was measured before it was built and it does not clear the bar. Under a rare-token rule
+(tokens appearing in at least two prompts and in under 1% of the store), at its best-behaved
+threshold of four shared tokens, level B keyword search has a measured false-positive rate
+of 0.72: precision 0.28, 95% Wilson interval [0.19, 0.41], over 60 judged pairs. The upper
+bound of that interval excludes the 0.6 precision bar rather than merely falling short of
+it, so a
+larger sample of the same rule cannot rescue it. A plain shared-token rule looked better at
+first — weighted precision 0.55 at six shared tokens — and was worse on inspection: 16 of
+the 17 pairs the judge called relevant had matched on this user's own workflow vocabulary —
+words like `subagents`, `goal` and `ultrawork`, which recur across nearly every project of
+theirs — rather than on anything about the work.
+
+The method, the judge, the five limits on it and the specific follow-ups that would change
+the verdict are in
+[`notes/research/level-b-search-measurement.md`](../notes/research/level-b-search-measurement.md).
+Showing one unasked at that precision would spend a slot in the model's context on an
+unrelated prompt roughly three times in four, and a channel that is wrong that often is one
+a session learns to skip — which is the cost the mission's own wording rules exist to avoid.
+So the command stays where it is, in the skill, to be run by a session that has a keyword
+worth searching for.

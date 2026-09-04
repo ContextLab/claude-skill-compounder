@@ -523,9 +523,9 @@ so an automatic compaction and a typed `/compact` are distinguishable only by th
 `last_assistant_message`**, which `Stop` has, so anything a `PreCompact` hook wants from
 the session it must read out of `transcript_path`. That path **exists and is complete
 before the hook runs**: the transcript file was on disk and readable from inside the hook.
-And `custom_instructions` is present as a key with a JSON `null` value even when no
-instructions were given, so `has("custom_instructions")` and "there were custom
-instructions" are different questions.
+And the key `custom_instructions` was present on both triggers here, holding JSON `null` in
+each, so `has("custom_instructions")` answers nothing about whether any were given. What
+that field holds when they were is the next entry: this probe did not ask.
 
 **How established.** Claude Code 2.1.259, macOS 25.6.0, 2026-09-02, `--model sonnet`. A
 scratch project directory, one dumping hook wired through its own `--settings` file with
@@ -550,9 +550,9 @@ is 100k tokens. The second arm fed a 520 KB neutral inventory listing on stdin, 
 billed 243302 cache-creation tokens and $0.98, and fired one `PreCompact` with
 `"trigger":"auto"` on a single turn. Nothing shorter will do it: the window is the trigger.
 
-**Remaining limits.** One run per arm and one model tier. `custom_instructions` was `null`
-in both, so its populated shape is still unconfirmed — `/compact <instructions>` was not
-probed.
+**Remaining limits.** One run per arm and one model tier. `/compact <instructions>` was not
+typed here, so nothing in this capture bears on a populated `custom_instructions`; the
+entry after this one probed exactly that, on a later build.
 
 **What it means.** A hook that means to act on every compaction must be wired with **no
 matcher**. `PreCompact`'s matcher selects the trigger rather than a tool, so a matcher of
@@ -560,6 +560,49 @@ matcher**. `PreCompact`'s matcher selects the trigger rather than a tool, so a m
 compaction — the ones the session did not see coming, which are the majority. A hook that
 branches on `compaction_trigger` instead of `trigger` gets `null` on both and cannot tell
 them apart, and nothing reports the mistake.
+
+---
+
+## `PreCompact`'s `custom_instructions` carries a `/compact` argument verbatim
+
+**Finding.** The field is not always `null`. `/compact focus on the greeting` delivers
+`"custom_instructions":"focus on the greeting"`: a plain JSON string holding the argument as
+typed, with no `/compact` prefix and no surrounding whitespace. A bare `/compact` on the same
+session delivers `null`. A hook that reads it therefore has to handle a string or a null, and
+must not expect an object.
+
+Two further observations came out of the same two runs. The key set is otherwise unchanged
+from the 2.1.259 capture above, so this is still the same seven keys. And **the hook fires on
+a compaction that never happens**: both arms answered `Not enough messages to compact.` and
+both still delivered a payload, each with its own `prompt_id`. So a hook on this event pays
+its cost on compactions that are refused after it has already run.
+
+**How established.** Claude Code 2.1.260, macOS 25.6.0, 2026-09-03,
+`--model claude-haiku-4-5-20251001`, through the probe described in the entry above: a
+scratch directory, one dumping hook wired through its own `--settings` file, with
+`--setting-sources ''` and `SKILL_COMPOUNDER_DISPATCHED=1` so no real hook on the machine
+fired. A headless session was started with `'say hi'` (`--output-format json`, for the
+session id) and then resumed twice, so the two arms differed in one thing only, the
+argument:
+
+```
+claude -p --resume <sid> --model claude-haiku-4-5-20251001 --output-format stream-json \
+  --verbose --max-turns 3 --setting-sources '' --strict-mcp-config --settings <probe>.json \
+  <<< '/compact focus on the greeting'      # -> "focus on the greeting"
+  <<< '/compact'                            # -> null
+```
+
+**What it means.** A hook that branches on this field has to test the value and not the key,
+since the key is there either way. A hook can also decline to read it at all:
+`hooks/precompact.sh` takes four fields off the payload and this is not one of them,
+deliberately, because it has nowhere to put the value — that script's first promise is that
+it writes no stdout whatever — so parsing it would spend a process start on nothing.
+`tests/test_precompact.py::CustomInstructionsTest` pins that a populated field changes
+nothing there, and that a hostile one reaches no shell.
+
+**Remaining limits.** One model tier, one run per arm, and the "not enough messages" check
+refused both, so a populated `custom_instructions` has still not been seen on a compaction
+that completed. An automatic compaction was not re-probed on this build.
 
 ---
 

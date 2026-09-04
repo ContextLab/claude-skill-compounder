@@ -1619,6 +1619,11 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
             # default is a `set -u` belt, not a way in.
             "TRIGGER_TEXT", "TRIGGER_KIND", "SKILL_PRESENT", "RESOLVED_NAME",
             "INSTALL_STATUS", "FOUND", "CLOSED_ID",
+            # `start --from <lineage id>` and `start --session <id>` (issue #37), set
+            # beside TRIGGER_TEXT and TRIGGER_KIND, initialised on the same line, and
+            # read by ledger_line for every command -- including the ones that never set
+            # them, which is exactly why the `:-` belt is there.
+            "FROM_ID", "START_SESSION",
         }
         self.assertEqual(names - knobs, set(),
                          "a new environment-defaulted variable appeared in "
@@ -1629,7 +1634,8 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
         initial value somewhere in the file, so the `:-` never supplies the answer."""
         src = self.code()
         for name in ("TRIGGER_TEXT", "TRIGGER_KIND", "SKILL_PRESENT", "RESOLVED_NAME",
-                     "INSTALL_STATUS", "FOUND", "CLOSED_ID", "A_NO_MARKER"):
+                     "INSTALL_STATUS", "FOUND", "CLOSED_ID", "A_NO_MARKER",
+                     "FROM_ID", "START_SESSION"):
             self.assertTrue(re.search(r'(?m)(^|;)\s*%s=("")?(0)?[\s;]' % name, src),
                             "%s is never initialised, so its value can come from the "
                             "ambient environment" % name)

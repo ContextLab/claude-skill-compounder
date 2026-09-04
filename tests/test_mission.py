@@ -1050,5 +1050,202 @@ class StoreRootTest(MissionCase):
         self.assert_read(r, self.R3)
 
 
+# ==================================================================== the sweep
+class PruneTest(MissionCase):
+    """<state>/mission/ grows by a <sid>/ per session that reaches this hook, and nothing
+    else sweeps it: `prune_stale_state()` in hooks/compound-improvement.sh walks
+    <state>/reminders/ and hooks/remind.sh's sweep walks <state>/remind/, both of them
+    different directories. So this hook sweeps its own tree, on a sampled event, by age
+    against its own clock -- the same shape tests/test_remind.py::PruneTest pins there.
+
+    THE TREE IS BUILT BY THE HOOK, never by hand: every directory below was written by a
+    real delivery or a real tool-call event, so the sweep is tested against the shape the
+    writer really produces. Age is then set with os.utime, which is the one thing an event
+    cannot do.
+
+    THE SWEEP'S ONE CALL SITE is the periodic arm's not-yet-due exit, so `sweep()` below
+    is an ordinary tool call INSIDE the interval -- an event that delivers nothing. An
+    event that is about to deliver never sweeps, and
+    `test_an_event_that_is_about_to_deliver_never_sweeps` is what pins that.
+    """
+
+    DAY = 86400
+    TTL = 7 * 86400
+
+    def sdir(self, sid):
+        return os.path.join(self.state, "mission", sid)
+
+    def deliver(self, sid, pid="pc1"):
+        """A real delivery, sweep off, so the tree only grows."""
+        self.default_store(session=sid)
+        self.context_of(self.run_hook(self.session_start(session=sid, pid=pid),
+                                      MISSION_PRUNE_EVERY="0"), "SessionStart")
+        self.assertTrue(os.path.isdir(self.sdir(sid)),
+                        "the delivery did not write %s" % self.sdir(sid))
+
+    def warm(self, sid, tuid="warm", pid="p1"):
+        """One ordinary tool call, sweep off.
+
+        It creates <sid>/seen/ and <sid>/tools/, so a LATER event from that session adds
+        entries inside them rather than creating them -- which would bump <sid>/'s own
+        mtime and make "the sweeping session's directory survived" true for the wrong
+        reason.
+        """
+        self.assert_silent(self.run_hook(self.pretooluse(session=sid, tuid=tuid, pid=pid),
+                                         MISSION_PRUNE_EVERY="0"))
+        self.assertTrue(os.path.isdir(os.path.join(self.sdir(sid), "tools")))
+
+    def age(self, sid, seconds):
+        t = self.clock - seconds
+        os.utime(self.sdir(sid), (t, t))
+
+    def sweep(self, sid="cur", tuid="sweep", pid="p1", **env):
+        """A forced sweep: an ordinary tool call inside the interval, which delivers
+        nothing and therefore takes the arm the sweep is wired to."""
+        return self.assert_silent(self.run_hook(
+            self.pretooluse(session=sid, tuid=tuid, pid=pid),
+            MISSION_PRUNE_EVERY="1", **env))
+
+    def test_a_real_stale_tree_is_swept_and_what_should_survive_survives(self):
+        for sid in ("stale1", "stale2", "fresh", "future", "cur"):
+            self.deliver(sid)
+        self.warm("cur")
+        self.age("stale1", 9 * self.DAY)          # well past the TTL
+        self.age("stale2", self.TTL + 1)          # one second past it
+        self.age("fresh", self.TTL - 1)           # one second inside it
+        self.age("future", -10 * self.DAY)        # a clock that ran ahead
+        self.age("cur", 30 * self.DAY)            # the sweeping session, ancient
+        # CANARIES that must survive whatever the sweep does, every one of them as old as
+        # the stale sessions so that "it survived" cannot also mean "nothing was that old":
+        # the hits log inside <state>/mission/, and a session directory belonging to
+        # hooks/remind.sh, whose tree is a SIBLING this walk must never reach.
+        other_tree = os.path.join(self.state, "remind", "someone-else")
+        os.makedirs(other_tree)
+        old = self.clock - 30 * self.DAY
+        for p in (self.hits, other_tree):
+            os.utime(p, (old, old))
+        with open(self.hits, "rb") as fh:
+            hits_before = fh.read()
+
+        self.sweep("cur")
+
+        for sid in ("stale1", "stale2"):
+            self.assertFalse(os.path.exists(self.sdir(sid)),
+                             "%s should have been swept" % self.sdir(sid))
+        for sid in ("fresh", "future", "cur"):
+            self.assertTrue(os.path.isdir(self.sdir(sid)),
+                            "%s should have survived" % self.sdir(sid))
+        with open(self.hits, "rb") as fh:
+            self.assertEqual(fh.read(), hits_before,
+                             "the sweep must never touch hits.jsonl")
+        self.assertTrue(os.path.isdir(other_tree),
+                        "the sweep reached <state>/remind/, which is not its tree")
+        # And the survival of the sweeping session's own directory was the SKIP, not a
+        # refreshed mtime: the event that swept adds entries inside seen/ and tools/ and
+        # never re-stamps <sid>/ itself.
+        self.assertLess(os.stat(self.sdir("cur")).st_mtime, self.clock - self.TTL,
+                        "the sweeping session's directory was re-stamped, so its survival "
+                        "proves nothing about the skip")
+
+    def test_the_sweep_is_sampled_and_zero_switches_it_off(self):
+        self.deliver("stale1")
+        self.deliver("cur")
+        self.warm("cur")
+        self.age("stale1", 30 * self.DAY)
+        self.assert_silent(self.run_hook(self.pretooluse(session="cur", tuid="t2"),
+                                         MISSION_PRUNE_EVERY="0"))
+        self.assertTrue(os.path.isdir(self.sdir("stale1")),
+                        "MISSION_PRUNE_EVERY=0 must not sweep")
+        self.sweep("cur", tuid="t3")
+        self.assertFalse(os.path.exists(self.sdir("stale1")))
+
+    def test_the_ttl_is_a_knob_and_reads_the_hooks_own_clock(self):
+        self.deliver("s1")
+        self.deliver("cur")
+        self.warm("cur")
+        self.age("s1", 100)
+        self.sweep("cur", tuid="t2", MISSION_PRUNE_TTL="99")
+        self.assertFalse(os.path.exists(self.sdir("s1")),
+                         "a 100 s old directory beats a 99 s TTL")
+
+    def test_a_sweep_never_removes_the_records_of_the_session_that_runs_it(self):
+        """The trap: the claim under seen/ is what stops the second wiring delivering the
+        same event twice, and tools/<pid> is the count the Stop arm reads. Removing either
+        from under a live session is a record whose absence is indistinguishable from
+        never-fired. So the sweeping session's own directory is skipped -- here, at thirty
+        days old."""
+        self.deliver("s1", pid="pc1")
+        self.warm("s1")
+        self.age("s1", 30 * self.DAY)
+
+        self.sweep("s1", tuid="sweep2")
+
+        self.assertTrue(os.path.isdir(self.sdir("s1")),
+                        "the sweep removed its own session's directory")
+        self.assertTrue(os.path.isdir(os.path.join(self.sdir("s1"), "seen", "resume-pc1")),
+                        "the sweep removed its own session's delivery claim")
+        # One byte per distinct tool_use_id: the warm-up and the sweep itself.
+        self.assertEqual(os.path.getsize(os.path.join(self.sdir("s1"), "tools", "p1")), 2,
+                         "the sweep zeroed its own turn's tool count")
+        # And the claim still holds: the duplicate delivery of the same event stays silent.
+        self.assert_silent(self.run_hook(self.session_start(session="s1", pid="pc1"),
+                                         MISSION_PRUNE_EVERY="1"))
+        self.assertEqual(len(self.hit_rows()), 1, "the mission was delivered twice")
+
+    def test_a_directory_that_is_not_a_sanitised_session_id_is_never_removed(self):
+        """Every directory this hook creates under <state>/mission/ went through
+        `tr -c 'A-Za-z0-9._-' '_' | cut -c1-96`. Anything else was put there by something
+        that is not this hook, and is not this hook's to delete."""
+        self.deliver("cur")
+        self.warm("cur")
+        strangers = [os.path.join(self.state, "mission", n)
+                     for n in ("not a session!", "x" * 97)]
+        old = self.clock - 30 * self.DAY
+        for d in strangers:
+            os.makedirs(d)
+            os.utime(d, (old, old))
+        self.sweep("cur", tuid="t2")
+        for d in strangers:
+            self.assertTrue(os.path.isdir(d), "%s is not ours to remove" % d)
+
+    def test_an_event_that_is_about_to_deliver_never_sweeps(self):
+        """The sweep must never delay an emit that is due, so it is not on that path at
+        all: the same stale directory that a not-due event removes survives a due one."""
+        self.deliver("cur")
+        self.warm("cur")
+        self.deliver("stale1")
+        self.age("stale1", 30 * self.DAY)
+
+        r = self.run_hook(self.pretooluse(session="cur", tuid="t2"),
+                          MISSION_NOW=self.clock + 1201, MISSION_PRUNE_EVERY="1")
+        self.assertIn(LONG, self.context_of(r, "PreToolUse"))
+        self.assertTrue(os.path.isdir(self.sdir("stale1")),
+                        "a delivering event swept, which is exactly what it must not do")
+        # ... and the very next not-due event does remove it. The clock stays where the
+        # delivery left it: that delivery re-armed `last`, so an event back at self.clock
+        # would be 1201 s away from it and would deliver rather than sweep.
+        self.sweep("cur", tuid="t3", MISSION_NOW=self.clock + 1201)
+        self.assertFalse(os.path.exists(self.sdir("stale1")))
+
+    def test_the_sweep_changes_neither_the_exit_status_nor_a_byte_of_the_emit(self):
+        self.deliver("cur")
+        self.warm("cur")
+        self.deliver("stale1")
+        self.age("stale1", 30 * self.DAY)
+        off = self.run_hook(self.pretooluse(session="cur", tuid="t2"),
+                            MISSION_PRUNE_EVERY="0")
+        on = self.run_hook(self.pretooluse(session="cur", tuid="t3"),
+                           MISSION_PRUNE_EVERY="1")
+        self.assertEqual(on.returncode, off.returncode, on.stderr)
+        self.assertEqual(on.returncode, 0)
+        self.assertEqual(on.stdout, off.stdout)
+        self.assertEqual(on.stderr, off.stderr)
+        self.assertEqual(on.stdout, "")
+        self.assertFalse(os.path.exists(self.sdir("stale1")),
+                         "the run with the sweep on did not actually sweep, so this "
+                         "comparison proves nothing")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

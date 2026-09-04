@@ -243,6 +243,75 @@ emit() {
   fi
 }
 
+# ------------------------------------------------------------- the delivery log
+#
+# EVERY NUDGE THIS HOOK DELIVERS IS WRITTEN DOWN, WITH AN ID. Until this existed the hook
+# logged nothing at all -- only a running edit count per session -- so the one conversion
+# figure in the package was RECONSTRUCTED: bin/skillreport divided each `.edits` tally by
+# CI_EDIT_EVERY to guess how many checkpoints a session must have hit, and printed its own
+# caveat saying the numerator and denominator covered different windows. A guess cannot
+# say which delivery produced which outcome, which is the whole question (issue #37).
+#
+# Same directory as every other piece of this hook's per-session state, so nothing new
+# has to be pruned, backed up or documented as a location. One line per delivery:
+#
+#   {"id","ts","session","kind","event"[,"cc_session"]}
+#
+# `id` IS THE LINEAGE, and it is stable rather than unique-per-delivery: the four nudges
+# this hook composes itself are the same nudge every time it fires, so they carry a fixed
+# name (`ci-checkpoint`, `ci-skill-check`, `ci-review`, `ci-prose`) and a funnel row for
+# one of them counts every delivery of it. The queue announcement is the exception and the
+# interesting one: it is ABOUT a specific queued candidate, so it carries that candidate's
+# own lineage id -- `c` plus the first eight characters of its hash, the same id
+# bin/skillinsight stamps on a note when that candidate is promoted. So a queue nudge, the
+# note it leads to, that note's reminder, every delivery of that reminder, and the forge
+# and verdict that follow all carry ONE id.
+#
+# TWO SESSION IDS, AND BOTH ARE RECORDED, because the stores this must join against use
+# different ones. `session` is the hook payload's `.session_id`, which is what
+# hooks/skill-use.sh stamps on a `use` row and hooks/remind.sh on a delivery. `cc_session`
+# is $CLAUDE_CODE_SESSION_ID, which Claude Code exports into every process a session
+# starts and which `skillforge apply`, `skillforge start` and `skillnote` record instead --
+# a DIFFERENT id from the payload's, measured (see bin/skillforge's header). Recording one
+# of them would have made half the ledger unjoinable; recording both costs one field. When
+# the variable is not in this hook's environment the field is simply absent, and the rows
+# that needed it are reported as unattributed rather than matched to the wrong session.
+NUDGE_LOG="$STATE_DIR/nudges.jsonl"
+# Not a knob. The tuning table documents every CI_* name this hook reads, and a cap nobody
+# has ever wanted to change does not earn a row in it; the bound exists so an install that
+# runs for a year does not grow an unbounded log.
+NUDGE_MAX_ROWS=2000
+
+log_nudge() { # <lineage id> <kind> <hookEventName>
+  ln_id="$1"
+  # The id reaches the row as JSON built by jq, so nothing here can break the file; the
+  # charset guard is about the JOIN. A lineage id is compared for equality against ids in
+  # four other stores, and a stray space or quote would make one that never matches.
+  case "$ln_id" in ''|*[!A-Za-z0-9._-]*) ln_id="unattributed" ;; esac
+  ln_row="$(jq -n -c --arg id "$ln_id" --arg kind "$2" --arg ev "$3" \
+      --arg session "$sid" --arg cc "${CLAUDE_CODE_SESSION_ID:-}" --argjson ts "$now" \
+      '{id:$id, ts:$ts, session:$session, kind:$kind, event:$ev}
+       + (if $cc == "" then {} else {cc_session:$cc} end)' 2>/dev/null)"
+  [ -n "$ln_row" ] || return 0
+  # `2>/dev/null` BEFORE the `>>`: written the other way round the append is opened first
+  # and a failure to open it is reported by the SHELL to a stderr that is still the
+  # terminal. The same ordering every append in this package is written in.
+  printf '%s\n' "$ln_row" 2>/dev/null >> "$NUDGE_LOG" || return 0
+  # Bounded on write, the way hooks/remind.sh bounds its own hits log: mktemp in the log's
+  # OWN directory so the `mv` is a rename(2) rather than a truncate in place. One `wc` per
+  # DELIVERY, which is rare -- never once per event.
+  ln_n="$(wc -l < "$NUDGE_LOG" 2>/dev/null | tr -cd '0-9')"
+  case "$ln_n" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$ln_n" -gt "$NUDGE_MAX_ROWS" ] || return 0
+  ln_tmp="$(mktemp "$STATE_DIR/.nudges.XXXXXX" 2>/dev/null)" || return 0
+  if tail -n "$NUDGE_MAX_ROWS" "$NUDGE_LOG" > "$ln_tmp" 2>/dev/null; then
+    mv -f "$ln_tmp" "$NUDGE_LOG" 2>/dev/null || rm -f "$ln_tmp" 2>/dev/null
+  else
+    rm -f "$ln_tmp" 2>/dev/null
+  fi
+  return 0
+}
+
 # ------------------------------------------------------------- the review notice
 # hooks/session-review.sh runs DETACHED, after a session has already ended. Whatever it
 # finds therefore lands somewhere nobody is looking, in a session that is over. This is
@@ -455,11 +524,23 @@ case "$MODE" in
   prompt)
     claim_once prompt || exit 0
     ctx=""
+    # "<lineage id> <kind>" per nudge that made it into this turn's context, one per line.
+    # Collected rather than logged as it is composed, because the three arms below all
+    # append to one `ctx` and the emit at the end is what decides whether ANY of it was
+    # delivered. Logging a delivery that never left would be the same defect as the edit
+    # counter it replaces: a number nobody can act on.
+    delivered=""
     # The announcement is judged BEFORE the prompt-length gate, and independently of
     # it. It is not about what was typed: a session whose first prompt is "continue"
     # is still a session starting, and gating the queue on prompt length would hide
     # it from exactly the short openings that are most common.
-    queue_nudge && ctx="$nudge_ctx"
+    if queue_nudge; then
+      ctx="$nudge_ctx"
+      # The candidate's OWN lineage id: `c` plus the eight hash characters
+      # `skillinsight pending --format tsv` prints, which is the id
+      # `skillinsight promote` stamps on the note if this announcement is acted on.
+      delivered="c$qn_hash queue"
+    fi
     sys="$nudge_sys"
     # Both can be due on the same first prompt. They are merged into ONE
     # additionalContext and ONE systemMessage, because two emits are two JSON objects
@@ -471,6 +552,8 @@ case "$MODE" in
 $ctx"; else ctx="$review_ctx"; fi
       if [ -n "$sys" ]; then sys="$review_sys
 $sys"; else sys="$review_sys"; fi
+      delivered="ci-review review${delivered:+
+$delivered}"
     fi
     text="$(printf '%s' "$payload" | jq -r '.prompt // ""' 2>/dev/null)"
     if [ "${#text}" -ge "$PROMPT_MIN_CHARS" ]; then
@@ -495,10 +578,17 @@ $ctx"
         else
           ctx="$reminder"
         fi
+        delivered="ci-skill-check skill-check${delivered:+
+$delivered}"
       fi
     fi
     if [ -n "$ctx" ]; then
       emit "$ctx" "UserPromptSubmit" "$sys"
+      while IFS=" " read -r d_id d_kind; do
+        [ -n "$d_id" ] && log_nudge "$d_id" "$d_kind" "UserPromptSubmit"
+      done <<DELIVERED_EOF
+$delivered
+DELIVERED_EOF
     fi
     ;;
   edit)
@@ -556,6 +646,7 @@ $ctx"
     fi
     if [ $(( n % EDIT_EVERY )) -eq 0 ]; then
       printf 'x' >> "$STATE_DIR/$sid.checkpoints" 2>/dev/null
+      log_nudge ci-checkpoint checkpoint PostToolUse
       emit "[skill-compounder] Checkpoint after $n file edits. (a) Have you fixed two or more defects of the SAME KIND this session? Repeated fixes of a kind are a recurrence even when each one felt like a self-contained task -- count across them, not within one. (b) Is the procedure you are working through right now BOTH costly to have gotten right AND likely to recur? (c) Did a skill you invoked this session misfire? If any is yes, invoke the 'skill-compounder' skill and follow it. If none, disregard." "PostToolUse"
       exit 0
     fi
@@ -565,6 +656,7 @@ $ctx"
       base="$(basename "$path")"
       grep -Fqx "$base" "$seen" 2>/dev/null && continue
       printf '%s\n' "$base" >> "$seen" 2>/dev/null || break
+      log_nudge ci-prose prose PostToolUse
       emit "[skill-compounder] $base is durable prose other people will read. Before it ships, invoke the 'ai-tell-audit' skill over the passages you changed. Disregard if this edit is not prose." "PostToolUse"
       exit 0
     done

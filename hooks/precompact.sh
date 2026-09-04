@@ -14,7 +14,10 @@
 # truncated at line 4 of 11, silently, and the next session loaded the truncated file as
 # project context without complaint. A Haiku subagent over a 256 KB tail took 54 seconds
 # and $0.128, against a median real compaction of 128 seconds. So this hook does string
-# extraction and nothing else, and its whole budget is 100 ms.
+# extraction and nothing else, and its whole budget is 100 ms -- which is a figure PER jq
+# BUILD, met on the system jq and missed by about a quarter on jq-1.6. The table by
+# TAIL_BYTES carries both rows and the measurement that says the slow one cannot be made
+# to fit.
 #
 # NEVER WRITE CLAUDE.md FROM A HOOK. This appends to the same weekly queue
 # `insight-capture.sh` writes, and `skillinsight` (and `skillnote` behind it) is where a
@@ -28,7 +31,7 @@
 #   {"session_id","transcript_path","cwd","prompt_id","hook_event_name":"PreCompact",
 #    "trigger":"manual"|"auto","custom_instructions":null}
 #
-# Two of those matter here.
+# Three of those matter here.
 #
 #   - THERE IS NO `last_assistant_message`. Stop has one and this does not, so the free
 #     path insight-capture.sh takes 76% of the time does not exist here. The transcript
@@ -37,6 +40,15 @@
 #   - THE FIELD IS `trigger`, NOT `compaction_trigger`. `permission_mode` is absent
 #     despite being documented. Nothing here branches on either, deliberately: both
 #     values name the same loss.
+#   - `custom_instructions` IS NOT ALWAYS null, as of a re-probe on 2.1.260, 2026-09-03
+#     (issue #32). A typed `/compact focus on the greeting` puts the argument there
+#     VERBATIM as a plain JSON string -- no `/compact` prefix, no surrounding whitespace;
+#     a bare `/compact` and every automatic compaction still put `null`. Nothing here
+#     reads it and nothing here should: the only channel a PreCompact hook has back is
+#     `systemMessage` on stdout, and this hook's first promise is that it never writes to
+#     stdout at all. Reading the field would be a process start spent on a value with
+#     nowhere to go. tests/test_precompact.py::CustomInstructionsTest pins both halves --
+#     that a populated field changes nothing, and that a hostile one reaches no shell.
 #
 # ---------------------------------------------------------------------------------------
 # WHY THIS IS ITS OWN SCRIPT AND NOT A THIRD ARM OF insight-capture.sh.
@@ -106,24 +118,40 @@ set -uo pipefail
 # ------------------------------------------------------------------------------------
 {
 
-# THE BOUND IS THE COST MODEL, and it is not really about bytes. End-to-end medians of
-# this hook against a 5 MB transcript, 15 runs each, macOS 25.6.0, 2026-09-02:
+# THE BOUND IS THE COST MODEL, and it is not really about bytes. THE 100 ms BUDGET FROM
+# ISSUE #8 IS A PER-jq FIGURE and cannot be anything else; issue #32 settled which of the
+# two answers it gets. End-to-end wall-clock over a 400 KB transcript at the default
+# 256 KB bound, the two builds interleaved run-for-run so a loaded box costs both arms
+# alike, macOS 25.6.0, 2026-09-03, load average 9.5, n=25, median / p90:
 #
-#                                   no candidate      one candidate
-#     bound 256 KB, system jq            27.4 ms            86.3 ms
-#     bound 512 KB, system jq            38.6 ms           103.1 ms
-#     bound 256 KB, jq 1.6 on PATH       62.4 ms           147.9 ms
+#                                       no candidate       one candidate
+#     /usr/bin/jq (jq-1.7.1-apple)    31.8 / 36.0 ms     84.7 /  87.7 ms
+#     anaconda's jq-1.6 on PATH       59.1 / 63.5 ms    123.0 / 128.9 ms
 #
-# Doubling the bound costs 11 ms and swapping the jq costs 62 ms, because what this hook
-# spends is PROCESS STARTS: on this machine `jq -n 1` medians 9.6 ms as /usr/bin/jq
-# (jq-1.7.1-apple) and 22.4 ms as anaconda's jq-1.6, `shasum` 21 ms, `git rev-parse`
-# 17 ms. So the number to watch when editing is how many programs run, and the byte count
-# is a detail -- tests/test_precompact.py pins the process count for that reason, since a
-# stopwatch tight enough to catch one added `jq` flakes on a loaded machine.
+# So the budget HOLDS on the system jq, at the median and at p90, and IS MISSED BY ABOUT
+# A QUARTER on jq-1.6. Quote the second row to anyone whose PATH resolves jq to a slow
+# build. It is still 0.1% of the 128-second median compaction this hook delays, which is
+# why the answer was to state the figure rather than block on it.
 #
-# THE 100 ms FROM ISSUE #8 IS MET ON THE SYSTEM jq AND NOT ON EVERY PATH. The third row
-# is the honest one to quote for a user whose PATH resolves jq to a slow build, and it is
-# still 0.1% of the 128-second median compaction it delays.
+# WHY THE SLOW BUILD CANNOT BE MADE TO FIT, which is the half of #32 that took measuring.
+# What this hook spends is PROCESS STARTS -- `jq -n 1` medians 8.2 ms as /usr/bin/jq and
+# 21.8 ms as jq-1.6, `shasum` 18 ms, `git rev-parse` 20 ms, `tail -c` 16 ms -- so the
+# question is how few programs the candidate path can run. It runs 13 now, three fewer
+# than it shipped with (see the `date`, `ensure_queue_dir` and event-claim notes below,
+# each of which names the start it dropped), and that bought 20 ms on both builds. It is
+# not enough and nothing left is sheddable: on jq-1.6 the NO-candidate path alone costs
+# 59 ms, and writing a record cannot cost less than a third `jq` (17 ms), the `hash_of`
+# pipeline (`shasum`, `awk`, `tr`; 18 ms), two claim `mkdir`s and a `grep`. That floor is
+# above 100 ms. Shedding `git rev-parse` on top was measured too -- 106 ms median, still
+# over, and a bash walk-up for `.git` disagrees with `git rev-parse --show-toplevel` on
+# every symlinked path, which on macOS includes everything under /tmp. The only remaining
+# candidate is `hash_of`, and that one is not on the table: its digest is the shared name
+# insight-capture.sh looks a record up under, so changing it would trade 18 ms for a
+# silently doubled queue.
+#
+# The byte count is a detail beside all that, which is why tests/test_precompact.py pins
+# the process count and not a stopwatch: an assertion tight enough to catch one added
+# `jq` flakes on a loaded machine, and the pin does not.
 #
 # 256 KB is insight-capture.sh's bound and the "256 KB tail" issue #8 costed, and it is
 # what keeps the candidate path under the 100 ms that issue set. Raising it is one
@@ -152,8 +180,15 @@ case "$now" in ''|*[!0-9]*) exit 0 ;; esac
 
 # BSD date wants -r <seconds>, GNU date wants -d @<seconds>. Try both, in that order.
 stamp() { date -u -r "$now" "+$1" 2>/dev/null || date -u -d "@$now" "+$1" 2>/dev/null; }
-ts="$(stamp %Y-%m-%dT%H:%M:%SZ)"
-week="$(stamp %G-W%V)"
+# ONE `date`, not two. Both values come from the same instant, so a second start bought
+# nothing but 2-5 ms -- see the table by TAIL_BYTES, where the cost model is process
+# starts. `%n` is strftime's newline and is honoured by BSD and GNU date alike, so the two
+# values arrive on two lines and are read the way the payload's four fields are read
+# below: one `IFS= read` each, initialised first, for the same reason given there.
+ts=""; week=""
+{ IFS= read -r ts; IFS= read -r week; } <<STAMP_EOF
+$(stamp '%Y-%m-%dT%H:%M:%SZ%n%G-W%V')
+STAMP_EOF
 [ -z "$ts" ] && exit 0
 [ -z "$week" ] && exit 0
 
@@ -202,12 +237,17 @@ hash_of() {
 # insight-capture.sh keeps, so "nothing was captured" stays testable. The per-compaction
 # claim below needs the directory in order to claim anything at all, which is the second
 # reason it is taken only once candidates are in hand rather than at the top of the file.
+# `mkdir -p "$DIR/.claims"` makes BOTH directories, so the common path is ONE start and
+# not two. The fallback is unchanged and still costs two: if `.claims` cannot be made, try
+# `$DIR` alone before giving up, which is the case where the queue directory exists but is
+# read-only. Ordering it the other way round -- $DIR first, then .claims -- charged every
+# ordinary compaction for the failure path.
 ensure_queue_dir() {
   [ -d "$CLAIMS" ] && return 0
-  mkdir -p "$DIR" 2>/dev/null || return 1
   if mkdir -p "$DIR/.claims" 2>/dev/null; then
     CLAIMS="$DIR/.claims"
   else
+    mkdir -p "$DIR" 2>/dev/null || return 1
     CLAIMS="$DIR"
   fi
   return 0
@@ -345,21 +385,44 @@ candidates="$(tail -c "$TAIL_BYTES" "$tp" 2>/dev/null | jq -R -r -n '
 # skipped", which `skillinsight stats` reports as candidates seen more than once, into a
 # count of how many times the hook was wired. That is the same distortion insight-capture's
 # `quiet` flag exists to prevent, arriving from the other direction.
+#
+# THIS KEY IS NOT HASHED, and that is the one place this hook deliberately does not reach
+# for `hash_of`. A hash is a SHARED NAME -- it exists so insight-capture.sh can look the
+# same candidate up under it -- and nothing outside this file ever looks an event claim
+# up. Paying for one is three process starts (`shasum`, `awk`, `tr`; ~18 ms on jq-1.6's
+# machine, and `shasum` on macOS is a perl script) for a name only this script reads. So
+# the key is built with bash parameter expansion, which forks nothing: every character
+# outside `[A-Za-z0-9._-]` becomes `_`, and the result is capped well under the 255-byte
+# filename limit. Session and prompt ids are UUIDs, so the cap is slack rather than a
+# truncation anyone will meet.
+#
+# It cannot collide with a content claim in the same directory. `hash_of` ends in
+# `tr -c 'A-Za-z0-9' '_'`, so a content name can only ever hold letters, digits and
+# underscores -- while every event name starts with the literal `precompact-event-`, and
+# that hyphen is a character no content name can contain.
+#
+# One upgrade effect, and it is bounded: a compaction claimed under the old hashed name is
+# not recognised under the new one. The content claim inside queue_record still stops a
+# second row, so the only thing that can double is `.dedup-count`, once, for a compaction
+# in flight across the upgrade.
 if [ -n "$pid" ]; then
-  ev_key="$(printf 'precompact-event\t%s\t%s' "$sid" "$pid")"
+  ev_key="${sid}-${pid}"
 else
   ev_size="$(wc -c < "$tp" 2>/dev/null | tr -cd '0-9')"
   [ -z "$ev_size" ] && ev_size=0
-  ev_key="$(printf 'precompact-event\t%s\t%s' "$sid" "$ev_size")"
+  ev_key="${sid}-${ev_size}"
 fi
-ev_h="$(printf '%s' "$ev_key" | hash_of 2>/dev/null)"
-if [ -n "$ev_h" ]; then
-  ensure_queue_dir || exit 0
-  # Both placements, because ensure_queue_dir falls back to $DIR when .claims cannot be
-  # made; checking only the preferred one would re-capture on every delivery in that case.
-  if [ -d "$CLAIMS/$ev_h" ] || [ -d "$DIR/$ev_h" ]; then exit 0; fi
-  mkdir "$CLAIMS/$ev_h" 2>/dev/null || exit 0
-fi
+ev_h="precompact-event-${ev_key//[!A-Za-z0-9._-]/_}"
+ev_h="${ev_h:0:200}"
+# No `[ -n "$ev_h" ]` guard: it was there because `hash_of` could fail and hand back an
+# empty name, and the expansion above cannot -- it always carries the literal prefix. A
+# guard that can no longer fire is a guard nobody can test, so it is gone rather than
+# kept for symmetry.
+ensure_queue_dir || exit 0
+# Both placements, because ensure_queue_dir falls back to $DIR when .claims cannot be
+# made; checking only the preferred one would re-capture on every delivery in that case.
+if [ -d "$CLAIMS/$ev_h" ] || [ -d "$DIR/$ev_h" ]; then exit 0; fi
+mkdir "$CLAIMS/$ev_h" 2>/dev/null || exit 0
 
 # Only now is the project worth resolving. `git rev-parse` is a fork and most compactions
 # carry no candidate, so paying for it up front would be ~8 ms spent on nothing.

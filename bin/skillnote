@@ -5,7 +5,7 @@
 #                     [--why <text>] [--source session|verdict|forge]
 #                     [--project <dir>] [--remind]
 #                     [--keyword <k>]... [--path <glob>]... [--command "<literal cmd>"]...
-#                     [--lesson <sig>] [--attach <path>]...
+#                     [--lesson <sig>] [--attach <path>]... [--candidate <id>]
 #   skillnote promote <id> --to global [--project <dir>]
 #   skillnote list    [--scope project|global|memory|remind] [--json]
 #   skillnote remove  <id>
@@ -203,6 +203,13 @@ usage() {
   echo "' (attached: <rel>)' to the note line so it is findable from the line. A path"
   echo "outside the working tree or \$HOME is refused, and an existing attachment is never"
   echo "overwritten. Both refusals happen before a byte is copied."
+  echo
+  echo "--candidate <id> records the LINEAGE this note descends from -- the queue"
+  echo "candidate a \`skillinsight promote\` came from, or the session review that"
+  echo "produced it. It is written onto the ledger note row and onto the reminder row,"
+  echo "so hooks/remind.sh carries it into every delivery and bin/skillreport can count"
+  echo "the funnel as a join instead of an estimate. Nothing derives it: a note added by"
+  echo "hand has no lineage and is reported as UNATTRIBUTED rather than guessed at."
   echo
   echo "promote <id> --to global MOVES a project note up a level -- the same line, the"
   echo "same id, the same date -- along with its attachments directory and its reminder,"
@@ -671,6 +678,9 @@ ledger_reminder_of() { # <note id> -> a reminder id, or nothing
 cmd_add() {
   scope="project"; text=""; why=""; source=""; remind=0
   kw=""; pg=""; cm=""; lesson=""; ATT_LIST=""; LESSON_NORM=""
+  # The lineage id this note descends from. NEVER derived, only carried: see --candidate
+  # in usage(). Reset here because add_note and add_reminder both read it as a global.
+  cand=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --scope)   [ $# -ge 2 ] || die "--scope needs a value"; scope="$2"; shift 2 ;;
@@ -689,6 +699,12 @@ cmd_add() {
 "; shift 2 ;;
       --lesson)  [ $# -ge 2 ] && [ -n "$2" ] || die "--lesson needs a repeat-gate signature ('skillrepeat list' prints them)"
                  lesson="$2"; shift 2 ;;
+      --candidate) [ $# -ge 2 ] && [ -n "$2" ] || die "--candidate needs a lineage id"
+                 case "$2" in
+                   *[!A-Za-z0-9._-]*|"") die "--candidate takes a lineage id of [A-Za-z0-9._-] only (got '$2')" ;;
+                 esac
+                 [ "${#2}" -le 64 ] || die "--candidate id is longer than 64 characters"
+                 cand="$2"; shift 2 ;;
       --attach)  [ $# -ge 2 ] && [ -n "$2" ] || die "--attach needs a path"
                  ATT_LIST="$ATT_LIST$2
 "; shift 2 ;;
@@ -763,7 +779,11 @@ CMDEOF
     echo "skillnote: already recorded ($ar_id)"
     return 0
   fi
+  LEDGER_EXTRA="$(jq -n -c --arg cand "${cand:-}" \
+      '(if $cand == "" then {} else {candidate: $cand} end)' 2>/dev/null)"
+  [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
   ledger_append add reminder "$ar_id" "$ar_scope" "$REMINDERS" "$text" "$why" "$source" "$(project_root)"
+  LEDGER_EXTRA='{}'
   echo "skillnote: reminder recorded ($ar_id) in $REMINDERS"
   return 0
 }
@@ -786,12 +806,14 @@ write_reminder_row() { # reads ar_id, ar_scope, ar_cmds, kw, pg, text, source, l
   ar_row="$(printf '%s' "$kw" | jq -c -R -s --arg id "$ar_id" --arg text "$text" \
       --arg scope "$ar_scope" --arg source "$source" --argjson created "$(now)" \
       --arg paths "$pg" --argjson cmds "$ar_cmds" --arg lesson "${lesson:-}" \
+      --arg cand "${cand:-}" \
       'def lines: split("\n") | map(select(length > 0));
        {id:$id, text:$text,
         match:{keywords: lines, paths: ($paths | lines), commands: $cmds},
         scope:$scope, created:$created, hits:0}
        + (if $source == "" then {} else {source:$source} end)
-       + (if $lesson == "" then {} else {lesson_sig:$lesson} end)' 2>/dev/null)"
+       + (if $lesson == "" then {} else {lesson_sig:$lesson} end)
+       + (if $cand   == "" then {} else {candidate:$cand}      end)' 2>/dev/null)"
   [ -n "$ar_row" ] || die "could not build the reminder row (is jq healthy?)"
 
   mkdir -p "$STATE_ROOT" 2>/dev/null || die3 "cannot create $STATE_ROOT"
@@ -861,9 +883,11 @@ add_note() {
   fi
 
   LEDGER_EXTRA="$(jq -n -c --argjson att "$ATTACH_JSON" --arg les "$lesson" --arg rid "$an_rid" \
+      --arg cand "${cand:-}" \
       '(if ($att | length) == 0 then {} else {attachments: $att} end)
-       + (if $les == "" then {} else {lesson_sig: $les} end)
-       + (if $rid == "" then {} else {reminder_id: $rid} end)' 2>/dev/null)"
+       + (if $les  == "" then {} else {lesson_sig: $les}  end)
+       + (if $rid  == "" then {} else {reminder_id: $rid} end)
+       + (if $cand == "" then {} else {candidate: $cand}  end)' 2>/dev/null)"
   [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
   ledger_append add note "$an_id" "$scope" "$an_target" "$text" "$why" "$source" "$an_root"
   LEDGER_EXTRA='{}'
@@ -948,8 +972,9 @@ add_memory_note() { # <project root>
   rm -f "$am_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
 
   # readback:"via-index" is a MEASUREMENT and not a hope: docs/CLAUDE-CODE-BEHAVIOR.md.
-  LEDGER_EXTRA="$(jq -n -c --argjson att "$ATTACH_JSON" \
-      '(if ($att | length) == 0 then {} else {attachments: $att} end)' 2>/dev/null)"
+  LEDGER_EXTRA="$(jq -n -c --argjson att "$ATTACH_JSON" --arg cand "${cand:-}" \
+      '(if ($att | length) == 0 then {} else {attachments: $att} end)
+       + (if $cand == "" then {} else {candidate: $cand} end)' 2>/dev/null)"
   [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
   ledger_append add note "$am_id" memory "$am_file" "$text" "$why" "$source" "$am_root" via-index
   LEDGER_EXTRA='{}'

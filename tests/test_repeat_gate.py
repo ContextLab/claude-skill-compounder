@@ -59,6 +59,28 @@ SATURATING_CMD = ("gh api repos/o/r/issues --paginate --jq '.[]|.number' "
 SATURATING_ERR = ("Exit code 127\n"
                   + "gh: command not found; see https://cli.github.com/manual/ " * 6)
 
+# THE CANONICAL FAIL-THEN-FIX PAIR, AND IT SHARES CONTENT TOKENS ON PURPOSE.
+#
+# Since 2026-09-03 a SAME-TOOL `Bash` binding wants REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS (2) content
+# tokens in common with the call that failed -- THE SAME-TOOL RULE IS NOT EVIDENCE FOR A
+# SHELL, in the hook's header, and the live store that argued it. So a fixture pair like
+# `gh pr list` -> `curl -s https://x/y` shares NOTHING (the URL is masked to `<P>` before
+# tokens are taken, and `gh` and `pr` are under the three-character floor), and a test
+# built on one now measures the new rule turning it away rather than whatever it was
+# written for. Every pair below shares `list` and `limit`, which is what a real
+# fail-then-fix usually looks like: the same command, corrected.
+#
+# THE TWO `--search` SPELLINGS NORMALISE TO ONE SHAPE (`--search <S>`) and the other two do
+# not, which is what lets one fixture produce an AGREED recovery across two sessions and
+# another produce a DISPUTED one. Do not "tidy" them into each other.
+FAILING_CMD = "gh pr list --limit 5"
+FIX_CMD = "gh pr list --limit 5 --repo ContextLab/claude-skill-compounder"
+FIX_CMD_2 = "gh pr list --limit 5 --state open"
+FIX_SEARCH_A = 'gh pr list --limit 5 --search "author:alice"'
+FIX_SEARCH_B = 'gh pr list --limit 5 --search "author:bob"'
+# A success sharing NOTHING with FAILING_CMD: the shape the same-tool rule now refuses.
+UNRELATED_OK = "cat notes/OPEN-THREADS.md"
+
 
 class GateCase(unittest.TestCase):
     """Shared harness: one temp state root per test, real scripts, real payloads."""
@@ -654,18 +676,18 @@ class CallkeyCollisionTest(GateCase):
 class RecoveryTest(GateCase):
 
     def test_the_first_success_of_the_same_tool_is_recorded_as_the_recovery(self):
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
-        self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
         rec = [r for r in self.rows() if r["t"] == "recover"]
         self.assertEqual(len(rec), 1, self.rows())
-        self.assertEqual(rec[0]["cmd"], "curl -s https://api.github.com/x")
+        self.assertEqual(rec[0]["cmd"], FIX_CMD)
 
     def test_only_the_first_success_is_bound(self):
         """One recovery per armed failure. A session that goes on working must not
         attach every later command to the same signature."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
-        self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
-        self.tick(); self.run_hook(self.success("echo done", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD_2, "s1"))
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 1)
 
     def test_a_success_of_another_tool_does_not_bind(self):
@@ -673,7 +695,7 @@ class RecoveryTest(GateCase):
         turned away by the token overlap, which is the only thing standing between the two.
         The other tool has to be one the matcher delivers, or this passes for the wrong
         reason -- see `filler`."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
         self.tick(); self.run_hook(self.filler("s1"))
         self.assertEqual([r for r in self.rows() if r["t"] == "recover"], [])
 
@@ -682,55 +704,56 @@ class RecoveryTest(GateCase):
         recorded as the fix. Successes of any tool THIS HOOK IS WIRED FOR consume the
         window -- and nothing else is delivered, so the stream is far sparser than every
         tool call the session makes."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
         for i in range(5):
             self.tick()
             self.run_hook(self.filler("s1", i))
-        self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
         self.assertEqual([r for r in self.rows() if r["t"] == "recover"], [],
                          "a success six calls after the failure was recorded as the fix")
 
     def test_inside_the_window_it_is_still_the_fix(self):
         """Non-vacuity for the window test: two intervening calls, same everything else,
         and the recovery IS recorded."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
         for i in range(2):
             self.tick()
             self.run_hook(self.filler("s1", i))
-        self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 1)
 
     def test_the_window_is_configurable(self):
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"),
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"),
                                    REPEAT_RECOVERY_WINDOW=1)
         self.tick(); self.run_hook(self.filler("s1"), REPEAT_RECOVERY_WINDOW=1)
-        self.tick(); self.run_hook(self.success("curl -s https://x", "s1"),
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"),
                                    REPEAT_RECOVERY_WINDOW=1)
         self.assertEqual([r for r in self.rows() if r["t"] == "recover"], [])
 
     def test_the_plurality_recovery_appears_in_the_deny_reason(self):
-        """Two of three sessions used curl; one used something else. The refusal names
-        the one the plurality agreed on, and says how many sessions that was."""
-        for s, fix in (("s1", "curl -s https://api.github.com/repos/a/b/pulls"),
-                       ("s2", "curl -s https://api.github.com/repos/c/d/pulls"),
-                       ("s3", "python3 -c import urllib")):
-            self.tick(); self.run_hook(self.failure("gh pr list", s))
+        """Two of three sessions reached for the same shape; one used something else. The
+        refusal names the one the plurality agreed on, and says how many sessions that was.
+
+        The two agreeing fixes differ in a QUOTED argument, which the normaliser masks to
+        `<S>`, so they are one shape to the plurality while being two distinct commands on
+        the wire -- exactly the case the grouping is by `norm` for."""
+        for s, fix in (("s1", FIX_SEARCH_A), ("s2", FIX_SEARCH_B), ("s3", FIX_CMD_2)):
+            self.tick(); self.run_hook(self.failure(FAILING_CMD, s))
             self.tick(); self.run_hook(self.success(fix, s))
         self.tick()
-        reason = self.assert_denied(self.run_hook(self.attempt("gh pr list", "s9")))
+        reason = self.assert_denied(self.run_hook(self.attempt(FAILING_CMD, "s9")))
         self.assertIn("what worked instead, in 2 of them", reason)
-        self.assertIn("curl -s https://api.github.com/repos", reason)
-        self.assertNotIn("python3", reason)
+        self.assertIn("--search", reason)
+        self.assertNotIn("--state open", reason)
 
     def test_a_tie_names_no_recovery(self):
         """Announcing one of two equally-supported commands as `what worked` would be an
         invention, and this store's whole value is that it never invents."""
-        for s, fix in (("s1", "curl -s https://one.example/a"),
-                       ("s2", "python3 -c import_urllib")):
-            self.tick(); self.run_hook(self.failure("gh pr list", s))
+        for s, fix in (("s1", FIX_CMD), ("s2", FIX_CMD_2)):
+            self.tick(); self.run_hook(self.failure(FAILING_CMD, s))
             self.tick(); self.run_hook(self.success(fix, s))
         self.tick()
-        reason = self.assert_denied(self.run_hook(self.attempt("gh pr list", "s9")))
+        reason = self.assert_denied(self.run_hook(self.attempt(FAILING_CMD, "s9")))
         self.assertIn("none of them is agreed", reason)
         self.assertNotIn("what worked instead", reason)
 
@@ -745,7 +768,10 @@ class RecoveryTest(GateCase):
             self.tick(); self.run_hook(self.failure("gh pr list", s, error=net))
             self.tick(); self.run_hook(self.success("gh pr list", s))
         # the recovery row IS written -- the recovery arm cannot know, and the exclusion
-        # belongs where the refusal is decided, on the whole record.
+        # belongs where the refusal is decided, on the whole record. It is written even
+        # though `gh pr list` carries ONE content token and the same-tool rule now wants
+        # two: an exact self-recovery is carved out of that floor precisely so this
+        # exclusion keeps its input (THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL).
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 2)
         self.tick()
         self.assert_allowed(self.run_hook(self.attempt("gh pr list", "f3")))
@@ -755,9 +781,8 @@ class RecoveryTest(GateCase):
         different command. The identical call must not be named, and the one session that
         proved the call can work is enough to stop the refusal."""
         net = "Exit code 1\nerror connecting to api.github.com: connection reset"
-        for s, fix in (("f1", "gh pr list"), ("f2", "gh pr list"),
-                       ("f3", "curl -s https://api.github.com/repos/a/b/pulls")):
-            self.tick(); self.run_hook(self.failure("gh pr list", s, error=net))
+        for s, fix in (("f1", FAILING_CMD), ("f2", FAILING_CMD), ("f3", FIX_CMD)):
+            self.tick(); self.run_hook(self.failure(FAILING_CMD, s, error=net))
             self.tick(); self.run_hook(self.success(fix, s))
         self.tick()
         self.assert_allowed(self.run_hook(self.attempt("gh pr list", "f9")))
@@ -767,14 +792,14 @@ class RecoveryTest(GateCase):
         the failing call, the very same shape still refuses and still names the fix."""
         net = "Exit code 1\nerror connecting to api.github.com: connection reset"
         for s in ("f1", "f2"):
-            self.tick(); self.run_hook(self.failure("gh pr list", s, error=net))
+            self.tick(); self.run_hook(self.failure(FAILING_CMD, s, error=net))
             self.tick()
-            self.run_hook(self.success("curl -s https://api.github.com/repos/a/b/pulls", s))
+            self.run_hook(self.success(FIX_CMD, s))
         self.tick()
-        reason = self.assert_denied(self.run_hook(self.attempt("gh pr list", "f3")))
+        reason = self.assert_denied(self.run_hook(self.attempt(FAILING_CMD, "f3")))
         self.assertIn("what worked instead, in 2 of them", reason)
-        self.assertIn("curl -s https://api.github.com/repos", reason)
-        self.assertNotIn("\n  gh pr list", reason)
+        self.assertIn("--repo ContextLab/claude-skill-compounder", reason)
+        self.assertNotIn("\n  gh pr list --limit <N>\n", reason)
 
     def test_the_cli_agrees_that_a_self_recovered_signature_does_not_refuse(self):
         """A CLI that reported `refuses` for a signature the gate lets through is exactly
@@ -812,9 +837,9 @@ class DoubleDeliveryTest(GateCase):
                          self.rows())
 
     def test_a_repeated_success_event_writes_exactly_one_recovery(self):
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
         self.tick()
-        p = self.success("curl -s https://x/y", "s1", tuid="toolu_same_s")
+        p = self.success(FIX_CMD, "s1", tuid="toolu_same_s")
         self.run_hook(p)
         self.run_hook(p)
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 1,
@@ -825,13 +850,13 @@ class DoubleDeliveryTest(GateCase):
         twice would halve REPEAT_RECOVERY_WINDOW silently, which is exactly the defect
         the claim exists to prevent -- and it would be invisible, because the recovery
         row count would still look right."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
         for i in range(2):
             self.tick()
             p = self.filler("s1", i, tool_use_id="toolu_fill_dup_%d" % i)
             self.run_hook(p)
             self.run_hook(p)          # the duplicate delivery
-        self.tick(); self.run_hook(self.success("curl -s https://x/y", "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 1,
                          "four deliveries of two calls burned the window: %r" % self.rows())
 
@@ -1412,9 +1437,12 @@ class MatcherDeliveryTest(GateCase):
 class CliTest(GateCase):
 
     def seed(self):
-        for s, fix in (("s1", "curl -s https://api.github.com/repos/a/b/pulls"),
-                       ("s2", "curl -s https://api.github.com/repos/c/d/pulls")):
-            self.tick(); self.run_hook(self.failure("gh pr list", s))
+        """Two sessions, one signature, and two DIFFERENT commands that normalise to ONE
+        shape -- so the plurality agrees and the CLI has a recovery to print. The pair
+        shares `list` and `limit` with the failure, which is what the same-tool rule wants
+        since 2026-09-03; see the constants at the top of this file."""
+        for s, fix in (("s1", FIX_SEARCH_A), ("s2", FIX_SEARCH_B)):
+            self.tick(); self.run_hook(self.failure(FAILING_CMD, s))
             self.tick(); self.run_hook(self.success(fix, s))
         return [r for r in self.rows() if r["t"] == "fail"][0]["sig"]
 
@@ -1437,7 +1465,7 @@ class CliTest(GateCase):
         self.assertEqual(got[0]["sig"], sig)
         self.assertEqual(got[0]["sessions"], 2)
         self.assertTrue(got[0]["refuses"])
-        self.assertIn("curl -s https://api.github.com/repos", got[0]["recovery"])
+        self.assertIn("--search", got[0]["recovery"])
 
     # ---------------------------------------------------------------- column layout
     # `list` is a fixed-width table and the header is the ruler. Both tests below assert
@@ -1603,8 +1631,12 @@ class CliTest(GateCase):
         self.tick(); self.run_hook(self.failure("curl -s https://x/y", "t1"))
         self.tick(); self.run_hook(self.failure("curl -s https://x/y", "t2"))
         self.tick(); self.run_hook(self.success("curl -s https://x/y", "t2"))
-        for sess, fix in (("d1", "gh pr list --json url"), ("d2", "gh pr status")):
-            self.tick(); self.run_hook(self.failure("gh pr view 1", sess))
+        # Two sessions, two DIFFERENT shapes, both genuinely related to the failure --
+        # which the same-tool rule requires since 2026-09-03 and which is what makes this
+        # signature `disputed` rather than simply unrecovered.
+        for sess, fix in (("d1", "gh pr view 1 --json title,url"),
+                          ("d2", "gh pr view 1 --json body")):
+            self.tick(); self.run_hook(self.failure("gh pr view 1 --json title", sess))
             self.tick(); self.run_hook(self.success(fix, sess))
 
         # TOOL and SIGNATURE at their widest, and SESS wider than its header: 10000
@@ -1659,8 +1691,8 @@ class CliTest(GateCase):
         r = self.run_cli("show", sig)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("gh: command not found", r.stdout)
-        self.assertIn("curl -s https://api.github.com/repos/a/b/pulls", r.stdout)
-        self.assertIn("curl -s https://api.github.com/repos/c/d/pulls", r.stdout)
+        self.assertIn(FIX_SEARCH_A, r.stdout)
+        self.assertIn(FIX_SEARCH_B, r.stdout)
 
     def test_show_json(self):
         sig = self.seed()
@@ -1702,10 +1734,10 @@ class CliTest(GateCase):
     def test_a_tombstone_suppresses_the_deny(self):
         sig = self.seed()
         self.tick()
-        self.assert_denied(self.run_hook(self.attempt("gh pr list", "s8")))
+        self.assert_denied(self.run_hook(self.attempt(FAILING_CMD, "s8")))
         self.run_cli("forget", sig, SKILLREPEAT_NOW=self.tick(100))
         self.tick()
-        self.assert_allowed(self.run_hook(self.attempt("gh pr list", "s9")))
+        self.assert_allowed(self.run_hook(self.attempt(FAILING_CMD, "s9")))
         self.assertNotIn("refuses", self.run_cli("list").stdout)
 
     def test_forgetting_is_re_armable(self):
@@ -1838,9 +1870,9 @@ class CostTest(GateCase):
         # is what a first draft of this test did, and it reported 0.08s for a query that
         # never saw the store. The PreToolUse below runs at the ordinary cap.
         big = 8 * 4194304
-        self.tick(); self.run_hook(self.failure("gh pr list --limit 5", "s999"),
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s999"),
                                    REPEAT_GATE_MAX_BYTES=big)
-        self.tick(); self.run_hook(self.success("curl -s https://x/y", "s999"),
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s999"),
                                    REPEAT_GATE_MAX_BYTES=big)
         self.assertGreater(os.path.getsize(self.store), size,
                            "the store was rotated out from under the measurement")
@@ -2373,12 +2405,12 @@ class RefuseArmDefaultTest(GateCase):
 
     def test_the_recovery_arm_still_records_with_the_arm_off(self):
         self.tick()
-        self.run_hook(self.failure("gh pr list --limit 5", "s1"), REPEAT_GATE_REFUSE=None)
+        self.run_hook(self.failure(FAILING_CMD, "s1"), REPEAT_GATE_REFUSE=None)
         self.tick()
-        self.run_hook(self.success("brew install gh", "s1"), REPEAT_GATE_REFUSE=None)
+        self.run_hook(self.success(FIX_CMD, "s1"), REPEAT_GATE_REFUSE=None)
         recs = [x for x in self.rows() if x["t"] == "recover"]
         self.assertEqual(len(recs), 1, "the recovery arm stopped recording: %r" % self.rows())
-        self.assertEqual(recs[0]["cmd"], "brew install gh")
+        self.assertEqual(recs[0]["cmd"], FIX_CMD)
 
     def test_both_argv_doors_answer_with_the_arm_off(self):
         """`--norm-of` is called by hooks/remind.sh and `--eligible-of` by two CLIs.
@@ -2635,8 +2667,8 @@ class CrossToolRecoveryTest(GateCase):
     def test_a_same_tool_recovery_still_binds_and_is_not_marked_cross_tool(self):
         """The rule that was here first, unchanged, and NOT relabelled: a reader weighing
         the two kinds of evidence has to be able to tell them apart."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
-        self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
         rec = self.recoveries()
         self.assertEqual(len(rec), 1)
         self.assertNotIn("cross_tool", rec[0], rec[0])
@@ -2688,9 +2720,10 @@ class CrossToolRecoveryTest(GateCase):
         self.run_hook(self.success("gh repo view claude-skill-compounder", "s1"),
                       REPEAT_RECOVERY_MIN_TOKENS=0)
         self.assertEqual(self.recoveries(), [])
-        self.tick(); self.run_hook(self.failure("gh pr list", "s2"),
+        # ...and the same-tool rule, which has its OWN threshold knob, is untouched by it.
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s2"),
                                    REPEAT_RECOVERY_MIN_TOKENS=0)
-        self.tick(); self.run_hook(self.success("gh pr status", "s2"),
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s2"),
                                    REPEAT_RECOVERY_MIN_TOKENS=0)
         self.assertEqual(len(self.recoveries()), 1, "the same-tool rule was switched off")
 
@@ -2755,6 +2788,293 @@ class CrossToolRecoveryTest(GateCase):
         self.assertEqual(len(self.recoveries()), 1, self.rows())
 
 
+# ============================================================== the same-tool rule
+class SameToolBindingTest(GateCase):
+    """A SHELL'S TOOL NAME IS NOT EVIDENCE, and three defects observed together in one
+    live session on 2026-09-03 (state root ~/.claude/skill-compounder, session f288cf8c).
+
+    A `gh issue view <N> --comments` call exited 1 on a deprecation warning. The store then
+    held FOUR byte-identical `recover` rows under ONE tool_use_id naming
+    `cat notes/OPEN-THREADS.md` as the fix, and the statement the session was given named a
+    THIRD command, `TEST_TIMEOUT=... ./run_tests.sh`. Each assertion below is one of those.
+
+    The payloads are the live ones, shortened only where the length carries nothing."""
+
+    GH_DEPRECATION = ("Exit code 1\nGraphQL: Projects (classic) is being deprecated in "
+                      "favor of the new Projects experience, see: "
+                      "https://github.blog/changelog/x. (repository.issue.projectCards)")
+    FAILING = "gh issue view 43 --comments 2>&1"
+    # Shares `issue`, `view` and `comments` with the failure: the real fix, which is the
+    # same call with the flag that avoids the deprecated field.
+    REAL_FIX = "gh issue view 43 --comments --json comments --jq '.comments[].body'"
+    # Shares NOTHING with it. `cat`, `notes`, `open`, `threads` against `issue`, `view`,
+    # `comments` -- and it is the command the live store recorded as the recovery.
+    UNRELATED = "cat notes/OPEN-THREADS.md 2>&1"
+
+    def recoveries(self):
+        return [r for r in self.rows() if r["t"] == "recover"]
+
+    def context_of(self, r):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if not r.stdout.strip():
+            return None
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    def arm(self, n, session="S", cmd=None):
+        """`n` failures of ONE signature, each a distinct call with its own tool_use_id --
+        which is what the live session did, and what arms `n` separate pending lines."""
+        for i in range(n):
+            self.tick()
+            # The tool_use_id carries the CLOCK as well as the index: `claim_once` drops a
+            # repeat of one id as the duplicate delivery, so a second arming round reusing
+            # `toolu_fail_0` would silently record nothing at all.
+            self.run_hook(self.failure(cmd or (self.FAILING.replace("43", str(30 + i))),
+                                       session, error=self.GH_DEPRECATION,
+                                       tuid="toolu_fail_%d_%d" % (self.clock, i)))
+
+    # ------------------------------------------------------- (2) the duplicated rows
+    def test_many_armed_failures_of_one_signature_write_one_recovery_row(self):
+        """DEFECT: N failures of one signature arm N pending lines, and the success bound
+        every one of them and wrote a row for each -- four byte-identical rows under one
+        tool_use_id on the live store. The pending lines are still consumed one apiece;
+        what is de-duplicated is the ROW."""
+        self.arm(4)
+        self.tick()
+        self.run_hook(self.success(self.REAL_FIX, "S", tuid="toolu_fix"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, "one success wrote %d rows: %r" % (len(rec), rec))
+        self.assertEqual(rec[0]["cmd"], self.REAL_FIX)
+
+    def test_sig_and_tuid_together_are_unique_in_the_store(self):
+        """The invariant the row de-duplication buys, stated the way the live store was
+        interrogated: `jq recover | (sig, tuid) | uniq -c` must print nothing above 1."""
+        self.arm(3)
+        self.tick()
+        p = self.success(self.REAL_FIX, "S", tuid="toolu_fix")
+        self.run_hook(p)
+        self.run_hook(p)                      # ...and the duplicate delivery on top
+        seen = {}
+        for r in self.recoveries():
+            key = (r["sig"], r["tuid"])
+            seen[key] = seen.get(key, 0) + 1
+        self.assertTrue(seen, "nothing bound at all")
+        self.assertEqual([k for k, v in seen.items() if v > 1], [],
+                         "duplicate (sig, tuid) rows: %r" % seen)
+
+    def test_two_distinct_signatures_bound_by_one_success_still_write_two_rows(self):
+        """NON-VACUITY for the de-duplication: it is per SIGNATURE, not per event. Two
+        genuinely different failures that the same success recovers are two recoveries."""
+        self.arm(2)
+        self.tick()
+        self.run_hook(self.failure("gh issue view 43 --comments --json body", "S",
+                                   error="Exit code 1\nunknown field: body",
+                                   tuid="toolu_other"))
+        self.tick()
+        self.run_hook(self.success(self.REAL_FIX, "S", tuid="toolu_fix"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 2, rec)
+        self.assertEqual(len({r["sig"] for r in rec}), 2)
+
+    # ------------------------------------------- (3) the statement and the row agreeing
+    def test_the_statement_names_the_call_the_row_records(self):
+        self.arm(1)
+        self.tick()
+        ctx = self.context_of(self.run_hook(self.success(self.REAL_FIX, "S",
+                                                         tuid="toolu_fix")))
+        self.assertIsNotNone(ctx, "the arm bound a recovery and said nothing")
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1)
+        worked = [ln for ln in ctx.split("\n") if ln.strip().startswith("worked:")]
+        self.assertEqual(len(worked), 1, ctx)
+        self.assertIn(rec[0]["norm"], worked[0],
+                      "the statement names a different call from the row it belongs to:\n"
+                      "  statement: %s\n  row norm:  %s" % (worked[0], rec[0]["norm"]))
+
+    def test_a_second_recovery_does_not_rewrite_the_statement_already_told(self):
+        """DEFECT, and the exact shape observed live: a LATER, genuinely different recovery
+        of the same signature rewrote the marker file while the `said-` claim stopped the
+        session being told again -- so the lesson gate would later quote a command the
+        session had never been shown. First binding wins, because the first binding is the
+        one the session was told about."""
+        self.arm(1)
+        self.tick()
+        first = self.context_of(self.run_hook(self.success(self.REAL_FIX, "S",
+                                                           tuid="toolu_fix1")))
+        self.assertIsNotNone(first)
+        self.arm(1, cmd=self.FAILING)          # arm the SAME signature again
+        self.tick()
+        second_fix = "gh issue view 43 --comments --json comments --jq '.comments[].url'"
+        self.assertIsNone(self.context_of(self.run_hook(
+            self.success(second_fix, "S", tuid="toolu_fix2"))),
+            "the session was told twice for one signature")
+        self.assertEqual(len(self.recoveries()), 2, "the second recovery lost its row")
+        markers = os.path.join(self.state, "repeats", "lessons", "S")
+        names = [n for n in os.listdir(markers) if n.startswith("s-")]
+        self.assertEqual(len(names), 1, names)
+        stored = open(os.path.join(markers, names[0]), encoding="utf-8").read()
+        self.assertEqual(stored, first,
+                         "the stored statement drifted from the one the session was told")
+
+    def test_every_signature_a_success_bound_gets_its_own_marker(self):
+        """DEFECT: the marker was written once, after the loop, for the FIRST bound
+        signature only -- so a success that bound two wrote two rows and left the second
+        invisible to the lesson gate, which reads its signatures off these filenames."""
+        self.arm(1)
+        self.tick()
+        self.run_hook(self.failure("gh issue view 43 --comments --json body", "S",
+                                   error="Exit code 1\nunknown field: body",
+                                   tuid="toolu_other"))
+        self.tick()
+        self.run_hook(self.success(self.REAL_FIX, "S", tuid="toolu_fix"))
+        sigs = {r["sig"] for r in self.recoveries()}
+        self.assertEqual(len(sigs), 2, self.recoveries())
+        markers = os.path.join(self.state, "repeats", "lessons", "S")
+        names = {n[2:] for n in os.listdir(markers) if n.startswith("s-")}
+        self.assertEqual(names, {re.sub(r"[^A-Za-z0-9._-]", "_", x) for x in sigs},
+                         "a bound signature has a row and no marker: %r vs %r"
+                         % (names, sigs))
+
+    # ------------------------------------------------------- the rule itself
+    def test_an_unrelated_bash_success_does_not_bind(self):
+        """The live binding, verbatim. `Bash` following `Bash` is not evidence of anything,
+        and these two share no content token at all."""
+        self.arm(4)
+        self.tick()
+        self.run_hook(self.success(self.UNRELATED, "S", tuid="toolu_cat"))
+        self.assertEqual(self.recoveries(), [],
+                         "an unrelated command was recorded as the fix: %r" % self.rows())
+
+    def test_an_unrelated_success_says_nothing_to_the_session(self):
+        self.arm(1)
+        self.tick()
+        self.assertIsNone(self.context_of(
+            self.run_hook(self.success(self.UNRELATED, "S", tuid="toolu_cat"))))
+
+    def test_an_unrelated_success_leaves_the_failure_armed_for_the_real_fix(self):
+        """THE COST THAT IS NOT NOISE. A binding CONSUMES its armed failure, so under the
+        old rule the unrelated success ate the arming and the genuine fix arriving two
+        calls later could never be recorded at all. On the live store one `cat` disarmed
+        four `gh issue view` failures."""
+        self.arm(1)
+        self.tick(); self.run_hook(self.success(self.UNRELATED, "S", tuid="toolu_cat"))
+        self.tick(); self.run_hook(self.success(self.REAL_FIX, "S", tuid="toolu_fix"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertEqual(rec[0]["cmd"], self.REAL_FIX)
+
+    def test_a_related_success_binds_and_is_not_marked_cross_tool(self):
+        self.arm(1)
+        self.tick()
+        self.run_hook(self.success(self.REAL_FIX, "S", tuid="toolu_fix"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertNotIn("cross_tool", rec[0], rec[0])
+
+    def test_an_exact_self_recovery_binds_below_the_threshold(self):
+        """THE CARVE-OUT, and it is load-bearing rather than a convenience: the refusal
+        arm's self-recovery exclusion is built on these rows, and `pwd` carries ONE content
+        token, so no positive floor could ever admit it."""
+        self.tick()
+        self.run_hook(self.failure("pwd", "S", error="Exit code 1\npwd: cannot access",
+                                   tuid="toolu_pwd_f"))
+        self.tick()
+        self.run_hook(self.success("pwd", "S", tuid="toolu_pwd_s"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, "an exact self-recovery was turned away: %r"
+                         % self.rows())
+        self.assertEqual(rec[0]["norm"], "pwd")
+
+    def test_one_shared_token_is_not_enough_for_a_shell(self):
+        """NON-VACUITY for the floor: `echo` alone in common -- the single commonest
+        accidental overlap in the live store, 11 of its 31 one-token bindings -- binds
+        nothing."""
+        self.tick()
+        self.run_hook(self.failure("echo start; gh issue view 43 --comments", "S",
+                                   error=self.GH_DEPRECATION, tuid="toolu_e1"))
+        self.tick()
+        self.run_hook(self.success("echo done; cat notes/OPEN-THREADS.md", "S",
+                                   tuid="toolu_e2"))
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    def test_the_threshold_is_REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS(self):
+        """Counted as a DELTA in a fresh session each time: the store is append-only, so a
+        running total would report the previous round's row as this round's binding."""
+        def bound_under(value, session):
+            before = len(self.recoveries())
+            self.tick()
+            self.run_hook(self.failure(self.FAILING, session, error=self.GH_DEPRECATION,
+                                       tuid="toolu_%s_f" % session),
+                          REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=value)
+            self.tick()
+            self.run_hook(self.success(self.UNRELATED, session,
+                                       tuid="toolu_%s_s" % session),
+                          REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=value)
+            return len(self.recoveries()) - before
+        self.assertEqual(bound_under(2, "a"), 0, "the shipped default bound an unrelated "
+                                                 "command")
+        self.assertEqual(bound_under(0, "b"), 1, "0 must restore the unconditional "
+                                                 "same-tool binding")
+        self.assertEqual(bound_under(1, "c"), 0, "zero shared tokens cleared a floor of 1")
+        # A misspelling lands on the documented default rather than switching the rule off.
+        self.assertEqual(bound_under("two", "d"), 0)
+
+    def test_the_threshold_admits_a_pair_that_clears_it(self):
+        """NON-VACUITY for the knob: the same session shape with a RELATED success binds
+        at every one of those settings."""
+        for i, value in enumerate((2, 0, 1, "two")):
+            session = "n%d" % i
+            before = len(self.recoveries())
+            self.tick()
+            self.run_hook(self.failure(self.FAILING, session, error=self.GH_DEPRECATION,
+                                       tuid="toolu_%s_f" % session),
+                          REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=value)
+            self.tick()
+            self.run_hook(self.success(self.REAL_FIX, session,
+                                       tuid="toolu_%s_s" % session),
+                          REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=value)
+            self.assertEqual(len(self.recoveries()) - before, 1,
+                             "a related fix did not bind at %r" % (value,))
+
+    def test_a_non_shell_tool_still_binds_on_the_tool_alone(self):
+        """`mcp__docs__fetch` names its operation in its own name, so a success of it after
+        a failure of it is the same operation by construction. Only `Bash` is content
+        tested; `shell_tool()` is the one place that decides which is which."""
+        self.tick()
+        self.run_hook(self.failure({"page": "alpha"}, "S", tool="mcp__docs__fetch",
+                                   error="Exit code 1\nHTTP 500", tuid="toolu_m1"))
+        self.tick()
+        self.run_hook(self.success({"slug": "zulu"}, "S", tool="mcp__docs__fetch",
+                                   tuid="toolu_m2"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, "a same-tool MCP recovery stopped binding: %r"
+                         % self.rows())
+        self.assertNotIn("cross_tool", rec[0], rec[0])
+
+    def test_norm_of_is_unchanged_by_the_new_knob(self):
+        """`--norm-of` is a pure function of its stdin and reads no store. The knob must
+        not reach it: bin/skillrepeat and bin/skillreport compare its output BYTE FOR BYTE
+        against signatures already in the store, so a shift in either direction would make
+        every stored signature unmatchable."""
+        corpus = [self.FAILING, self.REAL_FIX, self.UNRELATED, "pwd",
+                  FAILING_CMD, FIX_CMD, SATURATING_CMD,
+                  "cd /tmp && python3 - <<'EOF'\nprint(1)\nEOF"]
+        baseline = []
+        for cmd in corpus:
+            r = subprocess.run(["bash", HOOK, "--norm-of", "Bash"], input=cmd,
+                               capture_output=True, text=True, env=self.env(), timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            baseline.append(r.stdout)
+        self.assertTrue(all(baseline), baseline)
+        for value in (0, 1, 2, 9, "two"):
+            for cmd, want in zip(corpus, baseline):
+                r = subprocess.run(["bash", HOOK, "--norm-of", "Bash"], input=cmd,
+                                   capture_output=True, text=True, timeout=60,
+                                   env=self.env(REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=value))
+                self.assertEqual(r.stdout, want,
+                                 "--norm-of moved at REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=%r for "
+                                 "%r" % (value, cmd))
+
+
 # ============================================================== the lesson statement
 class LessonStatementTest(GateCase):
     """THE FIRST TIME: SAY IT. A recovery used to write a row into a file nobody reads
@@ -2769,8 +3089,7 @@ class LessonStatementTest(GateCase):
         self.assertEqual(hso["hookEventName"], "PostToolUse")
         return hso["additionalContext"]
 
-    def recover_once(self, session="s1", cmd="gh pr list --limit 5",
-                     fix="curl -s https://api.github.com/repos/a/b/pulls", **kw):
+    def recover_once(self, session="s1", cmd=FAILING_CMD, fix=FIX_CMD, **kw):
         self.tick(); self.run_hook(self.failure(cmd, session, **kw))
         self.tick()
         return self.run_hook(self.success(fix, session))
@@ -2781,7 +3100,7 @@ class LessonStatementTest(GateCase):
         sig = [r for r in self.rows() if r["t"] == "fail"][0]["sig"]
         self.assertIn("gh pr list --limit <N>", ctx)
         self.assertIn("gh: command not found", ctx)
-        self.assertIn("curl -s https:/<P>/pulls", ctx)
+        self.assertIn("--repo ContextLab/claude-skill-compounder", ctx)
         self.assertIn("skillnote add --lesson %s" % sig, ctx)
         self.assertIn("skillrepeat dismiss %s --why" % sig, ctx)
 
@@ -2825,16 +3144,16 @@ class LessonStatementTest(GateCase):
         session writes its row and says nothing: the session has already been told."""
         first = self.context_of(self.recover_once())
         self.assertIsNotNone(first)
-        second = self.context_of(self.recover_once(fix="python3 -c import urllib"))
+        second = self.context_of(self.recover_once(fix=FIX_CMD_2))
         self.assertIsNone(second, "the arm said it twice in one session:\n%s" % second)
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 2)
 
     def test_a_double_delivered_success_says_it_once(self):
         """Both wirings deliver every event twice. The duplicate is dropped by the arm's
         own claim before it reaches the statement, and this pins that it stays dropped."""
-        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1"))
         self.tick()
-        p = self.success("curl -s https://x/y", "s1", tuid="toolu_same_s")
+        p = self.success(FIX_CMD, "s1", tuid="toolu_same_s")
         self.assertIsNotNone(self.context_of(self.run_hook(p)))
         self.assertIsNone(self.context_of(self.run_hook(p)))
 
@@ -2867,8 +3186,7 @@ class LessonGateTest(GateCase):
     def sig(self):
         return [r for r in self.rows() if r["t"] == "fail"][0]["sig"]
 
-    def fail_then_fix(self, session, cmd="gh pr list --limit 5",
-                      fix="curl -s https://api.github.com/repos/a/b/pulls", **kw):
+    def fail_then_fix(self, session, cmd=FAILING_CMD, fix=FIX_CMD, **kw):
         self.tick(); self.run_hook(self.failure(cmd, session, error=self.ERR), **kw)
         self.tick(); self.run_hook(self.success(fix, session), **kw)
 
@@ -2892,7 +3210,7 @@ class LessonGateTest(GateCase):
         reason = self.assert_lesson_deny(self.probe("s2"))
         self.assertIn("gh pr list --limit <N>", reason)
         self.assertIn("gh: command not found", reason)
-        self.assertIn("curl -s https:/<P>/pulls", reason)
+        self.assertIn("--repo ContextLab/claude-skill-compounder", reason)
         self.assertIn("skillnote add --lesson %s" % self.sig(), reason)
         self.assertIn("skillrepeat dismiss %s" % self.sig(), reason)
         self.assertIn("lifts the moment either command has been run", reason)
