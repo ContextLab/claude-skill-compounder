@@ -6,6 +6,7 @@ and reads the file back off disk."""
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -22,9 +23,71 @@ FOREIGN_HOOK = {"hooks": [{"type": "command", "command": "/usr/bin/python3 /some
 FOREIGN_STATUSLINE = {"type": "command", "command": 'printf "my original status line"'}
 
 
-class InstallerTest(unittest.TestCase):
+def local_surfer_source():
+    """A real claude-history-surfer git checkout to clone FROM, with no network.
+
+    The dependency step really clones and really runs history-surfer's own installer, so
+    the only honest source is a real checkout of it. Four places are tried, in the order
+    of how much they prove: an explicit override, the checkout whatever `surfer` is on
+    PATH resolves back to, and the two default homes its own install.sh uses. Returns
+    None when the machine has none, which is a machine where this cannot be tested
+    without the network.
+    """
+    seen = []
+    override = os.environ.get("SKILL_COMPOUNDER_SURFER_SRC", "").strip()
+    if override:
+        seen.append(Path(override).expanduser())
+    on_path = shutil.which("surfer")
+    if on_path:
+        seen.append(Path(os.path.realpath(on_path)).parent.parent)
+    seen.append(Path.home() / "claude-history-surfer")
+    seen.append(Path.home() / ".claude" / "history-surfer-app")
+    for cand in seen:
+        if (cand / "scripts" / "setup.py").is_file() and (cand / ".git").exists():
+            return cand
+    return None
+
+
+SURFER_SRC = local_surfer_source()
+# Resolved at import: SurferTest.setUp narrows PATH, so asking again inside a
+# test would answer about the narrowed one and not about the machine.
+SURFER_ON_PATH = shutil.which("surfer")
+# The checkout that `surfer` resolves back into, when it is one. `_surfer_from_path`
+# makes the same walk; this is the test's independent copy of the question "is there a
+# real history-surfer behind the CLI on this machine's PATH".
+SURFER_PATH_CHECKOUT = None
+if SURFER_ON_PATH:
+    _cand = Path(os.path.realpath(SURFER_ON_PATH)).parent.parent
+    if (_cand / "scripts" / "setup.py").is_file() and (_cand / "history_surfer").is_dir():
+        SURFER_PATH_CHECKOUT = _cand
+
+
+class NoSurferMixin(object):
+    """Pin the history-surfer step OFF for every test that is not about it.
+
+    `install()` now installs a dependency, and a test that is checking hook wiring has no
+    business cloning a repository over the network to do it -- on a machine with no
+    `surfer` this class of test would make one clone per install call. The switch is the
+    shipped one (`SKILL_COMPOUNDER_NO_SURFER`), read by the real code path, which is the
+    same discipline every other pin in this suite follows. SurferTest below sets it back.
+    """
+
+    def pin_surfer_off(self):
+        before = os.environ.get(installer.SURFER_SKIP_ENV)
+        os.environ[installer.SURFER_SKIP_ENV] = "1"
+
+        def restore():
+            if before is None:
+                os.environ.pop(installer.SURFER_SKIP_ENV, None)
+            else:
+                os.environ[installer.SURFER_SKIP_ENV] = before
+        self.addCleanup(restore)
+
+
+class InstallerTest(NoSurferMixin, unittest.TestCase):
 
     def setUp(self):
+        self.pin_surfer_off()
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.claude = root / "claude"
@@ -287,12 +350,18 @@ class InstallerTest(unittest.TestCase):
 
     def test_the_reminder_hook_is_wired_after_the_gates_that_can_deny(self):
         """Order is load-bearing: tests/test_plugin.py compares the two wirings'
-        matcher lists POSITIONALLY, so a reordering here is a drift failure there."""
+        matcher lists POSITIONALLY, so a reordering here is a drift failure there.
+
+        Five entries now, and the shape of the list is the claim: the three that can DENY
+        a tool call come first, and the two that only state a fact -- the reminder and the
+        mission -- come after them. A gate that ran after a hook which had already emitted
+        context would spend that context on a call it then refused.
+        """
         self.do_install()
         pre = [h["command"] for g in self.read()["hooks"]["PreToolUse"] for h in g["hooks"]]
         names = [c.rsplit("/", 1)[-1].strip('"') for c in pre]
         self.assertEqual(names, ["claim-gate.sh", "doc-gate.sh", "repeat-gate.sh",
-                                 "remind.sh"])
+                                 "remind.sh", "mission.sh"])
 
     def test_installing_twice_leaves_one_reminder_entry_per_event(self):
         self.do_install()
@@ -546,7 +615,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("not ours", real.read_text(encoding="utf-8"))
 
 
-class DoctrineTest(unittest.TestCase):
+class DoctrineTest(NoSurferMixin, unittest.TestCase):
     """The doctrine stanza the hooks refer to, written where the model actually reads it.
 
     The hooks fire reminders that name three habits; before this existed those habits
@@ -567,6 +636,7 @@ class DoctrineTest(unittest.TestCase):
         self.claude.mkdir()
         self.bin.mkdir()
         self.md = self.claude / "CLAUDE.md"
+        self.pin_surfer_off()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -758,6 +828,541 @@ class DoctrineTest(unittest.TestCase):
 
         self.assertTrue(self.md.is_symlink(), "uninstall replaced the symlink")
         self.assertEqual(source.read_text(encoding="utf-8"), "# from dotfiles\n")
+
+
+# ------------------------------------------------------------------ the mission wiring
+
+MISSION = APP / "hooks" / "mission.sh"
+# The five moments hooks/mission.sh is wired to, and the matcher each one needs. Named
+# here rather than derived, because the drift check in tests/test_plugin.py only proves
+# the two wirings AGREE: two wirings that both forgot SubagentStart agree perfectly, and
+# the subagent moment is the one no other event can reach.
+MISSION_EVENTS = (("SessionStart", None),
+                  ("SubagentStart", None),
+                  ("UserPromptSubmit", None),
+                  ("PreToolUse", None),
+                  ("Stop", None))
+
+
+@unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+class MissionWiringTest(NoSurferMixin, unittest.TestCase):
+    """`hooks/mission.sh` is wired to five events, two of which this installer had never
+    written a key for.
+
+    SessionStart and SubagentStart are new event KEYS, so everything that used to be true
+    of an event we share with the user -- the strip, the preexisting-key rule, uninstall
+    putting back exactly what it found -- has to be true of two keys nobody here had
+    exercised. That is what this class is for.
+    """
+
+    def setUp(self):
+        self.pin_surfer_off()
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.claude = root / "claude"
+        self.bin = root / "bin"
+        self.state = root / "state"
+        self.claude.mkdir()
+        self.bin.mkdir()
+        self.settings = self.claude / "settings.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_settings(self, obj):
+        self.settings.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+
+    def read(self):
+        return json.loads(self.settings.read_text(encoding="utf-8"))
+
+    def do_install(self, home=APP_HOME):
+        return installer.install(home, str(self.claude), str(self.bin), str(self.state))
+
+    def do_uninstall(self):
+        return installer.uninstall(APP_HOME, str(self.claude), str(self.bin),
+                                   str(self.state))
+
+    def entries(self, event, marker="mission.sh"):
+        s = self.read()
+        return [(g.get("matcher"), h["command"])
+                for g in s.get("hooks", {}).get(event, []) for h in g["hooks"]
+                if marker in h["command"]]
+
+    def test_the_mission_is_wired_to_all_five_moments_with_the_right_matcher(self):
+        self.do_install()
+        for event, matcher in MISSION_EVENTS:
+            got = self.entries(event)
+            self.assertEqual(len(got), 1,
+                             "%s must carry the mission exactly once, got %r"
+                             % (event, got))
+            self.assertEqual(got[0][0], matcher,
+                             "%s matcher for the mission" % event)
+
+    def test_the_pretooluse_entry_carries_no_matcher_at_all(self):
+        """The only PreToolUse entry of ours that names no tools, and the reason is what
+        it does with them. Its periodic arm is a cooldown and its Stop arm counts the tool
+        calls a turn made; a matcher makes that counter undercount by exactly the calls it
+        excludes, which moves a threshold with nothing on any surface saying it moved. The
+        other four entries there each look for one particular call and name it."""
+        self.do_install()
+        matchers = [g.get("matcher") for g in self.read()["hooks"]["PreToolUse"]
+                    for h in g["hooks"] if "mission.sh" in h["command"]]
+        self.assertEqual(matchers, [None],
+                         "the mission's PreToolUse entry was narrowed: %r" % matchers)
+
+    def test_the_mission_is_wired_to_no_other_event(self):
+        """PostToolUse and PostToolUseFailure are after the fact: there is nothing left to
+        restate the request before. PreCompact cannot deliver context to the model at all
+        (measured: it honours `systemMessage` only), so a wiring there would look correct
+        and reach nobody."""
+        self.do_install()
+        for event in ("PostToolUse", "PostToolUseFailure", "PreCompact"):
+            self.assertEqual(self.entries(event), [],
+                             "the mission must not be wired to %s" % event)
+
+    def test_installing_twice_leaves_one_mission_entry_per_event(self):
+        self.do_install()
+        self.do_install()
+        for event, _matcher in MISSION_EVENTS:
+            self.assertEqual(len(self.entries(event)), 1,
+                             "%s picked up a duplicate mission entry" % event)
+
+    def test_uninstall_removes_the_two_event_keys_it_created(self):
+        """A key we created and then leave behind holding an empty list is litter in
+        someone's settings.json, and it is the exact failure `preexisting_events` was
+        written for -- caught on the SECOND install, when our own keys look like theirs."""
+        self.do_install()
+        s = self.read()
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertIn(event, s["hooks"], "install wrote no %s key" % event)
+        self.do_uninstall()
+        s = self.read()
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertNotIn(event, s.get("hooks", {}),
+                             "uninstall left an empty %s key behind" % event)
+
+    def test_install_install_uninstall_still_removes_the_two_new_keys(self):
+        """The reinstall case, which is where the obvious rule ("was the key there before
+        we ran") gets it wrong: by the second install our own key is there too."""
+        self.do_install()
+        self.do_install()
+        self.do_uninstall()
+        s = self.read()
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertNotIn(event, s.get("hooks", {}),
+                             "%s survived install, install, uninstall" % event)
+
+    def test_a_users_own_session_start_hook_survives_both_directions(self):
+        """SessionStart is a normal event for other tools to use, and it is a key this
+        package had never touched, so nothing had ever proved we leave one alone."""
+        self.write_settings({"hooks": {"SessionStart": [FOREIGN_HOOK]}})
+        self.do_install()
+        cmds = [h["command"] for g in self.read()["hooks"]["SessionStart"]
+                for h in g["hooks"]]
+        self.assertTrue(any("other/tool.py" in c for c in cmds),
+                        "install dropped a SessionStart hook of the user's: %r" % cmds)
+        self.assertTrue(any("mission.sh" in c for c in cmds),
+                        "ours must land beside theirs: %r" % cmds)
+        self.do_uninstall()
+        cmds = [h["command"] for g in self.read()["hooks"]["SessionStart"]
+                for h in g["hooks"]]
+        self.assertEqual(cmds, [c for c in cmds if "other/tool.py" in c],
+                         "uninstall took something of the user's with it: %r" % cmds)
+
+    def test_a_users_own_subagent_start_hook_survives_both_directions(self):
+        self.write_settings({"hooks": {"SubagentStart": [FOREIGN_HOOK]}})
+        self.do_install()
+        self.do_uninstall()
+        cmds = [h["command"] for g in self.read()["hooks"]["SubagentStart"]
+                for h in g["hooks"]]
+        self.assertEqual(cmds, [c for c in cmds if "other/tool.py" in c],
+                         "uninstall took something of the user's with it: %r" % cmds)
+
+    def test_an_empty_event_key_the_user_put_there_stays_theirs(self):
+        self.write_settings({"hooks": {"SessionStart": [], "SubagentStart": []}})
+        self.do_install()
+        self.do_uninstall()
+        hooks = self.read().get("hooks", {})
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertIn(event, hooks,
+                          "an empty %s list the user wrote was deleted" % event)
+            self.assertEqual(hooks[event], [])
+
+    def test_a_checkout_without_the_mission_hook_still_installs(self):
+        """The package must stay installable from a checkout older than any one
+        component. Nothing of the mission is wired, and nothing else is lost."""
+        import shutil as _shutil
+        dest = Path(self.tmp.name) / "checkout"
+        _shutil.copytree(APP_HOME, dest, symlinks=True,
+                         ignore=_shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+        (dest / "hooks" / "mission.sh").unlink()
+        self.do_install(home=str(dest))
+        s = self.read()
+        for event, _m in MISSION_EVENTS:
+            self.assertEqual([h["command"] for g in s.get("hooks", {}).get(event, [])
+                              for h in g["hooks"] if "mission.sh" in h["command"]], [],
+                             "%s wired a script this checkout does not carry" % event)
+        self.assertTrue(any("compound-improvement.sh" in h["command"]
+                            for g in s["hooks"]["UserPromptSubmit"] for h in g["hooks"]),
+                        "the rest of the wiring must still be installed")
+
+    def test_a_stale_mission_entry_is_stripped_by_a_checkout_without_it(self):
+        """The strip runs before any append, so an entry a newer checkout left is removed
+        rather than left pointing at a file that is gone -- including on the two events
+        where the strip is the ONLY thing that happens."""
+        self.do_install()
+        import shutil as _shutil
+        dest = Path(self.tmp.name) / "old"
+        _shutil.copytree(APP_HOME, dest, symlinks=True,
+                         ignore=_shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+        (dest / "hooks" / "mission.sh").unlink()
+        self.do_install(home=str(dest))
+        s = self.read()
+        for event, _m in MISSION_EVENTS:
+            self.assertEqual([h["command"] for g in s.get("hooks", {}).get(event, [])
+                              for h in g["hooks"] if "mission.sh" in h["command"]], [],
+                             "a stale %s entry was left orphaned" % event)
+
+
+# --------------------------------------------------------------- the surfer dependency
+
+class SurferTest(unittest.TestCase):
+    """history-surfer is installed as a real dependency, from a real git clone.
+
+    No fixture and no fake `surfer`: the source is a real claude-history-surfer checkout
+    (`SKILL_COMPOUNDER_SURFER_URL` points the step at it, which is the same role
+    `SKILL_COMPOUNDER_REPO_URL` plays for install.sh), and the assertions are that its
+    real CLI lands in the temp bin directory and its real hooks land in the temp
+    settings.json. The offline test needs no source at all and runs everywhere.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.claude = root / "claude"
+        self.bin = root / "bin"
+        self.state = root / "state"
+        self.surfer_home = root / "app" / "claude-history-surfer"
+        self.claude.mkdir()
+        self.bin.mkdir()
+        self.settings = self.claude / "settings.json"
+        self.set_env(installer.SURFER_HOME_ENV, str(self.surfer_home))
+        # `_surfer_store` honours this, and an operator who has one exported would send
+        # both `_surfer_has_store` and history-surfer's own scaffolding at their REAL
+        # prompt store. The store under test is the one below the temp claude dir.
+        self.set_env("CLAUDE_HISTORY_SURFER_DIR", None)
+        # `install_surfer` asks PATH first, and this process's PATH has whatever the
+        # developer has installed on it. Narrowed so the clone branch is the one under
+        # test rather than whichever machine happens to be running it.
+        self.set_env("PATH", "/usr/bin:/bin")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def set_env(self, key, value):
+        before = os.environ.get(key)
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+        def restore():
+            if before is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = before
+        self.addCleanup(restore)
+
+    def do_install(self):
+        return installer.install(APP_HOME, str(self.claude), str(self.bin),
+                                 str(self.state))
+
+    def manifest(self):
+        return json.loads((self.state / "install-manifest.json").read_text(encoding="utf-8"))
+
+    def read(self):
+        return json.loads(self.settings.read_text(encoding="utf-8"))
+
+    # ------------------------------------------------------------------ the real thing
+
+    @unittest.skipUnless(SURFER_SRC, "no local claude-history-surfer checkout to clone "
+                                     "from (set SKILL_COMPOUNDER_SURFER_SRC)")
+    def test_it_clones_and_wires_history_surfer_into_the_same_directories(self):
+        self.set_env(installer.SURFER_URL_ENV, str(SURFER_SRC))
+        rep = self.do_install()
+
+        self.assertTrue((self.surfer_home / "scripts" / "setup.py").is_file(),
+                        "nothing was cloned: %s" % rep["surfer"])
+        cli = self.bin / "surfer"
+        self.assertTrue(cli.exists(), "surfer did not land in %s: %s"
+                        % (self.bin, rep["surfer"]))
+        self.assertTrue(os.access(str(os.path.realpath(str(cli))), os.X_OK))
+
+        # Its own hooks, in the settings.json this install was pointed at -- not the
+        # developer's. Two wirings in one file is the whole point of handing its
+        # installer the same --claude-dir.
+        cmds = [h["command"] for groups in self.read()["hooks"].values()
+                for g in groups for h in g["hooks"]]
+        self.assertTrue(any("log_prompt.py" in c for c in cmds),
+                        "history-surfer's capture hook is not wired: %r" % cmds)
+        self.assertTrue(any("flush.py" in c for c in cmds),
+                        "history-surfer's flush hook is not wired: %r" % cmds)
+        # And ours are still there beside them.
+        self.assertTrue(any("mission.sh" in c for c in cmds),
+                        "our own wiring was lost: %r" % cmds)
+
+        # The store it scaffolds is under the claude dir it was given, which is what makes
+        # `surfer` and `hooks/mission.sh` read one file rather than two.
+        self.assertTrue((self.claude / "history-surfer" / "projects").is_dir())
+
+        record = self.manifest()["surfer"]
+        self.assertEqual(record["home"], str(self.surfer_home))
+        self.assertEqual(record["url"], str(SURFER_SRC))
+        self.assertTrue(record.get("installed"))
+        self.assertRegex(record["sha"], r"^[0-9a-f]{40}$",
+                         "the manifest must pin the commit that was installed")
+
+    @unittest.skipUnless(SURFER_SRC, "no local claude-history-surfer checkout to clone "
+                                     "from (set SKILL_COMPOUNDER_SURFER_SRC)")
+    def test_a_second_install_does_not_clone_again(self):
+        self.set_env(installer.SURFER_URL_ENV, str(SURFER_SRC))
+        self.do_install()
+        marker = self.surfer_home / ".this-checkout-was-not-replaced"
+        marker.write_text("x", encoding="utf-8")
+        rep = self.do_install()
+        self.assertTrue(marker.exists(),
+                        "the checkout was replaced on a second install: %s" % rep["surfer"])
+        # The second install stops at the target settings.json, which the first one wired.
+        self.assertIn("already wired into", rep["surfer"])
+
+    @unittest.skipUnless(SURFER_PATH_CHECKOUT,
+                         "no surfer on this machine's PATH that resolves back into a "
+                         "history-surfer checkout")
+    def test_a_surfer_already_on_path_is_wired_into_the_target_config(self):
+        """The defect the 2026-09-03 E2E run found, and the one this asserts is gone.
+
+        `install_surfer` used to return on `shutil.which("surfer")`, so an install into a
+        non-default `--claude-dir` on a machine that already had the CLI wired NOTHING
+        into that config: no capture hook, so no store, so `hooks/mission.sh` inert
+        there. PATH is a fact about the machine; the mission hook needs a fact about the
+        config. Nothing here is a fixture: `surfer` reaches PATH as a symlink to the real
+        one, and the real checkout behind it runs its own real installer.
+        """
+        fake_bin = Path(self.tmp.name) / "path-bin"
+        fake_bin.mkdir()
+        (fake_bin / "surfer").symlink_to(os.path.abspath(SURFER_ON_PATH))
+        # git and python live in the ordinary places; only `surfer` is contributed here.
+        self.set_env("PATH", os.pathsep.join([str(fake_bin), "/usr/bin", "/bin"]))
+        # Proof that no clone was even attempted: this url could not be cloned from.
+        self.set_env(installer.SURFER_URL_ENV, "/nowhere-this-must-not-be-reached.git")
+
+        rep = self.do_install()
+
+        self.assertFalse(self.surfer_home.exists(),
+                         "a checkout already on this machine must not be cloned again: %s"
+                         % rep["surfer"])
+        cmds = [h["command"] for groups in self.read()["hooks"].values()
+                for g in groups for h in g["hooks"]]
+        for marker in installer.SURFER_HOOK_MARKERS:
+            self.assertTrue(any(marker in c for c in cmds),
+                            "history-surfer's %s is not wired into the target config: "
+                            "%s -- %r" % (marker, rep["surfer"], cmds))
+        self.assertTrue(any("mission.sh" in c for c in cmds),
+                        "our own wiring was lost: %r" % cmds)
+        record = self.manifest()["surfer"]
+        self.assertEqual(record["home"], str(SURFER_PATH_CHECKOUT))
+        self.assertFalse(record["cloned"],
+                         "the manifest claims this package cloned a checkout it reused")
+        self.assertEqual(record["url"], "",
+                         "the manifest names a source for a checkout it did not clone")
+
+        # And a second install is a no-op on the file, byte for byte: the wiring check
+        # reads the target settings.json, so the whole step stops there.
+        before = self.settings.read_bytes()
+        rep2 = self.do_install()
+        self.assertIn("already wired into", rep2["surfer"])
+        self.assertEqual(self.settings.read_bytes(), before,
+                         "a second install rewrote settings.json: %s" % rep2["surfer"])
+
+    @unittest.skipUnless(SURFER_PATH_CHECKOUT,
+                         "no surfer on this machine's PATH that resolves back into a "
+                         "history-surfer checkout")
+    def test_a_symlinked_settings_json_survives_the_dependencys_own_installer(self):
+        """stow / chezmoi / a hand-rolled dotfiles repo present settings.json as a link.
+
+        This package writes THROUGH such a link so the dotfiles source is not orphaned.
+        history-surfer's installer renames over the path instead, which replaces the LINK
+        -- so the moment this step started really running its installer (rather than
+        returning on `shutil.which`), a stowed settings.json became a regular file. The
+        real dependency really runs here; nothing about this is simulated.
+        """
+        real = Path(self.tmp.name) / "dotfiles" / "settings.json"
+        real.parent.mkdir(parents=True)
+        real.write_text(json.dumps({"model": "opus"}, indent=2) + "\n", encoding="utf-8")
+        self.settings.symlink_to(str(real))
+
+        fake_bin = Path(self.tmp.name) / "path-bin"
+        fake_bin.mkdir()
+        (fake_bin / "surfer").symlink_to(os.path.abspath(SURFER_ON_PATH))
+        self.set_env("PATH", os.pathsep.join([str(fake_bin), "/usr/bin", "/bin"]))
+        self.set_env(installer.SURFER_URL_ENV, "/nowhere-this-must-not-be-reached.git")
+
+        rep = self.do_install()
+
+        self.assertTrue(self.settings.is_symlink(),
+                        "the dotfiles symlink was replaced by a regular file: %s"
+                        % rep["surfer"])
+        self.assertEqual(os.path.realpath(str(self.settings)), os.path.realpath(str(real)))
+        # And nothing was lost on the way through: the user's key, our wiring and
+        # history-surfer's are all in the dotfiles file itself.
+        written = json.loads(real.read_text(encoding="utf-8"))
+        self.assertEqual(written["model"], "opus")
+        cmds = [h["command"] for groups in written["hooks"].values()
+                for g in groups for h in g["hooks"]]
+        for marker in installer.SURFER_HOOK_MARKERS:
+            self.assertTrue(any(marker in c for c in cmds),
+                            "%s did not reach the dotfiles file: %r" % (marker, cmds))
+        self.assertTrue(any("mission.sh" in c for c in cmds),
+                        "our own wiring did not reach the dotfiles file: %r" % cmds)
+
+    def test_a_half_wired_config_is_not_read_as_wired(self):
+        """One of the two markers present is an interrupted install, not a finished one.
+
+        Returning True on it would leave the config half-wired for good, and half-wired
+        is a store nothing flushes. No `surfer` is needed to ask this question, so this
+        one runs on every machine.
+        """
+        self.settings.write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command",
+                        "command": "python3 /somewhere/hooks/log_prompt.py"}]}]}},
+            indent=2) + "\n", encoding="utf-8")
+        self.assertFalse(installer._surfer_wired(self.claude))
+        self.set_env(installer.SURFER_URL_ENV,
+                     str(Path(self.tmp.name) / "there-is-no-repo-here.git"))
+        rep = self.do_install()
+        self.assertNotIn("already wired into", rep["surfer"])
+
+    # ------------------------------------------------------------------ failing softly
+
+    def test_no_source_to_clone_from_does_not_fail_the_install(self):
+        """The offline case, and the one that must hold everywhere. A user on a plane
+        still gets the hooks, the skills and the CLIs; only the mission goes quiet, and
+        `skillforge doctor` is where that is visible."""
+        self.set_env(installer.SURFER_URL_ENV,
+                     str(Path(self.tmp.name) / "there-is-no-repo-here.git"))
+        rep = self.do_install()
+        self.assertIn("NOT INSTALLED", rep["surfer"])
+        self.assertIn("claude-history-surfer", rep["surfer"],
+                      "the report must say how to install it by hand")
+        self.assertNotIn("errors", rep, "the install itself must have succeeded")
+        self.assertTrue((self.claude / "skills" / "skill-compounder").exists(),
+                        "the rest of the install did not happen")
+        self.assertTrue((self.bin / "skillforge").exists())
+
+    def test_a_failed_clone_leaves_nothing_half_written_behind(self):
+        """`_surfer_checkout` reads a directory as installed, so a half-clone left at the
+        destination would make every later install skip the step for good."""
+        self.set_env(installer.SURFER_URL_ENV,
+                     str(Path(self.tmp.name) / "there-is-no-repo-here.git"))
+        self.do_install()
+        self.assertFalse(self.surfer_home.exists(),
+                         "a failed clone left %s behind" % self.surfer_home)
+        leftovers = [p.name for p in self.surfer_home.parent.iterdir()] \
+            if self.surfer_home.parent.is_dir() else []
+        self.assertEqual(leftovers, [], "a temporary clone was left behind: %r" % leftovers)
+
+    def test_the_opt_out_skips_it_entirely(self):
+        self.set_env(installer.SURFER_SKIP_ENV, "1")
+        self.set_env(installer.SURFER_URL_ENV, "/nowhere-this-must-not-be-reached.git")
+        rep = self.do_install()
+        self.assertIn(installer.SURFER_SKIP_ENV, rep["surfer"])
+        self.assertFalse(self.surfer_home.exists())
+        self.assertTrue(self.manifest()["surfer"]["skipped"])
+
+    def test_an_existing_store_is_never_installed_over(self):
+        """Prompts already captured mean history-surfer is installed somewhere this run
+        cannot see. A second checkout on top of that is how one store becomes two, which
+        is exactly what the design's single-source-of-truth rule forbids."""
+        projects = self.claude / "history-surfer" / "projects"
+        projects.mkdir(parents=True)
+        (projects / "some-project.jsonl").write_text(
+            '{"ts":"2026-09-03T00:00:00Z","prompt":"hello"}\n', encoding="utf-8")
+        self.set_env(installer.SURFER_URL_ENV, "/nowhere-this-must-not-be-reached.git")
+        rep = self.do_install()
+        self.assertIn("already holds captured prompts", rep["surfer"])
+        self.assertFalse(self.surfer_home.exists())
+
+    def test_a_scaffolded_but_empty_store_is_not_mistaken_for_one(self):
+        """history-surfer's own installer creates `projects/` empty. Reading that as a
+        store would stop this step from ever finishing a job it had only started."""
+        (self.claude / "history-surfer" / "projects").mkdir(parents=True)
+        self.set_env(installer.SURFER_URL_ENV,
+                     str(Path(self.tmp.name) / "there-is-no-repo-here.git"))
+        rep = self.do_install()
+        self.assertIn("NOT INSTALLED", rep["surfer"],
+                      "an empty scaffold was read as a populated store: %s" % rep["surfer"])
+
+    def test_a_directory_of_the_users_at_that_path_is_never_replaced(self):
+        """`<app home>/../claude-history-surfer` is a path a user could plausibly have
+        made themselves -- this machine had a real checkout there before any of this
+        existed. Whatever is at that path, an install must not clobber it, and the report
+        must say so rather than exiting 0 over the top of it."""
+        self.surfer_home.mkdir(parents=True)
+        keep = self.surfer_home / "something-of-mine.txt"
+        keep.write_text("do not delete me\n", encoding="utf-8")
+        self.set_env(installer.SURFER_URL_ENV, str(SURFER_SRC or "/nowhere.git"))
+        rep = self.do_install()
+        self.assertTrue(keep.exists(), "the user's own directory was replaced")
+        self.assertEqual(keep.read_text(encoding="utf-8"), "do not delete me\n")
+        self.assertIn("NOT INSTALLED", rep["surfer"])
+        self.assertNotIn("errors", rep, "the install itself must still have succeeded")
+
+    def test_a_setup_py_with_no_package_beside_it_is_not_taken_for_a_checkout(self):
+        """The step ENDS BY EXECUTING <home>/scripts/setup.py. A guessable path holding a
+        runnable file is not proof of what that file is, so the package directory has to
+        be there too -- which is the same file history-surfer's own install.sh uses to
+        decide it is inside a clone."""
+        (self.surfer_home / "scripts").mkdir(parents=True)
+        (self.surfer_home / "scripts" / "setup.py").write_text(
+            "raise SystemExit('this must never be run')\n", encoding="utf-8")
+        self.set_env(installer.SURFER_URL_ENV,
+                     str(Path(self.tmp.name) / "there-is-no-repo-here.git"))
+        rep = self.do_install()
+        self.assertIn("NOT INSTALLED", rep["surfer"],
+                      "a bare scripts/setup.py was run as if it were history-surfer: %s"
+                      % rep["surfer"])
+        self.assertNotIn("this must never be run", rep["surfer"])
+
+    # ---------------------------------------------------------------------- uninstall
+
+    @unittest.skipUnless(SURFER_SRC, "no local claude-history-surfer checkout to clone "
+                                     "from (set SKILL_COMPOUNDER_SURFER_SRC)")
+    def test_uninstall_leaves_history_surfer_where_it_is_and_says_so(self):
+        """It holds every prompt the user has ever typed. This package did not create
+        that data and cannot put it back, so uninstall reports it and removes nothing --
+        the same judgement it makes about the state directory."""
+        self.set_env(installer.SURFER_URL_ENV, str(SURFER_SRC))
+        self.do_install()
+        store = self.claude / "history-surfer"
+        rep = installer.uninstall(APP_HOME, str(self.claude), str(self.bin),
+                                  str(self.state))
+        self.assertIn("LEFT IN PLACE", rep["surfer"])
+        self.assertIn(str(self.surfer_home), rep["surfer"])
+        self.assertIn("--uninstall", rep["surfer"],
+                      "the note must say how to remove it")
+        self.assertIn(str(store), rep["surfer"],
+                      "the note must say where the captured prompts are")
+        self.assertTrue(self.surfer_home.is_dir(), "uninstall removed the checkout")
+        self.assertTrue((self.bin / "surfer").exists(),
+                        "uninstall removed the surfer CLI, which is not ours to remove")
+        self.assertTrue(store.is_dir(), "uninstall removed the prompt store")
+
+    def test_uninstall_says_nothing_it_cannot_prove_when_we_never_installed_it(self):
+        self.set_env(installer.SURFER_SKIP_ENV, "1")
+        self.do_install()
+        rep = installer.uninstall(APP_HOME, str(self.claude), str(self.bin),
+                                  str(self.state))
+        self.assertIn("did not install it", rep["surfer"])
 
 
 if __name__ == "__main__":

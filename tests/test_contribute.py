@@ -1,13 +1,32 @@
 #!/usr/bin/env python3
-"""Exercises skillcontrib for real: real SKILL.md files on disk, real GitHub reads.
+"""Exercises skillcontrib for real: real SKILL.md files, real git repositories, real reads.
 
 No mocks. The preflight tests write actual skill directories into a temp dir and run
 the actual script against them, and one of them runs the checker over every skill
 installed on this machine. The dedup tests hit live GitHub through `gh`; they skip
 cleanly when gh is missing or unauthenticated so a token-less CI run still passes.
+
+`OfflineProposeTest` covers the half of `skillcontrib propose` that writes. It builds
+two REAL bare git repositories in a temp directory, an "upstream" and a "fork", and the
+CLI clones, branches, copies, commits and pushes into them with the real git binary;
+every assertion about what landed is read back with `git --git-dir ... log` and
+`ls-tree` out of the bare repo. Three environment variables the CLI reads for exactly
+this purpose point it at them: SKILLCONTRIB_UPSTREAM_URL, SKILLCONTRIB_FORK_URL, and
+SKILLCONTRIB_GH.
+
+The last of those names a SHIM: a small shell script this file writes into the sandbox
+(`FAKE_GH` below), which answers the handful of `gh` subcommands the CLI calls with
+canned JSON, logs every call so a test can assert which subcommands ran, and can be told
+to fail one so a partial run is exercised. It is not a mock of anything under test:
+`bin/skillcontrib` runs unmodified and holds all of the logic. It replaces the one
+dependency whose real form would open a public pull request on every run of the suite,
+which is also why the live-GitHub classes at the bottom of this file are read-only and
+skip without auth.
 """
 
 import glob
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -23,6 +42,19 @@ SKILLS_REPO = "anthropics/skills"
 NESTED_REPO = "anthropics/claude-code"
 PORTABLE_KEYS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 WRITE_COMMANDS = ("gh repo fork", "gh repo sync", "gh pr create", "git push")
+PATH_BASE = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+
+# A git that cannot read the machine's config, cannot prompt, and has an identity of its
+# own, so the sandbox does not depend on the ambient environment. `propose` runs a real
+# `git commit`, which refuses without an identity.
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "skillcontrib test",
+    "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "skillcontrib test",
+    "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 
 VALID = """---
 name: %s
@@ -229,69 +261,126 @@ class ShippedSkillTest(unittest.TestCase):
         self.assertTrue(desc.startswith("Use when"), desc[:60])
         self.assertIn("Do NOT use", desc)
 
+    def test_the_description_still_matches_the_routing_pin(self):
+        """The pin binds the description it was measured against.
+
+        Rewriting the body of this skill is cheap; rewriting the description is not,
+        because the pin then vouches for a string nobody measured and the only way to
+        mend it is 18 real `claude -p` draws. `scripts/routing_claims.py lint` enforces
+        this repo-wide; this asserts it here so the failure names the file that broke.
+        """
+        text = self.text()
+        desc = re.search(r"^description: (.+)$", text, re.M).group(1)[1:-1]
+        pinned = re.search(r"^description-sha256: ([0-9a-f]{64})$", text, re.M).group(1)
+        self.assertEqual(hashlib.sha256(desc.encode("utf-8")).hexdigest(), pinned,
+                         "the description changed but the routing pin still names the old "
+                         "one. Re-measure with scripts/probe_routing_claims.py or revert.")
+
     # ---------------------------------------------------------- reading the document
     #
-    # Everything below reads the SKILL.md as text. It does NOT execute the procedure.
-    # The one test that executes anything is ExecutableStagingTest, which runs the
-    # read-only staging block against a local git repository.
+    # Everything below reads the SKILL.md as text. The class that executes the procedure
+    # is OfflineProposeTest, which runs the real CLI against real local git repositories.
 
-    def split_at_writes(self):
+    def test_the_bar_is_stated_verbatim_and_wants_both(self):
+        # Both conditions, in the wording the forge protocol uses. A paraphrase here
+        # drifts from `skill-compounder`, and the bar is the one thing no probe checks.
         text = self.text()
-        marker = "## 6. The write sequence"
-        self.assertIn(marker, text, "the write sequence must be its own section")
-        return text[:text.index(marker)], text[text.index(marker):]
+        self.assertIn("Propose a skill upstream only when BOTH hold:", text)
+        self.assertIn("**It came back clean from the `skill-compounder` red-team loop.**",
+                      text)
+        self.assertIn("Clean, from a cold red-teamer that was not a fork of the "
+                      "authoring session.", text)
+        self.assertIn("**It has been used again since it was forged.**", text)
+        self.assertIn("At least one later invocation that did\n  the job, in real work, "
+                      "not a rehearsal.", text)
 
-    def test_no_write_command_appears_before_the_write_section(self):
-        before, _ = self.split_at_writes()
-        for cmd in WRITE_COMMANDS:
-            self.assertNotIn(cmd, before,
-                             "%r appears in the read-only half of the procedure" % cmd)
-
-    def test_a_read_only_clone_exists_for_staging(self):
-        # The defect this pins: the gates required staging in a clone, and the only
-        # clone the procedure defined was `gh repo fork --clone`, a network write. So
-        # the ordering rule was circular and could not be obeyed.
-        before, _ = self.split_at_writes()
-        self.assertIn("git clone https://github.com/", before,
-                      "the procedure must define a read-only clone to stage in")
-        staging = before[before.index("### 5a."):before.index("### 5b.")]
-        self.assertIn("git clone", staging)
-        for cmd in WRITE_COMMANDS:
-            self.assertNotIn(cmd, staging, "%r appears in the staging step" % cmd)
-
-    def test_the_upload_step_is_spelled_out(self):
-        # "Upload the branch" is not an instruction a cold session can follow, and it
-        # hid the fact that a push is a write.
-        _, writes = self.split_at_writes()
-        self.assertIn("git push -u origin", writes)
-        self.assertIn("git push -u fork", writes)
-
-    def test_the_fork_is_the_first_write_on_the_fork_path(self):
-        _, writes = self.split_at_writes()
-        fork_section = writes[writes.index("### 6b."):]
-        self.assertLess(fork_section.index("gh repo fork"), fork_section.index("git push"),
-                        "the fork must precede the push on the fork path")
-
-    def test_repo_sync_targets_the_fork_and_never_upstream(self):
-        # `gh repo sync` writes to its argument: "Syncing uses the default branch of the
-        # source repository to update the matching branch on the destination." Naming
-        # upstream there fast-forwards upstream's default branch, an unconsented write
-        # that succeeds for real when upstream is itself a fork.
+    def test_the_procedure_is_the_dry_run_then_the_command(self):
         text = self.text()
-        occurrences = re.findall(r"`?gh repo sync ([^`\s]+)", text)
-        self.assertTrue(occurrences, "the stale-fork remedy must still be documented")
-        for target in occurrences:
-            self.assertIn("fork-owner", target,
-                          "gh repo sync must name the fork as its destination, got %r" % target)
-        self.assertNotIn("gh repo sync <owner>/<repo>", text)
+        self.assertIn("skillcontrib recon <skill-name>", text)
+        self.assertIn("skillcontrib propose <skill-name>", text)
+        self.assertLess(text.index("skillcontrib recon"), text.index("skillcontrib propose"),
+                        "the dry run must be named before the run that writes")
+
+    def test_running_the_command_is_the_consent_and_no_gate_list_survives(self):
+        # The seven lettered gates are gone on purpose. If any of them comes back the
+        # document has two procedures in it and a session will walk whichever it reads
+        # first.
+        text = self.text()
+        self.assertIn("Running it is the yes.", text)
+        for gate in ("G0.", "G1.", "G2.", "G3.", "G4.", "G5.", "G6."):
+            self.assertNotIn(gate, text, "consent gate %s is back alongside the command" % gate)
+
+    def test_the_reader_never_types_a_network_write(self):
+        """The whole point of the rewrite: the command performs the writes.
+
+        Under the old procedure a session copied `gh repo fork` and `git push` out of
+        this file by hand, which is what made the ordering rule something a session
+        could get wrong. Now no shell block here contains one.
+        """
+        blocks = re.findall(r"```bash\n(.*?)```", self.text(), re.S)
+        self.assertTrue(blocks, "the procedure must still show the commands to run")
+        for block in blocks:
+            for cmd in WRITE_COMMANDS:
+                self.assertNotIn(cmd, block,
+                                 "%r is in a block the reader is told to run:\n%s" % (cmd, block))
+            for line in block.strip().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                self.assertTrue(line.startswith("skillcontrib "),
+                                "a runnable block should invoke skillcontrib, got %r" % line)
+
+    def test_every_network_write_is_documented_as_announced(self):
+        text = self.text()
+        self.assertIn("`WRITE:`", text)
+        self.assertIn("at most three: the fork, the push, and `gh pr create`", text)
+
+    def test_the_duplicate_check_is_still_three_probes(self):
+        text = self.text()
+        for probe in ("|tree|", "|files|", "|fuzzy|"):
+            self.assertIn(probe, text, "the %s probe row is gone" % probe)
+        self.assertIn("normalised key (lowercased, non-alphanumerics dropped)", text)
+        self.assertIn("plugins/<x>/skills/<x>/SKILL.md", text)
+
+    def test_the_maintainer_versus_fork_decision_is_still_described(self):
+        text = self.text()
+        self.assertIn("permission endpoint", text)
+        self.assertIn("204 for read-only and triage collaborators", text)
+        self.assertIn("`--head <fork-owner>:skill/<name>`", text)
+        self.assertIn("push identity", text)
 
     def test_dry_run_is_not_claimed_to_be_read_only(self):
+        # `gh pr create --dry-run` is gh's flag, not ours, and its own help says it may
+        # push. `skillcontrib recon` is the preview; that flag is not.
         text = self.text()
         self.assertIn("May still push git changes", text)
         self.assertNotIn("without opening anything", text)
 
-    def test_the_whole_skill_directory_is_copied(self):
-        self.assertIn("cp -R", self.text())
+    def test_the_whole_skill_directory_travels(self):
+        # A copy step that takes only SKILL.md silently drops scripts/ and references/.
+        self.assertIn("copies the whole\n  skill directory", self.text())
+        self.assertIn('cp -R "$skill_dir/."', SCRIPT.read_text(),
+                      "the CLI must copy the directory, not just SKILL.md")
+
+    def test_every_exit_code_the_document_names_is_in_the_script(self):
+        """A code table nobody cross-checks is how a document starts lying.
+
+        The script's header table is the source; this reads every bare number out of
+        the document's own code column and requires the script to document it.
+        """
+        text = self.text()
+        table = re.search(r"\|Code\|Meaning\|What to do\|\n(.*?)\n\n", text, re.S).group(1)
+        codes = set()
+        for row in table.splitlines():
+            cell = row.split("|")[1]
+            codes.update(int(n) for n in re.findall(r"\d+", cell))
+        script = SCRIPT.read_text()
+        header = script[:script.index("set -uo pipefail")]
+        documented = set(int(n) for n in re.findall(r"^#\s+(\d+)\s+\S", header, re.M))
+        self.assertTrue(codes, "the exit-code table went missing")
+        self.assertLessEqual(codes, documented,
+                             "the skill names exit codes the script does not document: %s"
+                             % sorted(codes - documented))
 
     def test_no_em_dashes_anywhere(self):
         for p in [self.SKILL_DIR / "SKILL.md", SCRIPT,
@@ -299,90 +388,572 @@ class ShippedSkillTest(unittest.TestCase):
             self.assertNotIn("—", p.read_text(), "em-dash in %s" % p)
 
 
-class ExecutableStagingTest(unittest.TestCase):
-    """Runs the read-only staging block from the SKILL.md, for real, against real git.
+# ----------------------------------------------------------------------------------
+# The offline harness.
+#
+# `propose` is the only part of this package that writes to a service. Testing it needs
+# two things that do not exist on a laptop: a repository to push to, and a `gh` that
+# does not open real pull requests.
+#
+# The first is REAL. `upstream.git` and `fork.git` below are actual bare git
+# repositories in a temp directory, and the CLI clones, branches, copies, commits and
+# pushes into them with the real git binary. Every assertion about what landed is read
+# back with `git --git-dir ... log` / `ls-tree` out of the bare repo, so what is checked
+# is what a remote would hold.
+#
+# The second is a SHIM: `bin/gh` written below, named by SKILLCONTRIB_GH. It is not a
+# mock of anything under test -- `bin/skillcontrib` runs unmodified, and the shim
+# implements no logic of ours. It answers the handful of `gh` subcommands the CLI calls
+# with canned JSON, logs every call to a file so the test can assert on what was and was
+# not invoked, and can be told to fail one subcommand so a partial run is exercised. A
+# real `gh` here would open a public pull request on every test run, which is why the
+# live-GitHub classes further down are read-only and skip without auth.
+# ----------------------------------------------------------------------------------
 
-    This is the one test that executes the procedure rather than reading it. It proves
-    two things the document tests cannot: that the commands as written actually work,
-    and that running them leaves the upstream repository untouched. It uses a local
-    repository, so it needs no network and creates nothing on GitHub.
+FAKE_GH = r"""#!/usr/bin/env bash
+# Offline stand-in for `gh`, used only by tests/test_contribute.py. Canned answers, and
+# a log of every call so the test can prove which subcommands ran.
+set -u
+printf '%s\n' "$*" >> "${FAKEGH_LOG:?}"
+case "${1:-} ${2:-}" in
+  "auth status") echo "github.com: logged in as ${FAKEGH_USER:-tester}"; exit 0 ;;
+  "api user")    printf '%s\n' "${FAKEGH_USER:-tester}"; exit 0 ;;
+  "repo view")
+    case "$*" in
+      *"--json name"*)
+        # The fork-existence probe.
+        if [ -f "${FAKEGH_DIR:?}/fork-exists" ]; then printf '{"name":"pool"}\n'; exit 0; fi
+        echo "GraphQL: Could not resolve to a Repository" >&2; exit 1 ;;
+      *)
+        printf '{"isArchived":%s,"defaultBranchRef":{"name":"%s"}}\n' \
+          "${FAKEGH_ARCHIVED:-false}" "${FAKEGH_BRANCH:-main}"; exit 0 ;;
+    esac ;;
+  "api "*)
+    case "${2:-}" in
+      */permission)
+        if [ "${FAKEGH_PERM:-none}" = "none" ]; then
+          echo "gh: Must have push access to view collaborator permission. (HTTP 403)"; exit 1
+        fi
+        printf '%s\n' "$FAKEGH_PERM"; exit 0 ;;
+      *git/trees/*) cat "${FAKEGH_DIR:?}/tree.json"; exit 0 ;;
+      *contents/*)  cat "${FAKEGH_DIR:?}/contents.md" 2>/dev/null; exit 0 ;;
+      *) echo "fakegh: unhandled api path: ${2:-}" >&2; exit 1 ;;
+    esac ;;
+  "pr list") cat "${FAKEGH_DIR:?}/prs.json"; exit 0 ;;
+  "repo fork")
+    if [ -n "${FAKEGH_FORK_FAILS:-}" ]; then echo "fakegh: fork refused" >&2; exit 1; fi
+    : > "${FAKEGH_DIR:?}/fork-exists"
+    echo "Created fork ${FAKEGH_USER:-tester}/pool"; exit 0 ;;
+  "pr create")
+    if [ -n "${FAKEGH_PR_FAILS:-}" ]; then echo "fakegh: pr create refused" >&2; exit 1; fi
+    printf '%s\n' "${FAKEGH_PR_URL:-https://github.com/acme/pool/pull/7}"; exit 0 ;;
+  *) echo "fakegh: unhandled: $*" >&2; exit 1 ;;
+esac
+"""
+
+PINNED = """---
+name: demo-skill
+description: "Use when a demo is needed for the offline harness. Do NOT use for real work."
+---
+
+# Demo
+
+A body.
+
+## Trigger precision
+
+<!-- routing-pin
+description-sha256: %s
+prompts-sha256: %s
+measured: %s
+cli: 2.1.252 (Claude Code)
+model: sonnet
+runs: 3
+result: %s
+-->
+
+Prompts that MUST fire this skill:
+
+1. "run the demo"
+""" % ("0" * 64, "1" * 64, "%(measured)s", "%(result)s")
+
+
+class OfflineProposeTest(unittest.TestCase):
+    """`skillcontrib propose`, end to end, against local bare repos and a `gh` shim.
+
+    Read the harness note above this class before changing anything here. Nothing about
+    git is faked: the branch, the commit and the push are read back out of a bare
+    repository with `git --git-dir`.
     """
 
-    SKILL_DIR = REPO / "skills" / "contribute-skill"
+    MEASURED = "measured: 2026-09-01"
 
-    def staging_block(self):
-        text = (self.SKILL_DIR / "SKILL.md").read_text()
-        section = text[text.index("### 5a."):text.index("### 5b.")]
-        blocks = re.findall(r"```bash\n(.*?)```", section, re.S)
-        self.assertEqual(len(blocks), 1, "5a must contain exactly one bash block")
-        return blocks[0]
+    # ------------------------------------------------------------------ the sandbox
 
-    def test_the_staging_block_runs_and_writes_nothing_upstream(self):
-        block = self.staging_block()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            upstream = root / "upstream.git"
-            seed = root / "seed"
-            # A real upstream: a bare repo with one commit on its default branch.
-            subprocess.run(["git", "init", "--bare", "-b", "main", str(upstream)],
-                           check=True, capture_output=True)
-            seed.mkdir()
-            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
-                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
-            for cmd in (["git", "init", "-b", "main"], ["git", "commit", "--allow-empty", "-m", "seed"],
-                        ["git", "remote", "add", "origin", str(upstream)],
-                        ["git", "push", "origin", "main"]):
-                subprocess.run(cmd, cwd=seed, check=True, capture_output=True, env=env)
-            before = subprocess.run(["git", "show-ref"], cwd=upstream,
-                                    capture_output=True, text=True).stdout
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.state = self.root / "state"
+        self.canned = self.root / "canned"
+        self.log = self.root / "gh-calls.log"
+        for d in (self.home, self.canned, self.root / "bin"):
+            d.mkdir(parents=True)
+        shim = self.root / "bin" / "gh"
+        shim.write_text(FAKE_GH)
+        shim.chmod(0o755)
+        self.log.write_text("")
+        self.canned_tree(["skills/other/SKILL.md"])
+        self.canned_prs([])
+        self.upstream = self.build_bare("upstream.git", ["skills/other/SKILL.md"])
+        self.fork = self.clone_bare("fork.git", self.upstream)
+        self.write_skill()
 
-            # A real skill to contribute, with a file besides SKILL.md so the `cp -R`
-            # is genuinely exercised.
-            src = root / "demo-skill"
-            (src / "scripts").mkdir(parents=True)
-            (src / "SKILL.md").write_text(VALID % "demo-skill")
-            (src / "scripts" / "run.sh").write_text("echo hi\n")
+    def tearDown(self):
+        self.tmp.cleanup()
 
-            script = (block
-                      .replace("https://github.com/<owner>/<repo>.git", str(upstream))
-                      .replace("/tmp/contrib-<name>", str(root / "clone"))
-                      .replace("<path-to-skill-dir>", str(src))
-                      .replace("<skills-dir>", "skills")
-                      .replace("<name>", "demo-skill"))
-            r = subprocess.run(["bash", "-euo", "pipefail", "-c", script],
-                               capture_output=True, text=True, env=env, cwd=str(root))
-            self.assertEqual(r.returncode, 0,
-                             "the staging block as written failed:\n%s\n%s" % (script, r.stderr))
+    def git(self, *args, **kw):
+        env = dict(GIT_ENV, PATH=PATH_BASE, HOME=str(self.home))
+        r = subprocess.run(["git", *args], capture_output=True, text=True, env=env,
+                           stdin=subprocess.DEVNULL, **kw)
+        assert r.returncode == 0, "git %s\n%s\n%s" % (" ".join(args), r.stdout, r.stderr)
+        return r.stdout
 
-            clone = root / "clone"
-            listed = subprocess.run(["git", "show", "--name-only", "--pretty=format:", "HEAD"],
-                                    cwd=clone, capture_output=True, text=True).stdout
-            self.assertIn("skills/demo-skill/SKILL.md", listed)
-            self.assertIn("skills/demo-skill/scripts/run.sh", listed,
-                          "cp -R must carry the whole skill directory, not just SKILL.md")
-            branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                    cwd=clone, capture_output=True, text=True).stdout.strip()
-            self.assertEqual(branch, "add-skill-demo-skill")
+    def build_bare(self, name, paths):
+        """A real bare repo with one commit on `main`, holding `paths`."""
+        bare = self.root / name
+        self.git("-c", "init.defaultBranch=main", "init", "--quiet", "--bare", str(bare))
+        work = self.root / (name + ".work")
+        work.mkdir()
+        for p in paths:
+            f = work / p
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("---\nname: %s\ndescription: x\n---\n\n# body\n" % Path(p).parent.name)
+        self.git("-c", "init.defaultBranch=main", "init", "--quiet", str(work))
+        self.git("-C", str(work), "add", "-A")
+        self.git("-C", str(work), "commit", "--quiet", "-m", "seed")
+        self.git("-C", str(work), "remote", "add", "origin", str(bare))
+        self.git("-C", str(work), "push", "--quiet", "origin", "main")
+        return bare
 
-            after = subprocess.run(["git", "show-ref"], cwd=upstream,
-                                   capture_output=True, text=True).stdout
-            self.assertEqual(before, after,
-                             "staging must leave upstream untouched; refs changed")
+    def clone_bare(self, name, source):
+        bare = self.root / name
+        self.git("clone", "--quiet", "--bare", str(source), str(bare))
+        return bare
+
+    def canned_tree(self, paths):
+        (self.canned / "tree.json").write_text(json.dumps(
+            {"truncated": False, "tree": [{"path": p} for p in paths]}))
+
+    def canned_prs(self, rows):
+        (self.canned / "prs.json").write_text(json.dumps(rows))
+
+    def write_skill(self, name="demo-skill", measured="2026-09-01",
+                    result="verified 9/9 must-fire draws, 9/9 must-not-fire draws",
+                    text=None, extra=True):
+        d = self.home / ".claude" / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        body = text if text is not None else (PINNED % {"measured": measured,
+                                                        "result": result})
+        (d / "SKILL.md").write_text(body.replace("name: demo-skill", "name: " + name))
+        if extra:
+            (d / "scripts").mkdir(exist_ok=True)
+            (d / "scripts" / "run.sh").write_text("echo hi\n")
+        return d
+
+    # ------------------------------------------------------------------ running it
+
+    def env(self, **over):
+        e = dict(GIT_ENV)
+        e.update({
+            "PATH": str(self.root / "bin") + ":" + PATH_BASE,
+            "HOME": str(self.home),
+            "SKILL_COMPOUNDER_STATE": str(self.state),
+            "SKILLCONTRIB_GH": str(self.root / "bin" / "gh"),
+            "SKILLCONTRIB_UPSTREAM_URL": "file://" + str(self.upstream),
+            "SKILLCONTRIB_FORK_URL": "file://" + str(self.fork),
+            "SKILLCONTRIB_NOW": "1700000000",
+            "SKILLCONTRIB_FORK_SLEEP": "0",
+            "SKILLCONTRIB_FORK_TRIES": "3",
+            "FAKEGH_LOG": str(self.log),
+            "FAKEGH_DIR": str(self.canned),
+            "FAKEGH_USER": "tester",
+            "FAKEGH_PERM": "none",
+        })
+        e.update(over)
+        return e
+
+    def propose(self, *args, **over):
+        return subprocess.run([str(SCRIPT), "propose", "demo-skill",
+                               "--upstream", "acme/pool", *args],
+                              capture_output=True, text=True, env=self.env(**over),
+                              stdin=subprocess.DEVNULL, timeout=120)
+
+    def gh_calls(self):
+        return [ln for ln in self.log.read_text().splitlines() if ln.strip()]
+
+    def writes_called(self):
+        return [c for c in self.gh_calls()
+                if c.startswith("repo fork") or c.startswith("pr create")]
+
+    def refs(self, bare):
+        r = subprocess.run(["git", "--git-dir", str(bare), "show-ref"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return r.stdout
+
+    def ledger_rows(self, event="contrib"):
+        f = self.state / "ledger.jsonl"
+        if not f.exists():
+            return []
+        out = []
+        for ln in f.read_text().splitlines():
+            if ln.strip():
+                row = json.loads(ln)
+                if row.get("event") == event:
+                    out.append(row)
+        return out
+
+    def write_lines(self, stdout):
+        return [ln for ln in stdout.splitlines() if ln.startswith("WRITE:")]
+
+    # ---------------------------------------------------- the fork path, end to end
+
+    def test_the_fork_path_lands_branch_commit_and_files_in_the_fork(self):
+        before_upstream = self.refs(self.upstream)
+        r = self.propose()
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+
+        self.assertIn("refs/heads/skill/demo-skill", self.refs(self.fork),
+                      "the branch never reached the fork")
+        listed = subprocess.run(
+            ["git", "--git-dir", str(self.fork), "ls-tree", "-r", "--name-only",
+             "skill/demo-skill"], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL).stdout
+        self.assertIn("skills/demo-skill/SKILL.md", listed)
+        self.assertIn("skills/demo-skill/scripts/run.sh", listed,
+                      "the whole skill directory must travel, not just SKILL.md")
+        self.assertEqual(before_upstream, self.refs(self.upstream),
+                         "the fork path must not touch upstream")
+
+    def test_the_commit_message_carries_the_routing_pins_measured_line(self):
+        r = self.propose()
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        msg = subprocess.run(["git", "--git-dir", str(self.fork), "log", "-1",
+                              "--pretty=%B", "skill/demo-skill"],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+        self.assertIn("Add demo-skill skill", msg)
+        self.assertIn(self.MEASURED, msg,
+                      "a reviewer cannot tell a measured trigger from an unmeasured one "
+                      "without this line: %r" % msg)
+
+    def test_the_maintainer_path_pushes_to_upstream_and_never_forks(self):
+        before_fork = self.refs(self.fork)
+        r = self.propose(FAKEGH_PERM="admin")
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+        self.assertIn("refs/heads/skill/demo-skill", self.refs(self.upstream))
+        self.assertEqual(before_fork, self.refs(self.fork))
+        self.assertEqual([c for c in self.gh_calls() if c.startswith("repo fork")], [],
+                         "a maintainer must not fork a repo they can already write to")
+        self.assertIn("maintainer path", r.stdout)
+
+    def test_the_ledger_row_has_the_documented_shape(self):
+        r = self.propose()
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        rows = self.ledger_rows()
+        self.assertEqual(len(rows), 1, "expected exactly one contrib row, got %r" % rows)
+        row = rows[0]
+        self.assertEqual(row["name"], "demo-skill")
+        self.assertEqual(row["upstream"], "acme/pool")
+        self.assertEqual(row["fork"], True)
+        self.assertEqual(row["pr"], "https://github.com/acme/pool/pull/7")
+        self.assertEqual(row["ts"], 1700000000)
+
+    def test_the_ledger_row_is_invisible_to_the_forge_join(self):
+        # Every ledger reader selects BY NAME. A new event type must not be readable as
+        # a forge start or outcome, or the forge counts move the day this lands.
+        self.propose()
+        for event in ("start", "done", "fail", "use", "origin"):
+            self.assertEqual(self.ledger_rows(event), [],
+                             "a contrib run wrote a %r row" % event)
+
+    # -------------------------------------------------------------- the WRITE: lines
+
+    def test_every_network_write_is_announced_and_nothing_else_is(self):
+        r = self.propose()
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        lines = self.write_lines(r.stdout)
+        self.assertEqual(len(lines), 3, "expected three WRITE: lines, got %r" % lines)
+        self.assertIn("gh repo fork acme/pool", lines[0])
+        self.assertIn("git push -u origin skill/demo-skill", lines[1])
+        self.assertIn("gh pr create --repo acme/pool", lines[2])
+        # And the writes that actually happened are those and no more: two through gh,
+        # one through git (proved by the branch being in the fork).
+        self.assertEqual(len(self.writes_called()), 2, self.gh_calls())
+        self.assertIn("refs/heads/skill/demo-skill", self.refs(self.fork))
+
+    def test_the_write_line_is_printed_before_the_write_it_names(self):
+        """Proved by making the write fail.
+
+        The fork is refused by the shim, so nothing after that line runs. The line is
+        on stdout anyway, which is only possible if it was printed first.
+        """
+        r = self.propose(FAKEGH_FORK_FAILS="1")
+        self.assertEqual(r.returncode, 23, r.stdout[-2000:] + r.stderr[-1000:])
+        self.assertIn("WRITE: gh repo fork acme/pool --clone=false", r.stdout)
+        self.assertNotIn("refs/heads/skill/demo-skill", self.refs(self.fork))
+        self.assertEqual(self.ledger_rows(), [])
+
+    def test_a_failed_pull_request_says_the_branch_is_already_pushed(self):
+        # The dangerous half-state. Re-running propose would try to push again, so the
+        # message has to say what already happened.
+        r = self.propose(FAKEGH_PR_FAILS="1")
+        self.assertEqual(r.returncode, 25, r.stdout[-2000:] + r.stderr[-1000:])
+        self.assertIn("refs/heads/skill/demo-skill", self.refs(self.fork),
+                      "the push happened before gh pr create; the fixture is wrong")
+        self.assertIn("ALREADY PUSHED", r.stderr)
+        self.assertEqual(self.ledger_rows(), [], "no pull request means no contrib row")
+
+    # ------------------------------------------------------------------- the dry run
+
+    def test_the_dry_run_writes_nothing_anywhere(self):
+        before_fork, before_upstream = self.refs(self.fork), self.refs(self.upstream)
+        r = self.propose("--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+        self.assertEqual(before_fork, self.refs(self.fork))
+        self.assertEqual(before_upstream, self.refs(self.upstream))
+        self.assertEqual(self.writes_called(), [], self.gh_calls())
+        self.assertEqual(self.ledger_rows(), [])
+        self.assertFalse((self.state / "contrib").exists(),
+                         "a dry run must not create the work tree either")
+        self.assertEqual(self.write_lines(r.stdout), [],
+                         "a dry run must not print a WRITE: line; it writes nothing")
+
+    def test_the_dry_run_prints_what_the_real_run_would_do(self):
+        r = self.propose("--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        for expected in ("would run: gh repo fork acme/pool --clone=false",
+                         "would run: git push -u origin skill/demo-skill",
+                         "would run: gh pr create --repo acme/pool",
+                         "would append one row to",
+                         '"event":"contrib"'):
+            self.assertIn(expected, r.stdout, "the plan does not mention %r" % expected)
+
+    def test_the_dry_run_prints_the_whole_pull_request_body(self):
+        r = self.propose("--dry-run")
+        body = r.stdout[r.stdout.index("--- 8< ---"):r.stdout.index("--- >8 ---")]
+        self.assertIn("Use when a demo is needed for the offline harness.", body,
+                      "the body must carry the description a reviewer reads")
+        self.assertIn("verified 9/9 must-fire draws", body,
+                      "the body must carry the routing pin's own result line")
+        self.assertIn("recorded uses since:", body,
+                      "the body must carry the ledger's use count")
+
+    def test_recon_is_the_dry_run_under_another_name(self):
+        dry = self.propose("--dry-run")
+        recon = subprocess.run([str(SCRIPT), "recon", "demo-skill", "--upstream", "acme/pool"],
+                               capture_output=True, text=True, env=self.env(),
+                               stdin=subprocess.DEVNULL, timeout=120)
+        self.assertEqual(recon.returncode, 0, recon.stderr[-2000:])
+        self.assertEqual(recon.stdout, dry.stdout,
+                         "recon must be propose --dry-run, byte for byte")
+
+    # ------------------------------------------------------------------- refusals
+
+    def test_a_skill_already_in_the_upstream_tree_is_refused(self):
+        self.canned_tree(["skills/other/SKILL.md", "skills/demo-skill/SKILL.md"])
+        (self.canned / "contents.md").write_text("---\nname: demo-skill\n---\n")
+        before = self.refs(self.fork)
+        r = self.propose()
+        self.assertEqual(r.returncode, 9, r.stdout[-2000:])
+        self.assertIn("ALREADY UPSTREAM", r.stdout)
+        self.assertEqual(before, self.refs(self.fork))
+        self.assertEqual(self.writes_called(), [])
+
+    def test_a_skill_already_in_the_clone_is_refused_before_the_push(self):
+        # The tree probe reads one commit of the default branch through an API. The
+        # clone is the ground truth, and it can disagree: a fork that is ahead, a
+        # listing that was truncated, a race. Overwriting there is how a contribution
+        # silently replaces someone's work.
+        self.upstream = self.build_bare("upstream2.git",
+                                        ["skills/other/SKILL.md", "skills/demo-skill/SKILL.md"])
+        self.fork = self.clone_bare("fork2.git", self.upstream)
+        r = self.propose()
+        self.assertEqual(r.returncode, 9, r.stdout[-2000:] + r.stderr[-1000:])
+        self.assertIn("already exists", r.stderr)
+        self.assertNotIn("refs/heads/skill/demo-skill", self.refs(self.fork))
+        self.assertEqual(self.ledger_rows(), [])
+
+    def test_an_open_proposal_upstream_stops_the_run(self):
+        self.canned_prs([{"number": 12, "title": "Add demo-skill skill", "state": "OPEN",
+                          "url": "https://github.com/acme/pool/pull/12",
+                          "headRefName": "skill/demo-skill",
+                          "files": [{"path": "skills/demo-skill/SKILL.md",
+                                     "additions": 90, "deletions": 0}]}])
+        r = self.propose()
+        self.assertEqual(r.returncode, 4, r.stdout[-2000:])
+        self.assertEqual(self.writes_called(), [])
+        self.assertEqual(self.ledger_rows(), [])
+
+    def test_a_missing_skill_is_refused_before_any_lookup(self):
+        r = subprocess.run([str(SCRIPT), "propose", "no-such-skill", "--upstream", "acme/pool"],
+                           capture_output=True, text=True, env=self.env(),
+                           stdin=subprocess.DEVNULL, timeout=60)
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertEqual(self.gh_calls(), [],
+                         "nothing should reach gh before the skill is even found")
+
+    def test_the_parse_check_refuses_broken_frontmatter_before_any_lookup(self):
+        self.write_skill(text='---\nname: demo-skill\ndescription: "unterminated\n---\n\n# B\n')
+        r = self.propose()
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("does not parse as YAML", r.stderr)
+        self.assertEqual(self.gh_calls(), [])
+        self.assertEqual(self.ledger_rows(), [])
+
+    def test_a_skill_with_no_trigger_precision_section_is_refused(self):
+        self.write_skill(text=('---\nname: demo-skill\ndescription: "Use when demoing. '
+                               'Do NOT use otherwise."\n---\n\n# Demo\n\nA body.\n'))
+        r = self.propose()
+        self.assertEqual(r.returncode, 20, r.stdout + r.stderr)
+        self.assertIn("Trigger precision", r.stderr)
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_a_trigger_section_with_no_pin_is_refused(self):
+        self.write_skill(text=('---\nname: demo-skill\ndescription: "Use when demoing. '
+                               'Do NOT use otherwise."\n---\n\n# Demo\n\n'
+                               '## Trigger precision\n\nProsp that MUST fire:\n\n1. "demo"\n'))
+        r = self.propose()
+        self.assertEqual(r.returncode, 21, r.stdout + r.stderr)
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_an_unmeasured_routing_pin_is_refused_and_the_flag_lifts_it(self):
+        self.write_skill(measured="never", result="unmeasured")
+        r = self.propose()
+        self.assertEqual(r.returncode, 22, r.stdout + r.stderr)
+        self.assertIn("unmeasured", r.stderr)
+        self.assertEqual(self.gh_calls(), [])
+
+        ok = self.propose("--allow-unmeasured")
+        self.assertEqual(ok.returncode, 0, ok.stdout[-3000:] + ok.stderr[-2000:])
+        self.assertIn("UNMEASURED", ok.stdout)
+        self.assertIn("refs/heads/skill/demo-skill", self.refs(self.fork))
+
+    def test_an_installed_symlink_is_resolved_to_the_directory_it_names(self):
+        """The installed path is almost always a symlink into a checkout.
+
+        `~/.claude/skills/<name>` is what the installer creates, and the files that must
+        travel with SKILL.md live at the other end of it. Copying the link's own
+        directory finds only SKILL.md if it finds anything at all.
+        """
+        real = self.root / "checkout" / "skills" / "demo-skill"
+        real.mkdir(parents=True)
+        installed = self.home / ".claude" / "skills" / "demo-skill"
+        for f in installed.iterdir():
+            if f.is_dir():
+                (real / f.name).mkdir()
+                for g in f.iterdir():
+                    (real / f.name / g.name).write_text(g.read_text())
+            else:
+                (real / f.name).write_text(f.read_text())
+        shutil.rmtree(installed)
+        installed.symlink_to(real)
+
+        r = self.propose()
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+        self.assertIn("skill directory: %s" % real.resolve(), r.stdout,
+                      "the path printed must be the checkout, not the link")
+        listed = subprocess.run(
+            ["git", "--git-dir", str(self.fork), "ls-tree", "-r", "--name-only",
+             "skill/demo-skill"], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL).stdout
+        self.assertIn("skills/demo-skill/scripts/run.sh", listed,
+                      "following the symlink is what carries the rest of the directory")
+
+    def test_a_project_level_skill_is_found_when_nothing_is_installed(self):
+        # Level A: ./.claude/skills/<name>, for a skill that belongs to one repository.
+        shutil.rmtree(self.home / ".claude" / "skills" / "demo-skill")
+        project = self.root / "project"
+        (project / ".claude" / "skills").mkdir(parents=True)
+        d = project / ".claude" / "skills" / "demo-skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text(PINNED % {
+            "measured": "2026-09-01",
+            "result": "verified 9/9 must-fire draws, 9/9 must-not-fire draws"})
+        r = subprocess.run([str(SCRIPT), "propose", "demo-skill", "--upstream", "acme/pool"],
+                           capture_output=True, text=True, env=self.env(),
+                           stdin=subprocess.DEVNULL, timeout=120, cwd=str(project))
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+        self.assertIn("refs/heads/skill/demo-skill", self.refs(self.fork))
+
+    def test_an_archived_upstream_stops_before_any_write(self):
+        r = self.propose(FAKEGH_ARCHIVED="true")
+        self.assertEqual(r.returncode, 18, r.stdout[-2000:] + r.stderr[-1000:])
+        self.assertEqual(self.writes_called(), [])
+
+    def test_an_existing_fork_is_reused_rather_than_created_again(self):
+        (self.canned / "fork-exists").write_text("")
+        r = self.propose()
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr[-2000:])
+        self.assertEqual([c for c in self.gh_calls() if c.startswith("repo fork")], [])
+        self.assertIn("already exists and is reused", r.stdout)
+        self.assertEqual(len(self.write_lines(r.stdout)), 2,
+                         "with no fork to create there are two writes, not three")
 
 
-class ReadOnlyTest(unittest.TestCase):
-    """skillcontrib does reconnaissance. The writes belong to the skill, behind gates."""
+class WriteSurfaceTest(unittest.TestCase):
+    """Which commands in this CLI can write, and where those writes live in the file.
 
-    def test_script_contains_no_network_writes(self):
+    Until `propose` landed the answer was "none", and one test asserted the strings were
+    absent from the whole script. That test cannot survive the feature, so this replaces
+    it with the two claims that still hold: every OTHER subcommand writes nothing (driven
+    for real against the offline harness), and every write in the file is inside
+    `cmd_propose`.
+    """
+
+    def test_only_cmd_propose_contains_an_executable_network_write(self):
         text = SCRIPT.read_text()
-        for forbidden in ("gh pr create", "gh repo fork", "git push"):
-            self.assertNotIn(forbidden, text,
-                             "%r appears in a script that must never write" % forbidden)
+        start = text.index("cmd_propose() {")
+        end = text.index("\ncmd=\"${1:-}\"")
+        for pattern in ('"$GH" repo fork', '"$GH" pr create', 'push --quiet -u origin'):
+            spots = [m.start() for m in re.finditer(re.escape(pattern), text)]
+            self.assertTrue(spots, "%r is not in the script at all" % pattern)
+            for spot in spots:
+                line_start = text.rfind("\n", 0, spot) + 1
+                if text[line_start:spot].lstrip().startswith("#"):
+                    continue
+                self.assertTrue(start < spot < end,
+                                "%r is executed outside cmd_propose (offset %d)"
+                                % (pattern, spot))
 
-    def test_help_exits_zero(self):
+    def test_the_read_only_subcommands_reach_no_write(self):
+        """Driven, not read: the real subcommands against the real shim."""
+        case = OfflineProposeTest("test_the_dry_run_writes_nothing_anywhere")
+        case.setUp()
+        try:
+            before = case.refs(case.fork)
+            for argv in (["dedup", "demo-skill", "--repo", "acme/pool"],
+                         ["whoami", "--repo", "acme/pool"],
+                         ["preflight", str(case.home / ".claude" / "skills" / "demo-skill")],
+                         ["recon", "demo-skill", "--upstream", "acme/pool"]):
+                r = subprocess.run([str(SCRIPT), *argv], capture_output=True, text=True,
+                                   env=case.env(), stdin=subprocess.DEVNULL, timeout=120)
+                self.assertEqual(r.returncode, 0, "%s: %s%s" % (argv, r.stdout, r.stderr))
+            self.assertEqual(case.writes_called(), [], case.gh_calls())
+            self.assertEqual(before, case.refs(case.fork))
+            self.assertEqual(case.ledger_rows(), [])
+        finally:
+            case.tearDown()
+
+    def test_help_exits_zero_and_lists_every_subcommand(self):
         r = subprocess.run([str(SCRIPT), "--help"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
-        self.assertIn("skillcontrib dedup", r.stdout)
+        for cmd in ("skillcontrib dedup", "skillcontrib whoami", "skillcontrib preflight",
+                    "skillcontrib recon", "skillcontrib propose"):
+            self.assertIn(cmd, r.stdout)
+
+    def test_help_says_running_propose_is_the_consent(self):
+        r = subprocess.run([str(SCRIPT), "--help"], capture_output=True, text=True)
+        self.assertIn("RUNNING THIS WITHOUT --dry-run IS THE", r.stdout)
 
     def test_help_warns_about_the_default_repo(self):
         r = subprocess.run([str(SCRIPT), "--help"], capture_output=True, text=True)
@@ -396,6 +967,12 @@ class ReadOnlyTest(unittest.TestCase):
     def test_dedup_without_a_name_is_a_usage_error(self):
         r = subprocess.run([str(SCRIPT), "dedup"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
+
+    def test_propose_without_a_name_is_a_usage_error(self):
+        r = subprocess.run([str(SCRIPT), "propose"], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("propose <skill-name>", r.stderr)
 
 
 @unittest.skipUnless(LIVE, "gh is missing or unauthenticated; live GitHub reads skipped")

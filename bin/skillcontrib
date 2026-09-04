@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# skillcontrib: read-only reconnaissance for proposing a skill to an upstream repo.
+# skillcontrib: reconnaissance, and the one command that proposes a skill upstream.
 #
 #   skillcontrib dedup <skill-name> [--description <text>] [--repo <r>] [--override-rejected]
 #   skillcontrib whoami [--repo <r>]
 #   skillcontrib preflight <skill-dir>
+#   skillcontrib recon <skill-name> [--upstream <owner/repo>]
+#   skillcontrib propose <skill-name> [--upstream <owner/repo>] [--dry-run]
+#                                     [--allow-unmeasured] [--override-rejected]
+#                                     [--skills-dir <dir>]
 #   skillcontrib --help
 #
-# This script performs NO network writes. It only reads: no forking, no branch
-# creation, no uploading of commits, no opening of pull requests. Those steps belong
-# to the contribute-skill skill, behind its consent gates, where a human sees each
-# one before it happens.
+# EVERY SUBCOMMAND BUT `propose` PERFORMS NO NETWORK WRITES. `dedup`, `whoami`,
+# `preflight` and `recon` only read: no forking, no branch creation, no uploading of
+# commits, no opening of pull requests.
+#
+# `propose` is the exception, and running it without --dry-run IS the consent. It was
+# read-only reconnaissance and a hand-walked procedure for its whole life, and that
+# produced 47 reconnaissance runs and zero pull requests: a consent gate a human has to
+# walk seven times is a gate nobody reaches the far side of. So the gates collapse into
+# one act. Every step is printed before it runs, the run stops at the first failure with
+# its own exit code, `--dry-run` does the read-only half and prints what the rest would
+# do, and every network write is announced first on a line beginning `WRITE:` so a
+# transcript can be swept for them afterwards.
 #
 # Exit codes
 #   0   clean / success
@@ -29,6 +41,12 @@
 #   11  preflight: SKILL.md not found
 #   12  preflight: frontmatter missing, or it does not parse as YAML
 #   17  preflight: name or description is missing, or name does not match the directory
+#   20  propose: SKILL.md has no `## Trigger precision` section
+#   21  propose: that section carries no routing-pin block, or the pin has no `measured:`
+#   22  propose: the routing pin is unmeasured. Blocks unless --allow-unmeasured
+#   23  propose: the fork could not be created, or never became visible
+#   24  propose: a clone, branch, copy, commit or push step failed
+#   25  propose: `gh pr create` returned no pull request URL
 #
 # Codes 13 to 16 are retired. They enforced portable-key and length limits that
 # hard-failed 46 of 156 real installed skills, including four shipped by Anthropic,
@@ -79,6 +97,51 @@ set -uo pipefail
 
 DEFAULT_REPO="ContextLab/claude-skill-compounder"
 
+# EVERY `gh` CALL IN THIS FILE GOES THROUGH $GH. `gh` speaks only to GitHub, so the
+# write half of `propose` is untestable without either a real account and real pull
+# requests or a stand-in binary. SKILLCONTRIB_GH names one. It is not a mock of this
+# script's own logic -- the script under test is unchanged and the git operations are
+# real, against real repositories on disk. It substitutes the one dependency whose real
+# form would open public pull requests every time the suite ran.
+GH="${SKILLCONTRIB_GH:-gh}"
+
+# Where the branch is uploaded, and where the clone comes from. Unset in normal use, when
+# both are derived from the repo name; the tests point them at local bare repositories so
+# a clone, a branch, a commit and a push are all exercised for real with no network.
+UPSTREAM_URL_OVERRIDE="${SKILLCONTRIB_UPSTREAM_URL:-}"
+FORK_URL_OVERRIDE="${SKILLCONTRIB_FORK_URL:-}"
+
+# HOME can be unset (cron, a stripped env, a container). Under `set -u` reading it aborts
+# the script non-zero before it has printed anything.
+: "${HOME:=/tmp}"
+
+STATE_ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
+LEDGER="$STATE_ROOT/ledger.jsonl"
+
+# This script's own clock, and it is its own on purpose: pinning another script's clock
+# freezes a script whose behaviour a test never meant to touch. It stamps the ledger row
+# and the timestamp in the work-tree name.
+now() { if [ -n "${SKILLCONTRIB_NOW:-}" ]; then printf '%s' "$SKILLCONTRIB_NOW"; else date +%s; fi; }
+
+# Shell twin of resolve_link() in bin/skillnote, and it exists for the same reason: $0 is
+# a symlink in the user's bin directory on any machine that ran the installer, so
+# `dirname $0` finds the symlink's directory, where the sibling skillforge is not.
+resolve_link() { # <path> -> the regular file it ultimately names
+  rl_p="$1"; rl_n=0
+  while [ -L "$rl_p" ]; do
+    rl_n=$(( rl_n + 1 ))
+    if [ "$rl_n" -gt 40 ]; then printf '%s' "$1"; return 1; fi
+    rl_t="$(readlink "$rl_p" 2>/dev/null)" || { printf '%s' "$rl_p"; return 1; }
+    case "$rl_t" in
+      /*) rl_p="$rl_t" ;;
+      *)  rl_p="$(dirname "$rl_p")/$rl_t" ;;
+    esac
+  done
+  printf '%s' "$rl_p"
+}
+SELF="$(resolve_link "$0")"
+SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")"
+
 # A pull request PROPOSED a skill when it adds <path>/SKILL.md outright: no deletions
 # on that path, and at least PROPOSAL_MIN_ADDED added lines. The floor is the smallest
 # shipping SKILL.md in the survey (36 lines). Without this evidence a one-line typo fix
@@ -104,7 +167,7 @@ norm() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'; }
 
 usage() {
   cat <<'USAGE'
-skillcontrib: read-only reconnaissance before proposing a skill upstream.
+skillcontrib: reconnaissance, and the one command that proposes a skill upstream.
 
   skillcontrib dedup <skill-name> [--description <text>] [--repo OWNER/REPO]
                                   [--override-rejected]
@@ -129,18 +192,44 @@ skillcontrib: read-only reconnaissance before proposing a skill upstream.
         `description` exists (without one the skill never fires). Length, style, and
         key-portability advice belongs in review, not in a gate.
 
+  skillcontrib recon <skill-name> [--upstream OWNER/REPO]
+        The read-only half of `propose`, and nothing else: locate the skill, parse it,
+        read its routing pin, run the duplicate check, decide maintainer or fork, then
+        print exactly what a real run would clone, commit, push and open. Identical to
+        `propose --dry-run`. No network write of any kind.
+
+  skillcontrib propose <skill-name> [--upstream OWNER/REPO] [--dry-run]
+                                    [--allow-unmeasured] [--override-rejected]
+                                    [--skills-dir DIR]
+        Proposes the skill upstream, end to end. RUNNING THIS WITHOUT --dry-run IS THE
+        CONSENT: it forks when it has to, pushes a branch, and opens a public pull
+        request under the acting account. Six steps, each printed before it runs, and
+        the run stops at the first failure with that step's own exit code:
+          1  locate ~/.claude/skills/<name> (through its symlink) or
+             ./.claude/skills/<name>, preflight it, and read its routing pin
+          2  the duplicate check of `dedup`, using the skill's own description
+          3  the maintainer-or-fork decision of `whoami`, and the fork if one is needed
+          4  shallow-clone the target, branch `skill/<name>`, copy the whole skill
+             directory to <skills-dir>/<name>/, commit, push
+          5  `gh pr create` against the upstream default branch, and print the URL
+          6  one `contrib` row in the ledger
+        Every network write is printed first on a line beginning `WRITE:`. --dry-run
+        does steps 1 to 3 without the fork and prints what 4 to 6 would do.
+        An unmeasured routing pin is refused (exit 22); --allow-unmeasured proceeds.
+
 --repo defaults to ContextLab/claude-skill-compounder. Pass it explicitly whenever the
 target is anything else; a silent default aimed at the wrong repo answers "clean" for
-free. Exit codes are documented at the top of this script.
+free. `propose` and `recon` spell the same flag `--upstream` and accept `--repo` too.
+Exit codes are documented at the top of this script.
 USAGE
 }
 
 require_gh() {
-  command -v gh >/dev/null 2>&1 || fail 6 "gh is not installed. Install it from https://cli.github.com and retry."
+  command -v "$GH" >/dev/null 2>&1 || fail 6 "gh is not installed. Install it from https://cli.github.com and retry."
   command -v jq >/dev/null 2>&1 || fail 6 "jq is required."
   # A network outage and a missing login both make this call fail. Reporting the wrong
   # one sends the user off to re-authenticate a session that was never broken.
-  if ! authout=$(gh auth status 2>&1); then
+  if ! authout=$("$GH" auth status 2>&1); then
     # gh's own message is the evidence, so pass it through whole rather than guessing.
     detail=$(printf '%s' "$authout" | tr '\n' ' ' | sed 's/  */ /g')
     case "$authout" in
@@ -159,7 +248,7 @@ require_gh() {
 # exist answers an empty list with a zero exit status, indistinguishable from "no
 # duplicate found", so this call (which 404s properly) has to run first.
 resolve_repo() {
-  repo_json=$(gh repo view "$repo" --json isArchived,defaultBranchRef 2>/dev/null)
+  repo_json=$("$GH" repo view "$repo" --json isArchived,defaultBranchRef 2>/dev/null)
   [ -n "$repo_json" ] || fail 8 "could not resolve $repo. Check the name, your network, and 'gh api rate_limit'."
   archived=$(printf '%s' "$repo_json" | jq -r '.isArchived')
   default_branch=$(printf '%s' "$repo_json" | jq -r '.defaultBranchRef.name // "main"')
@@ -210,7 +299,7 @@ cmd_whoami() {
   done
   require_gh
 
-  user=$(gh api user --jq .login 2>/dev/null)
+  user=$("$GH" api user --jq .login 2>/dev/null)
   [ -n "$user" ] || fail 8 "could not read the authenticated identity from gh api user."
 
   # The bare collaborators/<user> endpoint answers 204 for ANY collaborator, including
@@ -220,7 +309,7 @@ cmd_whoami() {
   # A failed lookup here is not the same as "no permission". 403 and 404 are real
   # answers (no push access, not a collaborator); anything else means the question was
   # never answered, and guessing "contributor" is how a maintainer gets sent to fork.
-  if permout=$(gh api "repos/$repo/collaborators/$user/permission" --jq .permission 2>&1); then
+  if permout=$("$GH" api "repos/$repo/collaborators/$user/permission" --jq .permission 2>&1); then
     perm="$permout"
   else
     case "$permout" in
@@ -263,7 +352,7 @@ cmd_whoami() {
 # `.resources.graphql.remaining` was observed dropping while `.resources.search`
 # stayed put. gh's stderr is not swallowed; callers check the exit status.
 pr_search() {
-  gh pr list --repo "$repo" --state all --search "$1" --json "$2" --limit 100
+  "$GH" pr list --repo "$repo" --state all --search "$1" --json "$2" --limit 100
 }
 
 cmd_dedup() {
@@ -296,7 +385,7 @@ cmd_dedup() {
   # it missed every nested layout (plugins/<x>/skills/<x>/SKILL.md is real and common).
   # Matching any directory whose normalised name equals the key, at any depth, fixes
   # both. Cost is one API call regardless of repo size.
-  tree=$(gh api "repos/$repo/git/trees/$default_branch?recursive=1" 2>/dev/null)
+  tree=$("$GH" api "repos/$repo/git/trees/$default_branch?recursive=1" 2>/dev/null)
   [ -n "$tree" ] || fail 8 "could not list the tree of $repo@$default_branch. A failed lookup is not a clean one."
   truncated=0
   if [ "$(printf '%s' "$tree" | jq -r '.truncated')" = "true" ]; then
@@ -316,7 +405,7 @@ cmd_dedup() {
 
   if [ -n "$hit" ]; then
     echo "ALREADY UPSTREAM: $hit exists in $repo (default branch $default_branch)."
-    upstream_name=$(gh api "repos/$repo/contents/$hit" -H "Accept: application/vnd.github.raw" 2>/dev/null | awk '
+    upstream_name=$("$GH" api "repos/$repo/contents/$hit" -H "Accept: application/vnd.github.raw" 2>/dev/null | awk '
         NR == 1 && !/^---[[:space:]]*$/ {exit}
         /^name:/ {sub(/^name:[[:space:]]*/, ""); print; exit}
         NR > 1 && /^---[[:space:]]*$/ {exit}')
@@ -569,11 +658,390 @@ RBEOF
   return 0
 }
 
+# ------------------------------------------------------------------ propose
+#
+# THE ONLY SUBCOMMAND IN THIS FILE THAT WRITES ANYTHING TO THE NETWORK.
+#
+# It replaces a seven-gate procedure a human walked by hand. That procedure was correct
+# and it was never completed: 47 reconnaissance runs, 0 pull requests. A gate that is
+# never reached protects nothing, so the gates become one act -- typing the command
+# without --dry-run -- and everything the gates used to display is printed here instead,
+# before the thing it describes happens. Read the dry run, then run it for real.
+
+say_step() { printf '\n== %s\n' "$*"; }
+
+# Where a skill actually lives. The installed path is checked first and resolved THROUGH
+# its symlink, because the installer links a skill directory out of a checkout and the
+# files that must travel with SKILL.md -- scripts/, references/, LICENSE.txt -- sit in
+# the checkout, not beside the link.
+locate_skill() { # <name> -> absolute, symlink-resolved path
+  ls_name="$1"
+  for ls_c in "$HOME/.claude/skills/$ls_name" "./.claude/skills/$ls_name"; do
+    [ -d "$ls_c" ] || continue
+    (cd "$ls_c" 2>/dev/null && pwd -P) && return 0
+  done
+  return 1
+}
+
+# One frontmatter field, block scalars included. The `description:` of a real skill is
+# often written as `>-` with indented continuation lines, and taking only the first line
+# of that puts an empty description in the pull request body.
+frontmatter_field() { # <skill-md> <key>
+  awk -v key="$2" '
+    BEGIN { sq = sprintf("%c", 39); dq = sprintf("%c", 34); grab = 0; val = "" }
+    NR == 1 { if ($0 !~ /^---[[:space:]]*$/) exit; next }
+    /^---[[:space:]]*$/ { exit }
+    $0 ~ "^" key ":" {
+      line = $0
+      sub("^" key ":[[:space:]]*", "", line)
+      if (line ~ /^[>|]/) line = ""
+      val = line; grab = 1; next
+    }
+    grab == 1 {
+      if ($0 ~ /^[^[:space:]]/) { grab = 0; next }
+      l = $0; sub(/^[[:space:]]+/, "", l)
+      val = (val == "" ? l : val " " l)
+      next
+    }
+    END {
+      q = substr(val, 1, 1)
+      if ((q == sq || q == dq) && length(val) > 1 && substr(val, length(val), 1) == q)
+        val = substr(val, 2, length(val) - 2)
+      print val
+    }
+  ' "$1"
+}
+
+# The routing pin is the only machine-readable evidence that a skill's description was
+# ever measured against a router. Without one, "this fires on the right prompts" is a
+# claim the reviewer has to take on faith and cannot re-run, which is exactly the shape
+# of contribution that wastes their time.
+read_routing_pin() { # <skill-md>; sets pin_measured, pin_result, pin_cli, pin_model
+  rp_md="$1"
+  grep -q '^## Trigger precision' "$rp_md" \
+    || fail 20 "$rp_md has no '## Trigger precision' section, so nothing records which prompts this skill fires on. Write one and measure it before proposing."
+  rp_block="$(sed -n '/<!-- routing-pin/,/-->/p' "$rp_md")"
+  [ -n "$rp_block" ] \
+    || fail 21 "$rp_md has a '## Trigger precision' section but no <!-- routing-pin --> block, so its claims were never bound to a measurement."
+  pin_measured="$(printf '%s\n' "$rp_block" | sed -n 's/^[[:space:]]*measured:[[:space:]]*//p' | head -n 1)"
+  pin_result="$(printf '%s\n' "$rp_block" | sed -n 's/^[[:space:]]*result:[[:space:]]*//p' | head -n 1)"
+  pin_cli="$(printf '%s\n' "$rp_block" | sed -n 's/^[[:space:]]*cli:[[:space:]]*//p' | head -n 1)"
+  pin_model="$(printf '%s\n' "$rp_block" | sed -n 's/^[[:space:]]*model:[[:space:]]*//p' | head -n 1)"
+  [ -n "$pin_measured" ] \
+    || fail 21 "$rp_md: the routing-pin block has no 'measured:' line, so there is nothing to check."
+  return 0
+}
+
+# A fork is created asynchronously. gh returns before the repository is servable and a
+# clone issued immediately afterwards 404s, so poll the thing itself rather than sleeping
+# a guessed amount and hoping.
+wait_for_fork() { # <owner/repo>
+  wf_tries="${SKILLCONTRIB_FORK_TRIES:-30}"
+  wf_sleep="${SKILLCONTRIB_FORK_SLEEP:-2}"
+  wf_n=0
+  while [ "$wf_n" -lt "$wf_tries" ]; do
+    if "$GH" repo view "$1" --json name >/dev/null 2>&1; then
+      echo "fork is live: $1"
+      return 0
+    fi
+    wf_n=$(( wf_n + 1 ))
+    sleep "$wf_sleep"
+  done
+  fail 23 "the fork $1 did not answer after $wf_tries checks. It may still appear; re-run once 'gh repo view $1' answers."
+}
+
+# What this machine's own record says about the skill. A reviewer's first question is
+# "has anyone actually used this", and the ledger is the only place that answers it.
+ledger_summary() { # <skill-name>
+  if [ ! -f "$LEDGER" ]; then
+    printf 'origin: no ledger at %s, so nothing here is recorded.\n' "$LEDGER"
+    printf 'recorded uses since: unknown (no ledger on this machine)\n'
+    return 0
+  fi
+  ls_out="$(jq -R -s -r --arg n "$1" '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) ] as $rec
+    | ([ $rec[] | select(.event == "origin" and .name == $n) ] | sort_by(.ts) | .[0]) as $o
+    | [ $rec[] | select(.event == "use" and .name == $n) ] as $u
+    | (if $o == null then "origin: not recorded in this ledger"
+       else "origin: " + ($o.origin // "unknown")
+            + ", recorded " + ((($o.ts // 0) | gmtime | strftime("%Y-%m-%d"))) end),
+      ("recorded uses since: " + (($u | length) | tostring) + " total, "
+       + (([ $u[] | select(.harness == false) ] | length) | tostring) + " outside the harness, "
+       + (([ $u[] | select(.ok == false) ] | length) | tostring) + " that failed")
+  ' "$LEDGER" 2>/dev/null)"
+  if [ -n "$ls_out" ]; then
+    printf '%s\n' "$ls_out"
+  else
+    printf 'origin: the ledger at %s could not be read.\n' "$LEDGER"
+    printf 'recorded uses since: unknown\n'
+  fi
+  return 0
+}
+
+# ledger_ensure_horizon() in bin/skillforge states where the record begins, and a ledger
+# whose first row is a contrib with no horizon reads as "complete from here", which is
+# false. Rather than keep a second implementation of "what does this ledger not know",
+# call skillforge's. Best effort in both directions: if it is missing or too old to know
+# the subcommand, THE ROW IS APPENDED ANYWAY. A CLI that recorded nothing because a
+# sibling was out of date teaches the caller to stop calling it.
+ensure_horizon() {
+  eh_f="$(dirname "$SELF")/skillforge"
+  if [ ! -x "$eh_f" ]; then eh_f="$(command -v skillforge 2>/dev/null)" || eh_f=""; fi
+  [ -n "$eh_f" ] || return 0
+  "$eh_f" horizon >/dev/null 2>&1 || true
+  return 0
+}
+
+# The `contrib` event. Readers select ledger events BY NAME, so a new one is invisible to
+# every existing reader and widens no join.
+ledger_contrib() { # <name> <pr-url> <upstream> <fork-bool> <branch>
+  mkdir -p "$STATE_ROOT" 2>/dev/null || return 0
+  lc_line="$(jq -n -c --arg name "$1" --arg pr "$2" --arg upstream "$3" \
+    --argjson fork "$4" --arg branch "$5" --arg session "${CLAUDE_CODE_SESSION_ID:-}" \
+    --argjson ts "$(now)" \
+    '{event:"contrib", ts:$ts, name:$name, pr:$pr, upstream:$upstream, fork:$fork,
+      branch:$branch, confidence:"measured", backfilled:false}
+     + (if $session == "" then {} else {session:$session} end)' 2>/dev/null)"
+  [ -n "$lc_line" ] || return 0
+  ensure_horizon
+  # `2>/dev/null` BEFORE the `>>`: redirections apply left to right, so the other way
+  # round the append is opened first and a failure to open it is reported by the shell to
+  # a stderr that is still the terminal.
+  printf '%s\n' "$lc_line" 2>/dev/null >> "$LEDGER" || return 0
+  return 0
+}
+
+build_pr_body() { # <name> <description> <upstream> <skills-dir>
+  bp_ledger="$(ledger_summary "$1")"
+  cat <<PRBODY
+## \`$1\`
+
+$2
+
+### Trigger precision
+
+The skill carries a routing pin, so its trigger is a measurement rather than a claim:
+
+    measured: $pin_measured
+    cli:      $pin_cli
+    model:    $pin_model
+    result:   $pin_result
+
+The prompts it was measured against are in the skill's own \`## Trigger precision\`
+section, so this is re-runnable rather than a number to take on trust.
+
+### What the author's own record says
+
+$bp_ledger
+
+Those counts come from one machine's ledger. They say the skill was used, not that it
+was used by anyone else.
+
+### How this was prepared
+
+\`skillcontrib propose $1 --upstream $3\`: the whole skill directory copied to
+\`$4/$1/\`, after a duplicate check against the upstream tree and every pull request in
+any state.
+PRBODY
+}
+
+cmd_propose() {
+  name=""; repo="$DEFAULT_REPO"; dry=0; allow_unmeasured=0; pr_override=0; skills_dir="skills"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --upstream|--repo) shift; repo="${1:-}"; [ -n "$repo" ] || fail 2 "--upstream needs a value" ;;
+      --skills-dir) shift; skills_dir="${1:-}"; [ -n "$skills_dir" ] || fail 2 "--skills-dir needs a value" ;;
+      --dry-run) dry=1 ;;
+      --allow-unmeasured) allow_unmeasured=1 ;;
+      --override-rejected) pr_override=1 ;;
+      -h|--help) usage; exit 0 ;;
+      -*) fail 2 "unknown flag: $1" ;;
+      *) [ -z "$name" ] || fail 2 "propose takes one skill name"; name="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || fail 2 "usage: skillcontrib propose <skill-name> [--upstream OWNER/REPO] [--dry-run]"
+  propose_name="$name"; propose_repo="$repo"
+
+  echo "skillcontrib propose"
+  echo "  skill:    $propose_name"
+  echo "  upstream: $propose_repo"
+  if [ "$dry" -eq 1 ]; then
+    echo "  mode:     DRY RUN. Nothing is forked, pushed, opened or recorded."
+  else
+    echo "  mode:     LIVE. This run forks if it must, pushes a branch, and opens a public"
+    echo "            pull request. Running it is the consent; there is no later gate."
+  fi
+
+  # -------------------------------------------------- (a) locate and parse-check
+  say_step "step 1/6: locate the skill, parse-check it, read its routing pin"
+  skill_dir="$(locate_skill "$propose_name")" \
+    || fail 10 "no skill named '$propose_name' under $HOME/.claude/skills/ or ./.claude/skills/. Install it or run from the project that holds it."
+  echo "skill directory: $skill_dir"
+  cmd_preflight "$skill_dir"
+  skill_md="$skill_dir/SKILL.md"
+  read_routing_pin "$skill_md"
+  pin_unmeasured=0
+  case "$pin_measured" in never|Never|NEVER) pin_unmeasured=1 ;; esac
+  case "$pin_result" in unmeasured*|"") pin_unmeasured=1 ;; esac
+  echo "  routing pin: measured $pin_measured, cli $pin_cli, model $pin_model"
+  echo "  result: $pin_result"
+  if [ "$pin_unmeasured" -eq 1 ]; then
+    if [ "$allow_unmeasured" -eq 0 ]; then
+      fail 22 "the routing pin on $skill_md is unmeasured, so nobody has run the prompts it claims. Measure it, or pass --allow-unmeasured to propose it anyway and say so in review."
+    fi
+    echo "  UNMEASURED, and overridden by --allow-unmeasured. Say so in the pull request."
+  fi
+  propose_desc="$(frontmatter_field "$skill_md" description)"
+  [ -n "$propose_desc" ] || fail 17 "$skill_md: could not read a description out of the frontmatter."
+
+  # -------------------------------------------------- (b) the duplicate check
+  say_step "step 2/6: duplicate check against $propose_repo (tree, pull requests, fuzzy)"
+  if [ "$pr_override" -eq 1 ]; then
+    cmd_dedup "$propose_name" --description "$propose_desc" --repo "$propose_repo" --override-rejected
+  else
+    cmd_dedup "$propose_name" --description "$propose_desc" --repo "$propose_repo"
+  fi
+  propose_branch_base="$default_branch"
+
+  # -------------------------------------------------- (c) maintainer or fork
+  say_step "step 3/6: maintainer or fork, and the fork if one is needed"
+  cmd_whoami --repo "$propose_repo"
+  propose_user="$user"
+  propose_reponame="${propose_repo#*/}"
+  if [ "$role" = "maintainer" ]; then
+    propose_fork=false
+    propose_head=""
+    propose_clone_url="${UPSTREAM_URL_OVERRIDE:-https://github.com/$propose_repo.git}"
+    propose_remote_desc="upstream $propose_repo"
+    echo "maintainer path: branching directly on $propose_repo. No fork is created."
+  else
+    propose_fork=true
+    propose_head="$propose_user:skill/$propose_name"
+    propose_clone_url="${FORK_URL_OVERRIDE:-https://github.com/$propose_user/$propose_reponame.git}"
+    propose_remote_desc="the fork $propose_user/$propose_reponame"
+    if "$GH" repo view "$propose_user/$propose_reponame" --json name >/dev/null 2>&1; then
+      echo "fork path: $propose_user/$propose_reponame already exists and is reused, not created again."
+    elif [ "$dry" -eq 1 ]; then
+      echo "DRY-RUN: would run: gh repo fork $propose_repo --clone=false"
+      echo "         [network write: creates a repository under $propose_user]"
+    else
+      echo "WRITE: gh repo fork $propose_repo --clone=false"
+      echo "       (creates a repository under $propose_user; this is the first network write)"
+      "$GH" repo fork "$propose_repo" --clone=false >/dev/null 2>&1 \
+        || fail 23 "gh repo fork failed for $propose_repo. Nothing else has been written."
+      wait_for_fork "$propose_user/$propose_reponame"
+    fi
+  fi
+
+  # -------------------------------------------------- (d) stage and upload
+  propose_branch="skill/$propose_name"
+  propose_work="$STATE_ROOT/contrib/$propose_name-$(now)"
+  say_step "step 4/6: stage the branch in a clone of $propose_remote_desc and upload it"
+  echo "  clone source: $propose_clone_url (branch $propose_branch_base, --depth 1)"
+  echo "  work tree:    $propose_work"
+  echo "  branch:       $propose_branch"
+  echo "  destination:  $skills_dir/$propose_name/ (the whole directory, not just SKILL.md)"
+  if [ "$dry" -eq 1 ]; then
+    echo "DRY-RUN: would clone, branch, copy $skill_dir/. into $skills_dir/$propose_name/,"
+    echo "         and refuse with exit 9 if that path already exists there."
+    echo "DRY-RUN: would commit with this message:"
+    printf '           %s\n' "Add $propose_name skill"
+    echo
+    printf '           %s\n' "routing-pin measured: $pin_measured" \
+      "routing-pin result: $pin_result"
+    echo "DRY-RUN: would run: git push -u origin $propose_branch"
+    echo "         [network write: uploads the branch to $propose_remote_desc]"
+  else
+    mkdir -p "$(dirname "$propose_work")" \
+      || fail 24 "could not create $(dirname "$propose_work")."
+    git clone --quiet --depth 1 --branch "$propose_branch_base" \
+      "$propose_clone_url" "$propose_work" \
+      || fail 24 "could not clone $propose_clone_url at branch $propose_branch_base."
+    git -C "$propose_work" checkout -q -b "$propose_branch" \
+      || fail 24 "could not create branch $propose_branch in $propose_work."
+    if [ -e "$propose_work/$skills_dir/$propose_name" ]; then
+      fail 9 "$skills_dir/$propose_name/ already exists in $propose_remote_desc. That is a duplicate: improve the existing skill instead. Nothing has been pushed."
+    fi
+    mkdir -p "$propose_work/$skills_dir/$propose_name" \
+      || fail 24 "could not create $skills_dir/$propose_name in the clone."
+    cp -R "$skill_dir/." "$propose_work/$skills_dir/$propose_name/" \
+      || fail 24 "could not copy $skill_dir into the clone."
+    git -C "$propose_work" add "$skills_dir/$propose_name" \
+      || fail 24 "git add failed in $propose_work."
+    git -C "$propose_work" commit -q -F - <<COMMITMSG || fail 24 "git commit failed in $propose_work. Set an author identity and retry."
+Add $propose_name skill
+
+routing-pin measured: $pin_measured
+routing-pin result: $pin_result
+COMMITMSG
+    git -C "$propose_work" --no-pager log -1 --stat --pretty=format:'%h %s' || true
+    echo
+    echo "WRITE: git push -u origin $propose_branch"
+    echo "       (uploads the branch to $propose_remote_desc)"
+    git -C "$propose_work" push --quiet -u origin "$propose_branch" \
+      || fail 24 "git push failed. The branch exists only in $propose_work; nothing reached $propose_remote_desc."
+  fi
+
+  # -------------------------------------------------- (e) the pull request
+  say_step "step 5/6: open the pull request against $propose_repo ($propose_branch_base)"
+  propose_title="Add $propose_name skill"
+  propose_body="$(build_pr_body "$propose_name" "$propose_desc" "$propose_repo" "$skills_dir")"
+  if [ "$dry" -eq 1 ]; then
+    echo "DRY-RUN: would run: gh pr create --repo $propose_repo --base $propose_branch_base${propose_head:+ --head $propose_head} --title \"$propose_title\" --body-file $propose_work/pr-body.md"
+    echo "         [network write: opens a public, identity-attributed pull request]"
+    echo "DRY-RUN: the body would be, in full:"
+    echo "--- 8< ---"
+    printf '%s\n' "$propose_body"
+    echo "--- >8 ---"
+  else
+    propose_body_file="$propose_work/pr-body.md"
+    printf '%s\n' "$propose_body" > "$propose_body_file" \
+      || fail 24 "could not write $propose_body_file."
+    echo "WRITE: gh pr create --repo $propose_repo --base $propose_branch_base${propose_head:+ --head $propose_head} --title \"$propose_title\" --body-file $propose_body_file"
+    echo "       (opens a public, identity-attributed pull request)"
+    if [ -n "$propose_head" ]; then
+      propose_out="$("$GH" pr create --repo "$propose_repo" --base "$propose_branch_base" \
+        --head "$propose_head" --title "$propose_title" --body-file "$propose_body_file" 2>&1)"
+    else
+      propose_out="$("$GH" pr create --repo "$propose_repo" --base "$propose_branch_base" \
+        --title "$propose_title" --body-file "$propose_body_file" 2>&1)"
+    fi
+    printf '%s\n' "$propose_out"
+    propose_url="$(printf '%s\n' "$propose_out" \
+      | grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' | head -n 1)"
+    [ -n "$propose_url" ] \
+      || fail 25 "gh pr create printed no pull request URL. THE BRANCH IS ALREADY PUSHED to $propose_remote_desc; open the pull request by hand rather than re-running this, which would try to push again."
+  fi
+
+  # -------------------------------------------------- (f) the ledger row
+  say_step "step 6/6: record the contribution in the ledger"
+  if [ "$dry" -eq 1 ]; then
+    echo "DRY-RUN: would append one row to $LEDGER:"
+    printf '           {"event":"contrib","name":"%s","pr":"<the URL gh prints>","upstream":"%s","fork":%s}\n' \
+      "$propose_name" "$propose_repo" "$propose_fork"
+    echo
+    echo "DRY RUN COMPLETE. Nothing was forked, pushed, opened or recorded."
+    echo "Re-run without --dry-run to do everything above. That run is the consent."
+    return 0
+  fi
+  ledger_contrib "$propose_name" "$propose_url" "$propose_repo" "$propose_fork" "$propose_branch"
+  echo "recorded in $LEDGER"
+  echo
+  echo "DONE: $propose_url"
+  return 0
+}
+
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
   dedup) cmd_dedup "$@" ;;
   whoami) cmd_whoami "$@" ;;
   preflight) cmd_preflight "$@" ;;
+  propose) cmd_propose "$@" ;;
+  # `recon` is `propose --dry-run` and nothing else. Two names for one code path, because
+  # the read-only half has to be nameable on its own -- a reader told to "run the dry run
+  # first" needs a command that cannot be turned into a write by dropping a flag.
+  recon) cmd_propose "$@" --dry-run ;;
   -h|--help|help) usage; exit 0 ;;
   "") usage >&2; exit 2 ;;
   *) echo "skillcontrib: unknown command '$cmd'" >&2; usage >&2; exit 2 ;;

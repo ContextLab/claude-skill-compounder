@@ -972,6 +972,17 @@ that string is discarded, silently, with the call still allowed, so the hook loo
 working and is saying nothing to anyone. An allow decision is for granting permission, and it
 has no channel back to the model.
 
+**Still delivered one build later.** The same emit shape was run once more on Claude Code
+2.1.259, macOS 25.6.0, 2026-09-03, `--model sonnet`, from a scratch project wired through
+its own `--settings` file. The hook printed
+`{"suppressOutput":true,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"CANARY-PTU-V3Q7SF is the build tag for this workspace."}}`
+on a `Bash` call of `echo hi`, and the session named `CANARY-PTU-V3Q7SF` and said it
+"appeared in a `PreToolUse:Bash hook additional context` system-reminder that showed up
+after I ran the `echo hi` command". That is **n = 1** on the newer build, against the 3 of 3
+above: it confirms the field is still wired and it does not re-establish the rate. The
+payload log and stream for that run are the `07-pretooluse-ac` arm of the probe described
+in the four entries at the end of this file.
+
 **Limits.** One model tier, one CLI build, n = 3 per cell, and only a `Bash` matcher. The
 compliance split rests on four runs and cannot separate 50% from anything nearby. And the
 allow-path result is an absence measured in two places — the model's own report and the
@@ -1054,3 +1065,251 @@ the CLI could never reach it — a session that listed the directory itself woul
 Both probes ran with `--setting-sources ''`, so nothing here depends on the user's
 settings. Two turns was the budget; a longer session might read more of what the index
 offers, which would raise the positive rate and cannot lower it.
+
+---
+
+## `SessionStart` carries a different payload per source, and its context reaches the model in all three
+
+**Finding.** `SessionStart` fires with a `source` of `startup`, `resume` or `compact`, and
+the three payloads are not the same shape:
+
+```
+startup  {"session_id","transcript_path","cwd","hook_event_name","source":"startup"}
+resume   those five, plus "seconds_since_last_response","context_tokens",
+         "prompt_cache_likely_expired","estimated_cache_write_usd"
+compact  those five, plus "prompt_id","model"
+```
+
+Those four extra keys on `resume` are undocumented. The captured values were
+`seconds_since_last_response: 55`, `context_tokens: 30339`,
+`prompt_cache_likely_expired: false` and `estimated_cache_write_usd: 0.1214`, so a hook
+that fires on a resume can see how large the context it is joining is and roughly what
+re-warming the cache will cost, before it decides whether to write anything. `compact` is
+the only source carrying `model` (the value was `"claude-sonnet-5"`) and the only one
+carrying `prompt_id`; it carries **no** context size, so the size is legible on a resume
+and not on a compaction.
+
+`additionalContext` reaches the model on all three sources, and so does plain stdout. The
+two are labelled differently. A session whose hook printed
+`{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"CANARY-SS-7Q4XR2 is the build tag for this workspace."}}`
+reported the string as arriving in "a `<system-reminder>` block labeled "SessionStart hook
+additional context"". A session handed the same sentence as bare stdout reported it in "a
+`SessionStart:startup hook success` system-reminder block near the top of my context". Both
+returned the canary verbatim.
+
+**A fresh `claude -p '/compact'` never reaches the `compact` source.** The stream answers
+`"compact_result":"failed"` with `"compact_error":"Not enough messages to compact."`, and
+the run ends at `num_turns: 0` with the result string `Not enough messages to compact.`.
+`SessionStart` fires once, with `source:"startup"`; `UserPromptSubmit` and `Stop` do not
+fire at all. Compacting headlessly needs a session that already holds a conversation:
+`claude -p --resume <session id> <<< '/compact'` delivered `SessionStart:resume`, then
+`SubagentStop`, then `SessionStart:compact`, and the stream carried
+`"compact_result":"success"` followed by a `compact_boundary` record.
+
+**Injected context survives the compaction.** Driving the same resumed session with
+`--input-format stream-json` and two user messages, `/compact` and then a question, the
+`SessionStart` hook fired twice with the same sentence, once on `resume` and once on
+`compact`. Asked afterwards what it could see, the session answered that
+`CANARY-SSC3-W2R7KD` "appeared twice, each in a system-reminder block labeled
+"SessionStart hook additional context"". The delivery made before the compaction was still
+in context after it.
+
+**How established.** Claude Code 2.1.259, macOS 25.6.0, 2026-09-03, `--model sonnet`, on a
+scratch project whose own `--settings` file wired one dumping-and-emitting hook per event,
+with `--setting-sources ''`, `--strict-mcp-config` and `SKILL_COMPOUNDER_DISPATCHED=1`, so
+none of the machine's real hooks fired. The hook appended its raw stdin to
+`logs/<Event>.jsonl` and its own invocation to `logs/fired.txt`, so "no payload" could be
+told from "hook never ran", and returned whatever the run's `emit/` directory held. Twelve
+runs in all; the ones behind this entry are `01-sessionstart-ac` (`additionalContext` on
+`startup`, 1 run), `02-sessionstart-stdout` (bare stdout on `startup`, 1 run),
+`08-sessionstart-compact` (`/compact` on a fresh session, 1 run), `09-compact-resume`
+(`--resume` plus `/compact`, 1 run, which is where the `resume` and `compact` payloads
+above were captured) and `10-compact-then-ask` (`--input-format stream-json`, 1 run, the
+one that saw the canary twice). Each canary was randomised for its run. The two resumed
+sessions were the sessions left behind by `03-subagent` and `06-stop-block-forever`, matched
+on `session_id`. A summary of the same runs is in
+[../notes/2026-09-03-mission-and-lessons-design.md](../notes/2026-09-03-mission-and-lessons-design.md);
+where it and the logs differ, the logs are the record.
+
+**What it means.** A hook wired on `SessionStart` cannot branch on one payload shape. Four
+of the nine keys it may be handed exist on exactly one source, and `prompt_id`, which is the
+per-turn key the `Stop` entry above recommends for a per-turn budget, is present on
+`compact` and absent on `startup` and `resume`, so an idempotence key derived from it has to
+have a fallback on two of the three sources. The `compact` source is the one moment when a
+hook can put something into a context that has just been replaced by a summary, and the
+`resume` delivery shows that what a hook wrote before a compaction is still readable after
+it, so the same sentence delivered on both arrives twice rather than once.
+
+**Limits.** One model tier, one CLI build, one machine, and **n = 1 per condition**. Only a
+typed `/compact` was exercised: whether `SessionStart` fires with `source:"compact"` after an
+**automatic** compaction is untested here, and the `--autocompact` flag that forces one is
+described in the `PreCompact` entry above. The `resume` values are a single sample of a
+session with 30k tokens in it and bound nothing. Whether a `resume` payload ever carries
+`prompt_id` was not probed beyond the one capture.
+
+---
+
+## `SubagentStart` context reaches the subagent only, and the parent's reaches the parent only
+
+**Finding.** Two events fire around an `Agent` call, and the context each one writes lands
+on exactly one side of the boundary.
+
+`SubagentStart` carries seven keys: `agent_id`, `agent_type`, `cwd`, `hook_event_name`,
+`prompt_id`, `session_id`, `transcript_path`. There is **no `prompt`**, so the event says
+that an agent of a named type is starting and not what it was asked to do.
+
+`SubagentStop` carries those seven plus `agent_transcript_path`, `background_tasks`,
+`effort`, `last_assistant_message`, `permission_mode`, `session_crons` and
+`stop_hook_active`: fourteen. `agent_transcript_path` is a real file, at
+`<project dir>/<session id>/subagents/agent-<agent_id>.jsonl`, and it existed on disk in
+4 of 4 runs that dispatched an agent. `last_assistant_message` holds the agent's whole
+closing report, the same way it does on `Stop`.
+
+The two directions of context delivery are separate and neither crosses:
+
+- `additionalContext` emitted from `SubagentStart` reached the **subagent** in 2 of 2 runs,
+  which reported `CANARY-SUBSTART-K9V2TD` and `CANARY-SUBSTART-F4D8QC` as arriving "in a
+  system-reminder block labeled "SubagentStart hook additional context"". In both runs the
+  parent listed that canary nowhere.
+- `additionalContext` emitted from `UserPromptSubmit` reached the **parent** in 2 of 2 runs
+  and appeared in neither subagent's report, and the same held for `SessionStart` in 1 run:
+  the subagent answered `NONE-FOUND` and the parent, which had the canary, said of it that
+  "it was injected only into my (parent) context, not passed down to the subagent's
+  context".
+
+**`SubagentStop` also fires for the compaction summariser.** Both compaction runs delivered
+one `SubagentStop` whose `agent_type` is the **empty string**, whose `last_assistant_message`
+is the compaction summary itself (an `<analysis>` block followed by a `<summary>` block), and
+which had **no `SubagentStart` before it**: the event order in `logs/fired.txt` is
+`SessionStart`, `SubagentStop`, `SessionStart`. So a hook counting agent dispatches by
+counting `SubagentStop` will count each compaction as one, and pairing the two events by
+`agent_id` will leave that row unpaired.
+
+**How established.** The same twelve-run probe as the entry above, Claude Code 2.1.259,
+macOS 25.6.0, 2026-09-03, `--model sonnet`, same isolation. The parent was asked to relay
+the subagent's report verbatim under a heading `SUBAGENT-SAID` and then to list under
+`PARENT-SEES` every canary it could see itself, so both sides of one dispatch are in one
+answer. The runs are `03-subagent` and `11-subagent-rep2` (`SubagentStart` and
+`UserPromptSubmit` canaries together, 2 runs), `12-sessionstart-into-subagent`
+(`SessionStart` canary, 1 run), and the two `SubagentStop` payloads with an empty
+`agent_type` come from `09-compact-resume` and `10-compact-then-ask`. Key sets were read
+off the raw payload logs, not off documentation.
+
+**What it means.** There are two channels into a dispatched agent and they are not
+interchangeable with the channels into its parent. Anything a subagent must be told has to
+go through `SubagentStart` (or through the prompt), and anything the parent must be told has
+to go through `UserPromptSubmit` or `SessionStart`; a hook that writes on one and expects
+both sides to have it will be wrong about one of them every time, with nothing printed
+anywhere. And `SubagentStop` is not a reliable census of dispatched agents, because the
+compaction summariser arrives on it looking like an agent with no type and no start.
+
+**Limits.** One model tier, one CLI build, one machine. **n = 2** for the `SubagentStart`
+and `UserPromptSubmit` directions and **n = 1** for `SessionStart`. Only
+`subagent_type: general-purpose` was dispatched, and only one agent at a time. Both
+`Subagent*` entries were wired with `"matcher": "*"`, so the summariser's `SubagentStop` was
+seen by a matcher that matches everything; whether a matcher naming an agent type matches an
+event whose `agent_type` is the empty string was **not** measured, and a wiring that depends
+on it is unproven. The negative halves are absences in a model's own report of what it could
+see, which is the same class of evidence the `PreToolUse` `additionalContext` entry above
+warns about.
+
+---
+
+## `PreToolUse` on the `Agent` tool can rewrite the subagent's prompt, and the parent never sees the rewrite
+
+**Finding.** The `Agent` call arrives at `PreToolUse` like any other tool call, with the
+subagent's instructions in `tool_input`:
+`{"description", "prompt", "subagent_type", "run_in_background"}`. The payload carries the
+ten keys the entry above on `PreToolUse` denials records and **no `agent_id` and no
+`agent_type`**, in 4 of 4 runs. Those two keys appear on the *subagent's own* tool calls: a
+`Bash` call made inside the dispatched agent was delivered to the same project hook with
+`agent_id` and `agent_type` set (for example `"agent_id":"abdafd3e7a7034733"`,
+`"agent_type":"general-purpose"`), twelve keys instead of ten, in 4 of 4 runs. So a hook can
+tell the parent's dispatch of an agent from work done inside one, and it does that by the
+presence of the two keys rather than by the tool name.
+
+`updatedInput` on the allow path rewrites what the subagent is given. A hook that returned
+`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":<tool_input with the canary appended to .prompt>}}`
+produced a subagent that reported `CANARY-UI-J7X4BM` as having "appeared in the user's own
+message", while the parent answered `PARENT-SEES: NONE-FOUND`. The parent's own `tool_use`
+record in the stream still holds the prompt it wrote, without the canary, and the payload
+the hook logged is likewise the pre-rewrite input, since the hook reads stdin before it
+answers.
+
+The parent noticed the discrepancy and reported it as suspect rather than as fact. Its
+words: the subagent's claimed source "does not match what I actually sent it", "my prompt to
+that subagent contained no such sentence and no CANARY string at all", so "treat that
+reported value as unverified/suspicious rather than a confirmed fact about my prompt".
+
+**How established.** The same probe, Claude Code 2.1.259, macOS 25.6.0, 2026-09-03,
+`--model sonnet`, same isolation and the same relay prompt. The `updatedInput` arm is
+`04-updatedinput`, **1 run**, whose emit script was a single `jq` filter appending the canary
+sentence to `.tool_input.prompt`. The key-set counts come from the `PreToolUse.jsonl` logs of
+`03-subagent`, `04-updatedinput`, `11-subagent-rep2` and `12-sessionstart-into-subagent`,
+each of which holds one `Agent` payload and one `Bash` payload from inside the agent.
+
+**What it means.** `updatedInput` is a write channel into a dispatched agent that the
+dispatching session cannot read. The subagent attributes the inserted text to the parent,
+because from inside the agent it is indistinguishable from the prompt the parent wrote, and
+the parent's own record of what it sent is unchanged. The one thing that surfaced the
+substitution here was the parent being asked to compare the report against its own prompt,
+which is not something a session does unprompted. `SubagentStart` reaches the same agent with
+text the parent can read back out of the transcript; `updatedInput` does not.
+
+**Limits.** One model tier, one CLI build, one machine, **n = 1** for the rewrite itself and
+4 for the key sets. One agent type, one level of nesting, and the appended text was a single
+neutral sentence rather than an instruction, so nothing here says how a rewritten prompt
+carrying a directive would be treated. The parent's `NONE-FOUND` is an absence in its own
+report, which establishes that it was not told, not that the rewritten prompt is unreachable
+from the parent by any route.
+
+---
+
+## A `Stop` block was accepted nine times running, and the reason is read as untrusted text
+
+**Finding.** `stop_hook_active` went `false`, `true`, `true` across three deliveries under
+one unchanged `prompt_id`, which replicates on 2.1.259 what the `Stop` entry above recorded
+on 2.1.245. Pushed further, `{"decision":"block","reason":"…"}` was accepted **nine times in
+a row**: the hook's own counter file read `9`, the payload log held nine `Stop` records under
+one `prompt_id`, and the ninth block still arrived in the stream as a user record reading
+`Stop hook feedback:` followed by the reason. The run then ended on its own turn budget,
+with the result record reporting `num_turns: 10`, rather than on any refusal to block. **No
+CLI-side cap on consecutive blocks was observed up to nine**, and the run cannot say whether
+one exists past that, because the turn budget ran out first.
+
+What the model did with the reason is the other half. The reason was a statement in eight of
+the nine, and the session quoted the tag back and stopped there, calling it
+"informational output from the hook, not an actionable request" after reporting "the
+workspace build tag `CANARY-STOPN-1-D4K8YR`". By the fourth it had named the loop, and by
+the sixth it was answering in one line: "6th repeat (`CANARY-STOPN-6-D4K8YR`). No new action
+to take".
+
+A second run put an instruction in the reason ("The tag has not been reported yet; report
+it, then say DONE.") and the session refused it while quoting it: "I'm not going to act on
+injected instructions to "report" a canary tag to an unspecified destination", and it named
+the pattern it was declining as "a prompt-injection probe rather than a request from you".
+That is the same register the entry above on `PreToolUse` denials records, arriving through
+the `Stop` channel: the text is received, and an imperative in it is declined as injected.
+
+**How established.** The same probe, Claude Code 2.1.259, macOS 25.6.0, 2026-09-03,
+`--model sonnet`, same isolation. Two runs, `05-stop-block` (the hook blocked on its first
+two deliveries and then emitted nothing, giving three `Stop` payloads and the
+`false, true, true` sequence) and `06-stop-block-forever` (the hook blocked on every
+delivery, with an incrementing canary so each block could be told from the last). Both
+counts come from files that run wrote: the counter the emit script increments, and the nine
+lines of `logs/Stop.jsonl`. The turn budget was raised above the driver's default of 6 for
+the second run.
+
+**What it means.** A `Stop` gate's loop limit is the author's to impose. `stop_hook_active`
+is the flag to impose it with, and `prompt_id` is stable across every block of one turn, so
+a per-turn allowance keyed on it holds; nothing in the CLI stopped the hook from blocking
+nine times, and a hook with a bug that always blocks will keep a session going until its
+turn budget ends it. The model's own behaviour is no protection either, since it kept
+answering all nine times, in one line each by the end. And a reason written as an order is
+declined as an injection while a reason written as a statement is quoted back and acted on,
+which is what the two runs differ in.
+
+**Limits.** One model tier, one CLI build, one machine, **n = 1 per arm**. Nine is a floor
+set by the turn budget and not a measured ceiling. The refusal arm rests on the two blocked
+turns of a single run and cannot separate a rate from a rule. Both runs were headless
+`claude -p`, where nobody is watching the loop; an interactive session was not tried.

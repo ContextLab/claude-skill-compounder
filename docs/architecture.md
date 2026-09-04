@@ -24,23 +24,36 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`skills/skill-authoring/`|How to write the SKILL.md itself: the description that decides when it fires, and the gates that prove it parses|
 |`skills/<the rest>/`|The seed pool, below. Useful before you have forged anything|
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
+|`hooks/mission.sh`|States the user's own requests back, verbatim, at five moments. Wired on `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse` and `Stop`, and the `PreToolUse` entry is the one of ours with no matcher: [The mission](#the-mission). Off switch `MISSION_ENABLED=0`. It reads its prompts from `claude-history-surfer` and stores none of its own|
 |`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?"|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
-|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and when the same call has failed the same way in two earlier sessions it can deny the third attempt once and say what to do instead. **That refusal is off by default** (`REPEAT_GATE_REFUSE=1` arms it); learning and recovery run either way. Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, and is off until you switch it on** with `SKILL_COMPOUNDER_REVIEW=1`. After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and how to enable it: [What runs against the API](../README.md#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic|
-|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver|
+|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver. `--lesson <sig>` writes both tiers as one record keyed to a failure the repeat gate learned, `--attach <path>` puts the script beside the note and links it from the line, and `promote <id> --to global` moves a project note up a level: [The lesson](#the-lesson)|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again|
 |`bin/skillinsight`|Reads and prunes the candidate queue|
-|`bin/skillcontrib`|The read-only reconnaissance behind `contribute-skill`: duplicate check, push-access check, preflight|
-|`bin/skillrepeat`|Reads, inspects and clears the repeat gate's store of learned failure signatures|
+|`bin/skillcontrib`|The reconnaissance behind `contribute-skill` (duplicate check, push-access check, preflight), plus `propose`, the one subcommand that writes: it forks, pushes and opens the pull request, and running it without `--dry-run` is the consent: [Level C](#three-levels-project-user-general)|
+|`bin/skillrepeat`|Reads, inspects and clears the repeat gate's store of learned failure signatures. `list` carries a `LESSON` column, `show` marks the recoveries bound across tools, and `dismiss <sig> --why` is the answer that lifts the lesson gate without writing a lesson|
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
+|`claude-history-surfer`|Not ours, and installed anyway. `hooks/mission.sh` reads its per-project prompt JSONL and keeps no copy, so it is a dependency: install clones it beside its own checkout and runs its installer, unless `surfer` is already on `PATH` or `SKILL_COMPOUNDER_NO_SURFER=1`. It never fails the install, it never clones twice, uninstall never removes it, and `skillforge doctor` has a row for it|
+
+Twenty hook entries over ten scripts and eight events, as of this writing. The count that
+settles an argument is the one your own checkout gives:
+
+```bash
+jq '[.hooks|to_entries[]|.value[].hooks[]]|length' hooks/hooks.json   # 20
+jq '.hooks|keys|length' hooks/hooks.json                             # 8
+```
+
+The eleventh script, `hooks/session-review.sh`, is in neither wiring;
+`insight-capture.sh` launches it.
 
 The hook changes are additive: hooks installed by other tools are left alone, and
 uninstall removes only ours. `statusLine` is the one entry that cannot be additive,
@@ -158,6 +171,12 @@ habit also has an arm that asks nothing of the session and that the session cann
 decline, and a fourth mechanism below the three refuses outright rather than asking at
 all: [The claim gate](#the-claim-gate).
 
+Three more mechanisms sit outside the habits for the same reason. A habit is a question
+put to the session, and the answer to a question is the session's to give. [The
+mission](#the-mission) asks nothing: it restates what the user said, which is a fact the
+session cannot decline. [The lesson](#the-lesson) says it once and then stops the next
+call until it is recorded. The claim gate refuses on evidence.
+
 ## Three ways to compound: note, reminder, skill
 
 A forge is the expensive answer, and for most of what a session learns it is the wrong one.
@@ -168,6 +187,17 @@ Three tiers ship, and the first two cost one command each:
 |**note**|one command|a marker block in a project or global `CLAUDE.md`, or a Claude Code memory file|Claude Code, on every session that loads that file|the lesson is a fact with no steps: a path, a version, a command that works|
 |**reminder**|one command|`reminders.jsonl` in the state directory|`hooks/remind.sh`, when a prompt, a path or a command signature matches|the lesson applies at a moment you can name, and only then|
 |**skill**|a builder subagent, a cold reviewer, two rounds|`~/.claude/skills/<name>/` or a project's `.claude/skills/`|the router, when a prompt matches the description|the procedure has steps, and a description can route to it|
+
+The first two tiers are separate rows and one command. `skillnote add --lesson <sig>` takes
+both at once for a failure the repeat gate learned: the dated line goes in the `CLAUDE.md`,
+the reminder is keyed on the failing call's own normalised signature so it arrives before
+that command runs again, and a single ledger row carries `lesson_sig`, the reminder's id
+and the attachment count, so the two halves cannot drift apart in the record. `--attach
+<path>` copies a script or a file into `<scope>/lessons/<note id>/`, keeps its executable
+bit, and appends the relative path to the line, which is what turns a lesson into
+something a later session can run; it is valid with or without `--lesson`. Both refuse before a
+byte is written: an unknown signature exits 2 naming `skillrepeat list`, and so does a path
+outside the working tree or `$HOME`, or a destination already occupied.
 
 ```bash
 skillnote add --scope project "<the one-line lesson>" --why "<the dead end>" --source forge
@@ -434,6 +464,158 @@ move the resolved directory, then drop the dangling link.
 
 <!-- doctrine: never-rm-rf -->
 **Never `rm -rf` a skill.**
+
+## The mission
+
+Everything above is addressed to the session's attention. The mission is addressed to what
+the session has lost, which is the content of the request it started from.
+
+The mission is one object: the user's own prompts in this session, verbatim, filtered to
+drop slash commands and empty lines. `hooks/mission.sh` reads them from
+`claude-history-surfer`'s per-project JSONL, filtered on `session_id`, and stores none of
+its own. That is deliberate. A second copy of the prompts would be
+a second thing to filter, and the two would diverge the first time either side gained a
+rule. Without `surfer` the hook emits nothing and `skillforge doctor` reports it as a
+`FAIL`, which is the alternative to a hook that quietly invents its own store.
+
+It is always rendered as a statement of fact and never as an instruction, including the
+closing sentences on the subagent and completion arms. That is not a stylistic preference:
+an imperative in an injected reminder was read as prompt injection and refused, and on
+`Stop` the model quotes the block reason and declines any instruction inside it. Under a
+fixed budget, the first substantive request goes in whole up to `MISSION_FIRST_CHARS`, the
+most recent `MISSION_RECENT` requests up to `MISSION_EACH_CHARS` each, and the whole text is
+capped at `MISSION_MAX_CHARS`. Defaults and every other knob are in
+[Tuning](operations.md#tuning).
+
+|Moment|Event|What is delivered|
+|-|-|-|
+|after a compaction or a resume|`SessionStart`, `source` `compact` or `resume`|the mission as `additionalContext`. `startup` emits nothing, because at startup nothing has been asked yet and a mission read from an earlier session would describe work the user is not doing|
+|before an expensive task|`PreToolUse` on `Agent`, `Task` or `Workflow`, and `SubagentStart`|the parent gets it before it dispatches; the subagent gets it at its own start, with one closing sentence recording that the parent's instructions to it are above|
+|periodic|any `PreToolUse`, once per `MISSION_INTERVAL` seconds|the mission again. Never inside a subagent, which was handed the whole thing at `SubagentStart` and does not need a second copy addressed to somebody else|
+|ambiguity|`UserPromptSubmit` on a prompt of fewer than `MISSION_SHORT_WORDS` words|the last substantive request rather than the whole mission. "continue", "yes", "ok do it" are the prompts that lean hardest on memory|
+|before a completion claim|`Stop`|one block per `prompt_id`, ever, with the mission as the reason, and only when the closing message reads as a completion claim and the turn made at least `MISSION_STOP_MIN_TOOLS` tool calls|
+
+Two of those rows carry a subtlety worth stating. The `PreToolUse` entry is the only one of
+ours with **no matcher at all**, and that is deliberate: the periodic arm is a cooldown and
+the `Stop` arm counts the tool calls a turn made, and both are wrong if the stream they see
+is a subset of what the turn did. A matcher listing six tool names looks careful and makes
+the counter undercount by exactly what it excludes, which moves a threshold nobody can then
+watch move. And the two halves of "before an expensive task" are two moment labels,
+`dispatch` and `subagent`, because the parent and the agent it dispatched are different
+readers being told the same thing.
+
+Idempotence is keyed per event under `<state>/mission/<session>/`, on the payload's
+`prompt_id`, `tool_use_id` or `agent_id`, because [both wirings](#as-a-plugin) deliver every
+event twice. Every delivery appends one row to `<state>/mission/hits.jsonl`, which is what
+makes the question "did any of this land" answerable at all:
+[measurement.md](measurement.md#what-the-mission-counts).
+
+**The one channel this design declines** is `PreToolUse`'s `updatedInput`, which can rewrite
+a subagent's prompt behind the parent's back. `SubagentStart` says the same thing where the
+parent can read it, and the reasoning is in [DESIGN.md](DESIGN.md).
+
+Searching prompts from *other* projects is not in this. The reminder tier already scopes
+project then global, and `surfer search --all` is one command away. What would earn it is a
+keyword-overlap trigger with a measured false-positive rate, which nobody has measured.
+
+## The lesson
+
+The other half of the same idea, one event later. A session fails at something, works it
+out, and moves on; the working-out is gone when the context closes, and the next session
+pays for it again. `hooks/repeat-gate.sh` already saw both halves go past. What it did not
+do was say anything, or ever insist.
+
+**Cross-tool recovery.** The gate learns a failure signature on `PostToolUseFailure` and
+binds the next success as its recovery. It now binds across tools as well: a success of a
+*different* tool, within `REPEAT_RECOVERY_WINDOW` later calls, whose normalised input shares
+at least `REPEAT_RECOVERY_MIN_TOKENS` content tokens with the failed one. A content token is
+what survives splitting the normalised call on non-word characters, lowercased, three
+characters or longer, and not all digits, so a repository name, a path or a URL counts and
+`the` and `-v` do not. Those rows carry `cross_tool: true`, which keeps the two kinds of
+evidence apart for anything reading the store later. This is what "the skill fails, `gh`
+works" looks like on the wire, and before this it was never bound to anything.
+
+**The first time, it says it.** When a recover row is written, the `PostToolUse` arm emits
+`additionalContext`: the call that failed, the call that worked, and the two commands that
+record the outcome. Once per signature per session, and it blocks nothing. A statement at
+the moment the fix happened is worth more than the same statement in a queue, because the
+context it needs is still in the window.
+
+**The second time, it declines the next call.** The `PreToolUse` lesson gate refuses while
+three things hold at once: this session bound a recovery for the signature, the signature's
+`fail` rows come from at least `REPEAT_MIN_SESSIONS` distinct sessions, and neither a lesson
+nor a dismissal references it. The session count here includes this session and the repeat
+arm's does not. That reads as an inconsistency and is the difference between the two
+questions: the repeat arm asks whether a call is broken, which nothing a session did to
+itself may answer, and the lesson gate asks whether this has now happened twice, where this
+session's own occurrence is the second one. That is the doctrine's own threshold, made
+deterministic.
+
+**And it lets go.** At most `REPEAT_LESSON_MAX_DENIES` refusals per signature per session,
+after which the call goes through whatever the store says. Only `Bash` calls are ever
+refused, the head allowlist applies unchanged, and `skillnote` and `skillrepeat` are exempt
+by name, so the two commands that end the refusal can never themselves be refused. Every
+read that could go wrong fails toward allowing: an unreadable ledger means the escape cannot
+be verified, and a refusal whose escape cannot be verified is a trap.
+
+**What lifts it, and neither is a deletion.** `skillnote add --lesson <sig> "<text>"`
+appends a `note` row carrying `lesson_sig` to `<state>/ledger.jsonl`; `skillrepeat dismiss
+<sig> --why "<why>"` appends a `dismiss` row to `<state>/repeats/index.jsonl`. The gate
+reads both and writes neither. A dismissal counts as much as a lesson on purpose: the gate's
+business is that the decision was made and recorded, not which way it went. Because both
+stores are append-only, the read is not "is there a row". `skillnote remove <id>` appends a
+`remove` row and leaves the `add` exactly where it was, so what counts is adds minus removed
+ids, and a withdrawn lesson stops holding the gate open.
+
+**It ships on while the repeat arm ships off**, and the asymmetry is the population each one
+can reach. The repeat arm's population was measured and found empty: 81 sessions, no refusal
+ever, and every signature that reached the threshold sat on the gate's own head allowlist.
+The lesson gate fires only where a failure and its recovery were both observed in the
+session it is speaking to, so it acts on a fact about the session in front of it where the
+repeat arm infers from other people's history, and it names the two commands that end it. What would
+switch it off is a measured false-positive rate, which is what `REPEAT_LESSON_GATE=0` exists
+to make collectable.
+
+**One limit belongs to the other CLI.** The reminder half of a lesson is keyed on
+`.tool_input.command`, so `skillnote --lesson` refuses a signature whose `fail` row is not a
+`Bash` call: a `Skill` or MCP failure has no command for `hooks/remind.sh` to match. Such a
+lesson lands as a note plus a keyword reminder, with the command reminder the one thing it
+cannot have, and the refusal is always liftable because `skillrepeat dismiss` carries no such restriction. Separately, the
+gate's wiring matcher is `Bash|Skill` and MCP tool names are deliberately not matched at
+all: `mcp__.*` may well work, and nothing here has measured that a matcher regex is applied
+to an MCP tool name. A wiring that silently matches nothing is worse than one that admits
+its scope, and widening it is one string.
+
+## Three levels: project, user, general
+
+A lesson, a reminder and a skill all answer the same question about where they belong, and
+the answer is the same in all three cases: the highest level the thing actually applies to.
+What changed is that each level now has a mechanism instead of a convention.
+
+|Level|Where it lives|How something gets there|
+|-|-|-|
+|**A, project**|the repository's `.claude/CLAUDE.md`, its `.claude/lessons/`, and reminder rows scoped to that directory|`skillnote add --scope project`, which is the default, and `--attach` beside it|
+|**B, user**|`~/.claude/CLAUDE.md`, `~/.claude/lessons/`, a memory file with its `MEMORY.md` index line, and globally scoped reminders|`skillnote add --scope global` or `--scope memory`, or `skillnote promote <id> --to global` for something already written at A|
+|**C, general**|this repository, as a pull request|`skillcontrib propose <name>`|
+
+**Promotion moves; it never copies.** `skillnote promote <id> --to global` takes the line,
+its id, its date, its attachments directory and its reminder to the user level, and leaves a
+one-line tombstone in the project block pointing at where it went. `--to project` is refused,
+because the hierarchy only goes up, and promoting an already-moved note exits 0 and does
+nothing. One copy of a lesson is the whole point: two copies at two levels are two things to
+keep in step, and nothing keeps them.
+
+**Level C is one command, and running it is the consent.** `skillcontrib propose` locates
+the skill through its install symlink, parse-checks it, runs the duplicate check against the
+upstream tree and every pull request in any state, decides maintainer or fork from `gh`'s
+own permission answer, clones, branches, commits with the routing pin's measured line,
+pushes, opens the pull request and prints its URL. Every network write is announced first on
+a line beginning `WRITE:`, and `--dry-run` does the read-only half and prints what the rest
+would do; `skillcontrib recon` is that same dry run under an older name. This used to be
+reconnaissance and a procedure a human walked by hand, and it produced 47 reconnaissance runs
+and zero pull requests. A consent gate somebody has to walk seven times is a gate nobody
+reaches the far side of. An unmeasured routing pin is still refused, because
+[a probe that could not run is never a pass](#three-ways-to-compound-note-reminder-skill).
 
 ## The claim gate
 

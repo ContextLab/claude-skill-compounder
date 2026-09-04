@@ -9,19 +9,26 @@ A skill worth forging locally is often worth having in the default pool. This is
 gets there without wasting a reviewer's time and without pushing anything to the internet
 under someone's name that they did not see first.
 
-The procedure has two halves and they are not interchangeable.
+The whole procedure is two commands, and the second one is the consent:
 
-- **Sections 1 to 5 are read-only.** They clone, read, compare, stage, and commit, all
-  locally. Cloning a public repo over HTTPS creates nothing under anyone's account.
-- **Section 6 is nothing but network writes.** Every step there is visible to other
-  people and attributable to the user.
+```bash
+skillcontrib recon <skill-name> --upstream <owner>/<repo>
+skillcontrib propose <skill-name> --upstream <owner>/<repo>
+```
 
-Not one line of section 6 may run until gate G6 has returned an explicit yes. If you
-reach for a fork, a push, or a pull request while still in sections 1 to 5, you have
-already made the mistake, and no later gate can undo it.
+`recon` reads. It clones nothing, forks nothing, and pushes nothing; it is
+`propose --dry-run` under a second name, so a reader told to run the dry run first has a
+command that cannot be turned into a write by dropping a flag. `propose` without
+`--dry-run` forks if it has to, pushes a branch, and opens a public pull request under the
+acting account. Running it is the yes. There is no gate after it.
 
-`skillcontrib` holds the deterministic parts so this procedure does not have to remember
-flags. It performs no network writes at all.
+That is a change from how this file used to read, and the reason is a count. The earlier
+version put seven consent gates in front of the write sequence, each one a thing a session
+had to print and a human had to answer. The record for that version, audited on
+2026-09-03 and written up in `notes/2026-09-03-mission-and-lessons-design.md`, is 47 runs
+and 0 pull requests ever. Every gate held; nobody reached the far side. So
+the seven collapse into one act, and everything the gates used to display is printed by
+the command itself, before the thing it describes happens. Read the dry run. Then run it.
 
 ## 0. The bar: both, not either
 
@@ -35,8 +42,10 @@ Propose a skill upstream only when BOTH hold:
 An unproven skill costs a
 reviewer more than it saves them: they have to reconstruct evidence the author never
 gathered, and a skill nobody has re-run is a guess about the future dressed up as a
-capability. Nothing automated can check either condition, so G0 makes the user say it
-out loud. If only one holds, keep the skill local and revisit later.
+capability. Nothing automated can check either condition. The dry run prints the ledger's
+own answer to the second one, and it is a floor rather than a total, so ask the user to
+name both before you type either command. If only one holds, keep the skill local and
+revisit later.
 
 If the skill misfired and you are here to repair it, you want `skill-compounder` section
 3, not this.
@@ -44,65 +53,39 @@ If the skill misfired and you are here to repair it, you want `skill-compounder`
 ## 1. Choose the target repo
 
 There is no default worth trusting. Decide where the skill should live, and pass
-`--repo <owner>/<repo>` to every `skillcontrib` call. Without it the tool aims at
+`--upstream <owner>/<repo>` to both commands. Without it they aim at
 `ContextLab/claude-skill-compounder`, and a duplicate check pointed at the wrong repo
-answers "clean" for free. Name the repo to the user at G1 so a wrong target is caught by
-a human and not by a reviewer.
+answers "clean" for free. Name the repo to the user before the dry run, so a wrong target
+is caught by a human and not by a reviewer.
 
-## 2. Preflight the skill (read-only)
+## 2. Run the dry run
 
 ```bash
-skillcontrib preflight <path-to-skill-dir>
+skillcontrib recon <skill-name> --upstream <owner>/<repo>
 ```
 
 `skillcontrib` ships in this repo's `bin/`, and the installer links it into
 `~/.local/bin`. If the command is not found, that directory is not on `PATH`: call it by
 full path from wherever this repository is cloned, rather than skipping the check.
 
-It checks only what genuinely blocks a contribution: `SKILL.md` exists, the frontmatter
-parses with a real YAML parser, `name` matches the directory (Claude Code addresses a skill
-by its directory, so a mismatch makes it unreachable), and `description` is present and
-non-empty (a skill without one never triggers). It also lists every other
-file in the directory. Those travel with the skill: a copy step that takes only
-`SKILL.md` silently drops `scripts/`, `references/`, `examples/`, and `LICENSE.txt`.
+Steps 1 to 3 run for real, because they only read. Steps 4 to 6 are printed as a plan.
 
-Length, key portability, and prose style are review topics, not gates. Enforced as gates
-they hard-fail 46 of the 156 skills installed on one developer machine, four of them
-shipped by Anthropic, while a real parse finds none of the 156 unparseable. Keep them out
-of the gate; `CONTRIBUTING.md` is where a human weighs them.
+|Step|What runs in a dry run|
+|-|-|
+|1|Finds the skill at `~/.claude/skills/<name>`, resolved through its symlink, or at `./.claude/skills/<name>`. Parses the frontmatter with a real YAML parser, checks `name` against the directory and that `description` is non-empty, lists every other file in the directory, and reads the routing pin out of the `## Trigger precision` section|
+|2|The duplicate check, in three probes, using the skill's own description|
+|3|The acting account, its permission level, the push identity, and therefore maintainer or fork. The fork itself is printed as a plan, not created|
+|4|Prints the clone source, the branch `skill/<name>`, the destination `<skills-dir>/<name>/`, and the commit message|
+|5|Prints the pull request command and the whole body it would send|
+|6|Prints the ledger row it would append|
 
-## 3. Identity, permission, and the identity that actually pushes (read-only)
+Step 1 refuses a skill whose routing pin says `measured: never`. That pin is the only
+machine-readable evidence that the description was ever run against a router, and without
+it "this fires on the right prompts" is a claim a reviewer can neither check nor re-run.
+`--allow-unmeasured` proceeds anyway, and then the pull request body says so.
 
-```bash
-skillcontrib whoami --repo <owner>/<repo>
-```
-
-It prints four things that must all be true before section 6:
-
-- **The acting account** and its **permission level**. `admin`, `write`, or `maintain`
-  means `maintainer`: forking is wrong, because it creates a redundant fork of a repo the
-  user can already write to. Anything else is `contributor` and takes the fork path.
-  Note that the bare `collaborators/<user>` endpoint answers 204 for read-only and triage
-  collaborators too, who cannot push at all; `skillcontrib` uses the permission endpoint
-  instead. If you check by hand, do the same.
-- **The push identity**, read from `git credential fill`. This is the account git will
-  actually upload as, and it comes from the credential helper chain (a keychain entry, a
-  helper, or `gh auth git-credential`). It can differ from the account `gh` reports,
-  in which case the pull request and the commits land under different names.
-  `skillcontrib` warns on a mismatch. Resolve it before section 6 rather than hoping.
-- **Whether upstream is archived.** Exit 18 means stop: archived repos reject writes.
-
-`gh` acts as `GH_TOKEN` when that variable is set, which is a third possible identity.
-`skillcontrib` warns when it is set.
-
-## 4. Duplicate check (read-only)
-
-```bash
-skillcontrib dedup <skill-name> --description "<the description, verbatim>" \
-  --repo <owner>/<repo>
-```
-
-Three probes, cheapest first, because no single key is both precise and complete:
+Step 2 is three probes, cheapest first, because no single key is both precise and
+complete:
 
 |Probe|Question|Catches|Misses|
 |-|-|-|-|
@@ -118,18 +101,55 @@ A direct path lookup at `skills/<name>/` is case-exact and separator-exact, so
 `plugins/<x>/skills/<x>/SKILL.md`, which is how a real Anthropic repo is arranged. If the
 listing comes back truncated, `skillcontrib` says so, and the probe is then incomplete.
 
-The exit code is the whole contract:
+Step 3 reads the permission endpoint rather than the bare `collaborators/<user>` one,
+which answers 204 for read-only and triage collaborators who cannot push at all. `admin`,
+`write` or `maintain` is `maintainer`, and forking is then wrong: it makes a redundant
+fork of a repo the user can already write to. Anything else is `contributor` and takes the
+fork path, where the branch goes to the fork and the pull request is opened cross-repo
+with `--head <fork-owner>:skill/<name>`.
+
+It also prints the **push identity**, read from `git credential fill`. That is the account
+git will actually upload as, and it comes from the credential helper chain, so it can
+differ from the account `gh` reports; when it does, the pull request and the commits land
+under different names. `gh` acts as `GH_TOKEN` when that variable is set, which is a third
+possible identity, and the dry run warns when it is. Resolve a mismatch before step 4,
+rather than hoping.
+
+## 3. Read the dry run
+
+The dry run is the review that the seven gates used to be, and it is worth reading rather
+than skimming for the exit code. Five things, and then the code:
+
+1. **The skill directory it found.** Under a symlinked install the path it prints is the
+   checkout, not the link. If it is not the skill you meant, nothing later will notice.
+2. **Every duplicate row**, sub-threshold fuzzy ones included. The user may overrule
+   either way, and the rows below the threshold are printed precisely because a person
+   has to read them.
+3. **Maintainer or fork**, and which account owns the fork. That account becomes the owner
+   half of `--head <owner>:<branch>`.
+4. **The commit**: the branch name, the destination path, and every file that travels with
+   `SKILL.md`. A `scripts/` or `references/` directory left behind makes the skill arrive
+   broken.
+5. **The pull request body in full**, which the dry run prints between two markers. It
+   carries the description, the routing pin's own result line, and the ledger's counts for
+   this skill. Those counts come from one machine and say the skill was used, not that
+   anyone else used it.
+
+The exit code is the whole contract, and it is the same one on both commands:
 
 |Code|Meaning|What to do|
 |-|-|-|
-|0|Nothing found|Proceed to section 5|
+|0|Nothing found|Proceed|
 |3|Mentions, touches, or fuzzy hits|**Ask the user.** Show every row. Never decide alone|
 |4|A pull request that proposed this skill is OPEN or MERGED|Stop. It already exists|
 |5|A pull request that proposed this skill was CLOSED without merging|Stop and read it|
-|9|The skill already exists in the upstream tree|Stop. Improve the existing one|
+|9|The skill already exists in the upstream tree, or in the clone|Stop. Improve the existing one|
 |18|Upstream is archived|Stop. Find the successor repo|
 |19|The tree listing was truncated, so clean cannot be certified|Check by hand. Do not read this as clean|
 |8|A lookup failed|A failed lookup is not a clean one. Fix it, or stop|
+|10, 11, 12, 17|The skill is missing, or its frontmatter does not parse, or `name` disagrees with the directory|Fix the skill. A name that disagrees with its directory makes it unreachable|
+|20, 21, 22|No `## Trigger precision` section, no routing pin, or an unmeasured one|Measure it, or pass `--allow-unmeasured` and say so in review|
+|23, 24, 25|The fork, a git step, or `gh pr create` failed|These only happen on a real run. Read the message: it says what was already written|
 
 Exit 5 is deliberately hard to trigger: it requires a pull request to have **added** the
 skill file wholesale, not merely mentioned or edited it, so a typo fix inside an existing
@@ -150,120 +170,62 @@ Three limits of the lookup, to state plainly rather than paper over:
 - These queries drain the **graphql** budget, not the search one. Check
   `gh api rate_limit --jq .resources.graphql` if calls start failing.
 
-## 5. Stage it locally, then walk the gates. Nothing has been written yet
-
-### 5a. Stage in a read-only clone
-
-Clone upstream over HTTPS and do all the work there. **This is a read.** It creates no
-repository, no branch, and no record under anyone's account, and it is the only clone
-this procedure needs before consent. Do not reach for a fork to get a working copy.
+## 4. Run it for real
 
 ```bash
-git clone https://github.com/<owner>/<repo>.git /tmp/contrib-<name>
-cd /tmp/contrib-<name>
-git switch -c add-skill-<name>
-mkdir -p <skills-dir>/<name>
-cp -R <path-to-skill-dir>/. <skills-dir>/<name>/
-git add <skills-dir>/<name>
-git commit -m "Add <name> skill"
+skillcontrib propose <skill-name> --upstream <owner>/<repo>
 ```
 
-Use the layout the tree probe reported for `<skills-dir>`. A clean `skillcontrib dedup`
-prints an `upstream keeps skills under:` line naming the directories that actually hold
-`SKILL.md` files and how many are in each; a repo that keeps skills at
-`plugins/<x>/skills/` does not want a new top-level `skills/`. If that line says no
-`SKILL.md` was found anywhere, ask the user rather than inventing a layout. Everything
-above is local. Nothing has left the machine.
+Steps 1 to 3 run again, so a duplicate opened between the two commands still stops it. Then:
 
-### 5b. The consent gates
+- **Step 4** shallow-clones the target over HTTPS, cuts `skill/<name>`, copies the whole
+  skill directory to `<skills-dir>/<name>/`, commits with the routing pin's `measured:`
+  line in the message, and pushes. The clone is a read; it creates nothing under anyone's
+  account, and it is the only clone this procedure needs. Do not reach for a fork to get a
+  working copy. If `<skills-dir>/<name>/` already exists in the clone, the run stops with
+  exit 9 rather than overwriting it: that is a duplicate the tree probe did not see.
+- **Step 5** opens the pull request against the upstream default branch with
+  `gh pr create`, cross-repo on the fork path, and prints the URL.
+- **Step 6** appends one `contrib` row to the ledger naming the skill, the pull request,
+  the upstream, and whether a fork was used.
 
-Every gate is required. Do not compress them into one prompt, and do not proceed on
-silence or on an ambiguous "sounds good". Walk them in order and show real output.
-
-- **G0. The bar.** State the two conditions from section 0 and have the user confirm
-  both, naming the red-team outcome and where the skill has been reused. Nothing checks
-  this automatically; if the user cannot name them, stop here.
-- **G1. Identity and target.** Print `skillcontrib whoami` verbatim: acting account,
-  permission, push identity, any warning. Name the repo chosen in section 1.
-- **G2. Full dedup result.** Print every row `skillcontrib dedup` returned, sub-threshold
-  ones included, plus the exit code and what it means. The user may overrule either way.
-- **G3. State the path out loud.** Say "maintainer path: branching directly on upstream"
-  or "fork path: forking to `<owner>/<repo>`", naming the fork's owner. It is the user's
-  account unless `--org` puts it under an organization, and whichever it is becomes the
-  owner half of `--head <owner>:<branch>` in section 6.
-- **G4. Show the change.** From the clone: `git status --short`, `git show --stat HEAD`,
-  the branch name, and the commit message. All local.
-- **G5. Show the pull request text.** Write the filled-in body to `pr-body.md` in the
-  clone and print it, with the exact command that will open the pull request: repo, base,
-  head, title, body file. Use upstream's `.github/PULL_REQUEST_TEMPLATE.md` if it has one;
-  many repos do not, so fall back to this repo's template as the checklist and paste the
-  same headings. Do **not** reach for `--dry-run` here: its own help says
-  "May still push git changes", so it is not a read-only preview and does not belong
-  before consent.
-- **G6. Explicit go-ahead.** Ask as a distinct question and wait for a distinct answer.
+**Every network write is announced first, on its own line beginning `WRITE:`.** There are
+at most three: the fork, the push, and `gh pr create`. Nothing else in `bin/skillcontrib`
+writes to the network at all, so a transcript can be swept for that prefix and the answer
+is complete. The run stops at the first failure, and each message says what had already
+been written by then. Read that sentence before re-running anything: after a failed
+`gh pr create` the branch is already pushed, and a second `propose` will try to push it
+again.
 
 Three standing prohibitions:
 
-- **Never auto-retry over a detected rejection.** Exit 5 stops the run. The user decides.
+- **Never auto-retry over a detected rejection.** Exit 5 stops the run. The user decides,
+  and `--override-rejected` is theirs to grant, never yours to assume.
 - **Never escalate token scopes.** If a scope is missing, print the exact command for the
   user to run themselves (`gh auth refresh -s repo`) and stop. Do not start an auth flow
   they did not ask for.
-- **Never open a pull request whose body and target the user has not read.** It is a
-  public, identity-attributed write, and closing one still leaves the record.
-
-## 6. The write sequence. Every step here is a network write
-
-Do not enter this section until G6 returned yes. Work in the clone from 5a; the commit
-already exists.
-
-### 6a. Maintainer path (permission `admin`, `write`, or `maintain`)
-
-- **W1.** `git push -u origin add-skill-<name>` (`origin` is upstream on this path).
-  Never commit to the default branch directly; the review is the point.
-- **W2.** Optional, now that the branch is already uploaded and the caveat costs nothing:
-  `gh pr create --repo <owner>/<repo> --dry-run ...` to see the rendered result.
-- **W3.** `gh pr create --repo <owner>/<repo> --title "Add <name> skill" --body-file pr-body.md`
-
-### 6b. Fork path (any other permission)
-
-- **W1.** `gh repo fork <owner>/<repo> --remote --remote-name fork`, run inside the clone.
-  This creates a repository under the user's account. It is the first write, and it is
-  why no earlier step is allowed to need a fork.
-- **W2.** If the fork already existed and is behind, `gh repo sync <fork-owner>/<repo>`
-  before pushing. **This is a write too**, not a check: it fast-forwards the fork. A
-  branch cut from a stale fork produces a diff full of other people's reverts.
-  The argument is the **destination**, so it must name the fork. Everywhere else in this
-  file `<owner>/<repo>` means upstream, and passing that here would fast-forward
-  upstream's default branch instead: a write to a repo the user was never shown at G3 or
-  G5, which succeeds for real when upstream is itself a fork.
-- **W3.** `git push -u fork add-skill-<name>`. To the fork, never to upstream.
-- **W4.** Open the pull request against upstream with an explicit cross-repo head:
-
-```bash
-gh pr create --repo <owner>/<repo> --head <fork-owner>:add-skill-<name> \
-  --title "Add <name> skill" --body-file pr-body.md
-```
-
-Every flag above exists in the installed `gh`. `pr-body.md` is the file written at G5; if
-it does not exist, you skipped a gate.
+- **Never run the second command against a dry run the user has not seen.** The body and
+  the target are in that output. Skipping it does not skip the write; it skips the review.
 
 ## Failure modes
 
-|Symptom|Detect (read-only)|Response|
+|Symptom|Detect|Response|
 |-|-|-|
 |`skillcontrib` not found|`command -v skillcontrib`, rc 127|Call it by full path from wherever this repo is cloned. Do not skip the check|
-|`gh` not installed|`skillcontrib` exits 6|Stop. Tell the user to install it. Do not hand-roll the REST calls|
-|Not authenticated|`skillcontrib` exits 7|Stop. The user runs `gh auth login` themselves|
-|GitHub unreachable|`skillcontrib` exits 8, not 7|A network problem. Do not send the user to re-authenticate a session that was never broken|
+|`gh` not installed|Exit 6|Stop. Tell the user to install it. Do not hand-roll the REST calls|
+|Not authenticated|Exit 7|Stop. The user runs `gh auth login` themselves|
+|GitHub unreachable|Exit 8, not 7|A network problem. Do not send the user to re-authenticate a session that was never broken|
 |Missing token scope|403 on the first write; the scopes line of `gh auth status`|Stop and print `gh auth refresh -s repo`. Never run it for them|
-|Push identity mismatch|`skillcontrib whoami` prints both and warns|Resolve before W1. The pull request and the commits would land under different accounts|
+|Push identity mismatch|The dry run prints both and warns|Resolve before the real run. The pull request and the commits would land under different accounts|
 |Read-only collaborator|The permission line reads `read` or `triage`|Fork path. The bare 204 check would call it a maintainer and be wrong|
-|Fork already exists|`gh repo view <owner>/<repo> --json isFork,parent`|Reuse it and sync at 6b W2. Do not create a second one|
-|Fork stale behind upstream|Compare the fork's default-branch SHA to upstream's|`gh repo sync <fork-owner>/<repo>`, inside the write sequence, never before the gates. The argument is the destination: naming upstream writes to upstream|
-|Branch name collision|`gh api repos/<owner>/<repo>/branches/<name>` returns 200, not 404|Suffix the branch (`add-skill-<name>-2`). Never force-update someone's branch|
-|Upstream archived|`skillcontrib` exits 18|Stop. Find the successor repo|
+|Fork already exists|The dry run says it is reused|Reused, not created again. A second fork is never made|
+|Skill not found locally|Exit 10|It is not installed under either skills directory. Install it, or run from the project that holds it|
+|Routing pin unmeasured|Exit 22|Measure it. `--allow-unmeasured` proceeds and the body then says the trigger is unmeasured|
+|Branch name collision on the fork|Exit 24: `git push` is refused rather than forced|Nothing of someone else's was overwritten. Delete or rename the old branch yourself, then re-run|
+|`gh pr create` failed|Exit 25|The branch IS pushed. Open the pull request by hand; do not re-run `propose`|
+|Upstream archived|Exit 18|Stop. Find the successor repo|
 |Rate limited|`gh api rate_limit --jq .resources.graphql`|Wait for the reset it names. These queries drain graphql, not search|
-|Truncated tree listing|`skillcontrib` warns|The tree probe is incomplete. Check by hand before trusting a clean result|
+|Truncated tree listing|Exit 19|The tree probe is incomplete. Check by hand before trusting a clean result|
 
 ## Traps that produce a confidently wrong answer
 
@@ -279,11 +241,13 @@ it does not exist, you skipped a gate.
   `gh pr list --search` does not expose, it must be `-X GET`.
 - **A merged pull request is a closed one.** Read the JSON `state` field, which separates
   `MERGED` from `CLOSED`, not the open/closed distinction.
-- **`gh pr create --dry-run` is not read-only.** Its help says it may still push git
-  changes. It belongs after the go-ahead, not before it.
-- **A fork is not a way to get a working copy.** `git clone` is. Reaching for a fork to
-  stage the change is what quietly turns a read-only preparation step into the first
-  irreversible write.
+- **`gh pr create --dry-run` is not read-only.** Its help says
+  "May still push git changes". `skillcontrib recon` is the preview; that flag is not.
+- **A fork is not a way to get a working copy.** `git clone` is, which is what step 4
+  does. Reaching for a fork to stage a change is what quietly turns a read-only
+  preparation step into the first irreversible write.
+- **A dry run that exits 0 has not checked the bar.** Section 0 is the one condition no
+  probe reaches.
 
 ## Known limitations
 
@@ -295,14 +259,19 @@ These are real and unfixed. Read them as part of the procedure, not as small pri
   found, not that nothing is there.
 - **Fuzzy matching is name-shaped, not meaning-shaped.** The same idea proposed under a
   genuinely different name and vocabulary will not be found by any probe here. Only a
-  human who knows the domain catches that, which is why G2 shows the user every row.
-- **The gates are instructions, not enforcement.** Nothing in the tooling can stop a
-  session from skipping to section 6; `skillcontrib` simply has no write in it. The
-  guarantee is that the tool cannot write, not that the procedure cannot be skipped.
-- **The tests check this document and the tool, not a real contribution.** One test
-  executes the read-only staging block against a local git repo. No test opens a pull
-  request, so the write sequence in section 6 is verified by flag inspection and by
-  reading `gh`'s help, not by having been run end to end.
+  human who knows the domain catches that, which is why every row is printed.
+- **One command is one consent, and it is coarse.** The old seven gates could be answered
+  one at a time; this cannot. What replaces them is that the dry run is complete, so the
+  reviewer sees the body, the target and the writes before any of them happen. A session
+  that runs `propose` without reading `recon` has skipped the review, and nothing in the
+  tooling can tell.
+- **The ledger counts are one machine's.** "Used again since it was forged" is answered
+  from a local ledger that only knows what this machine recorded, and a session audit's
+  totals there are a floor rather than a count.
+- **The tests use a local git origin and a stand-in `gh`.** The clone, branch, commit and
+  push are real, against real repositories on disk, and are read back out of a bare repo.
+  No test opens a pull request on GitHub, so `gh pr create`'s own flags are verified by
+  reading `gh`'s help, not by having been run against the service.
 
 ## Trigger precision
 

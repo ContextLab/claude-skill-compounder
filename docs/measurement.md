@@ -79,6 +79,77 @@ your own ledger; the shape below is the instrument, not a result.
   documentation gate's overrides, counted rather than only permitted, because an escape
   nobody counts is indistinguishable from a gate nobody has.
 
+## What the mission counts
+
+`hooks/mission.sh` appends one row to `<state>/mission/hits.jsonl` for every delivery, and
+that file is the whole instrument. Each row carries `ts`, `session`, `moment`, `agent_id`
+(the subagent it was addressed to, or `null`), `chars` of rendered mission, and
+`prompt_count`, the number of the user's own requests it was rendered from. The log is
+trimmed to `MISSION_MAX_ROWS` lines on write, through a `mktemp` in its own directory, so it
+cannot grow without bound and cannot be truncated in place.
+
+```bash
+jq -r .moment ~/.claude/skill-compounder/mission/hits.jsonl | sort | uniq -c
+```
+
+**Six labels for five moments.** `resume`, `dispatch`, `subagent`, `periodic`, `ambiguity`
+and `completion`. The expensive-task moment writes two of them, because the parent being
+told before it dispatches and the subagent being told at its own start are two deliveries to
+two readers. The `mission` row of `skillforge doctor` folds `dispatch` and `subagent` into
+one before it counts, so an install that has exercised every arm reports five of five; count
+the labels yourself with the recipe above when you want the two readers apart.
+
+**A delivery is not an effect, and this file cannot become one.** A row says the text was
+emitted and, for `SessionStart`, `SubagentStart`, `UserPromptSubmit` and `PostToolUse`, that
+the channel it went down was measured as reaching the model on CLI 2.1.259. It says nothing
+about whether the turn that received it went on to do what the user asked. That is the same
+distinction the 10.5% figure below is a warning about, and it is why the rows carry
+`session` and `agent_id`: joining a delivery to what the session did next is the measurement
+that would settle it, and nothing here has run it yet.
+
+Two other figures about the mission are of a different kind, and neither says whether any
+of it works.
+
+The first is cost. The suite prints it on a 200-prompt store, median of five runs, and every
+arm has to come in under the 150 ms budget `tests/test_mission.py` asserts; run
+`python3 tests/test_mission.py 2>&1 | tail -8` for the figures on your own machine and your
+own `jq`. An ordinary `PreToolUse` is the cheapest of them, because it renders nothing until
+the cooldown has expired.
+
+The second is two new `skillforge doctor` rows. The `surfer` row reports `FAIL` when the
+hook is wired and the CLI is absent, and `WARN` when it is not wired; the `mission` row
+reports the delivery count and refuses to call an unparseable `hits.jsonl` a pass. Both
+measure whether this is running at all, which is the question that had no answer before.
+
+## What the lesson counts
+
+The lesson arm counts in two files, and the split matters because only one of them is
+durable.
+
+**`<state>/repeats/index.jsonl`** holds the observations: a `fail` row per learned failure
+signature, a `recover` row when a success was bound to one (carrying `cross_tool: true` when
+the success came from a different tool), a `dismiss` row when somebody decided the signature
+needs no lesson, and a `forget` row that cuts off the fail rows before it. **`ledger.jsonl`**
+holds the answer: a `note` row carrying `lesson_sig`, and a later `remove` row that withdraws
+it. Adds minus removed ids is what counts as a lesson, on both the gate's side and the CLI's,
+because both files are append-only and matching on `lesson_sig` alone would go on reporting a
+withdrawn lesson as standing.
+
+`skillrepeat list` joins the two into a `LESSON` column, and its four values are the
+population the gate acts on: `open` is a fail-then-fix whose fix exists nowhere but the
+store, which is what the gate declines a call over; `recorded` and `dismissed` are the two
+ways that ends; and `-` is a signature no session ever recovered from, so nothing is owed.
+`skillreport`'s `GATES` block reports the older repeat arm's population the same way, and
+both ask `hooks/repeat-gate.sh --eligible-of` rather than keeping a second copy of its head
+rules.
+
+**The refusals themselves are not counted, and that is a gap rather than a design.** The deny
+budget lives as directories under `<state>/repeats/lessons/<session>/deny/<sig>/<tuid>`,
+which is what enforces at most `REPEAT_LESSON_MAX_DENIES` per signature per session, and
+`prune_lessons` sweeps that tree after two days. So "how often did this gate refuse anything"
+is answerable for about 48 hours and not afterwards. Every figure about the lesson gate's
+false-positive rate needs that fixed first, and the arm ships on.
+
 ## What the destructive-op measurement actually showed
 
 `destructive-op-preflight` ships on a behavioural result rather than on reading well.
@@ -136,4 +207,21 @@ is open about it is in [`notes/OPEN-THREADS.md`](../notes/OPEN-THREADS.md).
 The two hook thresholds, `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`, are unvalidated for the
 same reason and should not move before that data exists:
 [Tuning](operations.md#tuning) says so where a reader would go to change them.
+
+**All three limits apply to the mission and the lesson, and neither has any usage behind it
+at all.** Both landed on 2026-09-03, so every constant in them was picked by judgement in
+one sitting and none has been checked against a session that was not this one:
+
+|Constant|What it decides|What would settle it|
+|-|-|-|
+|`MISSION_FIRST_CHARS`, `MISSION_RECENT`, `MISSION_EACH_CHARS`, `MISSION_MAX_CHARS`|how much of the request survives the budget|the rate at which a delivery elides the sentence the session needed|
+|`MISSION_INTERVAL`|how often a long session is told again|the same conversion question `CI_PROMPT_COOLDOWN` has, and it will need the same data|
+|`MISSION_SHORT_WORDS`|which prompts count as leaning on memory|a false-positive rate for the short-prompt proxy, which is the only reason a better ambiguity detector was not built|
+|`MISSION_STOP_MIN_TOOLS`|how much work a turn must have done before a completion claim is worth blocking|the block rate on real closing messages, replayed the way the claim gate's 3.4% was|
+|`REPEAT_RECOVERY_MIN_TOKENS`|how much a different tool's call must share to bind as the fix|how often a cross-tool binding is the wrong pair, which needs recoveries nobody has yet|
+|`REPEAT_LESSON_MAX_DENIES`|how long the gate holds on before letting go|a refusal count, which the two-day sweep above currently throws away|
+
+Every right-hand cell there names an instrument nobody has run. That is the honest state of
+both mechanisms, and it is the reason none of these numbers should move yet: a threshold
+tuned before its instrument exists is a guess with a version number on it.
 

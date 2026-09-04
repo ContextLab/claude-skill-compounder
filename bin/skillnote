@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # skillnote — the cheapest tier of compounding: write the lesson down where it will be read.
 #
-#   skillnote add   [--scope project|global|memory] "<text>"
-#                   [--why <text>] [--source session|verdict|forge]
-#                   [--project <dir>] [--remind]
-#                   [--keyword <k>]... [--path <glob>]... [--command "<literal cmd>"]...
-#   skillnote list  [--scope project|global|memory|remind] [--json]
-#   skillnote remove <id>
+#   skillnote add     [--scope project|global|memory] "<text>"
+#                     [--why <text>] [--source session|verdict|forge]
+#                     [--project <dir>] [--remind]
+#                     [--keyword <k>]... [--path <glob>]... [--command "<literal cmd>"]...
+#                     [--lesson <sig>] [--attach <path>]...
+#   skillnote promote <id> --to global [--project <dir>]
+#   skillnote list    [--scope project|global|memory|remind] [--json]
+#   skillnote remove  <id>
 #   skillnote --help
 #
 # WHY THIS EXISTS. `skills/skill-compounder/SKILL.md` has always had a cheap branch --
@@ -39,6 +41,43 @@
 # hooks/insight-capture.sh. And the id does not depend on the machine, so a note committed
 # into a repo's .claude/CLAUDE.md can be removed from any checkout.
 #
+# --lesson <sig> WRITES BOTH AT ONCE, AND IS THE ONLY FLAG THAT DOES. A fail-then-fix is
+# worth nothing to the next session unless the fix arrives BEFORE the same call is made
+# again, and it is worth nothing to a person unless it is also written where they read.
+# So one command writes three things: the dated line in the scoped CLAUDE.md, a reminder
+# keyed on the FAILING call's normalised signature, and one ledger `note` row carrying
+# `lesson_sig`, `reminder_id` and `attachments`. <sig> is a repeat-gate signature --
+# `skillrepeat list` prints them -- and one the store has no `fail` row for is REFUSED
+# (exit 2, nothing written), because the alternative is a reminder keyed on nothing.
+#
+# THE KEY IS COPIED OUT OF THE STORE, NOT RECOMPUTED. hooks/remind.sh compares
+# `match.commands` byte-for-byte against `hooks/repeat-gate.sh --norm-of Bash` of the
+# command about to run, and the gate wrote the store's `norm` field with that same
+# function. Storing that field verbatim is therefore the only spelling that can match;
+# re-normalising the row's raw `cmd` would put a second normaliser in the loop, and
+# prefixing the tool name is the exact drift that made every --command reminder silent on
+# 2026-09-02. A `fail` row whose tool is not `Bash` is refused for the same reason: the
+# hook's command arm reads `.tool_input.command`, so no non-Bash call can ever match it.
+#
+# --attach <path> IS THE "CODE OR SCRIPTS" HALF, and it is valid with or without --lesson.
+# The file is COPIED (executable bit and all) into <scope>/lessons/<note id>/ and the note
+# line gains a ` (attached: <rel>)` suffix, so the script that finally worked is reachable
+# from the sentence that says what it was for. Two refusals, both exit 2 and both BEFORE a
+# byte is copied: a source outside the working tree or $HOME, because this CLI is called
+# by hooks and by detached sessions and a flag that can copy /etc/anything into a repo is
+# a flag that eventually will; and an existing destination, because nothing here is ever
+# destructive.
+#
+# promote <id> --to global MOVES A NOTE UP A LEVEL, AND MOVE IS THE WHOLE POINT. Principle
+# (i) of notes/2026-09-03-mission-and-lessons-design.md is a single source of truth: a note
+# copied to the global file and left in the project file is two records that disagree the
+# first time one of them is edited. So the same line, with the same id and the same date,
+# is inserted into the global block; the attachments directory is `mv`d; the reminder is
+# tombstoned at project scope and re-created at global (the store is append-only, so
+# "change a row's scope" is spelled the way `remove` spells a deletion); and the project
+# block keeps a ONE-LINE tombstone naming where it went. `--to project` is refused: the
+# hierarchy only goes up. Promoting an already-moved note is a no-op that exits 0.
+#
 # --remind WRITES A REMINDER INSTEAD OF A NOTE. A note waits to be read; a reminder
 # arrives, because hooks/remind.sh matches it against a prompt, a file path or a command
 # signature and injects it. It therefore lands in <state>/reminders.jsonl and in NO
@@ -70,7 +109,8 @@
 #
 # ENV:
 #   SKILL_COMPOUNDER_STATE        state root ($HOME/.claude/skill-compounder). Holds the
-#                                 ledger, reminders.jsonl and remind/hits.jsonl.
+#                                 ledger, reminders.jsonl, remind/hits.jsonl, and the
+#                                 repeat gate's repeats/index.jsonl that --lesson reads.
 #   SKILL_COMPOUNDER_TRANSCRIPTS  where Claude Code keeps per-project directories
 #                                 ($HOME/.claude/projects). The memory scope writes here.
 #   SKILLNOTE_CLAUDE_DIR          overrides the claude directory for the global scope.
@@ -112,6 +152,10 @@ LEDGER="$STATE_ROOT/ledger.jsonl"
 # prune_stale_state(); reminders.jsonl sits beside it, where no sweep can reach it.
 REMINDERS="$STATE_ROOT/reminders.jsonl"
 HITS="$STATE_ROOT/remind/hits.jsonl"
+# hooks/repeat-gate.sh owns this file; --lesson only ever READS it. The path is spelled
+# the same way bin/skillrepeat spells it, and for the same reason claude_dir() is copied
+# rather than re-derived: two resolutions of one location that disagree is the drift.
+REPEAT_STORE="$STATE_ROOT/repeats/index.jsonl"
 TRANSCRIPTS="${SKILL_COMPOUNDER_TRANSCRIPTS:-$HOME/.claude/projects}"
 
 # Matches BACKUP_PREFIX / MAX_BACKUPS in skill_compounder/installer.py:137-138. A backup
@@ -138,11 +182,33 @@ esac
 now() { if [ -n "${SKILLNOTE_NOW:-}" ]; then printf '%s' "$SKILLNOTE_NOW"; else date +%s; fi; }
 
 usage() {
-  sed -n '2,10p' "$0" | sed -e 's/^# \{0,1\}//'
+  sed -n '2,12p' "$0" | sed -e 's/^# \{0,1\}//'
   echo
   echo "State:     $STATE_ROOT"
   echo "Ledger:    $LEDGER"
   echo "Reminders: $REMINDERS"
+  echo "Repeats:   $REPEAT_STORE  (read only; hooks/repeat-gate.sh writes it)"
+  echo
+  echo "--lesson <sig> writes ONE record in three places: the dated line in the scoped"
+  echo "CLAUDE.md, a reminder keyed on the FAILING call's normalised signature taken"
+  echo "verbatim from that signature's 'fail' row, and a ledger note row carrying"
+  echo "lesson_sig, reminder_id and attachments. hooks/remind.sh then states the lesson"
+  echo "back before that command runs again. A signature the store has no 'fail' row for"
+  echo "is refused with exit 2 and nothing is written; 'skillrepeat list' prints the ones"
+  echo "it knows. A row whose tool is not Bash is refused too -- the hook's command arm"
+  echo "reads .tool_input.command, so nothing else can ever match it."
+  echo
+  echo "--attach <path> (repeatable, and valid without --lesson) copies the file to"
+  echo "<scope>/lessons/<note id>/<basename>, keeps its executable bit, and appends"
+  echo "' (attached: <rel>)' to the note line so it is findable from the line. A path"
+  echo "outside the working tree or \$HOME is refused, and an existing attachment is never"
+  echo "overwritten. Both refusals happen before a byte is copied."
+  echo
+  echo "promote <id> --to global MOVES a project note up a level -- the same line, the"
+  echo "same id, the same date -- along with its attachments directory and its reminder,"
+  echo "and leaves a one-line tombstone in the project block. Never a copy. '--to"
+  echo "project' is refused: the hierarchy only goes up. Promoting a moved note again is"
+  echo "a no-op that exits 0."
   echo
   echo "The memory scope IS read back by a later session, but ONLY through MEMORY.md:"
   echo "measured 2026-09-02 on Claude Code 2.1.258, a memory file that MEMORY.md does not"
@@ -358,6 +424,14 @@ ensure_horizon() {
   return 0
 }
 
+# Fields beyond the fixed ten -- `lesson_sig`, `reminder_id`, `attachments`, and what a
+# promotion records -- arrive through LEDGER_EXTRA rather than a growing argument list,
+# because bash 3.2 has no named arguments and a tenth positional nobody passes is a
+# positional somebody will pass wrongly. It is ALWAYS built by jq, so it is always valid
+# JSON, and every caller resets it: a stale object would attach one note's attachments to
+# the next note's row.
+LEDGER_EXTRA='{}'
+
 ledger_append() { # <action> <kind> <id> <scope> <target> <text> <why> <source> <project> [readback]
   mkdir -p "$STATE_ROOT" 2>/dev/null || return 0
   la_line="$(jq -n -c \
@@ -365,13 +439,15 @@ ledger_append() { # <action> <kind> <id> <scope> <target> <text> <why> <source> 
     --arg target "$5" --arg text "$6" --arg why "$7" --arg source "$8" \
     --arg project "$9" --arg readback "${10:-}" \
     --arg session "${CLAUDE_CODE_SESSION_ID:-}" --argjson ts "$(now)" \
+    --argjson extra "${LEDGER_EXTRA:-\{\}}" \
     '{event:"note", action:$action, ts:$ts, id:$id, kind:$kind, scope:$scope,
       text:$text, project:$project, confidence:"measured", backfilled:false}
      + (if $target   == "" then {} else {target:   $target}   end)
      + (if $why      == "" then {} else {why:      $why}      end)
      + (if $source   == "" then {} else {source:   $source}   end)
      + (if $readback == "" then {} else {readback: $readback} end)
-     + (if $session  == "" then {} else {session:  $session}  end)' 2>/dev/null)"
+     + (if $session  == "" then {} else {session:  $session}  end)
+     + $extra' 2>/dev/null)"
   [ -n "$la_line" ] || return 0
   ensure_horizon
   # `2>/dev/null` BEFORE the `>>`, and the order is the whole point: redirections are
@@ -415,10 +491,11 @@ check_single_block() { # <resolved path>
 
 esc_why() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-build_line() { # <date> <text> <id> <source> <why>
+build_line() { # <date> <text> <id> <source> <lesson> <why>
   bl="- **$1** $2 <!-- id:$3 "
   [ -n "$4" ] && bl="${bl}source:$4 "
-  [ -n "$5" ] && bl="${bl}why:\"$(esc_why "$5")\" "
+  [ -n "$5" ] && bl="${bl}lesson:$5 "
+  [ -n "$6" ] && bl="${bl}why:\"$(esc_why "$6")\" "
   printf '%s-->' "$bl"
 }
 
@@ -478,10 +555,122 @@ norm_of_bash() { # <literal command> -> the normalised signature, or fails
   printf '%s' "$nb_out"
 }
 
+# --------------------------------------------------------------------- attachments
+#
+# An attachment is the "code or scripts" half of a lesson: the script that finally worked,
+# sitting beside the sentence that says what it was for. It is COPIED -- never moved, never
+# linked -- so the working tree the user is still editing is untouched, and `cp -p` carries
+# the executable bit across, which is the whole difference between a file and a script.
+#
+# ATTACH_DIR is where the bytes land. ATTACH_BASE is what the printed path is relative TO,
+# and the two differ per scope so that the suffix on the line is readable from wherever
+# that line is read: from the repository root for a project note (`.claude/lessons/...`),
+# and from $HOME for a global one (`.claude/lessons/...` again, because the claude dir is
+# `~/.claude`). A memory note names it relative to its own directory.
+ATTACH_DIR=""; ATTACH_BASE=""; ATTACH_SUFFIX=""; ATTACH_JSON='[]'
+
+attach_dirs() { # <scope> <project root> <note id>
+  case "$1" in
+    project) ATTACH_BASE="$2"; ATTACH_DIR="$2/.claude/lessons/$3" ;;
+    global)  ad_c="$(claude_dir)"; ATTACH_BASE="$(dirname "$ad_c")"; ATTACH_DIR="$ad_c/lessons/$3" ;;
+    memory)  ATTACH_BASE="$TRANSCRIPTS/$(slug_of "$2")/memory"; ATTACH_DIR="$ATTACH_BASE/lessons/$3" ;;
+    *)       return 1 ;;
+  esac
+  return 0
+}
+
+# `cd`-and-`pwd` rather than `realpath`, which is not on macOS before 12 and is not on the
+# minimal PATH the tests run under. The FILE is not resolved, only its directory: a
+# deliberate symlink to a script is a thing a user may well attach, and following it would
+# copy the target under the link name.
+abs_of() { # <path> -> absolute path with the directory resolved
+  case "$1" in /*) ao_p="$1" ;; *) ao_p="$PWD/$1" ;; esac
+  ao_d="$(cd "$(dirname "$ao_p")" 2>/dev/null && pwd)" || return 1
+  [ -n "$ao_d" ] || return 1
+  printf '%s/%s' "${ao_d%/}" "$(basename "$ao_p")"
+}
+
+# Containment, not a prefix test: `/repo-other` starts with `/repo` and is a different
+# tree. Same shape as `inscope` in hooks/remind.sh, for the same reason.
+inside() { # <abs path> <dir>
+  [ -n "${2:-}" ] || return 1
+  case "$1" in "$2"|"$2"/*) return 0 ;; esac
+  return 1
+}
+
+# TWO PASSES, AND THE SPLIT IS THE POINT. Every refusal is decided before a single byte is
+# copied, so `--attach a.sh --attach /etc/passwd` leaves nothing behind at all -- a partial
+# copy plus an exit 2 is the state that makes a retry refuse on its own leftovers.
+do_attach() { # <scope> <project root> <note id>; reads ATT_LIST
+  ATTACH_SUFFIX=""; ATTACH_JSON='[]'
+  [ -n "${ATT_LIST:-}" ] || return 0
+  attach_dirs "$1" "$2" "$3" || die "--attach is not supported for scope '$1'"
+  da_home="$(cd "$HOME" 2>/dev/null && pwd)" || da_home="$HOME"
+  da_srcs=""
+  while IFS= read -r da_p; do
+    [ -n "$da_p" ] || continue
+    da_abs="$(abs_of "$da_p")" || die "--attach $da_p: no such directory. Nothing was written."
+    [ -f "$da_abs" ] || die "--attach $da_p: not a regular file ($da_abs). Nothing was written."
+    if ! inside "$da_abs" "$2" && ! inside "$da_abs" "$da_home"; then
+      die "--attach $da_p: $da_abs is outside both the working tree ($2) and \$HOME ($da_home). Nothing was written."
+    fi
+    if [ -e "$ATTACH_DIR/$(basename "$da_abs")" ]; then
+      die "--attach $da_p: $ATTACH_DIR/$(basename "$da_abs") already exists, and this never overwrites. Nothing was written."
+    fi
+    da_srcs="$da_srcs$da_abs
+"
+  done <<ATTEOF
+$ATT_LIST
+ATTEOF
+
+  mkdir -p "$ATTACH_DIR" 2>/dev/null || die3 "cannot create $ATTACH_DIR"
+  while IFS= read -r da_s; do
+    [ -n "$da_s" ] || continue
+    da_b="$(basename "$da_s")"
+    # -p, so an executable stays executable. A lesson whose script arrives without its
+    # mode is a lesson whose one command does not run.
+    cp -p "$da_s" "$ATTACH_DIR/$da_b" 2>/dev/null || die3 "cannot copy $da_s to $ATTACH_DIR/$da_b"
+    da_rel="$ATTACH_DIR/$da_b"
+    case "$da_rel" in "$ATTACH_BASE"/*) da_rel="${da_rel#"$ATTACH_BASE"/}" ;; esac
+    ATTACH_SUFFIX="$ATTACH_SUFFIX (attached: $da_rel)"
+    ATTACH_JSON="$(printf '%s' "$ATTACH_JSON" | jq -c --arg e "$da_rel" '. + [$e]' 2>/dev/null)"
+    [ -n "$ATTACH_JSON" ] || die "could not build the attachment list (is jq healthy?)"
+  done <<SRCEOF
+$da_srcs
+SRCEOF
+  return 0
+}
+
+# -------------------------------------------------------------------------- the lesson
+#
+# READ-ONLY against hooks/repeat-gate.sh's store. The NEWEST `fail` row for the signature
+# is the one that answers, because a signature that failed again after a recovery failed
+# for a reason the older row does not describe.
+lesson_fail_row() { # <sig> -> that row, as one JSON object on stdout
+  [ -f "$REPEAT_STORE" ] && [ -r "$REPEAT_STORE" ] || return 1
+  lf_r="$(jq -s -R -c --arg s "$1" '
+      [ split("\n")[] | select(length > 0) | (fromjson? // empty) | select(type == "object")
+        | select((.sig // "") == $s) | select((.t // "") == "fail") ]
+      | sort_by(.ts // 0) | (last // empty)' "$REPEAT_STORE" 2>/dev/null)" || return 1
+  [ -n "$lf_r" ] || return 1
+  printf '%s' "$lf_r"
+}
+
+# The reminder id recorded beside a note id, so `promote` can move the pair without a
+# second index. The ledger is the join: `--lesson` wrote both ids into one row.
+ledger_reminder_of() { # <note id> -> a reminder id, or nothing
+  [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || return 0
+  jq -s -R -r --arg id "$1" '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) | select(type == "object")
+      | select((.event // "") == "note") | select((.id // "") == $id)
+      | select(((.reminder_id // "") | tostring) != "") ]
+    | sort_by(.ts // 0) | (last // {}) | ((.reminder_id // "") | tostring)' "$LEDGER" 2>/dev/null
+}
+
 # ------------------------------------------------------------------------------- add
 cmd_add() {
   scope="project"; text=""; why=""; source=""; remind=0
-  kw=""; pg=""; cm=""
+  kw=""; pg=""; cm=""; lesson=""; ATT_LIST=""; LESSON_NORM=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --scope)   [ $# -ge 2 ] || die "--scope needs a value"; scope="$2"; shift 2 ;;
@@ -498,6 +687,11 @@ cmd_add() {
       --command) [ $# -ge 2 ] && [ -n "$2" ] || die "--command needs a command"
                  cm="$cm$2
 "; shift 2 ;;
+      --lesson)  [ $# -ge 2 ] && [ -n "$2" ] || die "--lesson needs a repeat-gate signature ('skillrepeat list' prints them)"
+                 lesson="$2"; shift 2 ;;
+      --attach)  [ $# -ge 2 ] && [ -n "$2" ] || die "--attach needs a path"
+                 ATT_LIST="$ATT_LIST$2
+"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       --) shift; while [ $# -gt 0 ]; do text="$text${text:+ }$1"; shift; done ;;
       -*) die "unknown option '$1' (try: skillnote --help)" ;;
@@ -513,9 +707,22 @@ cmd_add() {
     *) die "unknown --scope '$scope'. The three are: project, global, memory (list also takes 'remind')." ;;
   esac
 
+  # EVERY --lesson REFUSAL HAPPENS HERE, before add_note has created a directory or
+  # copied a file. "Nothing was written" is a promise this ordering keeps.
+  if [ -n "$lesson" ]; then
+    [ "$remind" = "1" ] && die "--lesson already writes a reminder as well as the note; drop --remind."
+    [ "$scope" = "memory" ] && die "--lesson --scope memory: the reminder half has nowhere to live. Reminders are matched by hooks/remind.sh out of $REMINDERS; use --scope project or --scope global."
+    ls_row="$(lesson_fail_row "$lesson")" || die "unknown signature '$lesson': $REPEAT_STORE has no 'fail' row for it. \`skillrepeat list\` prints the signatures the store knows. Nothing was written."
+    ls_tool="$(printf '%s' "$ls_row" | jq -r '(.tool // "") | tostring' 2>/dev/null)"
+    LESSON_NORM="$(printf '%s' "$ls_row" | jq -r '(.norm // "") | tostring' 2>/dev/null)"
+    [ -n "$LESSON_NORM" ] || die "signature '$lesson' has a 'fail' row with no normalised call in it, so there is nothing to key a reminder on. Nothing was written."
+    [ "$ls_tool" = "Bash" ] || die "signature '$lesson' failed on the $ls_tool tool, and hooks/remind.sh keys command reminders on a Bash command only -- its command arm reads .tool_input.command, so a $ls_tool call could never match one. Record it with: skillnote add --remind --keyword <word> \"<text>\". Nothing was written."
+  fi
+
   if [ "$remind" = "1" ]; then
     [ "$scope" = "memory" ] && die "--remind --scope memory: a memory file is not a reminder store. Reminders live in $REMINDERS and are matched by hooks/remind.sh; use --scope project or --scope global."
     [ -n "$kw$pg$cm" ] || die "--remind needs at least one --keyword, --path or --command. A reminder with no match rule never fires and is invisible, which is worse than a note."
+    [ -n "$ATT_LIST" ] && die "--remind --attach: a reminder has no line to link an attachment from. Write it as a note (drop --remind), or as a lesson (--lesson <sig>), which writes both."
     add_reminder
     return $?
   fi
@@ -551,8 +758,25 @@ $cm
 CMDEOF
   fi
 
-  if [ -n "$(live_reminders | jq -r --arg id "$ar_id" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]; then
+  write_reminder_row || return $?
+  if [ "$REM_STATE" = "dup" ]; then
     echo "skillnote: already recorded ($ar_id)"
+    return 0
+  fi
+  ledger_append add reminder "$ar_id" "$ar_scope" "$REMINDERS" "$text" "$why" "$source" "$(project_root)"
+  echo "skillnote: reminder recorded ($ar_id) in $REMINDERS"
+  return 0
+}
+
+# The row write itself, shared by --remind and --lesson. It PRINTS NOTHING and writes no
+# ledger row: the two callers say different things about the same event ("recorded" versus
+# "keyed on the failing call"), and --lesson writes ONE ledger row for the pair rather than
+# two rows nothing joins. REM_STATE says which of the two things happened.
+REM_STATE="new"
+write_reminder_row() { # reads ar_id, ar_scope, ar_cmds, kw, pg, text, source, lesson
+  REM_STATE="new"
+  if [ -n "$(live_reminders | jq -r --arg id "$ar_id" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]; then
+    REM_STATE="dup"
     return 0
   fi
 
@@ -561,19 +785,29 @@ CMDEOF
   # row parses as eleven unparseable lines, so the reminder simply vanishes with no error.
   ar_row="$(printf '%s' "$kw" | jq -c -R -s --arg id "$ar_id" --arg text "$text" \
       --arg scope "$ar_scope" --arg source "$source" --argjson created "$(now)" \
-      --arg paths "$pg" --argjson cmds "$ar_cmds" \
+      --arg paths "$pg" --argjson cmds "$ar_cmds" --arg lesson "${lesson:-}" \
       'def lines: split("\n") | map(select(length > 0));
        {id:$id, text:$text,
         match:{keywords: lines, paths: ($paths | lines), commands: $cmds},
         scope:$scope, created:$created, hits:0}
-       + (if $source == "" then {} else {source:$source} end)' 2>/dev/null)"
+       + (if $source == "" then {} else {source:$source} end)
+       + (if $lesson == "" then {} else {lesson_sig:$lesson} end)' 2>/dev/null)"
   [ -n "$ar_row" ] || die "could not build the reminder row (is jq healthy?)"
 
   mkdir -p "$STATE_ROOT" 2>/dev/null || die3 "cannot create $STATE_ROOT"
   printf '%s\n' "$ar_row" 2>/dev/null >> "$REMINDERS" || die3 "cannot append to $REMINDERS"
-  ledger_append add reminder "$ar_id" "$ar_scope" "$REMINDERS" "$text" "$why" "$source" "$(project_root)"
-  echo "skillnote: reminder recorded ($ar_id) in $REMINDERS"
   return 0
+}
+
+# The --lesson half. The signature goes into `commands` EXACTLY as the store holds it: see
+# THE KEY IS COPIED OUT OF THE STORE at the top of this file.
+lesson_reminder() { # <the failing call as repeat-gate normalised it>
+  ar_scope="global"
+  [ "$scope" = "project" ] && ar_scope="$(project_root)"
+  ar_id="$(idof "remind|$ar_scope|$text")"
+  ar_cmds="$(jq -n -c --arg e "$1" '[$e]' 2>/dev/null)"
+  [ -n "$ar_cmds" ] || die "could not build the command list (is jq healthy?)"
+  write_reminder_row
 }
 
 add_note() {
@@ -588,12 +822,19 @@ add_note() {
   an_real="$(resolve_link "$an_target")"
   if [ -f "$an_real" ] && grep -q -F "id:$an_id " "$an_real" 2>/dev/null; then
     echo "skillnote: already recorded ($an_id)"
+    # Said rather than done silently: the line is already there, so appending a second
+    # `(attached: ...)` suffix to it is not possible without rewriting a line the user may
+    # since have edited, and copying files nothing points at is worse than not copying.
+    [ -n "${ATT_LIST:-}" ] && echo "skillnote: attachments were NOT copied -- that line is already written. Remove it and add it again, or attach to a new note."
     return 0
   fi
   check_single_block "$an_real"
 
   mkdir -p "$(dirname "$an_target")" 2>/dev/null || die3 "cannot create $(dirname "$an_target")"
-  an_line="$(build_line "$(fmt_date "$(now)")" "$text" "$an_id" "$source" "$why")"
+  # Before the line is built, because the line carries the suffix; and after the dedup
+  # check, because a note that is not written must not copy anything.
+  do_attach "$scope" "$an_root" "$an_id"
+  an_line="$(build_line "$(fmt_date "$(now)")" "$text$ATTACH_SUFFIX" "$an_id" "$source" "$lesson" "$why")"
   an_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
   trap 'rm -f "$an_tmp" 2>/dev/null' EXIT INT TERM HUP
   # /dev/null rather than creating the target first: a compose that fails must not leave an
@@ -610,8 +851,32 @@ add_note() {
     die3 "cannot write $an_target"
   fi
   rm -f "$an_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+
+  # The reminder comes AFTER the note, so a store that cannot be appended to leaves the
+  # lesson written down rather than nothing at all.
+  an_rid=""
+  if [ -n "$lesson" ]; then
+    lesson_reminder "$LESSON_NORM" || die3 "cannot write the reminder half of the lesson to $REMINDERS (the note itself was written to $an_target)"
+    an_rid="$ar_id"
+  fi
+
+  LEDGER_EXTRA="$(jq -n -c --argjson att "$ATTACH_JSON" --arg les "$lesson" --arg rid "$an_rid" \
+      '(if ($att | length) == 0 then {} else {attachments: $att} end)
+       + (if $les == "" then {} else {lesson_sig: $les} end)
+       + (if $rid == "" then {} else {reminder_id: $rid} end)' 2>/dev/null)"
+  [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
   ledger_append add note "$an_id" "$scope" "$an_target" "$text" "$why" "$source" "$an_root"
+  LEDGER_EXTRA='{}'
+
   echo "skillnote: recorded ($an_id) in $an_target"
+  [ -n "$ATTACH_SUFFIX" ] && echo "skillnote: attached to $ATTACH_DIR"
+  if [ -n "$lesson" ]; then
+    if [ "$REM_STATE" = "dup" ]; then
+      echo "skillnote: reminder ($an_rid) was already recorded; it stays keyed on the failing call"
+    else
+      echo "skillnote: reminder ($an_rid) keyed on the failing call for $lesson"
+    fi
+  fi
   return 0
 }
 
@@ -635,9 +900,11 @@ add_memory_note() { # <project root>
   # and the index is the only thing a later session actually reads.
   if [ -f "$am_index" ] && grep -q -F "($am_name.md)" "$am_index" 2>/dev/null; then
     echo "skillnote: already recorded ($am_id)"
+    [ -n "${ATT_LIST:-}" ] && echo "skillnote: attachments were NOT copied -- that note is already written."
     return 0
   fi
 
+  do_attach memory "$am_root" "$am_id"
   am_desc="$why"; [ -n "$am_desc" ] || am_desc="$text"
   am_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
   trap 'rm -f "$am_tmp" 2>/dev/null' EXIT INT TERM HUP
@@ -654,7 +921,7 @@ add_memory_note() { # <project root>
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && printf '  originSessionId: %s\n' "$CLAUDE_CODE_SESSION_ID"
     printf '  modified: %s\n' "$(fmt_iso_ms "$(now)")"
     printf -- '---\n\n'
-    printf '%s\n' "$text"
+    printf '%s\n' "$text$ATTACH_SUFFIX"
     [ -n "$why" ] && { printf '\n'; printf '%s\n' "$why"; }
     printf '\n<!-- id:%s ' "$am_id"
     [ -n "$source" ] && printf 'source:%s ' "$source"
@@ -681,8 +948,179 @@ add_memory_note() { # <project root>
   rm -f "$am_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
 
   # readback:"via-index" is a MEASUREMENT and not a hope: docs/CLAUDE-CODE-BEHAVIOR.md.
+  LEDGER_EXTRA="$(jq -n -c --argjson att "$ATTACH_JSON" \
+      '(if ($att | length) == 0 then {} else {attachments: $att} end)' 2>/dev/null)"
+  [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
   ledger_append add note "$am_id" memory "$am_file" "$text" "$why" "$source" "$am_root" via-index
+  LEDGER_EXTRA='{}'
   echo "skillnote: recorded ($am_id) in $am_file, indexed in $am_index"
+  [ -n "$ATTACH_SUFFIX" ] && echo "skillnote: attached to $ATTACH_DIR"
+  return 0
+}
+
+# ----------------------------------------------------------------------------- promote
+#
+# A MOVE, NEVER A COPY, and the order of the five steps is chosen so that every partial
+# failure leaves the note somewhere rather than nowhere:
+#
+#   0. every refusal that can be decided in advance is decided (the level, the id, an
+#      attachments directory already sitting at the destination)
+#   1. the GLOBAL block gains the line first -- if step 2 then fails the note exists twice,
+#      which a second `promote` repairs; the other order loses the text outright
+#   2. the project line becomes the one-line tombstone
+#   3. the attachments directory is `mv`d
+#   4. the reminder is tombstoned at project scope and re-created at global
+#   5. one ledger row, action:"promote"
+#
+# The line is carried across VERBATIM: same id, same date, same `(attached: ...)` suffix.
+# `.claude/lessons/<id>/<file>` is read relative to the repository root from a project note
+# and relative to $HOME from a global one, and `~/.claude` makes those the same string, so
+# a rewrite would be churn on every ordinary machine and a guess on the rest.
+cmd_promote() {
+  pr_id="${1:-}"
+  [ -n "$pr_id" ] || die "promote needs an id: skillnote promote <id> --to global  ('skillnote list' prints them)"
+  case "$pr_id" in -*) die "promote takes the id first, then --to global" ;; esac
+  shift
+  pr_to=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to)      [ $# -ge 2 ] || die "--to needs a level"; pr_to="$2"; shift 2 ;;
+      --project) [ $# -ge 2 ] || die "--project needs a directory"; PROJECT_OPT="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option '$1' (try: skillnote --help)" ;;
+    esac
+  done
+  case "$pr_to" in
+    global) : ;;
+    project) die "promote --to project: the hierarchy only goes up. A note is kept at the highest level that applies, so moving one down would silently narrow a lesson that had already earned the wider scope. Remove it and add it at --scope project if that is really what you mean." ;;
+    '') die "promote needs a level: skillnote promote $pr_id --to global" ;;
+    *) die "unknown --to '$pr_to'. The only level a note can be promoted to is: global." ;;
+  esac
+
+  pr_root="$(project_root)"
+  pr_src="$pr_root/.claude/CLAUDE.md"
+  pr_srcreal="$(resolve_link "$pr_src")"
+  [ -f "$pr_srcreal" ] || die "no project notes file at $pr_src, so there is nothing to promote."
+  check_single_block "$pr_srcreal"
+  pr_line="$(SN_NEEDLE="id:$pr_id " awk 'BEGIN { n = ENVIRON["SN_NEEDLE"] } index($0, n) > 0 { print; exit }' "$pr_srcreal" 2>/dev/null)"
+  [ -n "$pr_line" ] || die "no project note with id '$pr_id' in $pr_src. 'skillnote list --scope project' prints the ids it holds."
+  case "$pr_line" in
+    *"moved:global"*)
+      echo "skillnote: $pr_id was already promoted to global; nothing to do."
+      return 0 ;;
+  esac
+
+  pr_dst="$(claude_dir)/CLAUDE.md"
+  pr_dstreal="$(resolve_link "$pr_dst")"
+  check_single_block "$pr_dstreal"
+
+  pr_cd="$(claude_dir)"
+  pr_from="$pr_root/.claude/lessons/$pr_id"
+  pr_toat="$pr_cd/lessons/$pr_id"
+  if [ -d "$pr_from" ] && [ -e "$pr_toat" ]; then
+    die "$pr_toat already exists, and nothing here overwrites. Move or remove it, then run this again. Nothing was written."
+  fi
+
+  # The tombstone: the date off the original line, and the first 60 characters of what it
+  # said, so the project block still answers "where did that go" without holding a second
+  # copy of the lesson.
+  pr_date="$(printf '%s' "$pr_line" | sed -n 's/^- \*\*\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)\*\*.*/\1/p')"
+  [ -n "$pr_date" ] || pr_date="$(fmt_date "$(now)")"
+  pr_body="${pr_line%%<!-- id:*}"
+  pr_body="$(printf '%s' "$pr_body" | sed 's/^- \*\*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\*\* *//; s/^- *//; s/ *$//')"
+  pr_head="$(printf '%s' "$pr_body" | cut -c1-60 | sed 's/ *$//')"
+  pr_tomb="- **$pr_date** moved to global: $pr_head <!-- id:$pr_id moved:global -->"
+
+  # 1. the destination, first.
+  if grep -q -F "id:$pr_id " "$pr_dstreal" 2>/dev/null; then
+    pr_added=0
+  else
+    mkdir -p "$(dirname "$pr_dst")" 2>/dev/null || die3 "cannot create $(dirname "$pr_dst")"
+    pr_tmp="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
+    trap 'rm -f "$pr_tmp" 2>/dev/null' EXIT INT TERM HUP
+    pr_in="$pr_dstreal"; [ -f "$pr_dstreal" ] || pr_in=/dev/null
+    insert_line "$pr_in" "$pr_line" "$pr_tmp"
+    if [ ! -s "$pr_tmp" ]; then
+      rm -f "$pr_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+      die3 "could not compose the new $pr_dst"
+    fi
+    backup_file "$pr_dst" >/dev/null
+    if ! write_atomic "$pr_dst" "$pr_tmp"; then
+      rm -f "$pr_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+      die3 "cannot write $pr_dst"
+    fi
+    rm -f "$pr_tmp" 2>/dev/null; trap - EXIT INT TERM HUP
+    pr_added=1
+  fi
+
+  # 2. the source line becomes the tombstone. Exactly one line is replaced.
+  pr_tmp2="$(mktemp "${TMPDIR:-/tmp}/skillnote.XXXXXX")" || die3 "cannot create a temp file"
+  trap 'rm -f "$pr_tmp2" 2>/dev/null' EXIT INT TERM HUP
+  SN_NEEDLE="id:$pr_id " SN_TOMB="$pr_tomb" awk '
+    BEGIN { n = ENVIRON["SN_NEEDLE"]; t = ENVIRON["SN_TOMB"]; swapped = 0 }
+    { if (!swapped && index($0, n) > 0) { print t; swapped = 1; next }
+      print }' "$pr_srcreal" > "$pr_tmp2" 2>/dev/null
+  if [ ! -s "$pr_tmp2" ]; then
+    rm -f "$pr_tmp2" 2>/dev/null; trap - EXIT INT TERM HUP
+    die3 "could not compose the new $pr_src"
+  fi
+  backup_file "$pr_src" >/dev/null
+  if ! write_atomic "$pr_src" "$pr_tmp2"; then
+    rm -f "$pr_tmp2" 2>/dev/null; trap - EXIT INT TERM HUP
+    die3 "cannot write $pr_src"
+  fi
+  rm -f "$pr_tmp2" 2>/dev/null; trap - EXIT INT TERM HUP
+
+  # 3. the attachments travel with the note. `mv`, so there is never a second copy.
+  pr_moved=0
+  if [ -d "$pr_from" ]; then
+    mkdir -p "$pr_cd/lessons" 2>/dev/null || die3 "cannot create $pr_cd/lessons"
+    mv "$pr_from" "$pr_toat" 2>/dev/null || die3 "cannot move $pr_from to $pr_toat"
+    pr_moved=1
+  fi
+
+  # 4. the reminder changes scope, which in an append-only store is spelled tombstone plus
+  #    a new row -- the same doctrine `remove` follows. The new id is computed at global
+  #    scope, because the id is a hash OVER the scope; reusing the old one would leave two
+  #    live rows with one id, and hooks/remind.sh does not de-duplicate.
+  pr_rid="$(ledger_reminder_of "$pr_id")"
+  pr_newrid=""
+  if [ -n "$pr_rid" ]; then
+    pr_row="$(live_reminders | jq -c --arg id "$pr_rid" '(map(select(.id == $id)) | .[0]) // empty' 2>/dev/null)"
+    if [ -n "$pr_row" ]; then
+      pr_rtext="$(printf '%s' "$pr_row" | jq -r '(.text // "") | tostring' 2>/dev/null)"
+      pr_newrid="$(idof "remind|global|$pr_rtext")"
+      pr_new="$(printf '%s' "$pr_row" | jq -c --arg id "$pr_newrid" --argjson created "$(now)" \
+                  '.id = $id | .scope = "global" | .created = $created | .hits = 0' 2>/dev/null)"
+      pr_dead="$(jq -n -c --arg id "$pr_rid" --argjson ts "$(now)" '{id:$id, t:"remove", ts:$ts}' 2>/dev/null)"
+      if [ -n "$pr_new" ] && [ -n "$pr_dead" ]; then
+        mkdir -p "$STATE_ROOT" 2>/dev/null || true
+        printf '%s\n%s\n' "$pr_dead" "$pr_new" 2>/dev/null >> "$REMINDERS" \
+          || die3 "cannot append to $REMINDERS"
+      else
+        pr_newrid=""
+      fi
+    fi
+  fi
+
+  # 5. one row, so the move is counted rather than inferred from two adds.
+  LEDGER_EXTRA="$(jq -n -c --arg from "$pr_src" --arg rid "$pr_newrid" --arg orid "$pr_rid" \
+      --argjson att "$pr_moved" --argjson added "$pr_added" \
+      '{from_scope:"project", from_target:$from, attachments_moved:($att == 1), inserted:($added == 1)}
+       + (if $rid  == "" then {} else {reminder_id: $rid} end)
+       + (if $orid == "" then {} else {from_reminder_id: $orid} end)' 2>/dev/null)"
+  [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
+  ledger_append promote note "$pr_id" global "$pr_dst" "$pr_body" "" "" "$pr_root"
+  LEDGER_EXTRA='{}'
+
+  if [ "$pr_added" = "1" ]; then
+    echo "skillnote: moved $pr_id to $pr_dst"
+  else
+    echo "skillnote: $pr_id was already in $pr_dst; the project side has been tombstoned"
+  fi
+  echo "skillnote: tombstoned in $pr_src"
+  [ "$pr_moved" = "1" ] && echo "skillnote: moved attachments $pr_from -> $pr_toat"
+  [ -n "$pr_newrid" ] && echo "skillnote: reminder $pr_rid -> $pr_newrid, now global"
   return 0
 }
 
@@ -784,9 +1222,10 @@ parse_file() { # <scope> <configured path> -> a JSON array
       if (q == 0) next
       id = substr(tail, 1, q - 1)
       rest = substr(tail, q + 1)
-      src = ""
-      s = index(rest, "source:")
-      if (s > 0) { t = substr(rest, s + 7); u = index(t, " "); src = (u > 0 ? substr(t, 1, u - 1) : t) }
+      # `why` is written LAST on purpose, so the token fields are read out of the part
+      # BEFORE it. Without that split a why saying `the runner printed source:none` is
+      # read back as this line source field. An apostrophe cannot appear anywhere in
+      # this awk program: it is inside a single-quoted shell string.
       why = ""
       w = index(rest, "why:\"")
       if (w > 0) {
@@ -794,24 +1233,37 @@ parse_file() { # <scope> <configured path> -> a JSON array
         for (i = length(t); i > 0; i--) if (substr(t, i, 1) == "\"") { v = i; break }
         if (v > 1) why = unesc(substr(t, 1, v - 1))
       }
+      toks = (w > 0 ? substr(rest, 1, w - 1) : rest)
+      src = ""
+      s = index(toks, "source:")
+      if (s > 0) { t = substr(toks, s + 7); u = index(t, " "); src = (u > 0 ? substr(t, 1, u - 1) : t) }
+      les = ""
+      l = index(toks, "lesson:")
+      if (l > 0) { t = substr(toks, l + 7); u = index(t, " "); les = (u > 0 ? substr(t, 1, u - 1) : t) }
       date = ""
       if (match(head, /\*\*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\*\*/)) {
         date = substr(head, RSTART + 2, 10)
         body = substr(head, RSTART + RLENGTH)
       } else { body = head; sub(/^- */, "", body) }
       sub(/^ */, "", body); sub(/ *$/, "", body)
-      print id; print date; print body; print src; print why
+      print id; print date; print body; print src; print les; print why
     }' "$pf_real" 2>/dev/null \
   | jq -R -s --arg scope "$1" --arg target "$2" '
       (rtrimstr("\n")) as $s
       | (if $s == "" then [] else ($s | split("\n")) end) as $f
-      | [ range(0; (($f | length) / 5) | floor) as $i
+      | [ range(0; (($f | length) / 6) | floor) as $i
+          | ($f[$i*6+2]) as $body
           | {kind:"note", scope:$scope, target:$target,
-             id:    $f[$i*5],
-             date:  (if $f[$i*5+1] == "" then null else $f[$i*5+1] end),
-             text:  $f[$i*5+2],
-             source:(if $f[$i*5+3] == "" then null else $f[$i*5+3] end),
-             why:   (if $f[$i*5+4] == "" then null else $f[$i*5+4] end)} ]' 2>/dev/null \
+             id:    $f[$i*6],
+             date:  (if $f[$i*6+1] == "" then null else $f[$i*6+1] end),
+             text:  $body,
+             source:(if $f[$i*6+3] == "" then null else $f[$i*6+3] end),
+             lesson:(if $f[$i*6+4] == "" then null else $f[$i*6+4] end),
+             # DERIVED from the line, never a second field: the suffix in the visible
+             # text is what makes the file findable, so counting it is counting the
+             # thing that matters rather than a number that can disagree with it.
+             attachments: (($body | split("(attached: ") | length) - 1),
+             why:   (if $f[$i*6+5] == "" then null else $f[$i*6+5] end)} ]' 2>/dev/null \
   || printf '[]'
 }
 
@@ -841,9 +1293,12 @@ memory_rows() { # <memory dir> -> a JSON array
     [ -n "$mr_one" ] || continue
     mr_out="$(printf '%s' "$mr_one" | jq -R -s --arg f "$mr_f" --argjson prev "$mr_out" '
         (rtrimstr("\n") | split("\n")) as $f2
+        | ($f2[2] // "") as $body
         | $prev + [{kind:"note", scope:"memory", target:$f, id:$f2[0],
                     source:(if ($f2[1] // "") == "" then null else $f2[1] end),
-                    text:(if ($f2[2] // "") == "" then null else $f2[2] end),
+                    text:(if $body == "" then null else $body end),
+                    lesson:null,
+                    attachments: (($body | split("(attached: ") | length) - 1),
                     date:null, why:null}]' 2>/dev/null)"
     [ -n "$mr_out" ] || mr_out='[]'
   done
@@ -878,6 +1333,7 @@ cmd_list() {
     cl_rem="$(live_reminders | jq -c --argjson hits "$(hit_counts)" '
         map({kind:"reminder", scope:.scope, target:"reminders.jsonl", id:.id, text:.text,
              source:(.source // null), why:null, date:null,
+             lesson:(.lesson_sig // null), attachments:0,
              match:.match, created:.created, hits:($hits[.id] // 0)})' 2>/dev/null)"
     [ -n "$cl_rem" ] || cl_rem='[]'
     cl_add "$cl_rem"
@@ -899,7 +1355,10 @@ cmd_list() {
     .[] | (.id + "  " + (.kind // "note") + "  " + (.scope // "?")
            + (if .date then "  " + .date else "" end)
            + "  " + ((.text // ("(" + (.target // "?") + ")")) | .[0:100])
-           + (if .kind == "reminder" then "  [hits " + ((.hits // 0) | tostring) + "]" else "" end))' \
+           + (if .kind == "reminder" then "  [hits " + ((.hits // 0) | tostring) + "]" else "" end)
+           + (if (.lesson // null) != null then "  [lesson " + (.lesson | tostring) + "]" else "" end)
+           + (if ((.attachments // 0) > 0)
+              then "  [" + ((.attachments) | tostring) + " attached]" else "" end))' \
     2>/dev/null
   return 0
 }
@@ -907,9 +1366,10 @@ cmd_list() {
 sub="${1:-}"
 [ $# -gt 0 ] && shift
 case "$sub" in
-  add)    cmd_add "$@" ;;
-  list)   cmd_list "$@" ;;
-  remove) cmd_remove "$@" ;;
+  add)     cmd_add "$@" ;;
+  list)    cmd_list "$@" ;;
+  remove)  cmd_remove "$@" ;;
+  promote) cmd_promote "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "skillnote: unknown subcommand '$sub'" >&2; usage >&2; exit 2 ;;
 esac

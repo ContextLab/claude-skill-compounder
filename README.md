@@ -11,7 +11,26 @@ same order.
 
 `claude-skill-compounder` closes that loop. It installs the forging protocol as a skill,
 a pool of seed skills that are useful on day one, hooks that keep asking the question, and
-a live status-line animation. All of it serves one principle:
+a live status-line animation.
+
+Two of those hooks carry back the content a session lost.
+
+**The mission** states your own requests back, verbatim, at five moments where a session
+has most likely drifted from them: after a compaction or a resume, before it dispatches a
+subagent or a workflow, once every twenty minutes of a long session, on a prompt too short
+to stand on its own ("continue", "yes, do that"), and on a completion claim the turn has
+not earned. It reaches the subagent as well as the thread that dispatched it, so an agent
+working three levels down knows what you actually asked for. The prompts are read from
+[claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which install
+sets up for you; this package keeps no second copy of them.
+
+**The lesson** watches for a tool call that failed and then worked, including when the fix
+came from a different tool. The first time, it states the failure, the fix, and the one
+command that records both. The second time that same signature comes round, it declines the
+next call until the lesson is written down or explicitly dismissed. Neither answer deletes
+anything: both are rows.
+
+All of it serves one principle:
 
 > **Compound improvement.** When a procedure is *costly to get right* and *likely to
 > recur*, stop re-deriving it and forge it into a reusable skill. Do it adversarially, so
@@ -26,13 +45,15 @@ the command that re-derives it, because every one of these answers moves.
 
 |Area|Where it stands|
 |-|-|
-|The package|Implemented and in use. There is no runtime service: what ships is the set of skills, hooks, CLIs and the status line that `install.sh` wires into `~/.claude/`|
-|Releases|No tag has been cut yet, so the plain one-liner takes `main`. `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists what exists right now|
-|CI|`.github/workflows/ci.yml` runs the suite on ubuntu and macos, `shellcheck` on both, and `claude plugin validate --strict`. All five jobs passed on run `33719557434` (2026-09-03), which is the first fully green run on both platforms. Read the current one rather than this line: `gh run list --repo ContextLab/claude-skill-compounder --limit 1`|
+|The package|Implemented and in use. There is no runtime service: what ships is the set of skills, hooks, CLIs and the status line that `install.sh` wires into `~/.claude/`. It wires **20 hook entries over 10 scripts and 8 events**; count them yourself with `jq '[.hooks\|to_entries[]\|.value[].hooks[]]\|length' hooks/hooks.json`|
+|Releases|`v0.3.1` is the latest tag. The plain one-liner still takes `main`, so pin a ref to get the same code twice. `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists what exists right now|
+|CI|`.github/workflows/ci.yml` runs the suite on ubuntu and macos, `shellcheck` on both, and `claude plugin validate --strict`. All five jobs passed on run `33778693837` (2026-09-03), against `e31fe7d`. Read the current one rather than this line, because that commit predates the mission hook and the lesson gate: `gh run list --repo ContextLab/claude-skill-compounder --limit 1`|
+|Dependencies|`jq` and `python3`, plus [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which the mission hook reads its prompts from. Install fetches and wires it when `surfer` is not already on your `PATH`, never fails the install if it cannot, and uninstall leaves it where it is: [Install](#install)|
 |End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report and uninstall against a throwaway config. First real run 2026-09-02: every step PASS, six `sonnet` calls, 34.9 s, no product failures. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
 |Automatic session review|Ships **off**, and switching it on spends your quota: [What runs against the API](#what-runs-against-the-api). Stage 1 has been paid for six times. Stage 2, which would forge from a `CANDIDATE` verdict, is off for a structural reason rather than a price: a dispatched forge cannot finish its own routing gate, because `claude --version` inside one came back "This command requires approval" at the permission layer|
 |Usage evidence|One machine. `skillreport` counts genuine reuse and reports probe and test traffic on a separate line, and on this repository that traffic is most of the total. What each figure is and is not evidence for: [docs/measurement.md](docs/measurement.md)|
 |The two hook thresholds|`CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` were picked by judgement, and `skillreport` needs usage across several repositories before either should move|
+|The mission and the lesson|Landed 2026-09-03 and **every constant in both is unvalidated**, the two hook thresholds included: the mission's budget, its twenty-minute interval, its six-word ambiguity proxy and its eight-tool completion floor, and the lesson gate's two-token overlap and two-deny budget. What each one counts, and why none of it is a result yet: [docs/measurement.md](docs/measurement.md)|
 
 Everything known and unresolved, including the parts with no issue open for them, is in
 [`notes/OPEN-THREADS.md`](notes/OPEN-THREADS.md).
@@ -99,6 +120,22 @@ cd claude-skill-compounder && ./install.sh
 Requires `python3` (installer only), `jq` (hooks, CLIs, and status line), and
 `~/.local/bin` on your `PATH` for the CLIs.
 
+**It also installs one thing it did not write.** The mission hook states your own prompts
+back, and the only place those exist as data is
+[claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), a sibling
+project that records every prompt once per project as JSONL and searches it from a `surfer`
+CLI. Keeping a second copy here would break the rule the whole package is built on, so it
+is a dependency: when `surfer` is not already on your `PATH`, install
+clones it beside its own checkout and runs its installer. Four things that follows from.
+It never fails the install. No network, no `git`, a `python3` that errors, and you get one
+line in the report and everything else wired as usual, with only the mission gone quiet.
+It never clones twice, so a `surfer` you already have is left to be the one you have.
+Uninstall never removes it, because it holds every prompt you have ever typed and this
+package neither created that data nor can put it back; it prints where the checkout is and
+the command that removes it. And `skillforge doctor` has a `surfer` row, which is where a
+mission hook wired against a store that is not there stops being silent.
+`SKILL_COMPOUNDER_NO_SURFER=1` on the install command declines all of it.
+
 Hooks and skills are picked up **without restarting Claude Code**, though `/hooks` forces
 a config reload if you want to be certain. Install also appends the three habits to
 `~/.claude/CLAUDE.md`, between a pair of comments that render as nothing, and
@@ -138,16 +175,43 @@ skillnote add --remind --scope project "run the migration before the seed script
 `skillnote list --scope remind` shows what is armed, and `skillnote remove <id>` disarms
 one.
 
+When the lesson gate declines a call, it hands you the signature and the one command that
+answers it. That command writes both cheap tiers at once:
+
+```bash
+skillnote add --lesson <sig> "gh needs --json headSha to find a run for a commit" \
+  --attach scripts/watch-ci.sh
+```
+
+The dated line goes in the `CLAUDE.md` for the scope, the reminder is keyed on the failing
+call's own signature so the fix arrives before that command runs again, and the ledger gets
+one `note` row tying the two together. `--attach` copies the script or file beside the note
+and links it from the line, which is the "and any associated code" half; it works without
+`--lesson` too. `skillrepeat dismiss <sig> --why "..."` is the other answer and is equally
+final: the gate's business is that a decision was recorded, not which way it went.
+
+A lesson that turns out to apply beyond one repository moves up a level:
+
+```bash
+skillnote promote <id> --to global
+```
+
+That takes the line, its attachments and its reminder to `~/.claude/CLAUDE.md` and leaves a
+one-line tombstone behind. It is a move, never a copy, so there is still exactly one of it.
+
 Then check the wiring:
 
 ```bash
 skillforge doctor
 ```
 
-One line per check — `jq`, the state directory, the hook entries in your `settings.json`,
-the status line marker, the skill and CLI symlinks, the ledger, the counters, and any
-forge left running — and exit 1 if any of them failed. Run it first whenever something
-seems not to be firing.
+Eleven checks, one line each, and exit 1 if any of them failed: `jq`, the state directory,
+the hook entries in your `settings.json`, the status line marker, the skill and CLI
+symlinks, `surfer`, the ledger, the counters, any forge left running, the mission's
+delivery log, and which way the paid review is switched. Run it first whenever something
+seems not to be firing. The `surfer` row is the one that turns a silent mission hook into a
+`FAIL`: wired against a store that is not there, all five moments deliver nothing and
+nothing else says so.
 
 Forging is the expensive tier and it comes later, once a note has been rewritten often
 enough to count as a recurrence:
@@ -309,10 +373,17 @@ red-team rounds, verdict ABANDONED. Switched on, it writes into `reviews/staging
 and never into `~/.claude/skills`, so a forge cannot reach your live config without your
 having seen it.
 
-`skillreport`, `skillinsight`, `skillforge`, the status line,
-`hooks/compound-improvement.sh`, `hooks/insight-capture.sh`, `hooks/skill-use.sh` and
-`hooks/claim-gate.sh` make no network calls. `skillcontrib` reaches the network, but only
-through `gh` and only to read: see [Contributing a skill back](docs/operations.md#contributing-a-skill-back).
+`skillreport`, `skillinsight`, `skillforge`, `skillnote`, `skillrepeat`, the status line,
+`hooks/mission.sh`, `hooks/repeat-gate.sh`, `hooks/compound-improvement.sh`,
+`hooks/insight-capture.sh`, `hooks/skill-use.sh` and `hooks/claim-gate.sh` make no network
+calls. `skillcontrib` reaches the network through `gh`, and every subcommand but one only
+reads. The exception is `skillcontrib propose`, which forks, pushes and opens a pull
+request: running it without `--dry-run` is the consent, and it prints every network write
+on a `WRITE:` line before it makes it. See
+[Contributing a skill back](docs/operations.md#contributing-a-skill-back).
+
+Install is the other thing that reaches the network, to clone this repository and, unless
+`SKILL_COMPOUNDER_NO_SURFER=1`, `claude-history-surfer` beside it.
 
 ---
 
@@ -322,19 +393,23 @@ Three tiers of durable lesson, and the machinery that feeds them. A **note** is 
 line in a `CLAUDE.md` or a memory file. A **reminder** is a match rule that a hook states
 back at the moment it applies. A **skill** is the expensive tier, forged through a
 builder/red-team loop and installed into `~/.claude/skills/`. `skillnote` writes the first
-two in one command each; `skillforge` drives the third. Nine seed skills ship, so a fresh
-install is useful before you have forged anything.
+two in one command each, or both at once with `--lesson`; `skillforge` drives the third.
+Nine seed skills ship, so a fresh install is useful before you have forged anything. A
+lesson moves up a level with `skillnote promote`, and a skill goes the last level with
+`skillcontrib propose`, which opens the pull request.
 
-The hooks around those divide into three kinds. Two ask a question and can be read past:
-one at the start of a substantive turn, one every twelve file edits. Four are gates — the
-claim gate and the documentation gate refuse outright, the apply gate refuses once per
-session and then lets go, and the repeat gate can refuse but ships with that arm off. The
-rest only record: a ledger row per skill invocation, a queue row per candidate a session
-flags, and a session-audit record for a long session.
+The ten wired scripts divide into three kinds. Three carry something into the session and
+can be read past: the checkpoint that asks whether a skill already covers this, the
+reminder hook, and four of the mission's five moments. Five can refuse: the claim gate and
+the documentation gate outright, the apply gate once per session, the lesson gate at most
+twice per signature, and the mission once per prompt on a completion claim. The repeat
+gate's older arm can too, and ships off. Three only record: a ledger row per skill
+invocation, and a queue row per candidate, written at the end of a session and again from
+whatever a compaction is about to discard.
 
 |Where to look|What is there|
 |-|-|
-|[docs/architecture.md](docs/architecture.md)|What gets installed, the seed pool, the forging protocol and the doctrine it is pinned to, the claim gate, the status line, and what the ledger records|
+|[docs/architecture.md](docs/architecture.md)|What gets installed, the seed pool, the mission, the lesson, the three levels a lesson can live at, the forging protocol and the doctrine it is pinned to, the claim gate, the status line, and what the ledger records|
 |[docs/operations.md](docs/operations.md)|`skillforge doctor` and `reap`, the weekly candidate queue, the state directory and how to recover it, proposing a skill upstream, and the tuning table with every knob, its default and which component reads it|
 |[docs/measurement.md](docs/measurement.md)|What is counted, what each block of `skillreport` prints, and the limits on every figure here|
 |[docs/development.md](docs/development.md)|The suite, the rules it is written under, the end-to-end journey, and releasing|
@@ -353,6 +428,10 @@ flags, and a session-audit record for a long session.
 Removes our hooks, leaving other tools' hooks alone, then restores your original status
 line and removes the symlinks. Runtime state is left intact; delete it with
 `rm -rf ~/.claude/skill-compounder`.
+
+`claude-history-surfer` is left in place too, and for the stronger version of the same
+reason: its store is your prompt history, which this package did not create. Uninstall
+prints the checkout it made and the command that takes it off.
 
 The `curl` form works whichever way you installed: with no checkout beside it, the script
 reads `~/.claude/skill-compounder/install-manifest.json` to find the one you used. If that

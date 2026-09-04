@@ -62,6 +62,33 @@ class Base(unittest.TestCase):
         self.claude.mkdir()
         self.bin.mkdir()
         self.settings = self.claude / "settings.json"
+        self.pin_surfer_off()
+
+    def pin_surfer_off(self):
+        """Every test in this file is about OUR installer, not about its dependency.
+
+        `install()` wires claude-history-surfer into the target config, and since
+        2026-09-03 it does that whenever the config lacks its hooks -- not merely when
+        the machine lacks the CLI. Left on, every install here would run a second
+        project's installer against these temp directories, and two of these tests would
+        then be measuring ITS entries: an uninstall of ours leaves them in place on
+        purpose (they are not ours to remove), so "left the config as it found it" is a
+        claim about our own wiring and nothing else.
+
+        The switch is the shipped one, read by the real code path, which is the same
+        discipline `NoSurferMixin` in tests/test_installer.py follows and for the same
+        reason. `SurferTest` there is where the dependency itself is exercised, symlinked
+        settings.json included.
+        """
+        before = os.environ.get(installer.SURFER_SKIP_ENV)
+        os.environ[installer.SURFER_SKIP_ENV] = "1"
+
+        def restore():
+            if before is None:
+                os.environ.pop(installer.SURFER_SKIP_ENV, None)
+            else:
+                os.environ[installer.SURFER_SKIP_ENV] = before
+        self.addCleanup(restore)
 
     def tearDown(self):
         # A test that made a directory read-only must not break cleanup.

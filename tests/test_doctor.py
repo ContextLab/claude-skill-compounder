@@ -40,6 +40,30 @@ HOOKS_JSON = REPO / "hooks" / "hooks.json"
 T0 = 1000000000
 HOUR = 3600
 DEFAULT_ACTIVE_TTL = 21600      # bin/skillforge: six hours, of IDLE time
+ALL_CHECKS = ("jq", "state", "settings", "statusline", "skills", "surfer",
+              "ledger", "counters", "forges", "mission", "review")
+
+
+def real_surfer():
+    """A REAL `surfer` executable, or None.
+
+    claude-history-surfer is a dependency of hooks/mission.sh, and the doctor row that
+    reports it can only come out PASS on a machine that has it. Standing a two-line stub
+    up on PATH would satisfy `command -v` and prove nothing about `surfer stats`, which is
+    the half of the check that matters, so this looks for the real thing and the tests
+    that need it say so when it is absent.
+    """
+    for cand in (os.environ.get("SKILL_COMPOUNDER_SURFER_BIN"),
+                 shutil.which("surfer"),
+                 str(Path.home() / ".local" / "bin" / "surfer"),
+                 str(Path.home() / "claude-history-surfer" / "bin" / "surfer"),
+                 str(Path.home() / ".claude" / "history-surfer-app" / "bin" / "surfer")):
+        if cand and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+SURFER = real_surfer()
 
 
 def installer_hook_markers():
@@ -107,6 +131,12 @@ class DoctorCase(unittest.TestCase):
         e = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
              "HOME": str(self.state),
              "SKILL_COMPOUNDER_STATE": str(self.state)}
+        # The minimal PATH above deliberately excludes ~/.local/bin, so the surfer row
+        # would FAIL in every test here on a machine that has surfer installed perfectly
+        # well. The pin the script reads for exactly this purpose points it at the real
+        # binary instead; `extra` still wins, so a test can unset it and watch the FAIL.
+        if SURFER:
+            e["SKILLFORGE_SURFER_BIN"] = SURFER
         e.update({k: str(v) for k, v in extra.items()})
         return e
 
@@ -170,16 +200,29 @@ class DoctorCase(unittest.TestCase):
 class TheOutputIsReadableByAPersonAndByGrep(DoctorCase):
     def test_every_check_prints_one_line_whose_first_word_is_the_verdict(self):
         r = self.doctor(SKILLFORGE_NOW=T0)
-        for label in ("jq", "state", "settings", "statusline", "skills",
-                      "ledger", "counters", "forges", "review"):
+        for label in ALL_CHECKS:
             self.assertIn(verdict(r.stdout, label), ("PASS", "WARN", "FAIL"),
                           "no verdict line for '%s': %r" % (label, r.stdout))
 
     def test_a_clean_state_exits_zero_and_fails_nothing(self):
         """Non-vacuity for every FAIL below. A doctor that cannot come out clean is one
-        nobody runs a second time, and then the real FAILs go unread with it."""
+        nobody runs a second time, and then the real FAILs go unread with it.
+
+        One check reports a DEPENDENCY rather than this package: `surfer` is
+        claude-history-surfer's CLI, and on a machine that does not have it the machine
+        genuinely is not clean and doctor is right to say so. Rather than skip -- which
+        would take every other check's non-vacuity with it -- that one row is named and
+        the rest are still required to come out clean.
+        """
         self.write_settings()
         r = self.doctor(SKILLFORGE_NOW=T0)
+        if SURFER is None:
+            self.assertEqual(verdict(r.stdout, "surfer"), "FAIL",
+                             "no surfer on this machine, so that row must be the FAIL")
+            others = [l for l in r.stdout.splitlines()
+                      if l.startswith("FAIL") and l.split()[1] != "surfer"]
+            self.assertEqual(others, [], "\n".join(others))
+            return
         self.assertEqual(r.returncode, 0, "a clean state exited %d: %s"
                          % (r.returncode, r.stdout))
         self.assertNotIn("FAIL", r.stdout, r.stdout)
@@ -633,6 +676,211 @@ class TheReviewCheck(DoctorCase):
                 self.assertIn("review: disabled", line_for(r.stdout, "review"))
 
 
+# --------------------------------------------------------------------------- surfer
+
+class TheSurferCheck(DoctorCase):
+    """`surfer` is a real dependency of hooks/mission.sh and of nothing else here.
+
+    The mission hook states the user's own requests back verbatim, and the only place
+    those exist as data is claude-history-surfer's per-project JSONL -- this package keeps
+    no second copy of them on purpose. So without `surfer` the hook still runs, still
+    exits 0, and delivers nothing at any of its five wirings: quiet in exactly the way a
+    session with nothing to restate is quiet. That is the shape of failure doctor exists
+    for, which is why this is a FAIL and not a WARN.
+
+    Nothing here stands a fake `surfer` up. A stub would satisfy `command -v` and prove
+    nothing about `surfer stats`, which is the half that answers whether the STORE can be
+    read; so the PASS branch runs against the real CLI and says so when there is none.
+    """
+
+    def no_surfer(self, **extra):
+        return self.doctor(SKILLFORGE_NOW=T0, SKILLFORGE_SURFER_BIN="",
+                           PATH="/usr/bin:/bin", **extra)
+
+    def test_no_surfer_where_the_mission_is_wired_fails(self):
+        self.write_settings()
+        r = self.no_surfer()
+        self.assertEqual(verdict(r.stdout, "surfer"), "FAIL",
+                         line_for(r.stdout, "surfer"))
+        self.assertEqual(r.returncode, 1)
+
+    def test_no_surfer_where_nothing_is_wired_warns_instead(self):
+        """doctor's own definition of FAIL is "this package is not doing something it says
+        it does". A config that wires no mission hook is not silently broken, it is not
+        installed, and putting that on the exit status would fail every run against a
+        state directory nobody has installed into -- which is most of this suite."""
+        r = self.no_surfer()
+        self.assertEqual(verdict(r.stdout, "surfer"), "WARN",
+                         line_for(r.stdout, "surfer"))
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_the_warning_says_what_would_make_it_a_fault(self):
+        line = line_for(self.no_surfer().stdout, "surfer")
+        self.assertIn("Nothing wires", line)
+        self.assertIn("plugin", line,
+                      "a plugin install wires the mission where this cannot see it, and "
+                      "the line has to say so")
+
+    def test_the_failing_line_says_what_stops_working_and_how_to_fix_it(self):
+        """The reader of this line has no other surface that connects a missing CLI to
+        five silent hook wirings, so the line has to carry both halves."""
+        self.write_settings()
+        line = line_for(self.no_surfer().stdout, "surfer")
+        self.assertIn("mission.sh", line)
+        self.assertIn("claude-history-surfer", line)
+
+    def test_the_verdict_follows_the_wiring_and_not_the_settings_file_existing(self):
+        """The distinction is the MISSION entry, not a settings.json. A config wiring
+        every other hook of ours and not this one is a config where a missing surfer
+        breaks nothing.
+
+        The exit status is not asserted here and could not be: the settings check calls
+        that same config a PARTIAL wiring and FAILs it, which is correct and is a
+        different fault. This test is about which verdict the surfer row reaches.
+        """
+        self.write_settings(drop_marker="mission.sh")
+        r = self.no_surfer()
+        self.assertEqual(verdict(r.stdout, "surfer"), "WARN",
+                         line_for(r.stdout, "surfer"))
+        self.assertEqual(verdict(r.stdout, "settings"), "FAIL",
+                         "the fixture is meant to be a partial wiring")
+
+    def test_a_pin_that_is_not_executable_fails_rather_than_probing_something_else(self):
+        """Never guess. Falling back to PATH when the pin is wrong would report on a
+        binary nobody asked about."""
+        dead = self.state / "not-an-executable"
+        dead.write_text("#!/bin/sh\n")
+        os.chmod(str(dead), 0o644)
+        r = self.doctor(SKILLFORGE_NOW=T0, SKILLFORGE_SURFER_BIN=str(dead))
+        self.assertEqual(verdict(r.stdout, "surfer"), "FAIL",
+                         line_for(r.stdout, "surfer"))
+        self.assertIn(str(dead), line_for(r.stdout, "surfer"))
+
+    @unittest.skipUnless(SURFER, "no real surfer on this machine (install "
+                                 "claude-history-surfer, or set SKILL_COMPOUNDER_SURFER_BIN)")
+    def test_a_real_surfer_passes_and_reports_the_count_for_this_project(self):
+        """The PASS counterpart, against the real CLI reading a real store. HOME is the
+        temp state directory, so the store it resolves is empty and the count is 0 --
+        which is a PASS: a project nobody has typed in yet has nothing to restate."""
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "surfer"), "PASS",
+                         line_for(r.stdout, "surfer"))
+        self.assertRegex(line_for(r.stdout, "surfer"), r"\d+ prompt\(s\)",
+                         "the passing line must carry the count it read")
+
+    @unittest.skipUnless(SURFER, "no real surfer on this machine")
+    def test_a_surfer_that_cannot_read_its_store_fails_even_though_it_is_on_path(self):
+        """`command -v` is not the question. A CLI that is present and cannot read its
+        store leaves the mission hook exactly as empty-handed as no CLI at all, and only
+        RUNNING it can tell the two apart.
+
+        The fault is a real one: a prompt store whose directory the process cannot search
+        -- a `chmod 000`, which is what a restored backup, a wrong `sudo` or an ACL leaves
+        behind. Verified against the real CLI: it exits 1 with a PermissionError rather
+        than reporting zero prompts, which is why this is reachable at all.
+        """
+        self.write_settings()
+        broken = self.state / "history-surfer"
+        (broken / "projects").mkdir(parents=True, exist_ok=True)
+        os.chmod(str(broken / "projects"), 0o000)
+        try:
+            r = self.doctor(SKILLFORGE_NOW=T0, CLAUDE_HISTORY_SURFER_DIR=str(broken))
+        finally:
+            os.chmod(str(broken / "projects"), 0o755)
+        self.assertEqual(verdict(r.stdout, "surfer"), "FAIL",
+                         line_for(r.stdout, "surfer"))
+        self.assertIn("surfer stats", line_for(r.stdout, "surfer"))
+        self.assertEqual(r.returncode, 1)
+
+
+# -------------------------------------------------------------------------- mission
+
+class TheMissionStoreCheck(DoctorCase):
+    """<state>/mission/ is where the mission hook's per-event claim and its delivery log
+    live, and it is the only place either can be seen from.
+
+    The claim is what makes the two wirings' duplicate delivery a no-op, so an unwritable
+    directory does not stop the mission -- it stops the RECORD, and every moment is then
+    stated twice with nothing counting it. That is the one failure here that looks from
+    the outside like the hook working harder.
+    """
+
+    def mission_dir(self):
+        d = self.state / "mission"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_no_store_at_all_warns_rather_than_fails(self):
+        """A machine that has not started a session since installing looks exactly like
+        this, and a FAIL on a fresh install is a FAIL nobody reads twice."""
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "mission"), "WARN",
+                         line_for(r.stdout, "mission"))
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_the_warning_says_when_it_is_expected_and_when_it_is_not(self):
+        line = line_for(self.doctor(SKILLFORGE_NOW=T0).stdout, "mission")
+        self.assertIn("Expected", line)
+        self.assertIn("a fault if", line)
+
+    def test_an_empty_store_passes(self):
+        self.mission_dir()
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "mission"), "PASS",
+                         line_for(r.stdout, "mission"))
+        self.assertIn("0 deliveries", line_for(r.stdout, "mission"))
+
+    def test_an_empty_hits_file_is_zero_rows_and_still_passes(self):
+        (self.mission_dir() / "hits.jsonl").write_text("")
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "mission"), "PASS",
+                         line_for(r.stdout, "mission"))
+
+    def test_recorded_deliveries_pass_and_are_counted_by_moment(self):
+        rows = [{"moment": "compaction", "session": "s1", "chars": 900},
+                {"moment": "dispatch", "session": "s1", "agent_id": "a1", "chars": 610},
+                {"moment": "dispatch", "session": "s1", "agent_id": "a2", "chars": 610}]
+        (self.mission_dir() / "hits.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        line = line_for(r.stdout, "mission")
+        self.assertEqual(verdict(r.stdout, "mission"), "PASS", line)
+        self.assertIn("3 ", line)
+        self.assertIn("2 of the five moments", line)
+
+    def test_a_line_that_does_not_parse_fails_and_says_how_many(self):
+        """Every reader of a JSONL file here drops a bad line silently, so a delivery
+        recorded on one is already missing from every count that would show whether any
+        of this lands."""
+        (self.mission_dir() / "hits.jsonl").write_text(
+            json.dumps({"moment": "stop"}) + "\n" + "{truncated\n")
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "mission"), "FAIL",
+                         line_for(r.stdout, "mission"))
+        self.assertIn("1 of 2", line_for(r.stdout, "mission"))
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_store_that_will_not_take_a_write_fails(self):
+        d = self.mission_dir()
+        os.chmod(str(d), 0o555)
+        try:
+            r = self.doctor(SKILLFORGE_NOW=T0)
+        finally:
+            os.chmod(str(d), 0o755)
+        self.assertEqual(verdict(r.stdout, "mission"), "FAIL",
+                         line_for(r.stdout, "mission"))
+        self.assertIn("delivered twice", line_for(r.stdout, "mission"))
+        self.assertEqual(r.returncode, 1)
+
+    def test_the_probe_file_is_never_left_behind(self):
+        """Same house rule doctor_state is held to: one probe, written and removed. A
+        health surface that leaves litter in what it measures cannot be run twice."""
+        d = self.mission_dir()
+        self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(sorted(p.name for p in d.iterdir()), [],
+                         "the mission probe was left behind")
+
+
 # --------------------------------------------------------------------------- --json
 
 class TheJsonForm(DoctorCase):
@@ -654,8 +902,7 @@ class TheJsonForm(DoctorCase):
         js = self.json_doctor(SKILLFORGE_NOW=T0)
         obj = json.loads(js.stdout)
         names = {c["name"] for c in obj["checks"]}
-        for label in ("jq", "state", "settings", "statusline", "skills",
-                      "ledger", "counters", "forges", "review"):
+        for label in ALL_CHECKS:
             self.assertIn(label, names, "'%s' is in the text form but not --json" % label)
             self.assertEqual(verdict(text.stdout, label),
                              next(c["status"] for c in obj["checks"] if c["name"] == label),

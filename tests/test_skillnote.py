@@ -1094,5 +1094,684 @@ class ProjectFlagTest(SkillnoteCase):
         self.assertNotIn("removable", self.claude_md.read_text(encoding="utf-8"))
 
 
+# ==================================================================== the lesson tier
+#
+# A fail-then-fix is worth nothing unless the fix arrives BEFORE the same call is made
+# again. `--lesson <sig>` is the one command that writes both halves, so these tests drive
+# both: the store hooks/repeat-gate.sh writes, and the hook hooks/remind.sh reads.
+#
+# THE STORE ROWS ARE THE REAL SHAPE, field for field, copied off
+# ~/.claude/skill-compounder/repeats/index.jsonl (read-only, never written by the suite).
+# Only `norm` is computed rather than transcribed, by running the real normaliser: a
+# hand-typed signature would keep this file passing on the day production stopped matching,
+# which is exactly how the "Bash\n" prefix defect survived its own tests on 2026-09-02.
+
+REMIND = REPO / "hooks" / "remind.sh"
+
+FAIL_SIG = "c1273399358x407-e728136712x48"
+FAIL_CMD = "cd /tmp/forge && python3 setup.py install 2>&1 | tail -20"
+RECOVER_CMD = "cd /tmp/forge && python3 -m pip install -e ."
+
+
+def norm_of(command):
+    """What `hooks/repeat-gate.sh --norm-of Bash` prints for a command. Run, not guessed."""
+    r = subprocess.run([str(GATE), "--norm-of", "Bash"], input=command,
+                       capture_output=True, text=True, timeout=60,
+                       env={"PATH": PATH, "HOME": "/tmp"})
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+class LessonCase(SkillnoteCase):
+    """Adds a real repeat store to the temp world, plus a way to drive the real hook."""
+
+    def setUp(self):
+        super().setUp()
+        self.repeats = self.state / "repeats" / "index.jsonl"
+        self.repeats.parent.mkdir(parents=True, exist_ok=True)
+
+    # The two row shapes, verbatim from the live store: a `fail` carries
+    # ck/ec/err/norm/cmd/tool/session/tuid, a `recover` the same minus ec and err.
+    def fail_row(self, sig=FAIL_SIG, cmd=FAIL_CMD, tool="Bash", ts=1787780622, norm=None,
+                 session="s-aaa"):
+        return {"t": "fail", "ts": ts, "sig": sig, "ck": sig.split("-")[0],
+                "ec": "Exit code <N> ModuleNotFoundError: No module named setuptools",
+                "tool": tool, "norm": norm if norm is not None else norm_of(cmd),
+                "cmd": cmd,
+                "err": "Exit code 1\nModuleNotFoundError: No module named setuptools",
+                "session": session, "tuid": "toolu_01Apwx6o1ykGxLBuVrsoi9Dq"}
+
+    def recover_row(self, sig=FAIL_SIG, cmd=RECOVER_CMD, ts=1787780627, session="s-aaa"):
+        return {"t": "recover", "ts": ts, "sig": sig, "ck": sig.split("-")[0],
+                "tool": "Bash", "norm": norm_of(cmd), "cmd": cmd,
+                "session": session, "tuid": "toolu_01LCF4N6NKptBXEWoEEwZEcs"}
+
+    def write_store(self, *rows):
+        with self.repeats.open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    def seed(self, **kw):
+        """The ordinary case: one fail and its recovery, the pair the design describes."""
+        self.write_store(self.fail_row(**kw), self.recover_row())
+
+    def reminder_rows(self):
+        if not self.reminders.exists():
+            return []
+        return [json.loads(l) for l in self.reminders.read_text(encoding="utf-8").splitlines()
+                if l.strip()]
+
+    # ------------------------------------------------------------------ the real hook
+    def run_remind(self, command, cwd=None, session="s-live"):
+        """Drive hooks/remind.sh for real, on a PreToolUse Bash payload. `input=` is not
+        optional: the script reads its payload with `payload="$(cat)"` and hangs without
+        stdin."""
+        payload = {"hook_event_name": "PreToolUse", "session_id": session,
+                   "tool_use_id": "toolu_%s" % session,
+                   "cwd": str(cwd or self.proj),
+                   "transcript_path": str(self.root / "t.jsonl"),
+                   "permission_mode": "acceptEdits", "tool_name": "Bash",
+                   "tool_input": {"command": command, "description": "d"}}
+        env = {"PATH": PATH, "HOME": str(self.home),
+               "SKILL_COMPOUNDER_STATE": str(self.state), "REMIND_NOW": str(NOW + 100)}
+        return subprocess.run(["bash", str(REMIND)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env, timeout=180)
+
+    def delivered(self, r):
+        self.assertEqual(r.returncode, 0, "a hook must never exit non-zero: " + r.stderr)
+        self.assertTrue(r.stdout.strip(), "expected a reminder, got silence")
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+@unittest.skipUnless(HAVE_NORM_OF,
+                     "hooks/repeat-gate.sh does not answer --norm-of in this checkout")
+class LessonTest(LessonCase):
+
+    TEXT = "setup.py install needs setuptools here; pip install -e . is the one that works."
+
+    def test_one_command_writes_the_line_the_reminder_and_one_ledger_row(self):
+        self.seed()
+        r = self.ok("add", "--lesson", FAIL_SIG, self.TEXT, "--source", "session")
+        line = self.block_lines()[0]
+        self.assertIn("- **2026-08-29**", line)
+        self.assertIn(self.TEXT, line)
+        self.assertIn("lesson:%s" % FAIL_SIG, line)
+
+        rows = self.reminder_rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["match"]["commands"], [norm_of(FAIL_CMD)],
+                         "keyed on the FAILING call, exactly as the store spells it")
+        self.assertEqual(rows[0]["text"], self.TEXT)
+        self.assertEqual(rows[0]["scope"], str(self.proj))
+        self.assertEqual(rows[0]["lesson_sig"], FAIL_SIG)
+
+        led = [x for x in self.ledger_rows() if x.get("id") != rows[0]["id"]]
+        led = [x for x in led if x.get("text") == self.TEXT]
+        self.assertEqual(len(led), 1, "one ledger row for the pair, not two: %r" % led)
+        self.assertEqual(led[0]["lesson_sig"], FAIL_SIG)
+        self.assertEqual(led[0]["reminder_id"], rows[0]["id"])
+        self.assertEqual(led[0]["action"], "add")
+        self.assertIn("reminder", r.stdout)
+
+    def test_the_hook_actually_delivers_it_before_that_command_runs_again(self):
+        """The whole point, and the half a hand-written fixture cannot prove: the real
+        writer into the real reader. A signature stored in any other spelling matches
+        nothing and says nothing about it."""
+        self.seed()
+        self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        ctx = self.delivered(self.run_remind(FAIL_CMD))
+        self.assertIn("pip install -e .", ctx)
+
+    def test_a_different_command_is_silent(self):
+        self.seed()
+        self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        r = self.run_remind("git status --porcelain")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "", r.stdout)
+
+    def test_the_recovery_is_not_what_it_is_keyed_on(self):
+        """Keying on the fix would state the lesson only once the session had already
+        found it. The reminder has to arrive before the failure, not after."""
+        self.seed()
+        self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        self.assertNotEqual(norm_of(RECOVER_CMD), norm_of(FAIL_CMD))
+        r = self.run_remind(RECOVER_CMD)
+        self.assertEqual(r.stdout.strip(), "", "keyed on the recovery, not the failure")
+
+    def test_the_newest_fail_row_wins(self):
+        """A signature that failed again after a recovery failed for a reason the older
+        row does not describe."""
+        later = "cd /tmp/forge && python3 setup.py bdist_wheel 2>&1 | tail -5"
+        self.write_store(self.fail_row(ts=1787780622),
+                         self.recover_row(),
+                         self.fail_row(cmd=later, ts=1787790000, session="s-bbb"))
+        self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        self.assertEqual(self.reminder_rows()[0]["match"]["commands"], [norm_of(later)])
+
+    def test_an_unknown_signature_is_refused_and_writes_nothing(self):
+        self.seed()
+        r = self.note("add", "--lesson", "c1x1-e2x2", self.TEXT)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("skillrepeat list", r.stderr)
+        self.assertIn("c1x1-e2x2", r.stderr)
+        self.assertFalse(self.claude_md.exists(), "a refusal must not write a CLAUDE.md")
+        self.assertFalse(self.reminders.exists(), "a refusal must not write a reminder")
+        self.assertEqual([x for x in self.ledger_rows() if x.get("text")], [])
+
+    def test_an_absent_store_is_the_same_refusal(self):
+        r = self.note("add", "--lesson", FAIL_SIG, self.TEXT)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("skillrepeat list", r.stderr)
+        self.assertFalse(self.claude_md.exists())
+
+    def test_a_signature_with_only_a_recover_row_is_refused(self):
+        """`recover` is the fix. Keying a reminder on it would fire after the fix and
+        never before the failure, so a signature with no `fail` row is not a lesson."""
+        self.write_store(self.recover_row())
+        r = self.note("add", "--lesson", FAIL_SIG, self.TEXT)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("skillrepeat list", r.stderr)
+
+    def test_a_fail_row_on_another_tool_is_refused_by_name(self):
+        """hooks/remind.sh's command arm reads .tool_input.command, so nothing but a Bash
+        call can ever match a command signature. Writing the row anyway would build a
+        reminder that is silent forever -- the failure --remind's own refusal prevents."""
+        self.write_store(self.fail_row(tool="Skill", norm="Skill(gh-pr)"))
+        r = self.note("add", "--lesson", FAIL_SIG, self.TEXT)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("Skill", r.stderr)
+        self.assertIn("--keyword", r.stderr, "the refusal must name the way through")
+        self.assertFalse(self.claude_md.exists())
+        self.assertFalse(self.reminders.exists())
+
+    def test_lesson_with_remind_is_refused(self):
+        self.seed()
+        r = self.note("add", "--lesson", FAIL_SIG, "--remind", "--keyword", "k", self.TEXT)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("drop --remind", r.stderr)
+
+    def test_lesson_into_the_memory_scope_is_refused(self):
+        self.seed()
+        r = self.note("add", "--lesson", FAIL_SIG, "--scope", "memory", self.TEXT)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--scope project", r.stderr)
+
+    def test_a_global_lesson_is_scoped_global_and_fires_in_another_project(self):
+        self.seed()
+        self.ok("add", "--lesson", FAIL_SIG, "--scope", "global", self.TEXT)
+        self.assertEqual(self.reminder_rows()[0]["scope"], "global")
+        elsewhere = self.root / "somewhere-else"
+        elsewhere.mkdir()
+        ctx = self.delivered(self.run_remind(FAIL_CMD, cwd=elsewhere))
+        self.assertIn("pip install -e .", ctx)
+
+    def test_a_project_lesson_does_not_fire_in_a_sibling_project(self):
+        self.seed()
+        self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        sibling = self.root / "other"
+        sibling.mkdir()
+        r = self.run_remind(FAIL_CMD, cwd=sibling)
+        self.assertEqual(r.stdout.strip(), "", r.stdout)
+
+    def test_list_marks_it_as_a_lesson(self):
+        self.seed()
+        self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        rows = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertEqual(rows[0]["lesson"], FAIL_SIG)
+        self.assertIn("[lesson %s]" % FAIL_SIG, self.ok("list", "--scope", "project").stdout)
+
+    def test_a_plain_note_has_no_lesson_marker(self):
+        self.ok("add", "--scope", "project", "an ordinary note")
+        rows = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertIsNone(rows[0]["lesson"])
+
+    def test_a_why_mentioning_lesson_is_not_read_as_the_field(self):
+        """`why` is written last so the token fields are read out of what precedes it."""
+        self.ok("add", "--scope", "project", "tricky",
+                "--why", "the log said lesson:none and source:none")
+        rows = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertIsNone(rows[0]["lesson"])
+        self.assertIsNone(rows[0]["source"])
+        self.assertEqual(rows[0]["why"], "the log said lesson:none and source:none")
+
+
+# ==================================================================== attachments
+
+class AttachTest(LessonCase):
+
+    def setUp(self):
+        super().setUp()
+        self.script = self.proj / "fix.sh"
+        self.script.write_text("#!/bin/sh\necho fixed\n", encoding="utf-8")
+        self.script.chmod(0o755)
+
+    def lessons_dir(self, note_id, root=None):
+        return (root or (self.proj / ".claude")) / "lessons" / note_id
+
+    def test_the_file_is_copied_and_the_line_links_it(self):
+        r = self.ok("add", "--scope", "project", "the script that worked",
+                    "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        dest = self.lessons_dir(nid) / "fix.sh"
+        self.assertTrue(dest.is_file(), r.stdout)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "#!/bin/sh\necho fixed\n")
+        self.assertIn("(attached: .claude/lessons/%s/fix.sh)" % nid, self.block_lines()[0])
+        self.assertTrue(self.script.is_file(), "a copy, never a move")
+
+    def test_the_executable_bit_survives(self):
+        """A lesson whose script arrives without its mode is a lesson whose one command
+        does not run."""
+        r = self.ok("add", "--scope", "project", "keeps its mode", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertTrue(os.access(str(self.lessons_dir(nid) / "fix.sh"), os.X_OK))
+
+    def test_a_non_executable_file_stays_non_executable(self):
+        data = self.proj / "notes.txt"
+        data.write_text("plain\n", encoding="utf-8")
+        data.chmod(0o644)
+        r = self.ok("add", "--scope", "project", "a data file", "--attach", "notes.txt")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertFalse(os.access(str(self.lessons_dir(nid) / "notes.txt"), os.X_OK))
+
+    def test_two_attachments_both_land_and_both_appear_on_the_line(self):
+        other = self.proj / "probe.py"
+        other.write_text("print(1)\n", encoding="utf-8")
+        r = self.ok("add", "--scope", "project", "two files",
+                    "--attach", "fix.sh", "--attach", "probe.py")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertTrue((self.lessons_dir(nid) / "fix.sh").is_file())
+        self.assertTrue((self.lessons_dir(nid) / "probe.py").is_file())
+        line = self.block_lines()[0]
+        self.assertIn("lessons/%s/fix.sh)" % nid, line)
+        self.assertIn("lessons/%s/probe.py)" % nid, line)
+
+    def test_a_path_outside_the_tree_and_home_is_refused(self):
+        outside = self.root / "outside.txt"
+        outside.write_text("x\n", encoding="utf-8")
+        r = self.note("add", "--scope", "project", "nope", "--attach", str(outside))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("outside both the working tree", r.stderr)
+        self.assertFalse(self.claude_md.exists(), "nothing written")
+        self.assertFalse((self.proj / ".claude" / "lessons").exists())
+
+    def test_a_path_under_home_is_allowed(self):
+        keep = self.home / "keep.sh"
+        keep.write_text("#!/bin/sh\n", encoding="utf-8")
+        r = self.ok("add", "--scope", "project", "from home", "--attach", str(keep))
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertTrue((self.lessons_dir(nid) / "keep.sh").is_file())
+
+    def test_a_missing_file_is_refused(self):
+        r = self.note("add", "--scope", "project", "nope", "--attach", "no-such.sh")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("not a regular file", r.stderr)
+        self.assertFalse(self.claude_md.exists())
+
+    def test_a_directory_is_refused(self):
+        (self.proj / "adir").mkdir()
+        r = self.note("add", "--scope", "project", "nope", "--attach", "adir")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("not a regular file", r.stderr)
+
+    def test_an_existing_attachment_is_never_overwritten(self):
+        r = self.ok("add", "--scope", "project", "first", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        dest = self.lessons_dir(nid) / "fix.sh"
+        before = dest.read_text(encoding="utf-8")
+        # A second note whose id happens to be the same directory can only be produced by
+        # attaching under the same id, so the collision is forced directly.
+        self.script.write_text("#!/bin/sh\necho different\n", encoding="utf-8")
+        r2 = self.note("add", "--scope", "project", "first", "--attach", "fix.sh")
+        self.assertEqual(r2.returncode, 0, "the same text is a no-op, not a refusal")
+        self.assertIn("attachments were NOT copied", r2.stdout)
+        self.assertEqual(dest.read_text(encoding="utf-8"), before)
+
+    def test_a_forced_destination_collision_refuses_before_copying(self):
+        """The refusal is decided in pass one, so `--attach a --attach b` with b already
+        present leaves a uncopied: a partial copy plus an exit 2 is the state that makes
+        the retry refuse on its own leftovers."""
+        nid = None
+        r = self.ok("add", "--scope", "project", "seed", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        # Pre-plant the SECOND file's destination under the id the next note will get.
+        second = self.proj / "second.py"
+        second.write_text("print(2)\n", encoding="utf-8")
+        third = self.proj / "third.py"
+        third.write_text("print(3)\n", encoding="utf-8")
+        nid2 = None
+        probe = self.note("list", "--scope", "project", "--json")
+        del probe, nid
+        # Work out the id the new text will take by writing it once, then undoing it.
+        r2 = self.ok("add", "--scope", "project", "collides")
+        nid2 = [x["id"] for x in json.loads(
+            self.ok("list", "--scope", "project", "--json").stdout)
+            if x["text"] == "collides"][0]
+        self.ok("remove", nid2)
+        planted = self.lessons_dir(nid2)
+        planted.mkdir(parents=True)
+        (planted / "second.py").write_text("already here\n", encoding="utf-8")
+        r3 = self.note("add", "--scope", "project", "collides",
+                       "--attach", "third.py", "--attach", "second.py")
+        self.assertEqual(r3.returncode, 2, r3.stdout + r3.stderr)
+        self.assertIn("already exists", r3.stderr)
+        self.assertFalse((planted / "third.py").exists(),
+                         "the first file was copied before the second was checked")
+        self.assertEqual((planted / "second.py").read_text(encoding="utf-8"),
+                         "already here\n")
+        del r2
+
+    def test_the_ledger_row_lists_the_relative_paths(self):
+        r = self.ok("add", "--scope", "project", "with a file", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        row = [x for x in self.ledger_rows() if x.get("id") == nid][0]
+        self.assertEqual(row["attachments"], [".claude/lessons/%s/fix.sh" % nid])
+
+    def test_a_note_with_no_attachment_has_no_attachments_field(self):
+        self.ok("add", "--scope", "project", "bare note")
+        row = [x for x in self.ledger_rows() if x.get("text") == "bare note"][0]
+        self.assertNotIn("attachments", row)
+
+    def test_list_counts_them(self):
+        other = self.proj / "probe.py"
+        other.write_text("print(1)\n", encoding="utf-8")
+        self.ok("add", "--scope", "project", "counted",
+                "--attach", "fix.sh", "--attach", "probe.py")
+        rows = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertEqual(rows[0]["attachments"], 2)
+        self.assertIn("[2 attached]", self.ok("list", "--scope", "project").stdout)
+
+    def test_a_global_attachment_lands_beside_the_global_claude_md(self):
+        r = self.ok("add", "--scope", "global", "global lesson", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertTrue((self.home / ".claude" / "lessons" / nid / "fix.sh").is_file())
+        line = self.block_lines(self.home / ".claude" / "CLAUDE.md")[0]
+        self.assertIn("(attached: .claude/lessons/%s/fix.sh)" % nid, line)
+
+    def test_a_memory_attachment_lands_beside_the_memory_file(self):
+        slug = str(self.proj).replace("/", "-")
+        (self.transcripts / slug).mkdir(parents=True)
+        r = self.ok("add", "--scope", "memory", "memory lesson", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        mdir = self.transcripts / slug / "memory"
+        self.assertTrue((mdir / "lessons" / nid / "fix.sh").is_file())
+        body = (mdir / "memory-lesson.md").read_text(encoding="utf-8")
+        self.assertIn("(attached: lessons/%s/fix.sh)" % nid, body)
+
+    def test_remind_with_attach_is_refused(self):
+        r = self.note("add", "--remind", "--scope", "project", "r", "--keyword", "k",
+                      "--attach", "fix.sh")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no line to link an attachment from", r.stderr)
+        self.assertFalse(self.reminders.exists())
+
+    @unittest.skipUnless(HAVE_NORM_OF, "repeat-gate does not answer --norm-of")
+    def test_a_lesson_carries_its_attachment_and_still_fires(self):
+        self.seed()
+        r = self.ok("add", "--lesson", FAIL_SIG, "the fix is in the script",
+                    "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertTrue((self.lessons_dir(nid) / "fix.sh").is_file())
+        row = [x for x in self.ledger_rows() if x.get("id") == nid][0]
+        self.assertEqual(row["lesson_sig"], FAIL_SIG)
+        self.assertEqual(row["attachments"], [".claude/lessons/%s/fix.sh" % nid])
+        self.assertIn("the fix is in the script", self.delivered(self.run_remind(FAIL_CMD)))
+
+
+# ==================================================================== promote
+
+class PromoteTest(LessonCase):
+
+    # LONGER THAN SIXTY CHARACTERS ON PURPOSE. The tombstone keeps only the first 60, so
+    # a shorter sentence would make `assertNotIn(TEXT, the project file)` pass whether the
+    # note moved or not -- the assertion that says this is a move and not a copy.
+    TEXT = ("the runner has to be killed before the suite is re-run, or a "
+            "cross-file failure hides")
+
+    def global_md(self):
+        return self.home / ".claude" / "CLAUDE.md"
+
+    def add_project_note(self, text=None, attach=None):
+        args = ["add", "--scope", "project", text or self.TEXT]
+        if attach:
+            args += ["--attach", attach]
+        r = self.ok(*args)
+        return r.stdout.split("(")[1].split(")")[0]
+
+    def promote(self, nid, to="global", **kw):
+        return self.note("promote", nid, "--to", to, now=LATER, **kw)
+
+    def test_the_line_moves_and_the_project_keeps_a_one_line_tombstone(self):
+        nid = self.add_project_note()
+        before = self.block_lines()[0]
+        r = self.promote(nid)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        moved = self.block_lines(self.global_md())
+        self.assertEqual(len(moved), 1, moved)
+        self.assertEqual(moved[0], before, "same line, same id, same date")
+
+        tomb = self.block_lines()
+        self.assertEqual(len(tomb), 1, tomb)
+        self.assertEqual(tomb[0],
+                         "- **2026-08-29** moved to global: %s <!-- id:%s moved:global -->"
+                         % (self.TEXT[:60].rstrip(), nid))
+        self.assertNotIn(self.TEXT, self.claude_md.read_text(encoding="utf-8"))
+
+    def test_the_tombstone_is_truncated_at_sixty_characters(self):
+        long = ("a lesson whose sentence runs on well past sixty characters so the "
+                "tombstone has to cut it")
+        nid = self.add_project_note(long)
+        self.promote(nid)
+        tomb = self.block_lines()[0]
+        head = tomb.split("moved to global: ")[1].split(" <!-- id:")[0]
+        self.assertEqual(head, long[:60].rstrip())
+        self.assertIn(long, self.block_lines(self.global_md())[0],
+                      "the full sentence lives at the destination")
+
+    def test_it_is_a_move_and_never_a_copy(self):
+        nid = self.add_project_note()
+        self.promote(nid)
+        proj_text = self.claude_md.read_text(encoding="utf-8")
+        self.assertNotIn(self.TEXT, proj_text,
+                         "a copy left behind is two records that will disagree")
+
+    def test_the_attachments_directory_moves_with_it(self):
+        script = self.proj / "fix.sh"
+        script.write_text("#!/bin/sh\necho fixed\n", encoding="utf-8")
+        script.chmod(0o755)
+        nid = self.add_project_note(attach="fix.sh")
+        self.assertTrue((self.proj / ".claude" / "lessons" / nid / "fix.sh").is_file())
+        self.promote(nid)
+        dest = self.home / ".claude" / "lessons" / nid / "fix.sh"
+        self.assertTrue(dest.is_file())
+        self.assertTrue(os.access(str(dest), os.X_OK), "the mode travels too")
+        self.assertFalse((self.proj / ".claude" / "lessons" / nid).exists(),
+                         "moved, not copied")
+
+    def test_a_destination_directory_already_there_refuses_before_anything_moves(self):
+        script = self.proj / "fix.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        nid = self.add_project_note(attach="fix.sh")
+        planted = self.home / ".claude" / "lessons" / nid
+        planted.mkdir(parents=True)
+        (planted / "other.txt").write_text("mine\n", encoding="utf-8")
+        r = self.promote(nid)
+        # Exit 2, the same code --attach uses for the same refusal: a destination that is
+        # already occupied is fixed by moving it, not by a different environment.
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("already exists", r.stderr)
+        self.assertIn(self.TEXT, self.claude_md.read_text(encoding="utf-8"),
+                      "the note stays put when the move cannot complete")
+        self.assertFalse(self.global_md().exists())
+        self.assertTrue((self.proj / ".claude" / "lessons" / nid / "fix.sh").is_file())
+
+    @unittest.skipUnless(HAVE_NORM_OF, "repeat-gate does not answer --norm-of")
+    def test_the_reminder_becomes_global_and_the_old_row_is_tombstoned(self):
+        self.seed()
+        r = self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        nid = r.stdout.split("(")[1].split(")")[0]
+        old = self.reminder_rows()[0]["id"]
+        self.assertEqual(self.reminder_rows()[0]["scope"], str(self.proj))
+
+        p = self.promote(nid)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        rows = self.reminder_rows()
+        self.assertEqual(rows[1], {"id": old, "t": "remove", "ts": LATER},
+                         "append-only: a tombstone, never a rewrite")
+        self.assertEqual(rows[2]["scope"], "global")
+        self.assertNotEqual(rows[2]["id"], old, "the id is a hash OVER the scope")
+        self.assertEqual(rows[2]["match"]["commands"], [norm_of(FAIL_CMD)])
+        self.assertEqual(rows[2]["lesson_sig"], FAIL_SIG)
+
+        # And the real hook now delivers it from a project it was never recorded in.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.assertIn(self.TEXT, self.delivered(self.run_remind(FAIL_CMD, cwd=elsewhere)))
+
+    @unittest.skipUnless(HAVE_NORM_OF, "repeat-gate does not answer --norm-of")
+    def test_exactly_one_reminder_is_live_after_the_move(self):
+        """hooks/remind.sh does not de-duplicate by id, so a promotion that left both rows
+        live would state the same lesson twice."""
+        self.seed()
+        r = self.ok("add", "--lesson", FAIL_SIG, self.TEXT)
+        self.promote(r.stdout.split("(")[1].split(")")[0])
+        live = json.loads(self.ok("list", "--scope", "remind", "--json").stdout)
+        self.assertEqual(len(live), 1, live)
+        self.assertEqual(live[0]["scope"], "global")
+
+    def test_a_ledger_row_records_the_promotion(self):
+        nid = self.add_project_note()
+        self.promote(nid)
+        rows = [x for x in self.ledger_rows() if x.get("action") == "promote"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["event"], "note")
+        self.assertEqual(rows[0]["id"], nid)
+        self.assertEqual(rows[0]["scope"], "global")
+        self.assertEqual(rows[0]["from_scope"], "project")
+        self.assertEqual(rows[0]["from_target"], str(self.claude_md))
+        self.assertEqual(rows[0]["target"], str(self.global_md()))
+        self.assertEqual(rows[0]["ts"], LATER)
+
+    def test_to_project_is_refused(self):
+        nid = self.add_project_note()
+        r = self.promote(nid, to="project")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("the hierarchy only goes up", r.stderr)
+        self.assertIn(self.TEXT, self.claude_md.read_text(encoding="utf-8"))
+        self.assertFalse(self.global_md().exists())
+
+    def test_an_unknown_level_is_refused(self):
+        nid = self.add_project_note()
+        r = self.promote(nid, to="sideways")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("global", r.stderr)
+
+    def test_no_level_at_all_is_refused(self):
+        nid = self.add_project_note()
+        r = self.note("promote", nid, now=LATER)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--to global", r.stderr)
+
+    def test_promoting_a_moved_note_again_is_a_no_op(self):
+        nid = self.add_project_note()
+        self.promote(nid)
+        before_p = self.claude_md.read_text(encoding="utf-8")
+        before_g = self.global_md().read_text(encoding="utf-8")
+        again = self.promote(nid)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("already promoted", again.stdout)
+        self.assertEqual(self.claude_md.read_text(encoding="utf-8"), before_p)
+        self.assertEqual(self.global_md().read_text(encoding="utf-8"), before_g)
+        self.assertEqual(len([x for x in self.ledger_rows()
+                              if x.get("action") == "promote"]), 1)
+
+    def test_an_unknown_id_is_refused(self):
+        self.add_project_note()
+        r = self.promote("n404x404")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("skillnote list", r.stderr)
+
+    def test_with_no_project_file_at_all_it_refuses(self):
+        r = self.promote("n404x404")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("nothing to promote", r.stderr)
+
+    def test_the_users_other_notes_and_prose_survive(self):
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_md.write_text("# Project\n\nMy own rules.\n", encoding="utf-8")
+        keep = self.add_project_note("a note that stays")
+        nid = self.add_project_note()
+        self.promote(nid)
+        text = self.claude_md.read_text(encoding="utf-8")
+        self.assertIn("My own rules.", text)
+        self.assertIn("a note that stays", text)
+        self.assertIn("id:%s " % keep, text)
+
+    def test_it_joins_an_existing_global_block_rather_than_opening_a_second(self):
+        self.ok("add", "--scope", "global", "an older global note")
+        nid = self.add_project_note()
+        self.promote(nid)
+        text = self.global_md().read_text(encoding="utf-8")
+        self.assertEqual(text.count("<!-- skillnote:begin -->"), 1, text)
+        self.assertEqual(len(self.block_lines(self.global_md())), 2)
+
+    def test_the_flag_chooses_the_project(self):
+        other = self.root / "other-proj"
+        other.mkdir()
+        r = self.ok("add", "--scope", "project", "elsewhere", "--project", str(other))
+        nid = r.stdout.split("(")[1].split(")")[0]
+        p = self.note("promote", nid, "--to", "global", "--project", str(other), now=LATER)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("elsewhere", self.global_md().read_text(encoding="utf-8"))
+        self.assertIn("moved:global",
+                      (other / ".claude" / "CLAUDE.md").read_text(encoding="utf-8"))
+
+    # ------------------------------------------------------------------- symlinks
+    def test_both_symlinked_files_are_written_through_and_backed_up(self):
+        """The four rules apply to a promotion exactly as they apply to an add: two files
+        are rewritten, and either one of them can be a link into a dotfiles repo."""
+        dots = self.root / "dotfiles"
+        dots.mkdir()
+        psrc = dots / "project.md"
+        gsrc = dots / "global.md"
+        psrc.write_text("# project\n", encoding="utf-8")
+        gsrc.write_text("# global\n", encoding="utf-8")
+        self.claude_md.parent.mkdir(parents=True, exist_ok=True)
+        self.claude_md.symlink_to(psrc)
+        (self.home / ".claude").mkdir(parents=True, exist_ok=True)
+        self.global_md().symlink_to(gsrc)
+
+        nid = self.add_project_note()
+        r = self.promote(nid)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        self.assertTrue(self.claude_md.is_symlink(), "the link must survive")
+        self.assertTrue(self.global_md().is_symlink(), "the link must survive")
+        self.assertIn("moved:global", psrc.read_text(encoding="utf-8"))
+        self.assertIn(self.TEXT, gsrc.read_text(encoding="utf-8"))
+        self.assertIn("# global", gsrc.read_text(encoding="utf-8"))
+
+        # Backups land beside the CONFIGURED path, never inside the dotfiles repo.
+        self.assertEqual(sorted(p.name for p in dots.iterdir()),
+                         ["global.md", "project.md"], "dotfiles must stay clean")
+        self.assertTrue(any(p.name.startswith("CLAUDE.md.bak-skill-compounder-")
+                            for p in self.claude_md.parent.iterdir()),
+                        sorted(p.name for p in self.claude_md.parent.iterdir()))
+        self.assertTrue(any(p.name.startswith("CLAUDE.md.bak-skill-compounder-")
+                            for p in self.global_md().parent.iterdir()),
+                        sorted(p.name for p in self.global_md().parent.iterdir()))
+
+
+# ==================================================================== the help text
+
+class HelpDocumentsTheNewFlagsTest(SkillnoteCase):
+
+    def test_help_names_every_flag_and_subcommand(self):
+        out = self.ok("--help").stdout
+        for token in ("--lesson", "--attach", "promote", "--to global",
+                      "skillrepeat list", "lessons/", "hierarchy only goes up"):
+            self.assertIn(token, out, "the help must document %s" % token)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

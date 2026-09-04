@@ -1601,6 +1601,13 @@ class ApplyReadsNoInternalStateFromTheEnvironment(ApplyCase):
             # dead, and the jq version `doctor` reads instead of asking jq, which is a
             # test pin of the same kind as SKILLFORGE_NOW.
             "SKILLFORGE_ACTIVE_TTL", "SKILLFORGE_DOCTOR_JQ_VERSION",
+            # `doctor`'s third pin, and the same kind as the jq one above: the `surfer`
+            # check probes a REAL claude-history-surfer CLI, and the minimal PATH this
+            # suite runs under excludes ~/.local/bin, so its PASS branch is otherwise
+            # unreachable on a machine that has it installed perfectly well. Standing a
+            # stub on PATH instead would satisfy `command -v` and prove nothing about
+            # `surfer stats`, which is the half of the check that matters.
+            "SKILLFORGE_SURFER_BIN",
             # NOT this CLI's knob, and the only entry here that is not. `doctor_review`
             # reads hooks/session-review.sh's off switch with that script's own default
             # ("0" since 2026-09-03: the paid review is opt-in) purely to REPORT it: the switch is read at that script's first gate,

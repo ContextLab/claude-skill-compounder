@@ -169,6 +169,13 @@
 #                                 the switch and its default, which is 0). The check is
 #                                 informational and never fails; doctor is where a user
 #                                 learns it, and where they are told how to turn it on.
+#   SKILLFORGE_SURFER_BIN         The `surfer` executable `doctor` probes, instead of
+#                                 asking PATH for it. claude-history-surfer is a real
+#                                 dependency of hooks/mission.sh, so the PASS branch can
+#                                 only be reached on a machine that has it; this points
+#                                 the check at a real checkout's bin/surfer rather than
+#                                 standing a fake one up, which would test nothing. For
+#                                 tests; nothing else should set it.
 #
 # State is NOT keyed on a session id. The id in $CLAUDE_CODE_SESSION_ID and the
 # .session_id delivered to hooks and the status line are different values for the same
@@ -1853,6 +1860,132 @@ doctor_review() {
   fi
 }
 
+# `surfer` IS A DEPENDENCY, NOT A FEATURE OF THIS PACKAGE, and that is why it gets a row.
+# hooks/mission.sh states the user's own requests back verbatim, and the only place those
+# exist as data is claude-history-surfer's per-project JSONL -- this package deliberately
+# keeps no second copy of them. So without `surfer` the mission hook still runs, still
+# exits 0, and delivers nothing at any of its five moments: quiet in exactly the way a
+# session with nothing to restate is quiet, which is the shape of failure `doctor` exists
+# for. FAIL rather than WARN, because five wirings are pointing at it.
+#
+# `surfer stats` and not `surfer --version`: the question is not whether the CLI runs but
+# whether it can READ ITS STORE, and a store that has moved, gone unreadable, or was never
+# scaffolded answers the second question and not the first.
+#
+# THE VERDICT FOR A MISSING SURFER IS NOT FIXED, and the reason is doctor's own definition
+# of FAIL: "this package is not doing something it says it does". A machine that wires the
+# mission hook and has no surfer has five entries pointing at a hook that can never speak,
+# which is exactly that. A machine that wires nothing -- a fresh checkout, a state
+# directory being driven by a test, a config this doctor is only reading -- is not silently
+# broken, it is simply not installed, and calling that a FAIL would put a non-fault on the
+# exit status of every run. WARN there, and say what would make it a fault.
+#
+# THE INSTALL LINE NAMES A REPOSITORY AND NOT A PIPE-TO-SHELL ONE-LINER, deliberately:
+# this file and bin/skillreport are both held to containing no network call at all
+# (tests/test_ledger.py, which greps for the fetch commands by name), and such a line
+# sitting in a reporting CLI is the shape that guard exists to keep out -- quoted inside a
+# message or not, since a grep cannot tell those apart and should not have to.
+mission_wired() {   # 0 when settings.json wires hooks/mission.sh, 1 when it does not
+  mw_f="$(claude_dir)/settings.json"
+  [ -f "$mw_f" ] || return 1
+  mw_m="$(installer_const MISSION_MARKER)"
+  [ -n "$mw_m" ] || return 1
+  jq -r '[(.hooks // {}) | to_entries[] | .value[]? | (.hooks // [])[]? | (.command // "")] | .[]' \
+     "$mw_f" 2>/dev/null | grep -q -F -- "$mw_m"
+}
+SURFER_INSTALL_HINT="Install claude-history-surfer (github.com/ContextLab/claude-history-surfer); this package's own install.sh does it for you."
+doctor_surfer() {
+  du_bin="${SKILLFORGE_SURFER_BIN:-}"
+  if [ -n "$du_bin" ]; then
+    if [ ! -x "$du_bin" ]; then
+      dr FAIL surfer "SKILLFORGE_SURFER_BIN=$du_bin is not an executable file, so nothing was probed."
+      return 0
+    fi
+  else
+    du_bin="$(command -v surfer 2>/dev/null || true)"
+  fi
+  du_verdict=WARN
+  du_because=" Nothing wires hooks/mission.sh in $(claude_dir)/settings.json, so nothing is silent yet; this becomes a fault the moment install.sh wires it, and cannot be seen from here at all if this repo is loaded as a plugin."
+  if mission_wired; then
+    du_verdict=FAIL
+    du_because=" hooks/mission.sh is wired in $(claude_dir)/settings.json and reads its prompt store and nothing else, so all five of those wirings deliver nothing, silently."
+  fi
+  if [ -z "$du_bin" ]; then
+    dr "$du_verdict" surfer "surfer is not on PATH.$du_because $SURFER_INSTALL_HINT"
+    return 0
+  fi
+  # PYTHONDONTWRITEBYTECODE, because `doctor` promises it changes nothing but its own
+  # probe file, and this is the one line here that runs SOMEBODY ELSE'S program. surfer is
+  # stdlib python, and a framework python whose source directory is not writable caches
+  # its bytecode under $HOME/Library/Caches instead -- so probing it wrote a tree into the
+  # user's home on every run, which is exactly the promise being broken and was invisible
+  # until a test compared the directory before and after.
+  du_out="$(PYTHONDONTWRITEBYTECODE=1 "$du_bin" stats 2>&1)"; du_rc=$?
+  if [ "$du_rc" -ne 0 ]; then
+    du_tail="$(printf '%s\n' "$du_out" | tail -n 1)"
+    dr "$du_verdict" surfer "$du_bin is there but 'surfer stats' exited $du_rc: ${du_tail:-no output at all}. The mission hook reads that same store, so it has nothing to state either.$du_because"
+    return 0
+  fi
+  # The total is on STDERR ("N prompt(s) across current project."), which is why the call
+  # above folds stderr in. `tr -cd` on the capture for the reason the settings check gives:
+  # BSD tools pad a count with a leading space and a numeric guard reads that as junk.
+  du_n="$(int_or_zero "$(printf '%s\n' "$du_out" | sed -n 's/^\([0-9][0-9]*\) prompt(s).*/\1/p' | tail -n 1 | tr -cd '0-9')")"
+  if [ "$du_n" -eq 0 ]; then
+    dr PASS surfer "$du_bin reads its store; 0 prompt(s) recorded for this project yet, so the mission has nothing to state here until you type something"
+  else
+    dr PASS surfer "$du_bin: $du_n prompt(s) recorded for this project"
+  fi
+}
+
+# THE MISSION STORE IS WHERE DELIVERY BECOMES COUNTABLE. hooks/mission.sh claims each
+# event under <state>/mission/<session>/ so that the two wirings' duplicate delivery is a
+# no-op, and appends one row per delivery to <state>/mission/hits.jsonl. An unwritable
+# directory therefore does not stop the mission -- it stops the CLAIM, so every moment is
+# stated twice and nothing is recorded, which is the one failure here that looks like
+# working harder. An absent directory is not a fault: it is what a machine that has not
+# started a session since installing looks like, so it is a WARN that says which.
+doctor_mission() {
+  dm_dir="$STATE_ROOT/mission"
+  if [ ! -d "$dm_dir" ]; then
+    dr WARN mission "no $dm_dir, so the mission has never been delivered against this state. Expected before the first session after installing; a fault if sessions have run since."
+    return 0
+  fi
+  # A REAL WRITE, for the reason doctor_state gives: access(2) reads permission bits and
+  # is wrong about a read-only mount, an ACL, and a full disk alike.
+  dm_probe="$dm_dir/.doctor-probe.$$"
+  if ( : > "$dm_probe" ) 2>/dev/null; then
+    rm -f "$dm_probe" 2>/dev/null
+  else
+    dr FAIL mission "$dm_dir will not accept a write. The per-event claim lives there, so with both wirings active every moment is delivered twice and no delivery is recorded."
+    return 0
+  fi
+  dm_hits="$dm_dir/hits.jsonl"
+  if [ ! -s "$dm_hits" ]; then
+    dr PASS mission "$dm_dir is writable; 0 deliveries recorded"
+    return 0
+  fi
+  # Same reader every consumer of a JSONL file here uses: a raw line at a time with
+  # `fromjson?`, never `jq -s`, which aborts on the first bad line and takes the count of
+  # the good ones with it.
+  dm_pair="$(jq -r -R -n '[inputs | select(test("^[[:space:]]*$") | not)] as $l
+                       | [$l[] | fromjson? | select(type == "object")] as $o
+                       | "\($o | length) \($l | length) \([$o[] | .moment // empty | if . == "subagent" then "dispatch" else . end] | unique | length)"' \
+             < "$dm_hits" 2>/dev/null)"
+  dm_ok="$(int_or_zero "$(printf '%s' "$dm_pair" | cut -d" " -f1)")"
+  dm_all="$(int_or_zero "$(printf '%s' "$dm_pair" | cut -d" " -f2)")"
+  dm_moments="$(int_or_zero "$(printf '%s' "$dm_pair" | cut -d" " -f3)")"
+  # Six labels, five moments: `dispatch` (PreToolUse on Agent, to the parent) and
+  # `subagent` (SubagentStart, to the child) are the one moment "before an expensive task"
+  # reached from two events, so the jq above folds them before counting.
+  if [ "$dm_all" -eq 0 ]; then
+    dr PASS mission "$dm_dir is writable; 0 deliveries recorded"
+  elif [ "$dm_ok" -lt "$dm_all" ]; then
+    dr FAIL mission "$(( dm_all - dm_ok )) of $dm_all line(s) in $dm_hits do not parse as JSON. Every reader drops those without saying so, so the deliveries they recorded are already missing from every count of whether any of this lands."
+  else
+    dr PASS mission "$dm_all delivery/deliveries recorded in $dm_hits, across $dm_moments of the five moments"
+  fi
+}
+
 # --------------------------------------------------------------------- option parse
 
 cmd="${1:-}"; shift 2>/dev/null || true
@@ -2470,15 +2603,17 @@ SLOTS
       doctor_settings
       doctor_statusline
       doctor_skills
+      doctor_surfer
       doctor_ledger
       doctor_counters
       doctor_forges
+      doctor_mission
       doctor_review
       # Same aggregation every text run uses -- DOCTOR_PASS/WARN/FAIL_N/FAILED are built
       # by `dr` identically in both modes -- so `--json`'s counts and exit status cannot
       # drift from the text form's. `jq -s` over the accumulated per-check objects, one
       # per array element already, never per line: the `+alternate` guard is `set -uo
-      # pipefail`'s own requirement for an array that is never actually empty here (nine
+      # pipefail`'s own requirement for an array that is never actually empty here (eleven
       # checks always run), kept anyway because doctor's own house rule is never to guess.
       dj_exit=0; [ "$DOCTOR_FAILED" -eq 1 ] && dj_exit=1
       printf '%s\n' ${DOCTOR_JSON_CHECKS[@]+"${DOCTOR_JSON_CHECKS[@]}"} | jq -s \
@@ -2494,9 +2629,11 @@ SLOTS
     doctor_settings
     doctor_statusline
     doctor_skills
+    doctor_surfer
     doctor_ledger
     doctor_counters
     doctor_forges
+    doctor_mission
     doctor_review
     echo ""
     echo "$DOCTOR_PASS pass, $DOCTOR_WARN warn, $DOCTOR_FAIL_N fail"

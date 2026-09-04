@@ -9,11 +9,22 @@ must be impossible to trip over. Do not rename `journey.py` to `test_journey.py`
 not add a `test_*.py` file here.
 
 ```bash
-python3 tests/e2e/journey.py --out /tmp/journey-$(date +%Y%m%d-%H%M%S)   # ~6 model calls
+python3 tests/e2e/journey.py --out /tmp/journey-$(date +%Y%m%d-%H%M%S)   # 13 model calls
 python3 tests/e2e/journey.py --out /tmp/dry --no-model                   # free
 ```
 
 The artifact is `<out>/REPORT.md`, not the exit status.
+
+Seventeen steps, numbered 0-16, and they run in the order `STEPS` lists rather than in
+number order: 12-16 (the mission hook and the lesson loop) were added after 11 (uninstall)
+was numbered, and uninstall has to be last, so the run order is 0-10, 12-16, 11. The
+report says so at the top of its summary.
+
+The install this makes also installs **history-surfer**, because `hooks/mission.sh` reads
+the user's prompts out of its store and keeps no copy. The installer decides on the
+throwaway `settings.json`, not on PATH, so a machine that already has `surfer` gets the
+hooks wired from its existing checkout with nothing cloned, and the store lands under
+`<out>/claude/history-surfer`, where the mission hook looks by default.
 
 `docs/e2e.md` is the guide: what it costs, what it proves, what it does not, and why the
 throwaway config authenticates the way it does.

@@ -191,7 +191,9 @@ Both measured, in `docs/CLAUDE-CODE-BEHAVIOR.md`.
 **The lag, measured.** A skill created mid-session became invocable in that session in 4 of 4
 runs, but 2 of those 4 answered `Unknown skill` on the first `Skill` call and launched on the
 second. A **subagent** dispatched after the install saw it first-try in 4 of 4. So retrying is
-correct in the main thread, and handing the job to a subagent removes the race.
+correct in the main thread, and handing the job to a subagent removes the race. When a name
+will not resolve at all, the fallback is to `cat` the SKILL.md and follow it by path: the file
+is the skill, and only the routing to it is missing.
 
 ## Why `--trigger` is mandatory in the protocol though the CLI only warns
 

@@ -148,7 +148,10 @@ class RefHandlingTest(unittest.TestCase):
                     HOME=str(self.home),
                     CLAUDE_SKILL_COMPOUNDER_APP=str(self.app),
                     CLAUDE_SKILL_COMPOUNDER_STATE=str(self.state),
-                    SKILL_COMPOUNDER_REPO_URL=self.origin_url)
+                    SKILL_COMPOUNDER_REPO_URL=self.origin_url,
+                    # The install step that clones history-surfer is a real network
+                    # clone; this suite tests install.sh's pin and rollback, not that.
+                    SKILL_COMPOUNDER_NO_SURFER="1")
 
     def dirs(self):
         return ["--claude-dir", str(self.claude),

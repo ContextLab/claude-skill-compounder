@@ -82,3 +82,25 @@ Wave 1 in flight, five builders on disjoint files: `hooks/mission.sh` + test;
 installer/hooks.json/doctor + history-surfer dependency. Orchestrator owns every doc.
 Wave 2: docs (all), behavior entries for today's measurements (raw logs under the session
 scratchpad `research/hookprobe/`), E2E steps, full suite, live verification.
+
+## Wave 1 and wave 2 landed on disk (uncommitted at the time of writing)
+
+Builders (all reports verified where a number was reused): `hooks/mission.sh` (71 tests);
+repeat-gate lesson arms + `skillrepeat dismiss` (186 + 38 tests, `--norm-of` byte-identical
+over the live store); `skillnote --lesson/--attach/promote` (127 tests); `skillcontrib
+propose` + contribute-skill SKILL.md (91 tests); installer + hooks.json + doctor + history-
+surfer dependency (installer 82, plugin 27, doctor 69). Matcher widened to
+`Bash|Skill|mcp__.*` on the two learning events only (per-event pins). Docs: README,
+architecture, measurement, operations (57 knob rows), DESIGN, CLAUDE-CODE-BEHAVIOR (four new
+entries from the hook probe), `.claude/CLAUDE.md`, skill-compounder SKILL.md (499/500 lines,
+pinned regions byte-identical), e2e docs. Journey: 17/17 PASS, 13 calls, 150.9 s.
+Orchestrator fixes: derivation alternation + counts (153/155/22; operations 140), doctor's
+mission row folds `dispatch`+`subagent` before counting, `test_install_sh.py` pins the surfer
+step off, measurement.md corrected to match.
+
+In flight: a fix agent for the journey's two findings — `install_surfer` must decide on the
+TARGET settings.json rather than `which surfer`; `mission.sh` store root must follow
+`CLAUDE_HISTORY_SURFER_DIR` then `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer`.
+Then: full suite on a quiet tree, commit, re-derive the claim-provenance sweep figure
+(contribute-skill SKILL.md changed; expected 98, was 116), push, CI, `./install.sh` on this
+machine (backs up settings.json), a live check that the five moments fire here, #43 comment.

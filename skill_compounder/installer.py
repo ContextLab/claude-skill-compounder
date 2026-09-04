@@ -25,6 +25,21 @@ What gets wired:
                                                                     just before a
                                                                     compaction discards
                                                                     it)
+* ``hooks.SessionStart``         -> mission.sh                     (the user's own prompts,
+                                                                    verbatim, after a
+                                                                    compaction or a resume)
+* ``hooks.SubagentStart``        -> mission.sh                     (the same, addressed to
+                                                                    a subagent that never
+                                                                    saw them)
+* ``hooks.UserPromptSubmit``     -> mission.sh                     (the same, when the new
+                                                                    prompt is short enough
+                                                                    to be leaning on
+                                                                    memory)
+* ``hooks.PreToolUse``           -> mission.sh                     (the same, periodically
+                                                                    and before an
+                                                                    expensive dispatch)
+* ``hooks.Stop``                 -> mission.sh                     (the same, once, against
+                                                                    a completion claim)
 * ``statusLine``              -> statusline.sh                    (forge animation)
 * ``CLAUDE.md``               -> the doctrine stanza              (inside a marker block,
                                                                     so the habits the
@@ -110,6 +125,22 @@ REMIND_MARKER = "remind.sh"
 # `last_assistant_message`, which is why it reads the transcript and why it is bounded.
 # Issue #8. Its wiring below deliberately carries NO matcher.
 PRECOMPACT_MARKER = "precompact.sh"
+# `mission.sh` states the user's own prompts back, verbatim, at the five moments the
+# session is most likely to be working from a summary of them instead. It is the only
+# entry of ours wired to FIVE events, and each one is a different moment rather than a
+# different arm of one mechanism: `SessionStart` after a compaction or a resume,
+# `SubagentStart` for a subagent that never saw the request at all, `UserPromptSubmit`
+# for a prompt short enough to be leaning on memory ("continue", "yes, do it"),
+# `PreToolUse` before an expensive dispatch and periodically, and `Stop` against a
+# completion claim. Drop any one and that moment goes quiet with nothing saying so.
+#
+# TWO OF THOSE EVENTS ARE NEW KEYS FOR THIS INSTALLER, and that is the substance of the
+# wiring rather than a detail: `SessionStart` and `SubagentStart` were in neither wiring
+# before, so nothing this package shipped could speak to a freshly-compacted context or
+# to a subagent. Measured on 2.1.259: `SessionStart`'s `additionalContext` reaches the
+# parent in all three `source` cases, and `SubagentStart`'s reaches the SUBAGENT ONLY --
+# which is why the subagent moment cannot be served by any of the other four.
+MISSION_MARKER = "mission.sh"
 # Substring matching against the user's status line command was wrong twice. A bare
 # "statusline.sh" matched their ~/bin/git-statusline.sh; adding the directory component
 # still matched "$HOME/dotfiles/statusline/statusline.sh", a pipeline mentioning our path,
@@ -131,18 +162,46 @@ SKILL_MATCHER = "Skill"
 # on everything else; a matcher cannot express it.
 COMMIT_MATCHER = "Bash"
 # The repeat gate runs on every delivery of three events, so its matcher is a COST BOUND as
-# much as a filter. `Bash|Skill` covers both failures issue #19 names by example -- a broken
-# built-in retried as a `gh` command, and a skill that does not connect -- while leaving the
-# high-frequency read tools (Read, Grep, Glob) out of the stream entirely. MCP tool names
-# are deliberately NOT matched: `mcp__.*` may well work, but nothing here has measured that
-# a matcher regex is applied to an MCP tool name, and a wiring that silently matches nothing
-# is worse than one that admits its scope. Widening it is this one string.
-REPEAT_MATCHER = "Bash|Skill"
+# much as a filter. It is TWO STRINGS since 2026-09-03, because the three events do two
+# different jobs. Both leave the high-frequency read tools (Read, Grep, Glob) out of the
+# stream entirely, which is the cost bound; what differs is how much they admit above that.
+#
+# THE TWO EVENTS THAT LEARN -- PostToolUseFailure and PostToolUse -- also take `mcp__.*`.
+# The failure issue #19 names by example is an MCP GitHub tool dying and the session
+# finishing the job with `gh`, and the gate's cross-tool recovery rule is written for
+# exactly that pair; under `Bash|Skill` the MCP half was never delivered, so the rule could
+# only ever be exercised by driving the hook by hand. A matcher is a REGEX over the tool
+# name -- alternation and `.*` both work, measured 2026-08-26 on 2.1.246, where
+# `Bash|mcp__.*` was one of eight matchers on one event and received its `Bash` call
+# (docs/CLAUDE-CODE-BEHAVIOR.md, "A hook matcher is a regex over the tool name, not a
+# substring"). That probe is why a third alternative cannot cost the first two. What it did
+# NOT establish is whether `mcp__.*` reaches a real MCP tool: no MCP tool failure has been
+# observed arriving at a hook here, so this widening is UNPROVEN rather than proven, and
+# the store is the only surface that can settle it.
+REPEAT_LEARN_MATCHER = "Bash|Skill|mcp__.*"
+# THE EVENT THAT REFUSES STAYS NARROW, and that is evidence rather than caution. Both
+# PreToolUse arms are Bash-only inside the script: `lesson_gate` leaves on
+# `[ "$tool" = "Bash" ]`, and the repeat refusal's `if [ "$tool" = "Bash" ]` branch exits on
+# everything else because both of its escape hatches -- the `*skillrepeat*` guard and
+# `allowlisted_head` -- live inside that branch. Nothing on that event reads a non-Bash
+# payload, so widening it would buy a fork per MCP call and no behaviour at all. (`Skill` is
+# inert there for the same reason. It is left alone because narrowing a shipped matcher is
+# its own decision needing its own evidence, not a tidy-up done in passing.)
+REPEAT_PRE_MATCHER = "Bash|Skill"
 # The reminder hook's PreToolUse matcher. Deliberately NOT `EDIT_MATCHER`, which is the
 # same three tools in a different order: these are two independent decisions about two
 # different scripts, and sharing the constant would make a change to one silently rewire
 # the other. `Bash` for the command arm, `Write|Edit` for the path arm.
 REMIND_MATCHER = "Bash|Write|Edit"
+# THE MISSION HOOK IS THE ONE PreToolUse ENTRY OF OURS WITH NO MATCHER AT ALL, and that
+# is deliberate rather than an omission. Every other entry there names the tools it can
+# act on, because each is looking for a particular call -- a `git commit`, a `git push`, a
+# retried failure, a path a reminder is keyed to. The mission is not looking for a call:
+# its periodic arm is a COOLDOWN and its Stop arm counts the tool calls a turn made, and
+# both of those are wrong if the stream they see is a subset of what the turn did. A
+# matcher of `Bash|Write|Edit|Agent|Task|Workflow` looks careful and makes the counter
+# undercount by exactly the calls it excludes, which moves a threshold nobody can then
+# see moving. Cost is bounded in-script, by the cooldown, and not by the matcher.
 LEDGER = "ledger.jsonl"
 BACKUP_PREFIX = ".bak-skill-compounder-"
 MAX_BACKUPS = 10
@@ -717,20 +776,24 @@ def _strip_marker(groups, marker):
     return out
 
 
-OUR_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-              "Stop", "PreCompact")
+OUR_EVENTS = ("SessionStart", "SubagentStart", "UserPromptSubmit", "PreToolUse",
+              "PostToolUse", "PostToolUseFailure", "Stop", "PreCompact")
 # Most events carry more than one entry of ours, so the markers are a tuple per event:
 # stripping only the first would leave the second wired to a checkout the user had just
 # removed. `PreCompact` is the one event with a single marker, and it still spells it as a
 # one-tuple rather than a bare string -- a string is iterable too, so `for marker in
 # markers` over `"precompact.sh"` would strip on the letter `p` and delete every hook of
 # the user's whose command contains one.
-OUR_EVENT_MARKERS = (("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER)),
+OUR_EVENT_MARKERS = (("SessionStart", (MISSION_MARKER,)),
+                     ("SubagentStart", (MISSION_MARKER,)),
+                     ("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER, MISSION_MARKER)),
                      ("PreToolUse", (CLAIM_GATE_MARKER, DOC_GATE_MARKER,
-                                     REPEAT_GATE_MARKER, REMIND_MARKER)),
+                                     REPEAT_GATE_MARKER, REMIND_MARKER,
+                                     MISSION_MARKER)),
                      ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_MARKER)),
                      ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_MARKER)),
-                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER)),
+                     ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER,
+                               MISSION_MARKER)),
                      ("PreCompact", (PRECOMPACT_MARKER,)))
 
 
@@ -790,12 +853,20 @@ def merge_hooks(settings, app_home):
     # Stripped BEFORE anything is appended, like every other marker here, so an entry an
     # older checkout left behind is never found sitting beside a fresh one.
     ups = _strip_marker(ups, REMIND_MARKER)
+    ups = _strip_marker(ups, MISSION_MARKER)
     ups.append({"hooks": [{"type": "command",
                            "command": _hook_cmd(app_home, "prompt"),
                            "timeout": 10}]})
     if _has_gate(app_home, "remind.sh"):
         ups.append({"hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "remind.sh"),
+                               "timeout": 10}]})
+    # The mission's ambiguity arm. Last, like the PreToolUse one below, and for the same
+    # reason: everything above it either states a fact or decides, and this states the
+    # request that the short prompt in front of it is leaning on.
+    if _has_gate(app_home, "mission.sh"):
+        ups.append({"hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "mission.sh"),
                                "timeout": 10}]})
     hooks["UserPromptSubmit"] = ups
 
@@ -810,7 +881,8 @@ def merge_hooks(settings, app_home):
     # missing from this checkout has its stale entry removed rather than left orphaned
     # pointing at a file that is gone.
     pre = _event_groups(hooks, "PreToolUse", True)
-    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_MARKER, REMIND_MARKER):
+    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_MARKER, REMIND_MARKER,
+               MISSION_MARKER):
         pre = _strip_marker(pre, _m)
     _pre_wired = False
     if _has_claim_gate(app_home):
@@ -826,18 +898,26 @@ def merge_hooks(settings, app_home):
                                "timeout": 10}]})
         _pre_wired = True
     if _has_gate(app_home, "repeat-gate.sh"):
-        pre.append({"matcher": REPEAT_MATCHER,
+        pre.append({"matcher": REPEAT_PRE_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "repeat-gate.sh"),
                                "timeout": 10}]})
         _pre_wired = True
-    # LAST of the four, and the order is pinned by tests/test_plugin.py, which compares the
-    # two wirings' matcher lists POSITIONALLY. It is also the only PreToolUse entry of ours
-    # that cannot deny: the three gates above decide, this one states a fact.
+    # FOURTH of the five, and the order is pinned by tests/test_plugin.py, which compares
+    # the two wirings' matcher lists POSITIONALLY. It is also one of the two PreToolUse
+    # entries of ours that cannot deny: the three gates above decide, these two state a
+    # fact.
     if _has_gate(app_home, "remind.sh"):
         pre.append({"matcher": REMIND_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "remind.sh"),
+                               "timeout": 10}]})
+        _pre_wired = True
+    # LAST, and the only one of the five with no matcher: it is not looking for a call,
+    # it is counting them. See MISSION_MATCHER's absence above. It denies nothing either.
+    if _has_gate(app_home, "mission.sh"):
+        pre.append({"hooks": [{"type": "command",
+                               "command": _gate_cmd(app_home, "mission.sh"),
                                "timeout": 10}]})
         _pre_wired = True
     # `or "PreToolUse" in hooks` IS THE WHOLE OF A FIX, and the bug it closes was silent.
@@ -867,7 +947,7 @@ def merge_hooks(settings, app_home):
     # the workaround can be observed, and observing it is what makes the deny useful rather
     # than merely obstructive.
     if _has_gate(app_home, "repeat-gate.sh"):
-        ptu.append({"matcher": REPEAT_MATCHER,
+        ptu.append({"matcher": REPEAT_LEARN_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "repeat-gate.sh"),
                                "timeout": 10}]})
@@ -889,7 +969,7 @@ def merge_hooks(settings, app_home):
     # payload holds tool_input and an `error` field reading "Exit code 1\n<stderr>", and a
     # failed Bash call fires no PostToolUse at all.
     if _has_gate(app_home, "repeat-gate.sh"):
-        ptf.append({"matcher": REPEAT_MATCHER,
+        ptf.append({"matcher": REPEAT_LEARN_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "repeat-gate.sh"),
                                "timeout": 10}]})
@@ -905,6 +985,7 @@ def merge_hooks(settings, app_home):
     stop = _strip_marker(_event_groups(hooks, "Stop", True), INSIGHT_MARKER)
     stop = _strip_marker(stop, CLAIM_GATE_MARKER)
     stop = _strip_marker(stop, APPLY_GATE_MARKER)
+    stop = _strip_marker(stop, MISSION_MARKER)
     wired_stop = False
     if (Path(app_home) / "hooks" / "insight-capture.sh").exists():
         stop.append({"hooks": [{"type": "command",
@@ -919,6 +1000,15 @@ def merge_hooks(settings, app_home):
     if _has_gate(app_home, "apply-gate.sh"):
         stop.append({"hooks": [{"type": "command",
                                 "command": _gate_cmd(app_home, "apply-gate.sh"),
+                                "timeout": 10}]})
+        wired_stop = True
+    # The mission's completion arm, and the third entry of ours that can block a Stop. It
+    # blocks at most once per `prompt_id` and states the request rather than instructing:
+    # measured on 2.1.259, the model quotes a Stop reason back and declines any
+    # instruction inside it, so a reason that is a fact is the only kind that lands.
+    if _has_gate(app_home, "mission.sh"):
+        stop.append({"hooks": [{"type": "command",
+                                "command": _gate_cmd(app_home, "mission.sh"),
                                 "timeout": 10}]})
         wired_stop = True
     # The same fix, and this site was the worst of the three: it had no `or stop` fallback
@@ -943,6 +1033,33 @@ def merge_hooks(settings, app_home):
         wired_pre = True
     if wired_pre or pre or "PreCompact" in hooks:
         hooks["PreCompact"] = pre
+
+    # THE TWO EVENT KEYS THIS INSTALLER HAD NEVER WRITTEN. Both carry the mission and
+    # nothing else, both with NO matcher, and neither is a duplicate of the other.
+    #
+    # `SessionStart` fires with `source` in {startup, resume, compact}. It is wired
+    # unmatched for the reason PreCompact is: the matcher selects the source, and the
+    # source a session most needs its own request restated in -- `compact`, where the
+    # prompts have just been replaced by a summary -- is the one nobody types. The script
+    # decides which sources it acts on.
+    #
+    # `SubagentStart` is the only channel that reaches a subagent. Measured on 2.1.259:
+    # `SessionStart` and `UserPromptSubmit` context reaches the PARENT only, and
+    # `SubagentStart`'s reaches the subagent only, so a subagent handed a task with none
+    # of the request behind it has no other event that can tell it.
+    for _event in ("SessionStart", "SubagentStart"):
+        _groups = _strip_marker(_event_groups(hooks, _event, True), MISSION_MARKER)
+        _wired = False
+        if _has_gate(app_home, "mission.sh"):
+            _groups.append({"hooks": [{"type": "command",
+                                       "command": _gate_cmd(app_home, "mission.sh"),
+                                       "timeout": 10}]})
+            _wired = True
+        # Same `or <event> in hooks` guard the three sites above carry: `_strip_marker`
+        # returns a NEW list, so a checkout with no mission.sh must still write the
+        # stripped list back or a stale entry pointing at a script that is gone survives.
+        if _wired or _groups or _event in hooks:
+            hooks[_event] = _groups
     return settings
 
 
@@ -1661,6 +1778,387 @@ def disable_review(claude_dir, state_dir=None):
     return result
 
 
+# ------------------------------------------------------------------ history-surfer
+#
+# THE MISSION HOOK READS PROMPTS IT DOES NOT STORE. `hooks/mission.sh` states the user's
+# own requests back, verbatim, and the only place those exist as data is
+# claude-history-surfer's per-project JSONL. The alternative -- this package keeping its
+# own copy of every prompt -- breaks the design's first principle ("a single source of
+# truth, never a second copy"), and two stores of the same prompts drift the moment either
+# one gains a filter. So history-surfer is a DEPENDENCY, installed here, and without it
+# the mission hook is inert and `skillforge doctor` says so.
+#
+# Four rules, and each of them is the answer to a way this could go wrong:
+#
+# 1. NEVER FAIL THE INSTALL. No network, a git that refuses, a python that errors: one
+#    line in the report and the rest of the install proceeds. Everything this package
+#    already did works without surfer; only the mission hook goes quiet, and doctor is
+#    where that becomes visible.
+# 2. NEVER CLONE TWICE, AND NEVER SKIP THE WIRING. A checkout already on this machine --
+#    at our own home, or wherever a `surfer` on PATH resolves back to -- is REUSED: its
+#    own installer is run against this install's `--claude-dir`/`--bin-dir`. What decides
+#    that there is nothing left to do is history-surfer's own hook entries being in the
+#    TARGET settings.json, never `shutil.which("surfer")`; PATH is a fact about the
+#    machine and the mission hook needs a fact about the config. A store already under
+#    `<claude-dir>/history-surfer` still stops the CLONE branch, because prompts being
+#    captured mean an installation this run cannot see.
+# 3. NEVER REMOVE IT. Uninstall says where it is and how to take it off, and leaves it.
+#    It holds the user's whole prompt history, which this package did not create and
+#    cannot get back.
+# 4. RECORD WHAT WAS DONE. The manifest carries the url, the checkout and the sha, so
+#    "did this package put that there" has an answer that is not a guess.
+
+SURFER_URL = "https://github.com/ContextLab/claude-history-surfer.git"
+# The checkout goes BESIDE the app home rather than inside it. `install.sh --update` runs
+# `git checkout` against the app home itself and would refuse on an untracked directory
+# in the tree; a sibling is untouched by every one of those moves. For the managed
+# install (`~/.claude/skill-compounder-app`) that is `~/.claude/claude-history-surfer`.
+SURFER_DIRNAME = "claude-history-surfer"
+SURFER_SKIP_ENV = "SKILL_COMPOUNDER_NO_SURFER"
+# Overrides the source cloned FROM. The default is the public repository and nothing but
+# a test should change it; it exists so tests/test_installer.py can clone a real local
+# checkout with no network at all, the same role SKILL_COMPOUNDER_REPO_URL plays in
+# install.sh.
+SURFER_URL_ENV = "SKILL_COMPOUNDER_SURFER_URL"
+SURFER_HOME_ENV = "SKILL_COMPOUNDER_SURFER_HOME"
+SURFER_CLONE_TIMEOUT = 180
+SURFER_SETUP_TIMEOUT = 180
+# history-surfer's own hook entries, identified the way it identifies them itself:
+# `SUBMIT_MARKER`/`STOP_MARKER` in history_surfer/installer.py:15-16, the substrings its
+# `_upsert` matches on a hook command. Read from the TARGET settings.json, which is the
+# only place that answers "is the mission hook's dependency wired HERE".
+SURFER_HOOK_MARKERS = ("hooks/log_prompt.py", "hooks/flush.py")
+SURFER_INSTALL_LINE = (
+    "install it with: curl -fsSL https://raw.githubusercontent.com/ContextLab/"
+    "claude-history-surfer/main/install.sh | bash -s -- --import-history")
+
+
+def _surfer_skipped():
+    value = os.environ.get(SURFER_SKIP_ENV, "").strip().lower()
+    return value in ("1", "yes", "on", "true")
+
+
+def surfer_home(app_home):
+    """Where this package puts the history-surfer checkout it makes."""
+    override = os.environ.get(SURFER_HOME_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(app_home).resolve().parent / SURFER_DIRNAME
+
+
+def _surfer_store(claude_dir):
+    """history-surfer's data directory, resolved the way its own installer resolves it."""
+    override = os.environ.get("CLAUDE_HISTORY_SURFER_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(claude_dir) / "history-surfer"
+
+
+def _surfer_has_store(claude_dir):
+    """True when prompts have already been captured somewhere we would install into.
+
+    `projects/` existing is not enough: history-surfer's own installer scaffolds three
+    empty directories, so an install that got as far as scaffolding and no further would
+    read as a store and stop this step from ever finishing the job. A store is a store
+    once it holds a project file.
+    """
+    projects = _surfer_store(claude_dir) / "projects"
+    try:
+        return any(projects.iterdir())
+    except OSError:
+        return False
+
+
+def _surfer_checkout(home):
+    """True when ``home`` already holds a history-surfer checkout we can run.
+
+    BOTH files, not just the runnable one. The step ends by executing
+    ``<home>/scripts/setup.py``, and ``<app home>/../claude-history-surfer`` is a path the
+    user could plausibly have made themselves -- this machine had a real one there before
+    this code existed. A `scripts/setup.py` alone proves only that something runnable sits
+    at a guessable path; `history_surfer/` beside it is the package, and it is the same
+    identifying file history-surfer's own install.sh looks for to decide it is inside a
+    clone. Same judgement `_is_our_checkout` makes about this package: a directory is
+    recognised by carrying the source, never by its name.
+    """
+    home = Path(home)
+    return ((home / "scripts" / "setup.py").is_file()
+            and (home / "history_surfer").is_dir())
+
+
+def _surfer_wired(claude_dir):
+    """True when history-surfer's own hook entries are in the TARGET settings.json.
+
+    THIS, not `shutil.which("surfer")`, is the question. PATH answers "does this machine
+    have the CLI"; the mission hook needs "is the capture hook wired into the config this
+    install is pointing at", and on a non-default `--claude-dir` those two answers differ.
+    They differed on the E2E run of 2026-09-03: `surfer` was on the operator's PATH, the
+    step said "already on PATH; nothing cloned", and the throwaway config got no capture
+    hook at all -- so `hooks/mission.sh` had no store and every mission step would have
+    measured the absence of a dependency rather than the hook.
+
+    Both markers are required. One of the two present is a half-wiring (an interrupted
+    install, a hand-edited settings.json), and returning True on it would leave it
+    half-wired for good.
+
+    No guard around the read, deliberately: `install()` validates this same file before
+    anything is applied and refuses a malformed one there, so a `SettingsShapeError`
+    cannot reach here from the only caller. A `try` here would be a branch nothing can
+    make fire.
+    """
+    settings = read_settings(Path(claude_dir) / "settings.json")
+    commands = []
+    for groups in (settings.get("hooks") or {}).values():
+        for group in groups or []:
+            if not isinstance(group, dict):
+                continue
+            for entry in group.get("hooks") or []:
+                if isinstance(entry, dict):
+                    commands.append(entry.get("command") or "")
+    return all(any(marker in cmd for cmd in commands)
+               for marker in SURFER_HOOK_MARKERS)
+
+
+def _surfer_from_path():
+    """The checkout whatever `surfer` is on PATH resolves back into, or None.
+
+    Its own installer symlinks `<checkout>/bin/surfer` into the bin directory, so the
+    checkout is two levels up from the resolved target. `_surfer_checkout` still has to
+    vouch for it: a `surfer` that is somebody else's script, or a copy rather than a
+    symlink, resolves to a directory that is not a history-surfer checkout, and running
+    a `scripts/setup.py` found that way would be running an unknown file.
+    """
+    on_path = shutil.which("surfer")
+    if not on_path:
+        return None
+    home = Path(os.path.realpath(on_path)).parent.parent
+    return home if _surfer_checkout(home) else None
+
+
+def _surfer_existing_checkout(app_home):
+    """A history-surfer checkout already on this machine, or None. Never clones.
+
+    In order of how much each proves: the home this package would use itself
+    (`SKILL_COMPOUNDER_SURFER_HOME`, else the sibling of the app home), then whatever a
+    `surfer` on PATH resolves back into.
+    """
+    home = surfer_home(app_home)
+    if _surfer_checkout(home):
+        return home
+    return _surfer_from_path()
+
+
+def _surfer_sha(home):
+    try:
+        proc = subprocess.run(["git", "-C", str(home), "rev-parse", "HEAD"],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _surfer_clone(url, home):
+    """Clone into a temp name beside the destination and move it into place.
+
+    Returns None on success or a one-line reason. Cloning straight to ``home`` leaves a
+    half-written directory behind when the network drops, and `_surfer_checkout` would
+    then read it as installed forever after.
+    """
+    home = Path(home)
+    home.parent.mkdir(parents=True, exist_ok=True)
+    tmp = home.with_name(home.name + ".clone.%d" % os.getpid())
+    if tmp.exists():
+        shutil.rmtree(str(tmp), ignore_errors=True)
+    try:
+        proc = subprocess.run(["git", "clone", "--depth", "1", str(url), str(tmp)],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=SURFER_CLONE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(str(tmp), ignore_errors=True)
+        return "the clone timed out after %ds" % SURFER_CLONE_TIMEOUT
+    except OSError as exc:
+        shutil.rmtree(str(tmp), ignore_errors=True)
+        return "git could not be run (%s)" % (exc.strerror or exc)
+    if proc.returncode != 0:
+        shutil.rmtree(str(tmp), ignore_errors=True)
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return tail[-1] if tail else "git clone exited %d" % proc.returncode
+    try:
+        os.replace(str(tmp), str(home))
+    except OSError as exc:
+        shutil.rmtree(str(tmp), ignore_errors=True)
+        return "the clone could not be moved into %s (%s)" % (home, exc.strerror or exc)
+    return None
+
+
+def _settings_link(claude_dir):
+    """The link target of a symlinked settings.json, or None when it is a real file."""
+    p = Path(claude_dir) / "settings.json"
+    try:
+        return os.readlink(str(p)) if p.is_symlink() else None
+    except OSError:
+        return None
+
+
+def _restore_settings_link(claude_dir, target):
+    """Put back a settings.json symlink a FOREIGN installer replaced, content and all.
+
+    history-surfer's `write_settings` renames a temp file over the path
+    (history_surfer/installer.py:99-104). `os.replace` onto a symlink replaces the LINK,
+    not the file it points at, so a `stow`ed or `chezmoi`d settings.json becomes a
+    regular file and the dotfiles source is orphaned -- silently, and only noticed the
+    next time the user wonders why their config stopped tracking. This package writes
+    THROUGH a symlink for exactly that reason (`write_text_file`), and running somebody
+    else's installer against the same file must not undo the discipline.
+
+    So: take what they wrote, put the link back, and write their content through it. The
+    content is theirs and is kept in full; only the shape of the path is restored.
+    """
+    if not target:
+        return
+    p = Path(claude_dir) / "settings.json"
+    if p.is_symlink() or not p.exists():
+        return
+    try:
+        text = p.read_text(encoding="utf-8")
+        p.unlink()
+        p.symlink_to(target)
+        write_text_file(p, text)
+    except OSError:
+        # Never fail the install over this. The content is already on disk either way;
+        # what is lost is the link, and `skillforge doctor` is not the place to learn it,
+        # so the caller's report sentence still says what happened to the wiring.
+        return
+
+
+def _surfer_setup(home, claude_dir, bin_dir):
+    """Run history-surfer's own installer, non-interactively.
+
+    Its `scripts/setup.py` takes `--claude-dir` and `--bin-dir` and prompts for nothing,
+    so the same two directories this install was given are handed straight to it and the
+    two packages land in one place. It has no `--state-dir`: its data directory is
+    derived from `--claude-dir`, which is exactly the coupling we want.
+
+    Returns None on success or a one-line reason.
+    """
+    python = sys.executable or "python3"
+    setup = Path(home) / "scripts" / "setup.py"
+    # Their installer writes the same settings.json, and it renames over it. Remember the
+    # shape of the path so a dotfiles symlink can be put back afterwards; see
+    # `_restore_settings_link`.
+    link = _settings_link(claude_dir)
+    try:
+        proc = subprocess.run([python, str(setup),
+                               "--claude-dir", str(claude_dir),
+                               "--bin-dir", str(bin_dir)],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=SURFER_SETUP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "its installer timed out after %ds" % SURFER_SETUP_TIMEOUT
+    except OSError as exc:
+        return "its installer could not be run (%s)" % (exc.strerror or exc)
+    finally:
+        # In a `finally`, because a timeout can leave the file already replaced.
+        _restore_settings_link(claude_dir, link)
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return tail[-1] if tail else "its installer exited %d" % proc.returncode
+    return None
+
+
+def install_surfer(app_home, claude_dir, bin_dir, manifest):
+    """Wire history-surfer into THIS config, cloning it only if the machine has none.
+
+    Three decisions, in this order: is its capture hook already in the target
+    settings.json (nothing to do), is there a checkout anywhere on this machine to wire
+    from (wire it, do not clone), and only then clone.
+
+    Returns one report sentence. Never raises: every failure path here is a line in the
+    report and a FAIL on `skillforge doctor`, never a failed install.
+    """
+    manifest = manifest if manifest is not None else {}
+    if _surfer_skipped():
+        manifest.setdefault("surfer", {})["skipped"] = True
+        # NOT "until `surfer` is on PATH": the mission hook needs history-surfer's
+        # capture hook wired into THIS config, which is what fills the store it reads.
+        # A `surfer` on PATH wired somewhere else leaves it just as quiet.
+        return ("skipped (%s is set); the mission hook stays inert until history-surfer's "
+                "capture hook is wired into %s -- %s"
+                % (SURFER_SKIP_ENV, Path(claude_dir) / "settings.json",
+                   SURFER_INSTALL_LINE))
+
+    # The question is about the TARGET CONFIG, never about PATH. A `surfer` on PATH says
+    # the machine has history-surfer; it says nothing about whether the settings.json
+    # this install was pointed at carries its capture hook, and `hooks/mission.sh` reads
+    # a store that only exists because that hook runs.
+    if _surfer_wired(claude_dir):
+        return ("already wired into %s (its log_prompt.py and flush.py hooks are there); "
+                "nothing cloned" % (Path(claude_dir) / "settings.json"))
+
+    url = os.environ.get(SURFER_URL_ENV, "").strip() or SURFER_URL
+    # An existing checkout is REUSED rather than duplicated: cloning a second copy for a
+    # machine that already has one is how one prompt store becomes two.
+    home = _surfer_existing_checkout(app_home)
+
+    cloned = False
+    if home is None:
+        home = surfer_home(app_home)
+        if _surfer_has_store(claude_dir):
+            # Prompts are being captured by an installation this one cannot see -- a
+            # checkout somewhere else whose `surfer` is simply not on THIS PATH. Cloning
+            # a second copy over the top of it is how one store becomes two.
+            return ("not installed: %s already holds captured prompts, so history-surfer "
+                    "is installed somewhere this run cannot see. Put its `surfer` on your "
+                    "PATH rather than installing a second copy."
+                    % _surfer_store(claude_dir))
+        reason = _surfer_clone(url, home)
+        if reason:
+            return ("NOT INSTALLED: %s could not be cloned into %s (%s). The mission hook "
+                    "delivers nothing until it is -- %s"
+                    % (url, home, reason, SURFER_INSTALL_LINE))
+        cloned = True
+
+    reason = _surfer_setup(home, claude_dir, bin_dir)
+    # `url` only when we cloned: the manifest answers "did this package put that
+    # there", and recording a source for a checkout we merely reused would answer
+    # it wrong. `cloned` is the field that answers it.
+    record = {"url": url if cloned else "", "home": str(home),
+              "sha": _surfer_sha(home), "cloned": cloned}
+    manifest["surfer"] = record
+    if reason:
+        return ("%s %s, but NOT WIRED: %s. Run it by hand: python3 "
+                "%s/scripts/setup.py --claude-dir %s --bin-dir %s"
+                % ("cloned into" if cloned else "found the checkout at", home, reason,
+                   home, claude_dir, bin_dir))
+    record["installed"] = True
+    record["cloned"] = cloned
+    where = Path(bin_dir) / "surfer"
+    at = " at %s" % record["sha"][:12] if record["sha"] else ""
+    return ("%s%s; `surfer` is at %s (make sure that directory is on your PATH)"
+            % ("installed from %s into %s" % (url, home) if cloned
+               else "wired the checkout already at %s into %s"
+                    % (home, Path(claude_dir) / "settings.json"), at, where))
+
+
+def surfer_uninstall_note(manifest, claude_dir, bin_dir):
+    """What uninstall says about history-surfer, which it never removes.
+
+    It holds every prompt the user has ever typed at Claude Code, and this package
+    neither created that data nor can put it back. Same judgement as the state directory:
+    say where it is and how to remove it, and leave it alone.
+    """
+    record = (manifest or {}).get("surfer") or {}
+    home = record.get("home")
+    if not home or record.get("skipped"):
+        return ("left alone: this package did not install it (remove it yourself with "
+                "the uninstall.sh in its own checkout, if you have one)")
+    return ("LEFT IN PLACE at %s -- it holds your prompt history, which this package "
+            "never created. To remove it: python3 %s/scripts/setup.py --uninstall "
+            "--claude-dir %s --bin-dir %s, then rm -rf %s for the captured prompts."
+            % (home, home, claude_dir, bin_dir, _surfer_store(claude_dir)))
+
+
 # ------------------------------------------------------------------- install/uninstall
 
 def install(app_home, claude_dir, bin_dir, state_dir=None, doctrine=None):
@@ -1681,12 +2179,27 @@ def install(app_home, claude_dir, bin_dir, state_dir=None, doctrine=None):
     report = {}
     report["backup"] = backup_file(settings_path) or "(no existing settings.json)"
 
+    manifest = read_manifest(state_dir)
+    # BEFORE our own settings.json is written, and the order is load-bearing. This step
+    # runs history-surfer's OWN installer, which appends its two entries to the SAME
+    # file. Run after us, its entries land behind ours on the first install and in front
+    # of them on the second -- `merge_hooks` strips our markers and re-appends, so
+    # whatever is not ours floats to the front -- and the file does not settle until the
+    # second install. Run first, its entries are just another foreign hook to the merge,
+    # and settings.json is byte-identical from install one onward. It is still before
+    # `write_manifest` below, which is what records the checkout and sha uninstall's note
+    # reads back.
+    report["surfer"] = install_surfer(app_home, claude_dir, bin_dir, manifest)
+    # Re-read, because the line above may have written this file. `settings` above was
+    # read for `preflight` and `preexisting_events`, which must judge the config as it
+    # was BEFORE anything of ours or history-surfer's touched it.
+    settings = validate_settings(read_settings(settings_path))
+
     merge_hooks(settings, app_home)
     install_statusline(settings, app_home, state_dir)
     write_settings(settings_path, settings)
     report["settings"] = str(settings_path)
 
-    manifest = read_manifest(state_dir)
     manifest["app_home"] = app_home
     manifest["claude_dir"] = str(claude_dir)
     manifest["preexisting_hook_events"] = preexisting
@@ -1779,6 +2292,10 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
             report["settings"] = str(settings_path)
 
     report["doctrine"] = remove_doctrine(claude_dir, manifest)
+    # Reported, never removed, and the manifest entry stays: the checkout is still there
+    # after this runs, so a record saying so is true and deleting it would only make the
+    # next install think it had never been here.
+    report["surfer"] = surfer_uninstall_note(manifest, claude_dir, bin_dir)
     skills = _skill_dirs(app_home)
     clis = _cli_files(app_home)
     report["skills"], skill_failures = _unlink_all(skills, claude_dir / "skills",

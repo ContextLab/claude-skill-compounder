@@ -1,16 +1,29 @@
 #!/usr/bin/env bash
 # skillrepeat: read and retire what hooks/repeat-gate.sh has learned about broken calls.
 #
-#   skillrepeat list   [--json] [--tool <name>] [--all]
-#   skillrepeat show   <sig> [--json]        (every row, tombstoned ones included)
-#   skillrepeat forget <sig> [--why <reason>]
-#   skillrepeat stats  [--json]
+#   skillrepeat list    [--json] [--tool <name>] [--all]
+#   skillrepeat show    <sig> [--json]        (every row, tombstoned ones included)
+#   skillrepeat forget  <sig> [--why <reason>]
+#   skillrepeat dismiss <sig> [--why <reason>]
+#   skillrepeat stats   [--json]
 #   skillrepeat --help
 #
 # The store is <state>/repeats/index.jsonl, written by hooks/repeat-gate.sh:
 #   {"t":"fail",    ts, sig, ck, ec, tool, norm, cmd, err, session, tuid}
-#   {"t":"recover", ts, sig, ck, tool, norm, cmd, session, tuid}
+#   {"t":"recover", ts, sig, ck, tool, norm, cmd, session, tuid[, cross_tool:true]}
 #   {"t":"forget",  ts, sig, session, why}
+#   {"t":"dismiss", ts, sig, session, why}      <- written only by `dismiss`, below
+#
+# `cross_tool` marks a recovery bound because a DIFFERENT tool's call shared content
+# tokens with the failed one, rather than because the tool matched. It is present only
+# when true, so every reader that does not care about it goes on ignoring it.
+#
+# A `dismiss` IS NOT A TOMBSTONE, and the difference is the whole reason there are two
+# row types rather than one with a flag. `forget` says "these observations no longer
+# count" and suppresses rows; `dismiss` says "this was looked at and needs no lesson"
+# and suppresses nothing -- every count on every surface here is identical before and
+# after one. What it changes is the LESSON column and the lesson gate in
+# hooks/repeat-gate.sh, which stops refusing once either a dismissal or a lesson exists.
 #
 # `norm` -- printed as `shape` by `show` and as CALL by `list` -- IS A NORMALISED SHAPE AND
 # NOT A LITERAL COMMAND. hooks/repeat-gate.sh masks ordinary quoted arguments, the directory
@@ -60,9 +73,16 @@
 #                            are ASKED OF THAT SCRIPT (`--eligible-of`) and never
 #                            reimplemented here -- see THE GATE COLUMN below.
 #   SKILLREPEAT_NOW          this CLI's clock, epoch seconds, falling back to
-#                            REPEAT_GATE_NOW. It writes the tombstone timestamp, and a
-#                            tombstone that lands before the rows it is meant to suppress
-#                            suppresses nothing -- which is why tests need to pin it.
+#                            REPEAT_GATE_NOW. It writes the tombstone and dismissal
+#                            timestamps, and a tombstone that lands before the rows it is
+#                            meant to suppress suppresses nothing -- which is why tests
+#                            need to pin it.
+#
+# THE LEDGER, <state>/ledger.jsonl, IS READ HERE AND NEVER WRITTEN. bin/skillnote owns
+# it; `skillnote add --lesson <sig>` puts a `note` row carrying `lesson_sig` into it, and
+# that is the one fact the LESSON column below cannot get from this store. An absent or
+# unreadable ledger means no lesson has been recorded, which is what a fresh install
+# genuinely has, so it is reported as `open` rather than as an error.
 #
 # EXIT CODES: 0 success. 1 environment (no jq). 2 usage. 3 the named signature has no rows.
 set -uo pipefail
@@ -87,6 +107,7 @@ set -uo pipefail
 ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$ROOT/repeats"
 STORE="$DIR/index.jsonl"
+LEDGER="$ROOT/ledger.jsonl"
 
 MIN_SESSIONS="${REPEAT_MIN_SESSIONS:-2}"
 case "$MIN_SESSIONS" in ''|*[!0-9]*) MIN_SESSIONS=2 ;; esac
@@ -132,7 +153,7 @@ GATE_OK=0
 US="$(printf '\037')"
 
 usage() {
-  sed -n '2,9p' "$0" | sed -e 's/^# \{0,1\}//'
+  sed -n '2,10p' "$0" | sed -e 's/^# \{0,1\}//'
   echo
   echo "State: $DIR"
 }
@@ -161,6 +182,30 @@ fmt_ts() {
 rows() {
   [ -f "$STORE" ] && [ -r "$STORE" ] || return 0
   jq -Rc 'fromjson? // empty | select(type=="object")' "$STORE" 2>/dev/null
+}
+
+# The signatures a lesson has been written for: one pass over bin/skillnote's ledger.
+# Malformed lines are swallowed the same way `rows` swallows them, for the same reason --
+# a ledger this CLI does not own must not be able to take it out.
+# AN `add` WHOSE NOTE WAS LATER REMOVED IS NOT A LESSON. `skillnote remove <id>` appends
+# `{"event":"note","action":"remove","id":...}` and deletes nothing -- the same append-only
+# discipline `forget` and `dismiss` follow here -- so matching on `lesson_sig` alone would
+# print `recorded` for a lesson that no longer exists in any CLAUDE.md. Adds minus removed
+# ids. `.action // "add"` because rows written before that field existed carry no action.
+noted_sigs() {
+  [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || { printf '[]'; return 0; }
+  jq -R -s -c '[ split("\n")[] | select(length > 0) | (fromjson? // empty)
+                 | select(type=="object") | select(.event == "note") ] as $n
+               | ([ $n[] | select((.action // "add") == "remove")
+                    | (.id? // "") | select(. != "") ] | unique) as $gone
+               # BIND THE ID BEFORE THE LOOKUP: `$gone | index(.id)` evaluates `.id`
+               # against $gone, which is an array and has none, so jq errors and drops
+               # the row. The symptom is a removal that never takes effect.
+               | [ $n[] | select((.action // "add") == "add")
+                   | ((.id? // "")) as $rid
+                   | select(($gone | index($rid)) == null)
+                   | (.lesson_sig? // "") | select(. != "") ] | unique' \
+    "$LEDGER" 2>/dev/null || printf '[]'
 }
 
 # THE SUMMARY QUERY. It and the gate's must AGREE about what refuses, and they do: the same
@@ -195,12 +240,29 @@ rows() {
 # something today: they describe a query that no longer exists here. Read them as history,
 # not as a measurement, and do not carry them anywhere else.
 #
-# WHAT IT COSTS NOW, printed on this machine 2026-08-26 by TEN runs of
+# WHAT IT COSTS NOW, printed on this machine 2026-09-03 by TEN runs of
 #   PYTHONPATH=$PWD python3 tests/test_repeat_gate.py CliCostTest -v
 # which builds the store and PRINTS the time on every run, so none of this can quietly stop
 # being true. Observed min to max over those ten, not a mean:
-#   15831 rows, every signature distinct, 4190377 B:  stats 0.50-0.53 s   list 1.15-1.25 s
-#   16446 rows, one signature,            4190440 B:  stats 0.34-0.36 s
+#   15831 rows, every signature distinct, 4190377 B:  stats 1.27-1.31 s   list 2.05-2.08 s
+#   16446 rows, one signature,            4190440 B:  stats 0.68-0.71 s
+#
+# THEY ARE HIGHER THAN THE 2026-08-26 FIGURES THEY REPLACE -- stats 0.50-0.53, list
+# 1.15-1.25, stats-one-signature 0.34-0.36 -- AND MOST OF THAT IS NOT THIS CODE. Four other
+# agents were building in this same checkout while they were taken, which is the kind of
+# thing a range cannot say about itself. So the two causes were separated by a CONTROL that
+# was RUN rather than argued: `git show HEAD:bin/skillrepeat` and this file, ten interleaved
+# rounds each against the identical two stores, SKILLREPEAT_GATE pinned to the same hook so
+# only the CLI differed. Min to max:
+#   list  distinct: old 1.68-1.74 s   new 1.98-2.03 s
+#   stats distinct: old 1.12-1.15 s   new 1.22-1.26 s
+#   stats one sig:  old 0.65-0.67 s   new 0.65-0.69 s
+# The LESSON work costs roughly 18%, 10% and nothing of those three -- one more grouping
+# pass over the rows for the dismissals, and one pass over the ledger, neither of which the
+# one-signature store gives any work to do. The machine accounts for the rest. NEITHER HALF
+# COULD BE READ OFF THE ABSOLUTE FIGURES, which is why the control is the part of this
+# stanza worth repeating; the ranges above are what today's machine printed and will move
+# again the next time it is busy.
 # TEN RUNS AND NOT FIVE, AND RE-RUN WHENEVER THE CODE UNDER THEM CHANGES. A range from too
 # few runs is narrower than the thing it describes and reads as a precision the data does
 # not carry; a range measured on code this is no longer the code of is not a measurement of
@@ -247,6 +309,10 @@ SUMMARY_JQ='
      | group_by(.sig)
      | map({key: .[0].sig, value: .})
      | from_entries) as $recs
+  # NOT cut by a tombstone, and the header says why: forgetting the observations does
+  # not un-make the decision that they needed no lesson.
+  | ([ $rows[] | select(.t=="dismiss" and (.sig|type=="string")) | .sig ]
+     | unique) as $dism
   | [ [ $rows[] | select(.t=="fail" and (.sig|type=="string")) ]
       | group_by(.sig)[]
       | . as $fs
@@ -281,7 +347,14 @@ SUMMARY_JQ='
           recovery_sessions: (if ($g|length) == 0 then 0 else $g[0].c end),
           recovery_tied: (($g|length) > 1 and $g[0].c == $g[1].c),
           transient_sessions: ($self | map(.session) | unique | length),
-          candidates: ($g | length) }
+          candidates: ($g | length),
+          # A recovery of ANY kind was observed, self-recoveries included: that is what
+          # makes a lesson owed at all. `candidates` cannot answer it -- it counts only
+          # the recoveries that could be NAMED as the fix, so a signature whose every
+          # recovery was a self-recovery has candidates 0 and is still a fail-then-fix.
+          recovered: (($rec | length) > 0),
+          cross_tool: ([ $rec[] | select(.cross_tool == true) ] | length),
+          lesson_dismissed: (($dism | index($s)) != null) }
     ]
   | sort_by(-.sessions, .sig)
 '
@@ -352,6 +425,8 @@ cmd_list() {
         | map(select($all == 1 or .sessions > 0))' 2>/dev/null)"
   elig="$(printf '%s' "$s" | elig_map)"
   [ -z "$elig" ] && elig='{}'
+  noted="$(noted_sigs)"
+  [ -z "$noted" ] && noted='[]'
   # THE RULE IS APPLIED ONCE, HERE, and both consumers below read the field it writes.
   # Interpolating `$REFUSES_JQ` straight into the table's `if` chain worked and cost the
   # GATE column its DERIVATION: the alignment test reads the alternatives out of that
@@ -359,7 +434,10 @@ cmd_list() {
   # expression reads as one of them. A column whose widest value can no longer be derived
   # is the fixed-width overflow waiting to happen a third time.
   s="$(printf '%s' "$s" | jq -c --argjson min "$MIN_SESSIONS" --argjson elig "$elig" \
-        'map(. + {refuses: '"$REFUSES_JQ"'})' 2>/dev/null)"
+        --argjson noted "$noted" \
+        'map(. + {refuses: '"$REFUSES_JQ"',
+                  lesson_recorded: (.sig as $ls
+                                     | ($noted | index($ls)) != null)})' 2>/dev/null)"
   [ -z "$s" ] && s='[]'
   if [ "$json" = "1" ]; then
     printf '%s\n' "$s" | jq '.'
@@ -423,19 +501,27 @@ cmd_list() {
         (if .transient_sessions > 0 then "transient"
          elif .refuses then "refuses"
          elif .sessions >= $min then "exempt" else "-" end),
+        # LESSON, and `-` here means SOMETHING DIFFERENT from `open`: nothing has been
+        # written down about either, but `-` is a signature no session has ever recovered
+        # from, so there is no fix to write down and nothing is owed. `open` is a
+        # fail-then-fix with the fix nowhere but this store.
+        (if .lesson_dismissed then "dismissed"
+         elif .lesson_recorded then "recorded"
+         elif .recovered then "open" else "-" end),
         (.call | .[0:60]) ]
     | @tsv' 2>/dev/null \
   | awk -F'\t' '
       { n++; a[n] = $0
-        for (i = 1; i <= 5; i++) if (length($i) > w[i]) w[i] = length($i) }
+        for (i = 1; i <= 6; i++) if (length($i) > w[i]) w[i] = length($i) }
       END {
         h[1] = "SIGNATURE"; h[2] = "SESS"; h[3] = "TOOL"; h[4] = "RECOVERY"; h[5] = "GATE"
-        for (i = 1; i <= 5; i++) if (length(h[i]) > w[i]) w[i] = length(h[i])
-        f = "%-" w[1] "s %" w[2] "s %-" w[3] "s %-" w[4] "s %-" w[5] "s %s\n"
-        printf f, h[1], h[2], h[3], h[4], h[5], "CALL"
+        h[6] = "LESSON"
+        for (i = 1; i <= 6; i++) if (length(h[i]) > w[i]) w[i] = length(h[i])
+        f = "%-" w[1] "s %" w[2] "s %-" w[3] "s %-" w[4] "s %-" w[5] "s %-" w[6] "s %s\n"
+        printf f, h[1], h[2], h[3], h[4], h[5], h[6], "CALL"
         for (j = 1; j <= n; j++) {
           split(a[j], c, "\t")
-          printf f, c[1], c[2], c[3], c[4], c[5], c[6]
+          printf f, c[1], c[2], c[3], c[4], c[5], c[6], c[7]
         }
       }'
   echo
@@ -447,6 +533,13 @@ cmd_list() {
   echo "                 here (\`hooks/repeat-gate.sh --eligible-of\`)."
   echo "     transient = an earlier session re-ran the identical call and it worked, so"
   echo "                 the gate never refuses this one, whatever the count."
+  echo "LESSON open      = a session failed this way and then got it working, and nothing"
+  echo "                   outside this store says what was learned. That is what the"
+  echo "                   lesson arm of hooks/repeat-gate.sh declines a call over."
+  echo "       recorded  = a note carries this signature (\`skillnote add --lesson <sig>\`)."
+  echo "       dismissed = \`skillrepeat dismiss <sig>\` recorded that it needs none."
+  echo "       -         = no recovery was ever observed, so there is no fix to write down."
+  echo "       Lessons are read from $LEDGER"
   if [ "$GATE_OK" != "1" ]; then
     echo "     NOTE: $GATE is not executable, so the head exemptions could NOT be"
     echo "           applied. Every GATE value above is an upper bound."
@@ -510,6 +603,22 @@ cmd_show() {
     else
       echo "recovery:  none recorded"
     fi
+    xn="$(printf '%s' "$one" | jq -r '.cross_tool' 2>/dev/null)"
+    case "$xn" in ''|*[!0-9]*) xn=0 ;; esac
+    if [ "$xn" -gt 0 ]; then
+      echo "cross-tool: $xn of the recoveries were bound because a DIFFERENT tool's call"
+      echo "           shared content tokens with the failed one, not because the tool"
+      echo "           matched -- weaker evidence than a same-tool recovery."
+    fi
+    if [ "$(printf '%s' "$one" | jq -r '.lesson_dismissed' 2>/dev/null)" = "true" ]; then
+      echo "lesson:    dismissed -- see the dismiss row below for the reason given."
+    elif printf '%s' "$(noted_sigs)" \
+         | jq -e --arg s "$sig" 'index($s) != null' >/dev/null 2>&1; then
+      echo "lesson:    recorded in $LEDGER"
+    elif [ "$(printf '%s' "$one" | jq -r '.recovered' 2>/dev/null)" = "true" ]; then
+      echo "lesson:    none written. hooks/repeat-gate.sh declines a call over this once"
+      echo "           the fail rows come from >= $MIN_SESSIONS distinct sessions."
+    fi
     # A self-recovery is why the gate is silent about a signature that otherwise looks
     # well over the threshold, so `show` has to say it or the count reads as a bug.
     if [ "$tr_n" -gt 0 ]; then
@@ -527,8 +636,19 @@ cmd_show() {
            + "\n      error: " + ((.err // "") | gsub("\n"; "\n             "))
          elif .t == "recover" then
            "\n      ran:   " + (.cmd // "")
+           + (if .cross_tool == true then "  (bound cross-tool, on shared tokens)"
+              else "" end)
          else
-           "\n      why:   " + (.why // "(no reason given)")
+           # `forget` and `dismiss` both land here and both carry a `why`. The `t` of
+           # each row is printed on the line above, which is what tells the two apart.
+           #
+           # EMPTY AND ABSENT ARE THE SAME FACT HERE, and `//` alone does not say so:
+           # it falls back on null and false and NOT on "", and `--why` is optional on
+           # both subcommands, so the commonest row with no reason printed a bare label
+           # and the placeholder branch could only ever be reached by a foreign row.
+           "\n      why:   "
+           + (if ((.why // "") | tostring) == "" then "(no reason given)"
+              else .why end)
          end)' 2>/dev/null
   return 0
 }
@@ -570,6 +690,57 @@ cmd_forget() {
     echo "skillrepeat: cannot append to $STORE" >&2; return 1; }
   echo "forgot $sig -- its $cnt recorded row(s) no longer count, as of $(fmt_ts "$now")."
   echo "Nothing was deleted; \`skillrepeat show $sig\` still prints all of them."
+  return 0
+}
+
+# ---------------------------------------------------------------------- dismiss
+# THE OTHER HALF OF THE LESSON GATE, and the reason it is a row and not a deletion is the
+# reason `forget` is one: this store is the only record of which calls are broken, it is
+# written by a hook nobody watches, and a decision that leaves no trace is
+# indistinguishable afterwards from a decision nobody made.
+#
+# IT IS NOT `forget`, AND CONFLATING THEM WOULD BE THE EASY MISTAKE. `forget` suppresses
+# the observations -- every count drops, and the gate stops refusing the CALL. `dismiss`
+# suppresses nothing: the call is as broken as it was, the counts are unchanged, and what
+# ends is only the demand that the fix be written down. A session that dismisses when it
+# meant to forget still gets the repeat refusal, which is the safe direction.
+cmd_dismiss() {
+  sig=""; why=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --why) shift; why="${1:-}" ;;
+      --why=*) why="${1#--why=}" ;;
+      -*) echo "skillrepeat dismiss: unknown argument $1" >&2; return 2 ;;
+      *) [ -n "$sig" ] && { echo "skillrepeat dismiss: one signature at a time" >&2; return 2; }
+         sig="$1" ;;
+    esac
+    shift
+  done
+  [ -z "$sig" ] && { echo "usage: skillrepeat dismiss <sig> [--why <reason>]" >&2; return 2; }
+
+  cnt="$(rows | jq -s -r --arg s "$sig" 'map(select(.sig == $s)) | length' 2>/dev/null)"
+  case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+  # Same refusal as `forget`, same reason: a mistyped signature that silently appended a
+  # row matching nothing would look exactly like a successful dismissal, and the gate
+  # would go on declining calls over a signature the user believes they have cleared.
+  if [ "$cnt" -eq 0 ]; then
+    echo "skillrepeat: no rows for signature '$sig' -- nothing to dismiss" >&2
+    return 3
+  fi
+
+  now="${SKILLREPEAT_NOW:-${REPEAT_GATE_NOW:-}}"
+  case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
+  case "$now" in ''|*[!0-9]*) echo "skillrepeat: no usable clock" >&2; return 1 ;; esac
+
+  mkdir -p "$DIR" 2>/dev/null || { echo "skillrepeat: cannot write $DIR" >&2; return 1; }
+  row="$(jq -nc --arg ts "$now" --arg sig "$sig" --arg why "$why" \
+    '{t:"dismiss", ts:($ts|tonumber), sig:$sig, session:"cli", why:$why}' 2>/dev/null)"
+  [ -z "$row" ] && { echo "skillrepeat: could not build the dismissal" >&2; return 1; }
+  printf '%s\n' "$row" >> "$STORE" 2>/dev/null || {
+    echo "skillrepeat: cannot append to $STORE" >&2; return 1; }
+  echo "dismissed $sig as of $(fmt_ts "$now") -- no lesson is owed for it."
+  echo "Nothing was suppressed: its $cnt row(s) still count, and the repeat gate still"
+  echo "refuses the call if it ever did. \`skillrepeat forget $sig\` is the other one."
   return 0
 }
 
@@ -628,6 +799,7 @@ case "$sub" in
   list)   cmd_list "$@" ;;
   show)   cmd_show "$@" ;;
   forget) cmd_forget "$@" ;;
+  dismiss) cmd_dismiss "$@" ;;
   stats)  cmd_stats "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "skillrepeat: unknown subcommand '$sub'" >&2; usage >&2; exit 2 ;;

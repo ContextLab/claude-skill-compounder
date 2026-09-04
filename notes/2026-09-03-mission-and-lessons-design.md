@@ -139,7 +139,8 @@ measured false-positive rate. Stated as a limit, not built.
 the next success of the same tool as its recovery. Two extensions and one gate:
 
 - **Cross-tool recovery.** A failure of tool X (an MCP tool, a `Skill`, a `Bash` command)
-  followed within `REPEAT_RECOVERY_WINDOW` calls by a success of tool Y whose input shares
+  followed within `REPEAT_RECOVERY_WINDOW` calls (the existing default of 5 was kept when this
+  landed; the issue text says 6) by a success of tool Y whose input shares
   content tokens with the failed input (a repo name, a path, a URL) is bound as a recovery
   too, tagged `cross_tool`. This is what "the GitHub skill fails, `gh` works" looks like on
   the wire, and today it is never bound.

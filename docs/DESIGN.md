@@ -1205,3 +1205,174 @@ one writes nothing.
 
 The payload this is all built on, and the probe that captured it, are in
 [CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md).
+
+## The mission reads a store this package does not own
+
+`hooks/mission.sh` states the user's own prompts back, and the only place those exist as
+data is claude-history-surfer's per-project JSONL. The obvious alternative is to capture
+them here, on `UserPromptSubmit`, into a file of our own. That is refused by the first
+principle the design was written under, and stated in
+[the design note](../notes/2026-09-03-mission-and-lessons-design.md):
+one source of truth, never a second copy. Two stores of the same prompts do not stay equal.
+They drift the moment either one gains a filter, and the harness already emits pseudo-prompts
+that one of them would learn to drop before the other did.
+
+So history-surfer is a dependency rather than a design to imitate. Install clones it when
+`surfer` is absent, and the price of the choice is paid in the one place a missing
+dependency can be paid honestly: `skillforge doctor`. Its `surfer` row is FAIL when
+`settings.json` wires the hook and nothing can be found to read the store, because then
+five wirings deliver nothing and say nothing. It is WARN when nothing wires the hook,
+because a checkout nobody has installed is not a machine that is broken. That split is
+doctor's own definition of a fault, which is this package failing to do something it says
+it does; a hook made inert by a missing dependency is exactly that, and an uninstalled
+package is not.
+
+Uninstall never removes it, on the same judgement that leaves the state directory alone.
+The checkout holds every prompt the user has typed at Claude Code, which this package did
+not create and could not put back, so uninstall says where it is and how to remove it.
+
+## The subagent channel is `SubagentStart`, and the writable one was declined
+
+A subagent starts with the parent's instructions and none of the user's. Two channels reach
+it, and both were measured:
+[`SubagentStart` context](CLAUDE-CODE-BEHAVIOR.md#subagentstart-context-reaches-the-subagent-only-and-the-parents-reaches-the-parent-only)
+and
+[the prompt rewrite](CLAUDE-CODE-BEHAVIOR.md#pretooluse-on-the-agent-tool-can-rewrite-the-subagents-prompt-and-the-parent-never-sees-the-rewrite).
+
+The second works. It is not used, and the reason is not caution about the mechanism: it is
+that the parent cannot read the result. The transcript the parent keeps goes on saying what
+the parent asked for while the subagent was handed something else, so a session debugging
+its own subagent is reading a record that is no longer true, with nothing anywhere to say
+so. The first channel delivers to the subagent and leaves the parent's record intact, which
+is the same information said in the open.
+
+The cost of that choice is real and is stated in the arm itself. `SubagentStart` carries no
+prompt, so the mission arrives beside the parent's instructions rather than inside them,
+and the closing sentence exists to say which is which: "The parent's instructions to this
+agent appear above these requests; they are what the parent made of them." That is a weaker
+join than a rewrite would have made. It is the one that leaves a record two parties can
+read.
+
+## Why the `Stop` arm blocks once, and states rather than instructs
+
+Two constraints, both out of
+[the nine-block probe](CLAUDE-CODE-BEHAVIOR.md#a-stop-block-was-accepted-nine-times-running-and-the-reason-is-read-as-untrusted-text),
+and they point in opposite directions.
+
+The platform accepts block after block, so the cap is ours to impose rather than something
+to discover. It is one block per `prompt_id`. A gate that may fire again on the turn it has
+just extended can hold a session in place, and nothing in the payload distinguishes a
+session that ignored the block from one that read it and is still working. One block puts
+the request back in front of a session at the moment it claims to be done. A second would
+be arguing with it.
+
+And the reason arrives in the register a denial reason arrives in: text from somewhere
+else, quoted rather than obeyed. That is not a limitation to route around, it is what the
+whole hook is written for. Every line it emits is a record of what was asked and when,
+never an instruction about what to do next, and that holds for the closing sentences of the
+`SubagentStart` and `Stop` arms, where an imperative would read most naturally of all.
+Wording was measured with the delivery field, in
+[the `additionalContext` entry](CLAUDE-CODE-BEHAVIOR.md#pretooluse-additionalcontext-reaches-the-model-an-allow-reason-reaches-nothing):
+an imperative in that field was obeyed in 2 of 4 runs and refused as an injection attempt
+in the other two, while the same fact worded neutrally came back in 3 of 3. A reminder
+that gets refused is worse than one that is merely ignored, because it teaches the session
+that this channel carries prompt injection.
+
+## The lesson refusal ships on, and the repeat refusal does not
+
+Two arms of one script, one refusing by default and one not, is the kind of asymmetry that
+looks like an oversight. It is the population each arm can reach.
+
+The repeat arm refuses on an inference from history: this call failed in enough earlier
+sessions, so the next attempt is likely wrong too. Its population was measured and found
+empty, which is the argument recorded under
+[Three gates](#three-gates-and-the-reason-there-are-now-three).
+
+The lesson arm refuses on a fact about the session in front of it. A call failed here, a
+different call fixed it here, the store already holds fail rows for that signature from
+other sessions, and nothing anywhere records what was learned. That is the doctrine's own
+threshold arriving as an observation instead of a guess: a nameable dead end, and a second
+occurrence. Shipping that off by default would be shipping the finding without the
+consequence, which is what ten days of one output path already produced.
+
+Three things stop it becoming a wall. It is spent at most `REPEAT_LESSON_MAX_DENIES` times
+on one signature in one session and then lets go for good. Its two escapes are commands,
+and both of their heads are exempt from it, so the refusal can never block the thing that
+lifts it. And a dismissal counts exactly as much as a lesson: what is being asked for is a
+decision on the record, not a particular decision.
+
+The two switches are spelled in opposite directions on purpose. `REPEAT_GATE_REFUSE=1`
+turns an off arm on, and only `REPEAT_LESSON_GATE=0` turns the on arm off. Whichever way a
+value is mistyped it lands on the shipped default, which is the one spelling where a typo
+cannot silently change what a gate does.
+
+Cost is the other half of shipping anything on by default, and there are two figures. The
+common path is one `[ -d ]`, because a session that bound no recovery has no marker
+directory to find. The expensive path parses the store and the ledger, and cost 0.33 to
+0.35 s over ten runs against a 15831-row store on 2026-09-03, printed on every run of
+`PYTHONPATH=$PWD python3 tests/test_repeat_gate.py CostTest -v`. It is bounded per
+signature per session rather than per tool call, because the marker is removed the moment
+its signature is judged unable to qualify.
+
+## `skillnote promote` moves a note and never copies one
+
+A lesson recorded against one project turns out not to be about that project. The cheap
+move is to write it into the global `CLAUDE.md` and leave the project copy alone, since
+nothing breaks. What breaks is the first edit after that. Two records of one lesson
+disagree the moment either is corrected, and the one nobody edits is the one the next
+session finds first. That is the same principle the mission's store rests on, applied to
+the tier below it.
+
+So `promote` moves the whole record: the line with its id and its date, the attachments
+directory by `mv` rather than `cp`, and the reminder's scope, which an append-only store
+spells as a tombstone at project scope and a fresh row at global. What stays behind is one
+line saying where it went, and that is not a copy of the lesson. It is a pointer for
+somebody reading the project who remembers the lesson being there.
+
+`--to project` is refused rather than implemented. The hierarchy only goes up, because
+moving a note down silently narrows a lesson that had already earned the wider scope, and
+nothing would report that it had.
+
+## `skillcontrib propose` is one command because seven gates were none
+
+The contribution path was read-only reconnaissance plus a hand-walked procedure for its
+whole life. It was run 47 times and opened no pull request at all
+([the September audit](../notes/2026-09-02-audit-and-replan.md)). A consent gate a person
+has to walk seven times is a gate whose far side nobody reaches, and a gate nobody reaches
+protects nothing while looking exactly like protection.
+
+The replacement is not fewer safeguards. It is a different kind. Most of the gates were
+asking a person to approve lookups a person cannot check faster than the machine can:
+whether the upstream tree already holds this skill, whether some closed pull request
+already proposed it, whether the acting account can push. `propose` still runs every one of
+them, in order, and stops at the first that fails with that step's own exit code. What the
+gates were really protecting is the network writes, and there are three: the fork, the push
+and the pull request. Each is printed before it runs on a line beginning `WRITE:`, so a
+transcript can be swept for them afterwards, and the whole run has a read-only twin in
+`recon`, which is `propose --dry-run` under another name.
+
+That leaves the consent in the one place it cannot be given by accident and cannot be given
+twice: typing the subcommand without `--dry-run`. The two refusals that remain are the two
+a lookup cannot settle on its own, a previously rejected proposal and an unmeasured routing
+pin, and both name the flag that overrides them.
+
+## The learning events widened to `mcp__.*`, and the refusing one did not
+
+The failure issue #19 names by example is an MCP tool dying and the session finishing the
+job with `gh`, and the cross-tool recovery rule is written for exactly that pair. Under the
+`Bash|Skill` matcher the MCP half of it was never delivered to the hook at all, so the rule
+could only ever be exercised by driving the script by hand. `PostToolUseFailure` and
+`PostToolUse`, the two events that learn, therefore take `Bash|Skill|mcp__.*`.
+
+`PreToolUse` does not, and that is evidence rather than caution. Both of its arms leave on
+a `Bash` test inside the script, and both escapes from the refusal live inside that branch,
+so a wider matcher there would buy one fork per MCP call and no behaviour whatsoever. A
+matcher is a regex over the tool name rather than a substring
+([the matcher probe](CLAUDE-CODE-BEHAVIOR.md#a-hook-matcher-is-a-regex-over-the-tool-name-not-a-substring)),
+which is what makes a third alternative free on the two events that take it.
+
+What the widening does not establish is that anything now arrives. No MCP tool failure has
+been seen reaching a hook on this machine, so this is an unproven widening rather than a
+proven one, and the store is the only surface that can settle it: a `fail` row whose tool
+begins `mcp__` is the evidence, and until one exists the MCP half of the cross-tool rule is
+still exercised only by hand.

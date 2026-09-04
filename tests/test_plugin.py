@@ -29,6 +29,16 @@ from skill_compounder import installer
 PLUGIN_JSON = APP / ".claude-plugin" / "plugin.json"
 HOOKS_JSON = APP / "hooks" / "hooks.json"
 HOOK = APP / "hooks" / "compound-improvement.sh"
+MISSION = APP / "hooks" / "mission.sh"
+# The five moments hooks/mission.sh is wired to, with the matcher each one needs.
+# Named rather than derived from either wiring, because the drift check below only
+# proves the two AGREE: two wirings that both forgot SubagentStart agree perfectly,
+# and SubagentStart is the only event whose context a subagent ever sees.
+MISSION_EVENTS = (("SessionStart", None),
+                  ("SubagentStart", None),
+                  ("UserPromptSubmit", None),
+                  ("PreToolUse", None),
+                  ("Stop", None))
 
 
 def plugin_commands():
@@ -234,6 +244,93 @@ class ManifestTest(unittest.TestCase):
                           if "claim-gate.sh" in c], [])
         self.assertEqual([h["command"] for g in settings.get("PostToolUse", [])
                           for h in g["hooks"] if "claim-gate.sh" in h["command"]], [])
+
+    @unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+    def test_the_mission_is_wired_on_both_paths_to_all_five_of_its_moments(self):
+        """The drift check above only proves the two paths AGREE, and two paths that both
+        forgot a moment agree perfectly. So each of the five is named.
+
+        Each moment is a different loss, not a different arm of one mechanism.
+        `SessionStart` is the context that was just replaced by a summary;
+        `SubagentStart` is a subagent that never saw the request at all;
+        `UserPromptSubmit` is a prompt short enough to be leaning on memory;
+        `PreToolUse` is before an expensive dispatch, and periodically; `Stop` is against
+        a completion claim. Drop one wiring and that moment goes quiet with nothing
+        anywhere saying so.
+        """
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event, matcher in MISSION_EVENTS:
+            p_arm = [(m, c) for m, c in plugin.get(event, []) if "mission.sh" in c]
+            s_arm = [(g.get("matcher"), h["command"])
+                     for g in settings.get(event, []) for h in g["hooks"]
+                     if "mission.sh" in h["command"]]
+            self.assertEqual(len(p_arm), 1,
+                             "hooks.json must wire the mission to %s exactly once" % event)
+            self.assertEqual(len(s_arm), 1,
+                             "the installer must wire the mission to %s exactly once"
+                             % event)
+            self.assertEqual(p_arm[0][0], matcher, "hooks.json %s matcher" % event)
+            self.assertEqual(s_arm[0][0], matcher, "installer %s matcher" % event)
+
+    @unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+    def test_the_two_new_event_keys_carry_the_mission_and_nothing_else(self):
+        """SessionStart and SubagentStart were in neither wiring before this. Anything
+        else of ours appearing on them would be a second script running on an event with
+        no `last_assistant_message`, no tool, and no prompt to act on."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertEqual([c for _m, c in plugin.get(event, [])],
+                             [c for _m, c in plugin.get(event, []) if "mission.sh" in c],
+                             "hooks.json wires something other than the mission to %s"
+                             % event)
+            cmds = [h["command"] for g in settings.get(event, []) for h in g["hooks"]]
+            self.assertEqual(cmds, [c for c in cmds if "mission.sh" in c],
+                             "the installer wires something other than the mission to %s"
+                             % event)
+            self.assertEqual(len(cmds), 1)
+
+    @unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+    def test_the_two_new_event_keys_carry_no_matcher(self):
+        """`SessionStart`'s matcher selects the SOURCE -- startup, resume, compact -- and
+        the source the mission exists for is `compact`, the one nobody types. A matcher
+        would look correct and skip it, which is the same trap PreCompact's matcher sets.
+        `SubagentStart` has no matchable field at all."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertEqual([m for m, _c in plugin.get(event, [])], [None],
+                             "hooks.json narrowed %s with a matcher" % event)
+            self.assertEqual([g.get("matcher") for g in settings.get(event, [])], [None],
+                             "the installer narrowed %s with a matcher" % event)
+
+    @unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+    def test_the_mission_is_wired_to_no_other_event(self):
+        """PostToolUse and PostToolUseFailure are after the fact: there is nothing left to
+        restate the request before. PreCompact honours `systemMessage` only (measured on
+        2.1.259), so a wiring there would look correct and reach the model with nothing."""
+        plugin = plugin_commands()
+        settings = installer.merge_hooks({}, str(APP))["hooks"]
+        for event in ("PostToolUse", "PostToolUseFailure", "PreCompact"):
+            self.assertEqual([c for _m, c in plugin.get(event, []) if "mission.sh" in c],
+                             [], "hooks.json wires the mission to %s" % event)
+            self.assertEqual([h["command"] for g in settings.get(event, [])
+                              for h in g["hooks"] if "mission.sh" in h["command"]],
+                             [], "the installer wires the mission to %s" % event)
+
+    @unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+    def test_every_event_the_installer_declares_ours_is_one_it_can_strip(self):
+        """`OUR_EVENTS` drives validation and `OUR_EVENT_MARKERS` drives both the strip
+        and uninstall. The day SessionStart went into one and not the other, install would
+        have written a key that uninstall could never take back out."""
+        self.assertEqual(sorted(installer.OUR_EVENTS),
+                         sorted(e for e, _m in installer.OUR_EVENT_MARKERS),
+                         "OUR_EVENTS and OUR_EVENT_MARKERS name different events")
+        wired = set(plugin_commands())
+        self.assertTrue(wired.issubset(set(installer.OUR_EVENTS)),
+                        "hooks.json wires an event the installer does not claim: %s"
+                        % sorted(wired - set(installer.OUR_EVENTS)))
 
     @unittest.skipUnless(shutil.which("claude"), "claude CLI not on PATH")
     def test_claude_plugin_validate_strict_passes(self):

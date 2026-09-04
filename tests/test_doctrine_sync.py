@@ -843,7 +843,13 @@ class DerivationCommandTest(unittest.TestCase):
                # and `bin/skillforge`'s own header explains at length that it is NOT the
                # id a hook payload carries. Ours to read, never ours to set, so it belongs
                # here rather than in a tuning table nobody could act on.
-               "CLAUDE_CODE_SESSION_ID"}
+               "CLAUDE_CODE_SESSION_ID",
+               # claude-history-surfer's OWN data-directory override, read by
+               # hooks/mission.sh so that hook resolves the prompt store exactly the way
+               # its writer does (history_surfer/config.py:37-42). Same judgement as
+               # CLAUDE_CONFIG_DIR above: ours to read, never ours to set, so a tuning
+               # table row for it would document somebody else's knob as ours.
+               "CLAUDE_HISTORY_SURFER_DIR"}
 
     DOC = "docs/operations.md"
 

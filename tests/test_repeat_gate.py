@@ -181,6 +181,22 @@ class GateCase(unittest.TestCase):
         return out
 
     # ------------------------------------------------------------------- scenarios
+    def filler(self, session, i=0, **over):
+        """A success that CONSUMES the recovery window and can never claim it.
+
+        THE TOOL HAS TO BE ONE THE MATCHER REALLY DELIVERS. These were `Read` calls until
+        2026-09-03 and every window test built on them was measuring a route no session
+        can produce: the matcher has never selected `Read`, and the script now leaves on a
+        payload shape it has no rule for, so a `Read` success consumes nothing. An
+        `mcp__*` name is delivered on PostToolUse and is a DIFFERENT tool from both `Bash`
+        and the MCP tool these tests fail on, so it reaches the cross-tool rule and is
+        turned away there by the token overlap -- `page` and `slug` share nothing with a
+        `gh` command or a `claude-skill-compounder` repo argument."""
+        p = self.success({"page": "p%d" % i, "slug": "unrelated-filler"}, session,
+                         tool="mcp__docs__fetch", tuid="toolu_fill_%d_%d" % (i, self.clock))
+        p.update(over)
+        return p
+
     def teach(self, command, sessions, error=GH_ERR, tool="Bash"):
         """Record one failure of `command` in each of `sessions`, at distinct times."""
         for s in sessions:
@@ -296,10 +312,13 @@ class SignatureTest(GateCase):
         self.assertEqual(len(self.sigs()), 1, self.sigs())
 
     def test_a_structured_tool_gets_a_signature_too(self):
-        """Not everything is Bash. `Skill` is the one non-Bash tool the `Bash|Skill`
-        matcher actually delivers, so it is what this exercises -- the test used to use
-        `mcp__gh__list_prs`, which the matcher never delivers, and so demonstrated the
-        branch on a route that does not exist while the live route went untested."""
+        """Not everything is Bash. `Skill` was the ONLY non-Bash tool the matcher
+        delivered when this was written -- it used to use `mcp__gh__list_prs`, which
+        nothing then delivered, so it demonstrated the branch on a route that did not
+        exist while the live route went untested. Since 2026-09-03 the two learning events
+        carry `Bash|Skill|mcp__.*`, so an MCP name is a live route as well; this one stays
+        on `Skill` because both routes take the same branch and MatcherDeliveryTest drives
+        the new one end to end."""
         a = {"skill": "finish-task", "args": "x"}
         b = {"args": "x", "skill": "finish-task"}      # `jq -S` makes key order irrelevant
         self.tick(); self.run_hook(self.failure(a, "s1", tool="Skill",
@@ -650,19 +669,23 @@ class RecoveryTest(GateCase):
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 1)
 
     def test_a_success_of_another_tool_does_not_bind(self):
+        """A DIFFERENT tool with nothing in common: it reaches the cross-tool rule and is
+        turned away by the token overlap, which is the only thing standing between the two.
+        The other tool has to be one the matcher delivers, or this passes for the wrong
+        reason -- see `filler`."""
         self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
-        self.tick(); self.run_hook(self.success({"file_path": "/a/b.py"}, "s1",
-                                                tool="Read"))
+        self.tick(); self.run_hook(self.filler("s1"))
         self.assertEqual([r for r in self.rows() if r["t"] == "recover"], [])
 
     def test_the_window_expires_and_a_late_success_is_not_the_fix(self):
         """The bound that stops an unrelated command twenty steps later from being
-        recorded as the fix. Successes of ANY tool consume the window; only a success of
-        the SAME tool can claim it."""
+        recorded as the fix. Successes of any tool THIS HOOK IS WIRED FOR consume the
+        window -- and nothing else is delivered, so the stream is far sparser than every
+        tool call the session makes."""
         self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
         for i in range(5):
             self.tick()
-            self.run_hook(self.success({"file_path": "/a/%d.py" % i}, "s1", tool="Read"))
+            self.run_hook(self.filler("s1", i))
         self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
         self.assertEqual([r for r in self.rows() if r["t"] == "recover"], [],
                          "a success six calls after the failure was recorded as the fix")
@@ -673,16 +696,14 @@ class RecoveryTest(GateCase):
         self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
         for i in range(2):
             self.tick()
-            self.run_hook(self.success({"file_path": "/a/%d.py" % i}, "s1", tool="Read"))
+            self.run_hook(self.filler("s1", i))
         self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
         self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 1)
 
     def test_the_window_is_configurable(self):
         self.tick(); self.run_hook(self.failure("gh pr list", "s1"),
                                    REPEAT_RECOVERY_WINDOW=1)
-        self.tick(); self.run_hook(self.success({"file_path": "/a/b.py"}, "s1",
-                                                tool="Read"),
-                                   REPEAT_RECOVERY_WINDOW=1)
+        self.tick(); self.run_hook(self.filler("s1"), REPEAT_RECOVERY_WINDOW=1)
         self.tick(); self.run_hook(self.success("curl -s https://x", "s1"),
                                    REPEAT_RECOVERY_WINDOW=1)
         self.assertEqual([r for r in self.rows() if r["t"] == "recover"], [])
@@ -807,8 +828,7 @@ class DoubleDeliveryTest(GateCase):
         self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
         for i in range(2):
             self.tick()
-            p = self.success({"file_path": "/a/%d.py" % i}, "s1", tool="Read",
-                             tuid="toolu_read_%d" % i)
+            p = self.filler("s1", i, tool_use_id="toolu_fill_dup_%d" % i)
             self.run_hook(p)
             self.run_hook(p)          # the duplicate delivery
         self.tick(); self.run_hook(self.success("curl -s https://x/y", "s1"))
@@ -1209,21 +1229,42 @@ class NormOfTest(GateCase):
 
 
 class WiringTest(unittest.TestCase):
-    """The matcher is a REGEX over the tool name, and it is `Bash|Skill` on all three
-    events in BOTH install paths. Measured 2026-08-26 on 2.1.246: of eight matchers on one
-    event, `Bash`, `^Ba`, `Ba.*`, `Bash|mcp__.*`, `*` and `.*` all received a `Bash` call;
-    `Ba` and `as` received nothing.
+    """The matcher is a REGEX over the tool name, and since 2026-09-03 it is TWO strings
+    over three events -- the same pair in BOTH install paths:
 
-    That wiring is a deliberate cost bound -- this hook forks on every delivery and the
-    read tools are the high-frequency ones -- and it is also the ONLY thing protecting
-    Read/Glob/Grep from this gate. An in-script allowlist for them was a guard with no live
-    path: the event is never delivered, so the case arm could never run. This asserts the
-    wiring is what the script's header says it is, and that no such dead allowlist has
-    grown back."""
+        PostToolUseFailure  `Bash|Skill|mcp__.*`   the two events that LEARN and RECOVER
+        PostToolUse         `Bash|Skill|mcp__.*`
+        PreToolUse          `Bash|Skill`           the one event that REFUSES
+
+    Measured 2026-08-26 on 2.1.246 (docs/CLAUDE-CODE-BEHAVIOR.md, "A hook matcher is a
+    regex over the tool name, not a substring"): of eight matchers on one event, `Bash`,
+    `^Ba`, `Ba.*`, `Bash|mcp__.*`, `*` and `.*` all received a `Bash` call; `Ba` and `as`
+    received nothing. `Bash|mcp__.*` receiving its `Bash` call is the whole of the evidence
+    that a third alternative cannot cost the first two. That probe measured NOTHING about
+    whether `mcp__.*` reaches a real MCP tool, and none has been observed arriving here, so
+    the widening is unproven rather than proven -- which is a thing the header has to keep
+    saying, and which the prose assertions below pin.
+
+    The learning events are wider than the refusing one because nothing on PreToolUse reads
+    a non-Bash payload: `lesson_gate` leaves on `[ "$tool" = "Bash" ]` and the repeat arm's
+    Bash branch exits on everything else, both escape hatches being inside it. Below that
+    it is still a cost bound -- this hook forks on every delivery and the read tools are the
+    high-frequency ones -- and that bound is still the ONLY thing protecting Read/Glob/Grep
+    from this gate. An in-script ALLOWLIST for them stays forbidden: the event is never
+    delivered, so the case arm could never run. (The shape test at the top of the payload
+    read is not that arm. It names what the script has a rule for instead of sparing a tool
+    a refusal, and MatcherDeliveryTest drives it rather than reading the source.)"""
 
     EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
+    MATCHERS = {"PreToolUse": "Bash|Skill",
+                "PostToolUse": "Bash|Skill|mcp__.*",
+                "PostToolUseFailure": "Bash|Skill|mcp__.*"}
 
-    def test_both_install_paths_wire_the_gate_to_bash_and_skill_only(self):
+    def test_both_install_paths_wire_the_same_matcher_on_each_event(self):
+        """PER EVENT, and not one value asserted three times. The two learning events
+        widened and the refusing one did not, so a test carrying a single shared value
+        would have had to be loosened to something that also passes on the two being
+        swapped -- which is the drift this whole test exists to catch."""
         seen = {}
         with open(os.path.join(REPO, "hooks", "hooks.json"), encoding="utf-8") as fh:
             manifest = json.load(fh)
@@ -1233,19 +1274,35 @@ class WiringTest(unittest.TestCase):
                     if "repeat-gate.sh" in hook.get("command", ""):
                         seen[event] = group.get("matcher")
         self.assertEqual(sorted(seen), sorted(self.EVENTS), seen)
-        for event in self.EVENTS:
-            self.assertEqual(seen[event], "Bash|Skill", seen)
+        self.assertEqual(seen, self.MATCHERS, seen)
 
         with open(os.path.join(REPO, "skill_compounder", "installer.py"),
                   encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn('REPEAT_MATCHER = "Bash|Skill"', src,
-                      "the installer and the plugin manifest disagree about the matcher")
+        self.assertIn('REPEAT_LEARN_MATCHER = "Bash|Skill|mcp__.*"', src,
+                      "the installer and the plugin manifest disagree about the matcher "
+                      "the two learning events carry")
+        self.assertIn('REPEAT_PRE_MATCHER = "Bash|Skill"', src,
+                      "the installer and the plugin manifest disagree about the matcher "
+                      "the refusing event carries")
+        self.assertNotIn("REPEAT_MATCHER", src,
+                         "the single-matcher constant is gone; a surviving reference means "
+                         "one of its three uses was left pointing at a name that no longer "
+                         "exists, which is an ImportError at install time")
 
     def test_the_gate_carries_no_allowlist_for_a_tool_it_can_never_receive(self):
-        """A `case "$tool" in Read|Glob|Grep) exit 0` arm cannot fire under `Bash|Skill`.
-        Shipping a safety check nobody can reach is the defect skills/dead-guard-detection
-        exists for, and re-adding one must fail here rather than read as caution."""
+        """A `case "$tool" in Read|Glob|Grep) exit 0` arm cannot fire under any of these
+        matchers -- `Bash|Skill` on PreToolUse, `Bash|Skill|mcp__.*` on the two that learn,
+        and no Read, Glob or Grep in either. Shipping a safety check nobody can reach is the
+        defect skills/dead-guard-detection exists for, and re-adding one must fail here
+        rather than read as caution.
+
+        WHAT THIS DOES NOT FORBID is the `[ ]` shape test the payload read now begins with.
+        That is not an exemption for a tool: it declines to compute a signature for a
+        payload shape there is no normalising rule for, which became necessary when the
+        second alternative stopped being an exact name. `--eligible-of`'s own tool test is
+        written as `[ ]` for the same reason, and this assertion has always been about the
+        `case` form specifically."""
         with open(HOOK, encoding="utf-8") as fh:
             body = [ln for ln in fh if not ln.lstrip().startswith("#")]
         for line in body:
@@ -1256,13 +1313,21 @@ class WiringTest(unittest.TestCase):
     def test_the_header_describes_the_wiring_it_actually_has(self):
         """Prose that contradicts the wiring is how the dead guard got justified for three
         header lines. The recovery window counts what this hook is WIRED for, and the
-        structured-tool path is unreachable until someone widens the matcher."""
+        header claimed for its whole life that an `mcp__*` payload could never be delivered
+        -- true until 2026-09-03 and false the moment the matcher widened, which is exactly
+        the sentence a reader would have trusted."""
         with open(HOOK, encoding="utf-8") as fh:
             head = fh.read()
         self.assertFalse("successful tool calls, of any tool" in head,
                          "the window is documented as counting a stream it never sees")
         self.assertIn("Bash|Skill", head,
                       "the header never names the wiring it is describing")
+        self.assertIn("Bash|Skill|mcp__.*", head,
+                      "the header never names the matcher the two learning events carry")
+        self.assertNotIn("All three events are wired with the matcher", head,
+                         "the header still describes one matcher over three events")
+        self.assertNotIn("so an `mcp__*` payload is never delivered", head,
+                         "the header still says an MCP payload cannot reach this script")
         self.assertNotIn("UNREACHABLE ON THE CURRENT WIRING", head,
                          "the header claimed norm_structured was unreachable while every "
                          "`Skill` delivery reaches it; this assertion used to REQUIRE that "
@@ -1281,6 +1346,66 @@ class WiringTest(unittest.TestCase):
             src = fh.read()
         self.assertFalse("Identical in every clause" in src,
                          "bin/skillrepeat still claims its query is the gate's")
+
+
+class MatcherDeliveryTest(GateCase):
+    """WHAT THE WIDENED MATCHER HANDS THIS SCRIPT, driven through the real hook.
+
+    WiringTest pins the strings; this pins what the script does with what they select, and
+    the two are different silences. A matcher that selects nothing looks exactly like a
+    hook with nothing to say, and a script that keys a payload it has no rule for looks
+    exactly like one that ignored it -- neither shows up on any other surface."""
+
+    MCP = "mcp__github__create_issue"
+    MCP_ERR = "Exit code 1\nHTTP 403: Resource not accessible by integration"
+    READ_INPUT = {"file_path": "/Users/x/proj/missing.py"}
+
+    def test_an_mcp_failure_the_widened_matcher_delivers_is_learned(self):
+        """The half of the maintainer's own example that could not fire before: under
+        `Bash|Skill` a `mcp__*` name reached this script only when a test fed it one."""
+        self.tick()
+        r = self.run_hook(self.failure(
+            {"owner": "ContextLab", "repo": "claude-skill-compounder", "title": "x"},
+            "s1", error=self.MCP_ERR, tool=self.MCP))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "", r.stdout)
+        fails = [x for x in self.rows() if x["t"] == "fail"]
+        self.assertEqual(len(fails), 1, self.rows())
+        self.assertEqual(fails[0]["tool"], self.MCP, fails)
+        self.assertIn("ContextLab", fails[0]["norm"], fails)
+
+    def test_a_tool_none_of_our_matchers_selects_writes_nothing(self):
+        """A delivery this script has no rule for costs nothing and leaves no trace, on
+        every one of the three events.
+
+        NOT VACUOUS, and that was checked against the previous version of the hook rather
+        than assumed: driven at the pre-2026-09-03 script, this same `Read` failure was
+        keyed by `norm_structured` and stored as
+        `{"t":"fail","tool":"Read","norm":"{\"file_path\":\"<P>/missing.py\"}"}`. Under
+        `Bash|Skill` nothing could deliver it, so that was harmless; `mcp__.*` is a pattern
+        rather than a name, so "not Bash means Skill" stopped holding and the script now
+        says which shapes it keys."""
+        for payload in (self.failure(self.READ_INPUT, "s1", tool="Read",
+                                     error="Exit code 1\nFile does not exist"),
+                        self.success(self.READ_INPUT, "s1", tool="Read"),
+                        self.attempt(self.READ_INPUT, "s1", tool="Read")):
+            self.tick()
+            r = self.run_hook(payload)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout, "",
+                             "%s spoke about a tool it has no rule for: %r"
+                             % (payload["hook_event_name"], r.stdout))
+        self.assertEqual(self.rows(), [], self.rows())
+
+    def test_the_shape_test_does_not_reach_the_argv_doors(self):
+        """`--norm-of` and `--eligible-of` take the tool name as an ARGUMENT, and their
+        callers -- bin/skillrepeat and bin/skillreport -- pass whatever the store recorded.
+        The shape test lives inside the payload read, so a stored row naming a tool the
+        matcher no longer delivers is still answerable."""
+        r = subprocess.run(["bash", HOOK, "--eligible-of", "Read"], input="cat /x",
+                           capture_output=True, text=True, env=self.env(), timeout=180)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "exempt-tool")
 
 
 # ============================================================== the CLI
@@ -1497,6 +1622,11 @@ class CliTest(GateCase):
                     {"t": "fail", "ts": 6, "sig": "cSxS-eSxS", "ck": "cSxS", "ec": "?",
                      "tool": "Bash", "norm": "many --sessions", "cmd": "many --sessions",
                      "err": "e", "session": "many%d" % i, "tuid": "tm%d" % i}) + "\n")
+            # LESSON at ITS widest, `dismissed`, which needs a dismiss row for a signature
+            # already in the table. Appended rather than run through the CLI because the
+            # signature is one this test synthesised in the first place.
+            fh.write(json.dumps({"t": "dismiss", "ts": 7, "sig": widest_sig,
+                                 "session": "cli", "why": "known"}) + "\n")
         self.assertGreater(len(long_tool), len("TOOL"))
         self.assertGreater(len(str(sess_count)), len("SESS"))
 
@@ -1509,7 +1639,8 @@ class CliTest(GateCase):
         self.assertIn(long_tool, flat)
         self.assertIn(str(sess_count), flat)
         for label, marker in (("RECOVERY", "(if .recovery"),
-                              ("GATE", "(if .transient_sessions")):
+                              ("GATE", "(if .transient_sessions"),
+                              ("LESSON", "(if .lesson_dismissed")):
             alts = self.producer_alternatives(marker)
             self.assertTrue(alts, "no alternatives found for %s" % label)
             widest = max(alts, key=len)
@@ -1685,6 +1816,55 @@ class CostTest(GateCase):
 
     def test_a_store_at_the_cap_of_distinct_signatures_is_the_figure_to_quote(self):
         self.time_hook("distinct signatures", 100000)
+
+    def test_the_lesson_gate_on_its_expensive_path(self):
+        """THE LESSON GATE SHIPS ON, so its cost is the one every user pays. There are two
+        figures and only one of them is common.
+
+        The CHEAP path is what the two tests above already measure: with no recovery bound
+        in the session there is no `lessons/<sid>` directory and the arm leaves on one
+        `[ -d ]`, which is why their figures did not move when it landed.
+
+        This is the OTHER path -- a session that HAS bound a recovery -- and it parses the
+        store and the ledger on top of everything else. It is bounded per signature per
+        session rather than per tool call, because the marker is removed as soon as the
+        signature is judged unable to qualify; this measures one of those few, at the
+        store's byte cap, which is the worst case there is."""
+        n, size, distinct = self.fill(100000)
+        # A real failure and a real success, so the marker is written by the real arm --
+        # and a RAISED CAP for those two calls only. The learn arm rotates the store at
+        # HALF the read budget, so a failure recorded at the default cap archives the
+        # 4 MB file this test just built and leaves a two-row one behind. Measured: that
+        # is what a first draft of this test did, and it reported 0.08s for a query that
+        # never saw the store. The PreToolUse below runs at the ordinary cap.
+        big = 8 * 4194304
+        self.tick(); self.run_hook(self.failure("gh pr list --limit 5", "s999"),
+                                   REPEAT_GATE_MAX_BYTES=big)
+        self.tick(); self.run_hook(self.success("curl -s https://x/y", "s999"),
+                                   REPEAT_GATE_MAX_BYTES=big)
+        self.assertGreater(os.path.getsize(self.store), size,
+                           "the store was rotated out from under the measurement")
+        marker = os.path.join(self.state, "repeats", "lessons", "s999")
+        self.assertTrue(os.path.isdir(marker), "no lesson marker to measure against")
+        with open(os.path.join(self.state, "ledger.jsonl"), "w", encoding="utf-8") as fh:
+            for i in range(2000):
+                fh.write(json.dumps({"event": "note", "ts": i, "id": "n%d" % i,
+                                     "text": "x" * 120}) + "\n")
+        self.tick()
+        t0 = time.time()
+        r = self.run_hook(self.attempt("npm install left-pad", "s999"),
+                          REPEAT_GATE_REFUSE=None)
+        elapsed = time.time() - t0
+        print("\n[cost] lesson gate/expensive path: %d rows, %d distinct signatures, "
+              "%d bytes + a %d-byte ledger, whole-hook wall time %.2fs"
+              % (n, distinct, size, os.path.getsize(
+                  os.path.join(self.state, "ledger.jsonl")), elapsed))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(elapsed, 5.0,
+                        "the lesson gate took %.2fs at the store's cap" % elapsed)
+        # NON-VACUITY: it really did the work -- the marker is gone, which only the arm
+        # that read the store can do.
+        self.assertEqual([f for f in os.listdir(marker) if f.startswith("s-")], [])
 
 
 class CliCostTest(CostTest):
@@ -2341,7 +2521,14 @@ class InstrumentAgreementTest(GateCase):
         # left as `-`, which would mean the count rule and the table disagree.
         body = [l for l in out.splitlines() if l.startswith("c")]
         self.assertEqual(len(body), len(self.MIX))
-        self.assertEqual([l for l in body if " - " in l], [])
+        # READ OUT OF THE GATE COLUMN AND NOT OUT OF THE WHOLE LINE. This was
+        # `" - " in l`, and that stopped being a question about the GATE column the day
+        # LESSON was added beside it: none of these signatures has a recovery, so every
+        # one of them prints a legitimate `-` under LESSON and the substring matched all
+        # six. The header is the ruler here as everywhere else in this table.
+        hdr = [l for l in out.splitlines() if l.startswith("SIGNATURE")][0]
+        gate = [l[hdr.index("GATE"):hdr.index("LESSON")].strip() for l in body]
+        self.assertEqual([v for v in gate if v == "-"], [], gate)
 
     def test_a_skill_signature_at_the_threshold_is_not_reported_as_refusing(self):
         """The refuse arm is Bash-only and says so; the CLI reported `refuses` for a
@@ -2389,6 +2576,635 @@ class InstrumentAgreementTest(GateCase):
         self.assertEqual(cli, denied,
                          "on the live store skillrepeat says %d and the gate denies %d"
                          % (cli, denied))
+
+
+# ============================================================== cross-tool recovery
+class CrossToolRecoveryTest(GateCase):
+    """A failure of tool X bound to a success of tool Y, on shared content tokens.
+
+    This is the maintainer's own example on the wire: the GitHub tool dies and the session
+    gets it done with `gh`. Until 2026-09-03 the recovery arm bound only the same tool, so
+    that pair was never recorded and the store never learned the one fix it was built for.
+
+    THE MCP PAYLOADS HERE ARE FED TO THE HOOK DIRECTLY. That used to be the only way one
+    could arrive at all -- the matcher was `Bash|Skill` on all three events -- and since
+    2026-09-03 the two learning events carry `Bash|Skill|mcp__.*`, so the platform may
+    deliver one (WiringTest pins the matchers per event). What is STILL unestablished is
+    whether it does: no MCP tool failure has been observed arriving at a hook here. These
+    tests establish that the RULE handles such a payload, not that anything is being
+    learned from MCP calls on this machine."""
+
+    MCP = "mcp__github__create_issue"
+    MCP_ERR = ("Exit code 1\nHTTP 403: Resource not accessible by integration")
+
+    def recoveries(self):
+        return [r for r in self.rows() if r["t"] == "recover"]
+
+    def test_an_mcp_failure_and_a_gh_success_bind_cross_tool(self):
+        self.tick()
+        self.run_hook(self.failure(
+            {"owner": "ContextLab", "repo": "claude-skill-compounder", "title": "x"},
+            "s1", error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        self.run_hook(self.success(
+            'gh issue create --repo ContextLab/claude-skill-compounder --title "x"', "s1"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertTrue(rec[0]["cross_tool"])
+        self.assertEqual(rec[0]["tool"], "Bash")
+        self.assertIn("gh issue create --repo ContextLab/claude-skill-compounder",
+                      rec[0]["norm"])
+        # The row is filed under the FAILING call's signature, which is the whole point:
+        # a later session asking "what worked for this" has to find it there.
+        fail_row = [r for r in self.rows() if r["t"] == "fail"][0]
+        self.assertEqual(rec[0]["sig"], fail_row["sig"])
+
+    def test_a_skill_failure_and_a_bash_success_bind_cross_tool(self):
+        """`tool_input.skill` is where a Skill call's name arrives (measured 2026-08-26,
+        docs/CLAUDE-CODE-BEHAVIOR.md), so the tokens come out of the skill name."""
+        self.tick()
+        self.run_hook(self.failure({"skill": "github-issue-triage"}, "s1",
+                                   error="Exit code 1\nUnknown skill", tool="Skill"))
+        self.tick()
+        self.run_hook(self.success("gh issue list --repo github/docs", "s1"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertTrue(rec[0]["cross_tool"])
+        self.assertEqual(rec[0]["tool"], "Bash")
+
+    def test_a_same_tool_recovery_still_binds_and_is_not_marked_cross_tool(self):
+        """The rule that was here first, unchanged, and NOT relabelled: a reader weighing
+        the two kinds of evidence has to be able to tell them apart."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick(); self.run_hook(self.success("curl -s https://api.github.com/x", "s1"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1)
+        self.assertNotIn("cross_tool", rec[0], rec[0])
+
+    def test_no_binding_when_the_tokens_do_not_overlap(self):
+        self.tick()
+        self.run_hook(self.failure({"owner": "ContextLab", "repo": "skill-compounder"},
+                                   "s1", error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        self.run_hook(self.success("brew upgrade sqlite", "s1"))
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    def test_one_shared_token_is_not_enough(self):
+        """NON-VACUITY for the threshold: one token in common, everything else different,
+        and nothing binds -- so the bindings above are not simply binding everything."""
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder"}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        self.run_hook(self.success("brew upgrade compounder", "s1"))
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    def test_the_token_threshold_is_configurable(self):
+        """Counted as a DELTA and in a fresh session each time. The store is append-only,
+        so a test that read the running total would report the previous round's row as
+        this round's binding and pass whatever the knob did."""
+        def bound_under(min_tokens, session):
+            before = len(self.recoveries())
+            self.tick()
+            self.run_hook(self.failure({"repo": "claude-skill-compounder"}, session,
+                                       error=self.MCP_ERR, tool=self.MCP),
+                          REPEAT_RECOVERY_MIN_TOKENS=min_tokens)
+            self.tick()
+            self.run_hook(self.success("gh repo view claude-skill-compounder", session),
+                          REPEAT_RECOVERY_MIN_TOKENS=min_tokens)
+            return len(self.recoveries()) - before
+        # `repo`, `claude`, `skill`, `compounder` are the four shared tokens.
+        self.assertEqual(bound_under(2, "a"), 1, "the default did not bind")
+        self.assertEqual(bound_under(4, "b"), 1, "exactly four shared tokens did not bind")
+        self.assertEqual(bound_under(5, "c"), 0, "a threshold of five bound anyway")
+        self.assertEqual(bound_under(0, "d"), 0, "0 must switch cross-tool binding off")
+
+    def test_zero_tokens_disables_cross_tool_without_touching_the_same_tool_rule(self):
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder"}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP),
+                      REPEAT_RECOVERY_MIN_TOKENS=0)
+        self.tick()
+        self.run_hook(self.success("gh repo view claude-skill-compounder", "s1"),
+                      REPEAT_RECOVERY_MIN_TOKENS=0)
+        self.assertEqual(self.recoveries(), [])
+        self.tick(); self.run_hook(self.failure("gh pr list", "s2"),
+                                   REPEAT_RECOVERY_MIN_TOKENS=0)
+        self.tick(); self.run_hook(self.success("gh pr status", "s2"),
+                                   REPEAT_RECOVERY_MIN_TOKENS=0)
+        self.assertEqual(len(self.recoveries()), 1, "the same-tool rule was switched off")
+
+    def test_the_window_bounds_a_cross_tool_binding_too(self):
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder"}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP))
+        for i in range(5):
+            self.tick()
+            self.run_hook(self.filler("s1", i))
+        self.tick()
+        self.run_hook(self.success("gh repo view claude-skill-compounder", "s1"))
+        self.assertEqual(self.recoveries(), [],
+                         "a cross-tool success past the window was bound anyway")
+
+    def test_inside_the_window_the_same_pair_does_bind(self):
+        """NON-VACUITY for the window test above: two intervening calls instead of five."""
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder"}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP))
+        for i in range(2):
+            self.tick()
+            self.run_hook(self.filler("s1", i))
+        self.tick()
+        self.run_hook(self.success("gh repo view claude-skill-compounder", "s1"))
+        self.assertEqual(len(self.recoveries()), 1)
+
+    def test_the_placeholders_contribute_no_tokens(self):
+        """`<S>`, `<N>` and `<P>` are in EVERY normalised call, so if they counted, any two
+        masked calls would share three tokens and bind. They survive the split as single
+        letters and the length rule drops them; nothing names them."""
+        self.tick()
+        self.run_hook(self.failure({"note": "zzz", "count": 7, "where": "/aa/bb/cc"},
+                                   "s1", error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        self.run_hook(self.success('grep -n "qqq" /xx/yy/zz 41', "s1"))
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    def test_a_recovery_of_a_second_armed_failure_is_still_one_per_failure(self):
+        """Two armed failures whose tokens both overlap the one success: each is bound
+        once, and neither is bound twice."""
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder", "a": 1}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder", "b": 2}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        self.run_hook(self.success("gh repo view claude-skill-compounder", "s1"))
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 2, self.rows())
+        self.assertEqual(len({r["sig"] for r in rec}), 2)
+
+    def test_a_double_delivered_success_writes_one_cross_tool_row(self):
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder"}, "s1",
+                                   error=self.MCP_ERR, tool=self.MCP))
+        self.tick()
+        p = self.success("gh repo view claude-skill-compounder", "s1", tuid="toolu_same")
+        self.run_hook(p)
+        self.run_hook(p)
+        self.assertEqual(len(self.recoveries()), 1, self.rows())
+
+
+# ============================================================== the lesson statement
+class LessonStatementTest(GateCase):
+    """THE FIRST TIME: SAY IT. A recovery used to write a row into a file nobody reads
+    mid-session. The arm now states the fact at the moment both halves are known."""
+
+    def context_of(self, r):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if not r.stdout.strip():
+            return None
+        d = json.loads(r.stdout)
+        hso = d["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PostToolUse")
+        return hso["additionalContext"]
+
+    def recover_once(self, session="s1", cmd="gh pr list --limit 5",
+                     fix="curl -s https://api.github.com/repos/a/b/pulls", **kw):
+        self.tick(); self.run_hook(self.failure(cmd, session, **kw))
+        self.tick()
+        return self.run_hook(self.success(fix, session))
+
+    def test_the_statement_names_the_failure_the_fix_and_both_commands(self):
+        ctx = self.context_of(self.recover_once())
+        self.assertIsNotNone(ctx, "the recovery arm said nothing at all")
+        sig = [r for r in self.rows() if r["t"] == "fail"][0]["sig"]
+        self.assertIn("gh pr list --limit <N>", ctx)
+        self.assertIn("gh: command not found", ctx)
+        self.assertIn("curl -s https:/<P>/pulls", ctx)
+        self.assertIn("skillnote add --lesson %s" % sig, ctx)
+        self.assertIn("skillrepeat dismiss %s --why" % sig, ctx)
+
+    def test_it_is_a_statement_and_carries_no_imperative(self):
+        """Measured (PLATFORM FACTS 4): the model treats text arriving through a hook as
+        untrusted and refuses directives in it, so an imperative is both ignored and
+        misleading about who is asking. This asserts the shape, not the model."""
+        ctx = self.context_of(self.recover_once())
+        first_words = [ln.strip().split(" ")[0].lower()
+                       for ln in ctx.split("\n") if ln.strip()]
+        for bad in ("run", "write", "record", "please", "you", "do", "call", "use"):
+            self.assertNotIn(bad, first_words, "imperative opener %r in:\n%s" % (bad, ctx))
+
+    def test_the_statement_stays_under_seven_hundred_characters(self):
+        """Measured against input that saturates both normalisers, not against a typical
+        command: the caps inside the builder are what has to hold, and the widest input
+        the gate can produce is the only thing that tests them."""
+        ctx = self.context_of(self.recover_once(cmd=SATURATING_CMD, error=SATURATING_ERR,
+                                                fix=SATURATING_CMD.replace("gh ", "curl ")))
+        self.assertIsNotNone(ctx)
+        self.assertLess(len(ctx), 700, "the statement is %d characters:\n%s"
+                        % (len(ctx), ctx))
+        # ...and it is not short because the pieces went missing.
+        self.assertGreater(len(ctx), 300, ctx)
+        self.assertIn("skillnote add --lesson", ctx)
+        self.assertIn("skillrepeat dismiss", ctx)
+
+    def test_a_cross_tool_recovery_says_it_too(self):
+        self.tick()
+        self.run_hook(self.failure({"repo": "claude-skill-compounder"}, "s1",
+                                   error="Exit code 1\nHTTP 403: not accessible",
+                                   tool="mcp__github__create_issue"))
+        self.tick()
+        ctx = self.context_of(self.run_hook(
+            self.success("gh repo view claude-skill-compounder", "s1")))
+        self.assertIsNotNone(ctx)
+        self.assertIn("gh repo view claude-skill-compounder", ctx)
+
+    def test_once_per_signature_per_session(self):
+        """A second, genuinely different recovery of the same signature later in the
+        session writes its row and says nothing: the session has already been told."""
+        first = self.context_of(self.recover_once())
+        self.assertIsNotNone(first)
+        second = self.context_of(self.recover_once(fix="python3 -c import urllib"))
+        self.assertIsNone(second, "the arm said it twice in one session:\n%s" % second)
+        self.assertEqual(len([r for r in self.rows() if r["t"] == "recover"]), 2)
+
+    def test_a_double_delivered_success_says_it_once(self):
+        """Both wirings deliver every event twice. The duplicate is dropped by the arm's
+        own claim before it reaches the statement, and this pins that it stays dropped."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1"))
+        self.tick()
+        p = self.success("curl -s https://x/y", "s1", tuid="toolu_same_s")
+        self.assertIsNotNone(self.context_of(self.run_hook(p)))
+        self.assertIsNone(self.context_of(self.run_hook(p)))
+
+    def test_a_different_session_is_told_as_well(self):
+        """Per session, not per store: a fresh session has not seen the first statement."""
+        self.assertIsNotNone(self.context_of(self.recover_once("s1")))
+        self.assertIsNotNone(self.context_of(self.recover_once("s2")))
+
+    def test_a_success_that_binds_nothing_says_nothing(self):
+        self.tick()
+        self.assertIsNone(self.context_of(
+            self.run_hook(self.success("echo hello", "s1"))))
+
+
+# ============================================================== the lesson gate
+class LessonGateTest(GateCase):
+    """THE SECOND TIME: REFUSE UNTIL IT IS WRITTEN.
+
+    `REPEAT_GATE_REFUSE` is DELETED throughout this class. The lesson gate ships ON and
+    the repeat arm ships OFF, so a test that left the repeat arm switched on could not
+    tell which rule produced a refusal -- and the configuration under test here is the
+    shipped one."""
+
+    ERR = "Exit code 127\ngh: command not found"
+
+    def env(self, **extra):
+        extra.setdefault("REPEAT_GATE_REFUSE", None)
+        return GateCase.env(self, **extra)
+
+    def sig(self):
+        return [r for r in self.rows() if r["t"] == "fail"][0]["sig"]
+
+    def fail_then_fix(self, session, cmd="gh pr list --limit 5",
+                      fix="curl -s https://api.github.com/repos/a/b/pulls", **kw):
+        self.tick(); self.run_hook(self.failure(cmd, session, error=self.ERR), **kw)
+        self.tick(); self.run_hook(self.success(fix, session), **kw)
+
+    def probe(self, session="s2", command="npm install left-pad", **kw):
+        self.tick()
+        return self.run_hook(self.attempt(command, session), **kw)
+
+    def assert_lesson_deny(self, r):
+        reason = self.assert_denied(r)
+        self.assertIn("No lesson references this signature yet", reason)
+        return reason
+
+    # ------------------------------------------------------------------ the rule
+    def test_the_first_session_is_told_and_not_refused(self):
+        self.fail_then_fix("s1")
+        self.assert_allowed(self.probe("s1"))
+
+    def test_the_second_session_is_refused(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        reason = self.assert_lesson_deny(self.probe("s2"))
+        self.assertIn("gh pr list --limit <N>", reason)
+        self.assertIn("gh: command not found", reason)
+        self.assertIn("curl -s https:/<P>/pulls", reason)
+        self.assertIn("skillnote add --lesson %s" % self.sig(), reason)
+        self.assertIn("skillrepeat dismiss %s" % self.sig(), reason)
+        self.assertIn("lifts the moment either command has been run", reason)
+
+    def test_a_session_that_recovered_nothing_is_never_refused(self):
+        """The gate is keyed on a recovery bound in THIS session, so a session that only
+        watched the failure happen is not asked to write anything down."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.tick(); self.run_hook(self.failure("gh pr list --limit 5", "s3",
+                                                error=self.ERR))
+        self.assert_allowed(self.probe("s3"))
+
+    def test_the_threshold_is_REPEAT_MIN_SESSIONS(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_allowed(self.probe("s2", REPEAT_MIN_SESSIONS=3))
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3", REPEAT_MIN_SESSIONS=3))
+
+    # ------------------------------------------------------------------ what lifts it
+    def write_lesson_row(self, sig, note_id="n1x1"):
+        """The CONTRACT with bin/skillnote: a `note` ledger row carrying `lesson_sig`.
+        Written here as a real row in a real file -- the reader under test is this hook,
+        and what it reads is a line of JSON on disk whoever put it there.
+        tests/test_skillrepeat.py::LiveSkillnoteTest drives the REAL writer into the real
+        reader, which is what keeps this shape from becoming its own definition."""
+        path = os.path.join(self.state, "ledger.jsonl")
+        os.makedirs(self.state, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": "note", "action": "add", "ts": self.clock,
+                                 "id": note_id, "kind": "note", "scope": "project",
+                                 "text": "gh is not on PATH here; curl the API instead.",
+                                 "lesson_sig": sig, "session": "cli"}) + "\n")
+        return path
+
+    def write_lesson_removal(self, note_id="n1x1"):
+        """`skillnote remove <id>` appends this and DELETES NOTHING -- the same append-only
+        discipline `forget` and `dismiss` follow. The row carries the note id and not the
+        signature, so the join has to be on the id."""
+        path = os.path.join(self.state, "ledger.jsonl")
+        os.makedirs(self.state, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": "note", "action": "remove", "ts": self.clock,
+                                 "id": note_id, "session": "cli"}) + "\n")
+        return path
+
+    def test_a_lesson_ledger_row_lifts_it(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.write_lesson_row(self.sig())
+        self.assert_allowed(self.probe("s2"))
+
+    def test_a_ledger_row_for_another_signature_does_not_lift_it(self):
+        """NON-VACUITY: the reader matches on the signature and not on the presence of a
+        ledger. A row that names something else leaves the refusal exactly where it was."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.write_lesson_row("c1x1-e1x1")
+        self.assert_lesson_deny(self.probe("s2"))
+
+    def test_a_withdrawn_lesson_is_not_a_standing_one(self):
+        """The ledger is append-only on both sides: `skillnote remove <id>` appends a
+        removal and leaves the add row where it was. A reader matching on `lesson_sig`
+        alone would treat a withdrawn lesson as standing while the note itself was gone
+        from the CLAUDE.md it was meant to be read from."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.write_lesson_row(self.sig(), note_id="n7x7")
+        self.tick()
+        self.write_lesson_removal("n7x7")
+        self.assert_lesson_deny(self.probe("s2"))
+
+    def test_a_removal_of_a_different_note_leaves_the_lesson_standing(self):
+        """NON-VACUITY: the subtraction is by id, not by the presence of any removal."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.write_lesson_row(self.sig(), note_id="n7x7")
+        self.write_lesson_removal("n8x8")
+        self.assert_allowed(self.probe("s2"))
+
+    def test_a_lesson_withdrawn_after_the_gate_saw_it_does_not_re_arm_this_session(self):
+        """A LIMIT, ASSERTED RATHER THAN LEFT TO BE DISCOVERED, and it is the price of the
+        marker sweep: once the gate has judged a signature settled it removes the marker,
+        so a lesson withdrawn LATER in the same session is not noticed until the next
+        session binds a recovery for that signature. The alternative is re-parsing the
+        store and the ledger on every remaining tool call of the session, at the cost
+        printed by CostTest, to catch a person un-writing a lesson minutes after writing
+        it. The window is one session and the deny budget is two, so nothing is lost that
+        the next session does not offer again."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.write_lesson_row(self.sig(), note_id="n7x7")
+        self.assert_allowed(self.probe("s2", command="npm install a"))
+        self.tick()
+        self.write_lesson_removal("n7x7")
+        self.assert_allowed(self.probe("s2", command="npm install b"))
+        # ...and the next session that recovers it is armed again, so this is a delay and
+        # not a hole.
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3", command="npm install c"))
+
+    def test_a_row_with_no_action_field_is_read_as_an_add(self):
+        """Rows written before `action` existed carry none, and dropping them would
+        silently un-record every lesson recorded before that field landed."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        path = os.path.join(self.state, "ledger.jsonl")
+        os.makedirs(self.state, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": "note", "ts": 1, "id": "nOld",
+                                 "lesson_sig": self.sig(),
+                                 "text": "an older row"}) + "\n")
+        self.assert_allowed(self.probe("s2"))
+
+    def test_a_note_row_with_no_lesson_sig_does_not_lift_it(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        path = os.path.join(self.state, "ledger.jsonl")
+        os.makedirs(self.state, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": "note", "action": "add", "ts": 1,
+                                 "text": "an ordinary note"}) + "\n")
+        self.assert_lesson_deny(self.probe("s2"))
+
+    def test_skillrepeat_dismiss_lifts_it(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        r = self.run_cli("dismiss", self.sig(), "--why", "gh is not installed here")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assert_allowed(self.probe("s2"))
+
+    def test_a_dismissal_suppresses_nothing_it_only_ends_the_demand(self):
+        """`dismiss` is not `forget`. Every count the store reports is identical before
+        and after one, which is what makes the two commands worth having separately."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        before = json.loads(self.run_cli("list", "--json").stdout)
+        self.run_cli("dismiss", self.sig(), "--why", "known")
+        after = json.loads(self.run_cli("list", "--json").stdout)
+        for key in ("sessions", "failures", "suppressed", "forgotten", "recovery"):
+            self.assertEqual([e[key] for e in before], [e[key] for e in after], key)
+
+    def test_a_tombstone_takes_the_count_below_the_threshold(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.tick()
+        r = self.run_cli("forget", self.sig(), SKILLREPEAT_NOW=self.clock)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assert_allowed(self.probe("s2"))
+
+    # ------------------------------------------------------------------ and it lets go
+    def test_it_is_capped_at_REPEAT_LESSON_MAX_DENIES(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_lesson_deny(self.probe("s2", command="npm install a"))
+        self.assert_lesson_deny(self.probe("s2", command="npm install b"))
+        self.assert_allowed(self.probe("s2", command="npm install c"))
+        self.assert_allowed(self.probe("s2", command="npm install d"))
+
+    def test_the_cap_is_configurable(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_lesson_deny(self.probe("s2", command="npm install a",
+                                           REPEAT_LESSON_MAX_DENIES=1))
+        self.assert_allowed(self.probe("s2", command="npm install b",
+                                       REPEAT_LESSON_MAX_DENIES=1))
+
+    def test_a_cap_of_zero_refuses_nothing(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_allowed(self.probe("s2", REPEAT_LESSON_MAX_DENIES=0))
+
+    def test_a_double_delivered_pretooluse_refuses_once_and_spends_one(self):
+        """Both wirings deliver the same event twice. Two refusals for one call is the
+        outcome ranked worse than a missed one, and a duplicate must not eat the budget."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.tick()
+        p = self.attempt("npm install left-pad", "s2", tuid="toolu_dup")
+        self.assert_lesson_deny(self.run_hook(p))
+        self.assert_allowed(self.run_hook(p))
+        # ...and the second delivery did not spend the second refusal.
+        self.assert_lesson_deny(self.probe("s2", command="npm install other"))
+
+    # ------------------------------------------------------------------ what it spares
+    def test_the_two_commands_that_lift_it_are_never_themselves_refused(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        for command in ('skillnote add --lesson %s "gh is missing"' % self.sig(),
+                        "skillrepeat dismiss %s --why x" % self.sig(),
+                        "bash -c 'skillnote list' && echo ok"):
+            self.assert_allowed(self.probe("s2", command=command))
+
+    def test_the_head_allowlists_are_honoured(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        for command in ("cd /tmp", "git status", "ls -la", "jq . x.json",
+                        "./run_tests.sh", "pytest tests/", "npm test"):
+            self.assert_allowed(self.probe("s2", command=command))
+        # NON-VACUITY: the same session, one command off both lists, is refused.
+        self.assert_lesson_deny(self.probe("s2", command="npm install left-pad"))
+
+    def test_a_skill_call_is_never_refused_by_it(self):
+        """Bash-only, for the reason the repeat arm is Bash-only: neither escape hatch
+        exists for a Skill call, and refusing one blocks the mechanism this package
+        exists to promote."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.tick()
+        self.assert_allowed(self.run_hook(self.attempt({"skill": "anything"}, "s2",
+                                                       tool="Skill")))
+
+    def test_a_call_with_no_tool_use_id_is_not_refused(self):
+        """An unclaimed refusal is emitted TWICE under the double delivery both wirings
+        produce. The learn arm can afford an unclaimed event and a refusal cannot."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.tick()
+        p = self.attempt("npm install left-pad", "s2")
+        del p["tool_use_id"]
+        self.assert_allowed(self.run_hook(p))
+
+    def test_with_both_refusals_armed_only_one_deny_is_emitted(self):
+        """Two rules on one event, and a call can satisfy both. The reason a session gets
+        must be ONE object -- two concatenated JSON documents on stdout is not a deny, it
+        is a parse error -- so the lesson gate exits the script when it has spoken."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.tick()
+        r = self.run_hook(self.attempt("gh pr list --limit 5", "s3"),
+                          REPEAT_GATE_REFUSE=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # One document, not two: json.loads on the whole of stdout is the assertion.
+        reason = self.assert_lesson_deny(r)
+        self.assertNotIn("already failed in", reason,
+                         "the repeat arm's reason was concatenated onto the lesson one")
+        # NON-VACUITY: the repeat arm really would have denied this call on its own.
+        self.tick()
+        self.assertIn("already failed in",
+                      self.assert_denied(self.run_hook(
+                          self.attempt("gh pr list --limit 5", "s9"),
+                          REPEAT_GATE_REFUSE=1)))
+
+    # ------------------------------------------------------------------ the knob
+    def test_REPEAT_LESSON_GATE_0_refuses_nothing(self):
+        self.fail_then_fix("s1", REPEAT_LESSON_GATE=0)
+        self.fail_then_fix("s2", REPEAT_LESSON_GATE=0)
+        self.assert_allowed(self.probe("s2", REPEAT_LESSON_GATE=0))
+
+    def test_only_the_literal_zero_switches_it_off(self):
+        """The REVERSE spelling from REPEAT_GATE_REFUSE, and deliberately: this knob ships
+        ON, so a typo must land on the documented default rather than silently off."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        for value in ("false", "no", "", "00", "1"):
+            self.assert_lesson_deny(self.probe("s2", command="npm install %s" % value,
+                                               REPEAT_LESSON_GATE=value,
+                                               REPEAT_LESSON_MAX_DENIES=99))
+
+    def test_the_off_switch_stops_it_with_everything_else(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.assert_allowed(self.probe("s2", SKILL_COMPOUNDER_REPEAT_GATE=0))
+
+    # ------------------------------------------------------------------ fail open
+    def test_an_unreadable_ledger_refuses_nothing(self):
+        """Fails CLOSED ON DENYING, which is the opposite direction from the store reads:
+        a refusal whose escape cannot be verified is a trap."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        path = self.write_lesson_row("something-else")
+        os.chmod(path, 0)
+        try:
+            self.assert_allowed(self.probe("s2"))
+        finally:
+            os.chmod(path, 0o644)
+        # NON-VACUITY: readable again, same store, and it refuses.
+        self.assert_lesson_deny(self.probe("s2", command="npm install other"))
+
+    def test_a_ledger_over_the_byte_cap_refuses_nothing(self):
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        path = os.path.join(self.state, "ledger.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x" * 4096)
+        self.assert_allowed(self.probe("s2", REPEAT_GATE_MAX_BYTES=2048))
+
+    def test_a_session_that_bound_no_recovery_costs_no_store_read(self):
+        """The cheap path, which is the one that matters because this arm ships ON: with
+        no `lessons/<sid>` directory the gate leaves on a single `[ -d ]`. Asserted by
+        making the store unreadable -- anything that opened it would fail differently --
+        and by the marker directory genuinely not existing."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1", error=self.ERR))
+        lessons = os.path.join(self.state, "repeats", "lessons")
+        self.assertFalse(os.path.exists(os.path.join(lessons, "s1")), lessons)
+        os.chmod(self.store, 0)
+        try:
+            self.assert_allowed(self.probe("s1"))
+        finally:
+            os.chmod(self.store, 0o644)
+
+    def test_the_marker_is_spent_and_the_store_is_not_reread_all_session(self):
+        """A signature judged unable to qualify has its marker removed, so the next tool
+        call in the session does not re-parse the store to reach the same answer."""
+        self.fail_then_fix("s1")
+        marker_dir = os.path.join(self.state, "repeats", "lessons", "s1")
+        self.assertTrue(os.listdir(marker_dir), marker_dir)
+        self.assert_allowed(self.probe("s1"))
+        self.assertEqual([n for n in os.listdir(marker_dir) if n.startswith("s-")], [],
+                         "the marker survived a verdict that cannot change this session")
 
 
 if __name__ == "__main__":
