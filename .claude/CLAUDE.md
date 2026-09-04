@@ -244,11 +244,21 @@ under two names. Every delivery appends a row to `<state>/mission/hits.jsonl` (`
 bash counts characters only in a UTF-8 locale and bytes otherwise, and these hooks run
 under whatever environment the harness hands them, so a column that is codepoints on one
 machine and bytes on the next is the dead-measurement shape of 2026-09-02 all over again.
-Two limits stand. `PreToolUse` on `Agent` can rewrite a subagent's prompt through
+One limit stands. `PreToolUse` on `Agent` can rewrite a subagent's prompt through
 `updatedInput`, measured working, and this design declines that channel in favour of
 `SubagentStart`, which says the same thing where the parent can read it; the reasoning is
-in `docs/DESIGN.md`. And `<state>/mission/<sid>/` has no prune yet -- one byte per tool
-call and one empty directory per claimed event accumulate there, and nothing removes them.
+in `docs/DESIGN.md`. The other one closed on 2026-09-03: `<state>/mission/<sid>/` gains one
+byte per tool call and one empty directory per claimed event, and it now sweeps itself the
+way `hooks/remind.sh` does. `prune_stale_sessions()` (`hooks/mission.sh:413`) removes
+ANOTHER session's `<sid>/` whose mtime is more than `MISSION_PRUNE_TTL` (604800) behind
+`MISSION_NOW`, on a 1-in-`MISSION_PRUNE_EVERY` (25; `0` switches the sweep off) draw,
+walking one level under `<state>/mission/` only -- so `hits.jsonl` is a file the
+directory-only glob never lists, the sweeping session's own tree is skipped whatever its
+age, and a name outside the sanitiser's own charset was put there by something else and is
+left alone. It has ONE call site (`hooks/mission.sh:499`), the periodic `PreToolUse` arm's
+not-yet-due exit: the most frequent event this hook sees and the one that delivers nothing,
+so an event about to emit never pays for a `stat` over every directory.
+`tests/test_mission.py::PruneTest` drives both exclusions.
 
 **Five hooks can refuse a turn; `hooks/claim-gate.sh` is the one whose evidence rule is
 an exclusion.** It dispatches on `.hook_event_name` and takes no argv: on `Stop` it judges
@@ -301,13 +311,42 @@ later calls, by a success of a DIFFERENT tool whose normalised input shares at l
 `REPEAT_RECOVERY_MIN_TOKENS` (2) content tokens with the failed one binds as the recovery
 and writes `"cross_tool":true` on the row (`toks_of`, `overlap_count` and the binding in
 `hooks/repeat-gate.sh`; the line numbers move, the function names do not). A content token
-is a lowercased run of word characters, three or more, not all digits. The same-tool rule
-it extends is left alone, and `REPEAT_RECOVERY_MIN_TOKENS=0` turns cross-tool binding off
-without touching it. THE FIRST TIME, IT SAYS IT: when a `recover` row is written, the `PostToolUse` arm emits
+is a lowercased run of word characters, three or more, not all digits.
+`REPEAT_RECOVERY_MIN_TOKENS=0` turns cross-tool binding off.
+
+**The same-tool rule it extends is no longer left alone for a shell.** `Bash` is a universal
+shell, so two calls being the same tool says nothing about their being the same operation.
+Over the 231 distinct same-tool `Bash` bindings on the live store of 2026-09-03, 52 (22.5%)
+shared not one content token with the failure they were bound to and a further 31 shared
+exactly one, 11 of those only the word `echo`; and a binding CONSUMES its armed failure, so
+an unrelated success does not merely add a wrong row, it destroys the right one -- four
+`gh issue view` failures were disarmed by one `cat`. So a same-tool binding now wants
+`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` (2) shared content tokens whenever `shell_tool()`
+(`hooks/repeat-gate.sh:1010`, `Bash` and nothing else) says the tool is a shell. **That
+store grows, so re-run the join rather than quoting those figures back** -- late on the same
+day it stood at 241 bindings. A capped floor of `min(2, |fail tokens|)` was tried against it
+and admitted exactly one binding more, on the word `echo`, and was rejected. An exact
+self-recovery -- a success whose
+normalised call EQUALS the failure -- always binds, because the refusal arm's self-recovery
+exclusion is built on those rows and `pwd` carries one token. Non-shell tools are unchanged,
+and `0` restores the unconditional binding. What it gives up is a real fix sharing no text
+with the failure, which now degrades to silence, and silence is the direction this gate errs
+in everywhere else.
+
+THE FIRST TIME, IT SAYS IT: when a `recover` row is written, the `PostToolUse` arm emits
 `additionalContext` built by `lesson_statement` -- the failed call, the error head, the call
 that worked, and the two commands `skillnote add --lesson <sig> "<text>"` and `skillrepeat
 dismiss <sig> --why "<why>"` -- once per signature per session, as fact and not as an
-instruction. THE SECOND TIME, IT REFUSES: `lesson_gate` denies the next `Bash` call when a
+instruction. **One row per (signature, `tool_use_id`), and the statement names the call the
+row records.** N failures of one signature arm N separate pending lines and one success used
+to bind every one of them, writing N byte-identical `recover` rows -- four under a single
+`tool_use_id` on the live store -- while the `s-<sig>` marker was written after the loop for
+the FIRST bound signature only and overwritten on every later binding, so a signature the
+same success also bound was invisible to the lesson gate, and -- observed live on
+2026-09-03 -- the session was told `TEST_TIMEOUT=... ./run_tests.sh` while the marker was
+rewritten to `cat notes/OPEN-THREADS.md`. First binding wins now. `claim_once`
+covers only the duplicate the two wirings deliver; no claim can see a duplicate inside one
+event, so the de-duplication is the row's own. THE SECOND TIME, IT REFUSES: `lesson_gate` denies the next `Bash` call when a
 signature recovered in THIS session has fail rows from `REPEAT_MIN_SESSIONS` or more
 distinct EARLIER sessions, no `dismiss` row, and no standing lesson. Nothing else lifts it:
 running either of the two commands it prints does, and so does its own budget running out at
@@ -393,8 +432,23 @@ replaces the context with a summary, and its payload carries no `last_assistant_
 `source:"precompact"` into the same weekly queue. Three things to know before touching it.
 It is wired with **no matcher**, because `PreCompact`'s matcher selects the trigger and
 `manual` and `auto` name the same loss. It blocks the compaction while it runs, so its
-budget is process starts rather than bytes and `tests/test_precompact.py` pins the exec
-count rather than a stopwatch. And what must stay identical to `insight-capture.sh` is
+budget is process starts rather than bytes and `tests/test_precompact.py::ProcessCountTest`
+pins the exec count rather than a stopwatch: **13** programs on the candidate path and
+**4** on the empty one, `date` bounded separately (1 start on BSD, 2 on GNU), with zero
+slack -- verified by mutation, so shedding a program is a test change and adding one fails.
+Issue #8's 100 ms figure is now stated **per jq**, because no single number covers both
+builds on this machine. At n=25 interleaved over a 400 KB transcript at the default 256 KB
+bound (macOS 25.6.0, 2026-09-03) the system jq (jq-1.7.1-apple) runs 31.8 ms median /
+36.0 p90 with no candidate and 84.7 / 87.7 with one; anaconda's jq-1.6 runs 59.1 / 63.5 and
+123.0 / 128.9, so 100 ms holds for the system jq at p90 and 1.6 is about 125 ms. jq-1.6
+cannot be made to fit: its no-candidate path alone is 59 ms, shedding `git rev-parse` as
+well measured 106 ms, and a bash `.git` walk-up disagrees with `--show-toplevel` on
+symlinked paths, which on macOS is all of `/tmp`. `custom_instructions` **is** populated, on
+2.1.260: `/compact focus on the greeting` put that string in it verbatim, with no prefix,
+and a bare `/compact` left it null. The hook ignores the field and should -- its only return
+channel is `systemMessage`, which it never writes. Both probes answered "Not enough messages
+to compact." and the hook fired anyway, so it pays its cost on compactions that never
+happen. And what must stay identical to `insight-capture.sh` is
 `hash_of` and the `normalise` inside the candidate scan and nothing else -- that digest is
 the shared name the two scripts look one record up under, and it is the only thing keeping
 Stop and PreCompact from queueing the same sentence twice. The rationale is in
@@ -506,7 +560,12 @@ its matching `done` or `fail` are joined into forges; `origin`, `use`, `verdict`
 escalate`) are invisible to that join. A reader that classified by exclusion -- "anything
 that is not a start is an outcome" -- would have folded every `use` row into the forge
 count the day ledger v2 landed, so `tests/test_ledger_v2.py` pins both readers against a
-mixed ledger. Add an event type freely; never widen a selector to a negation.
+mixed ledger. Add an event type freely; never widen a selector to a negation. Rows carry
+fields as well as names, and #37 added three: `from` on `start`, `origin`, `apply` and
+`verdict`, holding the lineage id the event descends from; `session` on `start`; and
+`candidate` on the `note` rows `bin/skillnote` writes. None of them changes how a reader
+selects, and `apply` and `verdict` read `from` back off the ledger by name rather than
+asking a caller who ran the forge months earlier.
 
 **`--trigger` warns, it does not refuse.** Refusing does not produce a trigger, it
 produces no row at all: every caller written before the flag existed would exit non-zero,
@@ -578,15 +637,17 @@ the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
 `grep -rhoE '\b(CI|CLAUDE_SKILL_COMPOUNDER|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REPEAT_LESSON|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING|MISSION|SKILLCONTRIB)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **153** names, over
-**22** prefixes, as of 2026-09-03. A grep
+hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **156** names, over
+**22** prefixes, re-run 2026-09-03 on the #43 completion tree. A grep
 that reads gitignored `.pyc` files as source adds a `Binary file
 skill_compounder/__pycache__/installer.cpython-NN.pyc matches` line per cached bytecode
-file -- two on this checkout, so `/usr/bin/grep` answers 155 where the ugrep an agent
-shell gets answers 153; that is
+file -- two on this checkout, so `/usr/bin/grep` answers 158 where the ugrep an agent
+shell gets answers 156; that is
 the same split that makes the `skipTest` count above depend on which grep you have. Each
 hit was then read; re-run the command rather than trusting the list above if the two have
-drifted. **Five
+drifted. The three names that wave added -- `MISSION_PRUNE_TTL`, `MISSION_PRUNE_EVERY` and
+`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` -- all sit under prefixes the alternation already
+carried, so for once the command printed its own list unaided. **Five
 times now the command has been narrower than the list it introduces**: it named three prefixes when seven were in use,
 seven when fourteen were, fourteen when sixteen were, sixteen when seventeen were, and
 eighteen when nineteen were, so
@@ -687,17 +748,26 @@ cheap tier under it, `2026-09-02-tiers-design.md` for the two cheap tiers it ans
 `2026-09-02-forge-diet-design.md` for cutting the default forge to two agents and two
 rounds (issue #22), `2026-09-03-mission-and-lessons-design.md` for the mission and the
 lesson -- what the platform was measured to do on 2.1.259, the five moments, the cross-tool
-recovery and the two principles they answer -- and
+recovery and the two principles they answer -- `2026-09-03-issue43-completion-session.md`
+for the wave that closed #43 and #32 and built #37's lineage id, and
 `notes/research/` for the evidence behind the seed-pool selection, the
-insight queue, and the contribution mechanics. `notes/OPEN-THREADS.md` is the one file
+insight queue, the contribution mechanics, and, in
+`notes/research/level-b-search-measurement.md`, the two rounds of judged pairs that
+measured level B keyword search and kept it out of the skill.
+`notes/OPEN-THREADS.md` is the one file
 there that tracks current state rather than history, and its last section, "This machine",
 is operational debt on the author's box rather than a property of the code — nothing above
 that heading is machine-local, and nothing below it should be read as a repo-wide defect.
 Read the dated ones for reasoning, not for the current state of the code.
 
 The two hook constants (12 edits, 20 minutes) are unvalidated. `bin/skillreport` is the
-instrument that would settle them, and it needs real usage across several repositories
-over real time. Do not tune them before that data exists. That limit, and the two others
+instrument that would settle them, and since #37 it counts rather than estimates: its
+`REMINDER CONVERSION` block is a join on session and order, and its `FUNNEL` block reports
+each lineage id as delivered, acted on and outcome, with rows carrying no id reported
+UNATTRIBUTED rather than dropped. Every nudge written before 2026-09-03 carries no id, so
+the funnel's first weeks are mostly that column. Having the instrument is not having read
+one: it needs real usage across several repositories over real time, and neither number
+should move before that data exists. That limit, and the two others
 on every figure this repo quotes, are written up for a reader in
 `docs/measurement.md`; state them there rather than a fourth time somewhere else. The
 skill's own threshold is
@@ -714,4 +784,5 @@ there is nothing there to tune.
 - **2026-09-03** To watch a GitHub Actions run for a commit, filter 'gh run list --json headSha,status,conclusion' on a headSha prefix; 'gh run list --commit <sha>' returned nothing here and a watcher built on it timed out silently. <!-- id:n1407736601x223 source:session why:"2026-09-03: first CI watcher waited 27 minutes on an empty result; the headSha filter reported the verdict in one poll" -->
 - **2026-09-03** CI lints with apt's shellcheck 0.9.0 on Ubuntu and brew's 0.11.0 on macOS, and the two disagree at warning level (0.9.0 reports SC2120 where 0.11.0 is silent); before raising the floor or pushing a lint fix, run 'pip install shellcheck-py==0.9.0.6' into a scratch venv and lint with that binary too. <!-- id:n674753163x307 why:"2026-09-03: the floor rose to warning on a tree clean under brew's 0.11.0 and the Ubuntu job went red on SC2120 from apt's 0.9.0; the 0.9.0.6 wheel reproduced it locally in one call" -->
 - **2026-09-03** Before pushing, run the test files touched under a clean environment, env -i HOME=$(mktemp -d) PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin PYTHONPATH=$PWD python3 tests/<file>, because the CI runner lacks what this box has on PATH and in HOME; a suite green only here has gone red on CI twice in one day. <!-- id:n4188254070x320 why:"twice on 2026-09-03 a green local suite went red on CI because this box carries something the runner lacks: brew shellcheck 0.11.0 vs apt 0.9.0, then history-surfer on PATH satisfying doctor's surfer row" -->
+- **2026-09-04** In jq a function argument is evaluated against the input of the function it was passed to, so index(str(.session)) reads .session off the array; bin/skillinsight's pending_tsv and bin/skillreport's funnel both hit it — second occurrence 2026-09-03 <!-- id:n20301053x257 -->
 <!-- skillnote:end -->

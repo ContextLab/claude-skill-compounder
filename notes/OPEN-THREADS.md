@@ -1,7 +1,9 @@
 # Open threads
 
-What is actually open, as of **2026-09-03**, on `resume/after-v0.3.1` after `cec109c` (tags
-`v0.3.0` = `a2aa2d4`, `v0.3.1` = `b7f6a47`). CI is green on both platforms from `cfb2bc6`
+What is actually open, as of the **2026-09-03** completion wave for issue #43 (the clock
+crossed to 2026-09-04 during it), on `resume/after-v0.3.1` after `adf8a65` (tags
+`v0.3.0` = `a2aa2d4`, `v0.3.1` = `b7f6a47`), with that wave's code and docs on the working
+tree and not yet committed. CI is green on both platforms from `cfb2bc6`
 onward, the end-to-end journey passed 12/12 on `a2aa2d4`, and the paid review is opt-in.
 Issue #31 carries the status table; this file carries the threads behind it.
 
@@ -105,7 +107,7 @@ both install paths. Two known limits, neither a defect to fix blind:
 
 ## Open: unvalidated constants
 
-Six numbers picked by judgement, none settled by data. Do not tune any of them before the
+Eleven numbers picked by judgement, none settled by data. Do not tune any of them before the
 data exists.
 
 - `CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` in `hooks/compound-improvement.sh`.
@@ -130,8 +132,24 @@ data exists.
   resulting 1.7 dispatches/week is arithmetic, not observation.
 - `$0.19` per stage-1 review, measured once on 2026-08-25 over a 60 KB digest on sonnet.
   Every weekly-cost figure in that header, and in the README, multiplies one observation.
+- `REMIND_PRUNE_TTL=604800` and `REMIND_PRUNE_EVERY=25` in `hooks/remind.sh` (#33), and
+  `MISSION_PRUNE_TTL=604800` and `MISSION_PRUNE_EVERY=25` in `hooks/mission.sh` (#43), which
+  copied them. A week and a 1-in-25 draw are both round numbers chosen because the tree
+  being swept is small and nothing depended on the answer. What would settle them is a
+  measurement nobody has: how many session directories a heavy month actually leaves, and
+  how long the longest live session runs — the second matters, because a session idle
+  longer than the TTL can have another session's sweep reach its stamps.
+- `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=2` in `hooks/repeat-gate.sh` (#43). This one is
+  **better founded than the rest and still not validated**: the floor was picked against
+  the live store's own distribution — of 231 distinct same-tool `Bash` bindings, 52 shared
+  zero content tokens with their failure, 31 shared exactly one, and 11 of those shared only
+  the word `echo` — but that distribution is one machine's store on one day, it grew to 241
+  bindings later the same day, and nothing has measured how many of the rejected bindings
+  were real recoveries. Re-run the join rather than quoting those figures back. A capped
+  floor of `min(2, |fail tokens|)` was tried and rejected: it admitted exactly one more
+  binding, on the word `echo`.
 
-## Open: `hooks/remind.sh` never prunes its own claim and stamp tree
+## Open: the per-session sweep, answered twice, and its two pairs of constants
 
 Wave 2 shipped the reminder hook with per-session state and no sweep. `ROOT/remind/<session
 id>/` (`hooks/remind.sh:144`, `:224`, `:419`) accumulates one directory per session, holding
@@ -160,6 +178,12 @@ only, so `reminders.jsonl` and the counters directory are unreachable by constru
 `hits.jsonl` is trimmed to its last `REMIND_MAX_ROWS` on the delivery path (`:510`).
 `tests/test_remind.py::PruneTest` builds the stale tree from real deliveries and proves a
 cooldown is not re-armed in the session that sweeps; `::HitsCapTest` writes past the cap.
+**`hooks/mission.sh` now carries the same sweep**, added 2026-09-03 for #43:
+`prune_stale_sessions()` (`hooks/mission.sh:413`) is the same sweep with its own two knobs
+(`MISSION_PRUNE_TTL`, `MISSION_PRUNE_EVERY`) and ONE call site — the periodic `PreToolUse`
+arm's not-yet-due exit (`hooks/mission.sh:499`), an event that delivers nothing — so no
+delivering event pays for a `stat` over every directory. Two copies of one procedure
+now, and they are not shared code; a fix to either belongs in both.
 Two limits stated rather than fixed: after the first trim `hits.jsonl` carries mktemp's
 `0600`; and a session idle for longer than the TTL whose `REMIND_COOLDOWN` is positive can
 have its stamps swept by another session, because rewriting a stamp does not bump the
@@ -184,32 +208,6 @@ deleted so that the next install writes the current text into it. Until one of t
 happens, a session reading the global file is being told an older protocol than the one the
 skill carries — the three-tier split, the cheap branch, and the round cap are all missing
 from it.
-
-## Open: the PreCompact 100 ms target holds on one jq and is unmeasured on the other
-
-`hooks/precompact.sh` ships against issue #8's 100 ms budget and **meets it on
-`/usr/bin/jq` only**. Medians over 15 runs against a 5 MB transcript, macOS 25.6.0,
-2026-09-02, at the default 256 KB bound:
-
-|jq|no candidate|one candidate|
-|-|-|-|
-|`/usr/bin/jq` (jq-1.7.1-apple)|27.4 ms|86.3 ms|
-|anaconda's jq-1.6|62.4 ms|147.9 ms|
-
-The gap is process starts, not bytes: `jq -n 1` medians 9.6 ms as the system jq and 22.4 ms
-as jq-1.6, and this hook runs several programs. So a user whose `PATH` resolves `jq` to a
-slow build is over budget on the candidate path, by 48 ms. It is still 0.1% of the
-128-second median compaction the hook delays, which is why it shipped rather than blocking;
-what is unresolved is whether the 100 ms number should be restated as a system-jq figure or
-the hook should shed a process. `tests/test_precompact.py::ProcessCountTest` pins the
-process count, so shedding one is a testable change rather than a stopwatch argument.
-
-Second, unrelated gap in the same measurement: **`custom_instructions` has only ever been
-observed `null`**. Every probe recorded it empty (docs/CLAUDE-CODE-BEHAVIOR.md:510), so the
-populated shape — whether it is a string, and what a `/compact <instructions>` invocation
-puts in it — is unprobed. Nothing in `hooks/precompact.sh` reads the field, so this costs
-nothing today; it is a gap in the platform record, and the probe is one `/compact` with an
-argument against a payload dump.
 
 ## Open: stage-2 auto-forge cannot finish its own gate
 
@@ -297,6 +295,54 @@ This is a baseline, not a verdict: nothing has been changed against it yet, and 
 session correctly ignores is a correct outcome, so the ceiling is unknown and 100% would be
 wrong. What is open is what the number should be compared against, and re-running it after
 Wave 2 lands so the two are measured the same way.
+
+## Open: level B search was measured, and declined
+
+Level B — "has this user hit this before in another project?" — was scoped as a keyword
+search over claude-history-surfer's prompt store, of the kind `surfer search "<keyword>"
+--all` already runs. It was measured before it was built, and it was not built.
+
+Two rounds, a haiku judge, 260 calls, against the live store on this machine (1453 project
+directories, 7716 non-command prompts). A plain shared-content-token rule reached weighted
+precision 0.55 at its best threshold, but 16 of the 17 pairs the judge called RELEVANT
+matched on this user's own workflow boilerplate (`subagents`, `goal`, `ultrawork`) rather
+than on content, so the number was an artifact. Round 2 restricted the rule to rare tokens
+(document frequency under 1% of the store), which removes most of the artifact and does not
+save the precision: **at the rare-token rule's best-behaved threshold (k>=4), level B
+keyword search has a measured false-positive rate of 0.72 (n=60; precision 0.28, 95% CI
+[0.19, 0.41])**. The upper bound of that interval is below 0.6, so no re-run of this rule
+clears a 0.6 bar.
+
+Method, both rounds, and the scripts are in `notes/research/level-b-search-measurement.md`
+and `notes/research/level-b/`. `skills/skill-compounder/SKILL.md` carries the verdict in one
+sentence beside the command, so a session reads the hits and does not act on them. What is
+open is whether a different mechanism — embeddings, or the queue's own digest rather than
+tokens — clears the bar; nothing here measures that, and this thread is not an argument
+that it cannot.
+
+## Open: #37 landed, and what the funnel can and cannot count yet
+
+Event attribution ships: one lineage id, DERIVED from the digest the capture hooks already
+share (`c` + 8 chars of a queue record's hash, `v` + 8 for a review verdict) and never
+minted, carried through `skillinsight promote` -> `skillnote add --candidate` ->
+`reminders.jsonl` -> `remind/hits.jsonl` -> `skillforge start --from` -> the ledger's
+`origin`, `apply` and `verdict` rows. `bin/skillreport` grew a `FUNNEL` block that reports
+each id as delivered / acted on / outcome, and its `REMINDER CONVERSION` block is now a
+counted join on session and order rather than the estimate over mismatched windows it was.
+
+Three limits, none of which a code change can lift:
+
+- **Nothing was backfilled, and it must not be.** Every nudge, reminder and forge recorded
+  before 2026-09-03 carries no id. Those rows report `UNATTRIBUTED` rather than being
+  dropped, which is the honest thing to do, but it means the funnel's first weeks are mostly that
+  column and no ratio taken from them means anything.
+- **The join needs real usage.** A funnel over this machine's store measures this machine.
+  The same limit the two hook constants have, and for the same reason: the instrument
+  exists, nobody has read one against a store that is not this one.
+- **A lineage can be real and still unattributed.** `--from` warns and never refuses, on the
+  same reasoning as `--trigger`: a CLI that refuses gets stopped being called. So a forge
+  started by hand from a candidate nobody passed `--from` for is a true gap in the chain,
+  recorded as a gap, and no amount of usage closes it by itself.
 
 ## Known tree-state dependency — do not "fix" it
 
@@ -405,10 +451,39 @@ Kept as one line each so a returning session does not reopen them.
   re-measured on 2.1.259 and is recorded at `docs/CLAUDE-CODE-BEHAVIOR.md:510`, including
   the previously unconfirmed `"trigger":"auto"`; the field is `trigger`, not the documented
   `compaction_trigger`, and there is no `last_assistant_message`, so the bounded transcript
-  read is mandatory rather than a fallback. Cost is 27 ms with no candidate and 86 ms with
-  one, median, on the system jq — the jq-1.6 figures and the unprobed `custom_instructions`
-  are open above. Wired on both install paths, which takes the package to **15 hook entries
-  over 6 events**; `tests/test_precompact.py` is 47 tests.
+  read is mandatory rather than a fallback. Its cost, and `custom_instructions`, were both
+  settled on 2026-09-03 and are the entry below. Wired on both install paths, which took the
+  package to **15 hook entries over 6 events** at the time; `tests/test_precompact.py` is
+  52 tests.
+- **The PreCompact budget is restated per jq, and `custom_instructions` is probed** (#32,
+  closed 2026-09-03). The 100 ms target was met on `/usr/bin/jq` and missed on jq-1.6, and
+  the question was whether to restate the number or shed a process. Both: three process
+  starts were shed — one `date` instead of two (`%n` in the format), one `mkdir -p` instead
+  of two, and the per-compaction claim named by parameter expansion instead of `hash_of`,
+  which cost `shasum` + `awk` + `tr` for a name nothing else reads — taking the candidate
+  path from 16 programs to **13**. `ProcessCountTest` now pins 13 non-`date` programs on the
+  candidate path and **4** on the empty one (`cat`, `jq`, `jq`, `tail`), with `date` bounded
+  separately at 1 start on BSD and 2 on GNU and zero slack, verified by mutation.
+  Re-measured n=25 interleaved, 400 KB transcript, 256 KB bound,
+  macOS 25.6.0, load average 9.5, median / p90 ms:
+
+  |jq|no candidate (before → after)|one candidate (before → after)|
+  |-|-|-|
+  |`/usr/bin/jq` (jq-1.7.1-apple)|33.8/38.7 → 31.8/36.0|104.2/113.3 → 84.7/87.7|
+  |anaconda's jq-1.6|61.9/64.3 → 59.1/63.5|143.5/154.6 → 123.0/128.9|
+
+  **jq-1.6 cannot be made to fit 100 ms**: its no-candidate path alone is 59 ms. Shedding
+  `git rev-parse` as well measured 106 ms, and the bash `.git` walk-up that would replace it
+  disagrees with `--show-toplevel` on symlinked paths, which on macOS is all of `/tmp`. So
+  the budget is stated per jq: 100 ms holds for the system jq at p90; 1.6 is about 125 ms.
+  There is no Homebrew jq on this machine, so those two builds are the whole comparison.
+  `hash_of`, both `scan(` lines and `normalise` were re-verified byte-identical to
+  `hooks/insight-capture.sh`, which was not touched. And `custom_instructions` **is**
+  populated: on Claude Code 2.1.260, `/compact focus on the greeting` put `focus on the
+  greeting` in it verbatim with no prefix, and a bare `/compact` left it null. The hook
+  ignores the field and should — its only return channel is `systemMessage` and it never
+  writes one. Both probes answered "Not enough messages to compact." and the hook fired
+  anyway, so it pays its cost on compactions that never happen.
 - **The cheap branch has a mechanism.** `SKILL.md` used to say "write a note or update
   CLAUDE.md" and name no path, no CLI and no ledger row, so the branch was taken zero
   times. `bin/skillnote` is that path: `add`/`remove`/`list` against a marker block in a
@@ -530,6 +605,14 @@ machine-local; nothing below it should be read as a repo-wide defect.
   `tr -d x < ~/.claude/skill-compounder/reminders/f0feae4c-834a-409b-8e25-9a2894341168.edits | wc -c`
   prints 0). What stays open is the general question, and it is in the list above, not
   here: whether anything should ever write the other form again.
+- **A throwaway `CLAUDE_CONFIG_DIR` cannot authenticate on this box, re-verified
+  2026-09-03 on 2.1.260** (#42). `CLAUDE_CONFIG_DIR=$(mktemp -d) claude -p hi` answers
+  `Not logged in · Please run /login` and exits 0, and neither `ANTHROPIC_API_KEY` nor
+  `CLAUDE_CODE_OAUTH_TOKEN` is in this shell's environment. That is the mechanism behind the
+  e2e report's stated limit — sessions there run on ambient credentials with `--settings`
+  plus `--setting-sources ''` — and behind stage-2 auto-forge being unable to run
+  `claude --version`. It is a property of how this box is logged in, not of the code, so a
+  machine holding an API key in its environment will see something else.
 - **How to check this box.** `skillforge doctor` is the whole check, one line per item and
   exit 1 on any FAIL. The branch above is reproducible without touching live state: write
   `36` and 900 `x` bytes into `<dir>/reminders/<id>.edits` and run

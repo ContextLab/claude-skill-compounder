@@ -16,6 +16,7 @@ this session's prompt; `ls ~/.claude/skills/` (cross-project) and `ls ./.claude/
 the name is not an obvious match, `grep -ril '<keyword>' ~/.claude/skills ./.claude/skills
 ~/.claude/plugins/cache/*/*/*/skills`; and beside that grep, `surfer search "<keyword>" --all`, the level B
 search, which asks whether this user has hit this before in another project and names the project if so.
+Read its hits, never act on one: measured 0.72 false positives at its best threshold (n=60, precision 0.28).
 
 <!-- doctrine: invoke-do-not-reimplement -->
 **If a plausible skill exists, invoke it. Do not reimplement.** If it turns out to be the
