@@ -143,9 +143,9 @@ claims you are auditing drown in hunks that are not yours.
 
 **Both of those read a change, and the commoner case here is a document nobody changed
 today.** On an unmodified tracked file they print nothing, and nothing is exactly what a
-clean bill of health looks like. Measured on this repository, as of 2026-08-31: the diff
+clean bill of health looks like. Measured on this repository, as of 2026-09-03: the diff
 sweep over `skills/contribute-skill/SKILL.md` matched 0 lines while the same pattern over the
-whole file matched 116. So when the document is not part of your diff, sweep the file:
+whole file matched 98. So when the document is not part of your diff, sweep the file:
 
 ```bash
 grep -nEi '[0-9]|\b(none|all|every|only|never|always|cannot)\b' README.md
