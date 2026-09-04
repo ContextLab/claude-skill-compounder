@@ -562,7 +562,13 @@ if [ -n "$ref" ]; then
   exit 1
 fi
 case "$d" in
-  @*) secs="${d#@}"; exec %s -u -r "$secs" "$fmt" ;;
+  @*) secs="${d#@}"
+      # Answer through whichever spelling the REAL date accepts: BSD's `-r <secs>` on
+      # macOS, GNU's `-d @<secs>` on Ubuntu, where `-r` is a file reference and this
+      # very shim's first attempt fails the way the hook's does. Written with only the
+      # BSD form, this shim passed on macOS and failed on Ubuntu (CI run 33882581234).
+      %s -u -r "$secs" "$fmt" 2>/dev/null && exit 0
+      exec %s -u -d "@$secs" "$fmt" ;;
 esac
 exit 1
 """
@@ -573,7 +579,7 @@ exit 1
         bindir = self.root / "gnudate"
         bindir.mkdir()
         p = bindir / "date"
-        p.write_text(self.SHIM % real)
+        p.write_text(self.SHIM % (real, real))
         p.chmod(0o755)
         return "%s:%s" % (bindir, PATH)
 
