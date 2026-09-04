@@ -79,3 +79,44 @@ log_nudge concurrency and trim, precompact, env hostility, prune symlink/charset
 mtime, CLI id validation.
 
 In flight: live functional stress (18 haiku calls, real config); cold docs-accuracy review.
+
+## Red-team round 1 (live functional, real config, 10 claude -p calls)
+
+PASS: resume (canary quoted), ambiguity, completion (one block, one row), lesson first time
+(one row per tuid, statement = row), lesson refusal lifted by `skillnote add --lesson`,
+no binding for `gh issue view 9999` -> `npm run build`, prune, no leaks (13 live jsonl files
+parse, 0 hook stderr / non-zero exits across 7 sessions). LIMIT: a subagent receives the
+mission and still answers "NOT KNOWN" (third observation). FAIL: FUNNEL arithmetic.
+
+Defects: (1) HIGH the deny text names `skillrepeat dismiss` and 2/2 haiku sessions ran it
+with a fabricated `--why`; `bin/skillrepeat` records `session:"cli"`. Decision: a lesson is
+the only thing a SESSION can do to lift the gate; dismiss records `actor` (model when
+CLAUDECODE/CLAUDE_CODE_SESSION_ID is set) and only a human dismiss lifts. (2) HIGH the
+"earlier sessions only" guard does not exist (`repeat-gate.sh:1538` counts the current
+session). (3) FUNNEL: ACTED ON 104 vs DELIVERED 69; a lineage with ledger rows but no
+delivery is counted nowhere. (4) `skillinsight promote --scope project` writes into the
+candidate's originating repo regardless of cwd. (5) residual same-tool binding on path
+tokens {remind, hooks}. (6) a Stop block costs one empty assistant turn (platform).
+(7) `mission.sh` exits before the prune when the surfer store is absent.
+
+## Red-team round 1 (cold docs-accuracy review) — to fix in the docs touch-up
+
+1. `.claude/CLAUDE.md:219-231` mission moment citations (:344/:353/:349/:609/:356-377/:382/
+   :387/:440-441) are off by 110-345 lines; re-derive after the fix wave.
+2. README.md:257 "only two env vars install.sh reads" — it reads five; operations.md:483 says
+   four. `grep -nE '\$\{(SKILL_COMPOUNDER|CLAUDE_SKILL_COMPOUNDER)[A-Z_]*:-' install.sh`.
+3. `hooks/compound-improvement.sh:404` "SessionStart is not among the three events" — eight
+   events, SessionStart wired.
+4. README.md:224 "2.1.241 through 2.1.259" — the printed command yields 2.1.260.
+5. `.claude/CLAUDE.md:289`, `:379` repeat-gate citations off by 64 (REFUSE at 504/694; exec
+   2>/dev/null at 688) — re-derive after the fix wave.
+6. Stale cross-file cites: `bin/skillnote:161` (installer 206-207), `:265` (repeat-gate
+   hashof 1041), `:304` (installer 227); `hooks/mission.sh:41` (skillnote 283, skillforge 1381).
+7. docs/development.md:45 "six claude -p calls" — journey is 13 calls / 17 steps.
+8. `.claude/CLAUDE.md:24` "every entry names the CLI version" — two behavior entries carry
+   none (child-result, SessionStart-before-typing).
+9. `.claude/CLAUDE.md:273` recount recipe returns six files (remind.sh:31 comment matches).
+10. README.md:52 Status "six sonnet calls, 34.9 s" — current shape 13 calls / 150.9 s / 17.
+Verified clean: 20/10/8, 12 skills, 6 CLIs, 11 doctor checks in order, 14 clocks, 22
+prefixes, 156/158 names, 53 test files, every header-documented env default, install/
+uninstall leaves a user's own SessionStart hook, README five-minute path runs verbatim.
