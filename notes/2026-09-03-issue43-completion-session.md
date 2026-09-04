@@ -187,3 +187,9 @@ docs cite by anchor not line.
   at `86297ec` is green; close #32, #37, #43; refresh #31; #19, #30, #34, #42 stay open.
 - First measurement sweep for #30 after a week of ordinary use (nudges.jsonl, hits.jsonl,
   FUNNEL).
+
+## Closed out
+
+CI green at `86297ec` (run 33885409282, all five jobs). Comments posted on #32, #37, #43
+(closed), #31 (status table refreshed), #42, #30, #34, #19 (open, each with its blocker).
+Open after this session: #19, #30, #31, #34, #42.
