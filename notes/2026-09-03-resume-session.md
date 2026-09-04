@@ -121,3 +121,12 @@ moment in `<state>/mission/hits.jsonl`, lesson rows in the repeat store); the jo
 "subagent received the mission and still answered UNKNOWN" limit from the E2E run; no prune
 of `<state>/mission/<sid>/`; level B search of other projects' prompts not built (design
 note says what would earn it).
+
+## Close: CI green at `c05d01e`
+
+The first push was red on both suite legs because a clean install wires the mission hook
+and the runner had no `surfer`; the two doctor tests that assumed exit 0 now follow the
+no-dependency branch the clean-state test already had, and CI clones history-surfer into
+`~/claude-history-surfer` before the suite (`c05d01e`, run 33825231226, all five jobs
+green). #43 carries the landing comment. Open issues after this session: #19, #30, #31,
+#32, #34, #37, #42, #43.
