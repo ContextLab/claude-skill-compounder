@@ -161,3 +161,29 @@ into this checkout's CLAUDE.md again; removed with `skillnote remove n1240016210
 Suite after the fix wave (smoke, docs agents editing): one failure, the new isolation guard
 in test_queue_surfacing tripped by the red-teamer's live promote writing into the checkout
 mid-run — the guard working, not the test failing. Authoritative run pending on a quiet tree.
+
+## Landed: `5f0c73a` (red-team fixes + docs), `b3f72cf` (two recurrence notes), `86297ec`
+
+Final suite on the quiet tree before the push: ALL TESTS PASSED, 53 files, 2 skips;
+shellcheck 0.11.0 and 0.9.0.6 clean over every script. `main` and `resume/after-v0.3.1`
+are the same commit throughout. Fix 3 (allowlist per segment, fail-closed; deny no longer
+states its budget; `2>&1` no longer splits at `&`; heredoc bodies not read as shell) landed
+inside `5f0c73a`.
+
+CI at `b3f72cf` (run 33882581234): plugin-validate, both shellcheck legs and the macOS suite
+green; the Ubuntu suite red on ONE test, `test_precompact.py::GnuDateFallbackTest` — the
+test's own GNU shim answered through the real `date` with BSD's `-r`, which GNU rejects.
+The hook was right; the shim was macOS-only. Fixed in `86297ec` (answer through whichever
+spelling the real date accepts). Second time this project's "green here, red on CI" note
+has fired on a date/platform assumption; the note stands.
+
+Lessons recorded this session through the arm itself: the zsh `=` expansion under a second
+signature (n388812050x224), and a foreground until-loop dying at the tool's 10-minute cap
+(n703879817x267). Two project notes on recurrences: knob guards ship with the knob;
+docs cite by anchor not line.
+
+## Remaining after this session
+- Post the seven issue comments (drafted under the session scratchpad `comments/`) once CI
+  at `86297ec` is green; close #32, #37, #43; refresh #31; #19, #30, #34, #42 stay open.
+- First measurement sweep for #30 after a week of ordinary use (nudges.jsonl, hits.jsonl,
+  FUNNEL).
