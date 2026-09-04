@@ -104,3 +104,20 @@ TARGET settings.json rather than `which surfer`; `mission.sh` store root must fo
 Then: full suite on a quiet tree, commit, re-derive the claim-provenance sweep figure
 (contribute-skill SKILL.md changed; expected 98, was 116), push, CI, `./install.sh` on this
 machine (backs up settings.json), a live check that the five moments fire here, #43 comment.
+
+## Landed: `de30244` (the mission and the lesson, #43) and `d3a4e3e` (claim-provenance figure 98)
+
+Suite on the quiet tree: 52 files, 2694 tests, one expected failure fixed in the second
+commit. Installed on this machine with `./install.sh`: doctor 11 pass, 20/20 entries, 8
+events, `surfer` 79 prompts for this project. Live check under the real config
+(`claude -p`, sonnet, scratch dir): a subagent dispatch wrote two `hits.jsonl` rows
+(`dispatch`, `subagent`), and the subagent's transcript carries the canary and reports the
+user's request verbatim. The lesson arm fired live on the orchestrator's own zsh
+fail-then-fix (`======` parsed as an `=command` expansion) and the lesson was recorded with
+`skillnote add --lesson` into the global CLAUDE.md with a command-keyed reminder.
+
+Open after this: #43 stays open for the measurement it now makes possible (deliveries per
+moment in `<state>/mission/hits.jsonl`, lesson rows in the repeat store); the journey's
+"subagent received the mission and still answered UNKNOWN" limit from the E2E run; no prune
+of `<state>/mission/<sid>/`; level B search of other projects' prompts not built (design
+note says what would earn it).
