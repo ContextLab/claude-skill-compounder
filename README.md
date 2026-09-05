@@ -2,7 +2,7 @@
 
 **Make Claude Code get permanently better at the things you do repeatedly.**
 
-![A skill being forged: the builder/red-team loop, with live progress in the status line](docs/media/forge.gif)
+![A fail-then-fix written down as a lesson, then a skill being forged under the two-round cap: the builder/red-team loop, with live progress in the status line](docs/media/forge.gif)
 
 Knowledge that costs a session real effort to acquire dies with that session. You and
 Claude work out a debugging sequence, a deploy-and-verify loop, or a non-obvious API

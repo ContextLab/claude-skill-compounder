@@ -64,8 +64,12 @@ forge keys on a name, why the status line rotates, and the shell traps that bite
 
 The animation at the top of [`README.md`](../README.md) is a recording, not a live run:
 the session chrome is redrawn and
-the subagents are not re-run. The progress bar is the real status line, driven by the real
-state file. Regenerate it with [`vhs`](https://github.com/charmbracelet/vhs):
+the subagents are not re-run. What it replays is real: the lesson it opens on is the
+hook's own statement and `skillnote add --lesson` output, captured by driving them, and the
+forge is `watch-ci-run` as it happened on 2026-09-05 -- two rounds, the blocking counts from
+`<state>/rounds/watch-ci-run.tsv`, and the round cap refusing a third round for a count that
+did not fall and granting it only as a narrowing. The progress bar is the real status line,
+driven by the real state file. Regenerate it with [`vhs`](https://github.com/charmbracelet/vhs):
 
 ```bash
 brew install vhs

@@ -741,7 +741,7 @@ it off; the rest of its knobs are in [Tuning](operations.md#tuning).
 While a skill is being forged, your status line shows live progress:
 
 ```
-my-project git:(main)  ⣻ forge parallel-agents-one-codebase ▕██████······▏ 3/6  50% · red-team round 1
+my-project git:(main)  ⣻ forge watch-ci-run ▕██████······▏ 3/6  50% · red-team round 1
 ```
 
 The tail alternates between what is happening right now and a one-line summary of what
