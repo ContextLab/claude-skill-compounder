@@ -30,7 +30,7 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
-|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure` and `PostToolUse` with matcher `Bash\|Skill\|mcp__.*`, and on `PreToolUse` with matcher `Bash\|Skill` — the two events that learn are wider than the one that refuses (`REPEAT_LEARN_MATCHER` and `REPEAT_PRE_MATCHER` in `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`). Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure` and `PostToolUse` with matcher `Bash\|Skill\|mcp__.*`, and on `PreToolUse` with NO matcher at all, so the lesson arm is delivered every tool a session calls (`REPEAT_LEARN_MATCHER` and `REPEAT_PRE_MATCHER = None` in `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`). Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
@@ -586,17 +586,27 @@ reads, because two earlier sessions plus the recovery bound in this one is the t
 `REPEAT_MIN_SESSIONS=1` is the spelling of "refuse on the second" and is one export rather
 than a hidden off-by-one.
 
-**And it lets go, silently.** At most `REPEAT_LESSON_MAX_DENIES` refusals per signature per
-session, after which the call goes through whatever the store says — and the deny text does
-not say so. It used to. The reason ended by naming the budget and stating that the call then
-went through, and a session red-teaming the gate on 2026-09-04 read that as a schedule: it
-retried until the budget expired and wrote no lesson at all. The budget is a valve against a
-false positive trapping a session, not a term offered to the session in front of it, so it is
-enforced and unadvertised. The live store says the valve is barely reached — nine sessions
-have armed a lesson marker, one deny has ever been spent, none reached two — so the default
-stays 2. Only `Bash` calls are ever refused, the head exemptions are judged per segment
-rather than on one head per command, and `skillnote` and `skillrepeat` are exempt
-by name, so neither recording command can ever itself be refused. Every
+**And it no longer lets go.** `REPEAT_LESSON_MAX_DENIES` defaults to `unlimited`: the
+refusal has no expiry, and exactly two things end it — a standing lesson on the ledger, and
+a `dismiss` row a person wrote. It shipped at 2, silently, because the deny text used to
+name the budget and say the call then went through, and a session red-teaming the gate on
+2026-09-04 read that as a schedule: it retried until the budget expired and wrote no lesson
+at all. Removing the advertisement was not enough. Driven against the installed package on
+2026-09-05, both of two refused sessions spent BOTH denies on the identical command,
+re-issued verbatim, then ran it and wrote neither a lesson nor a dismissal — the silence
+made the wall look like weather rather than a decision. On the live store, 2 of the 16
+sessions that have ever armed a lesson marker reached the cap, and both were that red team;
+the sentence this paragraph used to carry, that none had reached two, was false the day it
+was checked. What a false positive costs with no expiry is ONE lesson line for that
+signature forever, and a lesson is allowed to record that the failure is EXPECTED — a
+red-green test run, a probe whose error is the answer — which the deny now says in one
+clause, so a session holding a real false positive has a true sentence to write rather than
+a wall to outwait. A positive integer restores a budget for anyone who wants the valve back
+and `0` still means never refuse, but the deny names neither: a refusal that advertises its
+own expiry is an instruction to wait it out. Every tool is refusable now, not `Bash` alone;
+the per-segment head exemptions belong to the repeat arm, and this arm's only exemption is a
+`Bash` call reaching for `skillnote` or `skillrepeat` (`lesson_cli_head`), so neither
+recording command can ever itself be refused. Every
 read that could go wrong fails toward allowing: an unreadable ledger means the escape cannot
 be verified, and a refusal whose escape cannot be verified is a trap.
 
@@ -639,15 +649,18 @@ to make collectable.
 `.tool_input.command`, so `skillnote --lesson` refuses a signature whose `fail` row is not a
 `Bash` call: a `Skill` or MCP failure has no command for `hooks/remind.sh` to match. Such a
 lesson lands as a note plus a keyword reminder, with the command reminder the one thing it
-cannot have. A session that meets that refusal has the deny budget and nothing else: the
-dismissal carries no such restriction, but a dismissal written from inside a session lifts
-nothing either, so what ends the refusal there is `REPEAT_LESSON_MAX_DENIES` running out.
-Separately, the
-gate is wired at two widths. The two events that LEARN carry `Bash|Skill|mcp__.*`
+cannot have. A session that meets that refusal has nothing of its own left: the dismissal
+carries no such restriction, but a dismissal written from inside a session lifts nothing
+either, and the refusal no longer expires, so for such a signature a person has to type the
+one line. Separately, the
+gate is no longer wired at two widths. The two events that LEARN carry `Bash|Skill|mcp__.*`
 (`REPEAT_LEARN_MATCHER`), so an `mcp__*` failure can be learned at all; the event that
-REFUSES stays at `Bash|Skill` (`REPEAT_PRE_MATCHER`), because both `PreToolUse` arms leave
-on a `[ "$tool" = "Bash" ]` test inside the script and widening it would buy a fork per MCP
-call and no behaviour. The third alternative is UNPROVEN rather than proven: no MCP tool
+REFUSES lost its matcher entirely on 2026-09-05 (`REPEAT_PRE_MATCHER = None`, and the
+`PreToolUse` entry carries no `matcher` key in either install path), because a session this
+gate refused on a `Bash` call answered with `Read data/f2.txt` and finished the job.
+Continuing is any tool, so the lesson arm now refuses any tool while a marker is armed, and
+the repeat arm keeps its own `[ "$tool" = "Bash" ]` test inside the script. The `mcp__*`
+alternative is UNPROVEN rather than proven: no MCP tool
 failure has been observed arriving at a hook here, and the store is the only surface that
 can settle it.
 

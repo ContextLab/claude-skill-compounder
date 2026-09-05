@@ -293,12 +293,16 @@ is no fix to write down and nothing is owed.
 both ask `hooks/repeat-gate.sh --eligible-of` rather than keeping a second copy of its head
 rules.
 
-**The refusals themselves are not counted, and that is a gap rather than a design.** The deny
-budget lives as directories under `<state>/repeats/lessons/<session>/deny/<sig>/<tuid>`,
-which is what enforces at most `REPEAT_LESSON_MAX_DENIES` per signature per session, and
-`prune_lessons` sweeps that tree after two days. So "how often did this gate refuse anything"
-is answerable for about 48 hours and not afterwards. Every figure about the lesson gate's
-false-positive rate needs that fixed first, and the arm ships on.
+**The refusals themselves are not counted, and that is a gap rather than a design.** Every
+refusal claims a directory at `<state>/repeats/lessons/<session>/deny/<sig>/<tuid>`, which is
+what stops the double delivery emitting one deny twice, and — where somebody has set
+`REPEAT_LESSON_MAX_DENIES` to a number — what counts it against the budget. At the shipped
+`unlimited` there is no budget to count against, so those directories are a record and
+nothing else, and `prune_lessons` sweeps that tree after two days either way. So "how often
+did this gate refuse anything" is answerable for about 48 hours and not afterwards. Every
+figure about the lesson gate's false-positive rate needs that fixed first, and the arm ships
+on — and now ships without an expiry, so a false positive costs one lesson line rather than
+two attempts' patience.
 
 ## The PreCompact budget is per jq build
 
@@ -437,7 +441,7 @@ one sitting and none has been checked against a session that was not this one:
 |`MISSION_SHORT_WORDS`|which prompts count as leaning on memory|a false-positive rate for the short-prompt proxy, which is the only reason a better ambiguity detector was not built|
 |`MISSION_STOP_MIN_TOOLS`|how much work a turn must have done before a completion claim is worth blocking|the block rate on real closing messages, replayed the way the claim gate's 3.4% was|
 |`REPEAT_RECOVERY_MIN_TOKENS`|how much a different tool's call must share to bind as the fix|how often a cross-tool binding is the wrong pair, which needs recoveries nobody has yet|
-|`REPEAT_LESSON_MAX_DENIES`|how long the gate holds on before letting go|a refusal count, which the two-day sweep above currently throws away|
+|`REPEAT_LESSON_MAX_DENIES`|whether the refusal expires at all. It ships `unlimited`, so it does not: only a standing lesson or a human's dismissal ends it. The 2 it shipped at was outwaited by both of two red-teamed sessions on 2026-09-05|a refusal count, which the two-day sweep above currently throws away|
 
 Every right-hand cell there names an instrument nobody has run. That is the honest state of
 both mechanisms, and it is the reason none of these numbers should move yet: a threshold

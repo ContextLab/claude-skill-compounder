@@ -1467,20 +1467,34 @@ threshold arriving as an observation instead of a guess: a nameable dead end, an
 occurrence. Shipping that off by default would be shipping the finding without the
 consequence, which is what ten days of one output path already produced.
 
-Three things stop it becoming a wall. It is spent at most `REPEAT_LESSON_MAX_DENIES` times
-on one signature in one session and then lets go for good — silently, because the deny text
-that named the budget was read as a timetable. A session red-teaming this gate on 2026-09-04
-met a reason ending "after which the call goes through whatever this store says" and retried
-until the budget expired, writing nothing down; an expiry a refusal advertises is an
-instruction to wait it out, and the valve exists against a false positive trapping a session
-rather than as a term offered to the session being refused. It is still there and still 2,
-and the live store says it is barely reached: nine sessions have armed a lesson marker, one
-deny has ever been spent, none reached two. Its escapes are commands, and
-both `skillnote` and `skillrepeat` are exempt from it by name, so the refusal can never
-block the thing that lifts it. And the refusal counts EARLIER sessions only, on both arms:
+Two things stop it becoming a trap, and a third used to. Its escape is a command, and a
+`Bash` call whose every segment head is `skillnote`, `skillrepeat` or `cd` is exempt from
+this arm by name (`lesson_cli_head`), so the refusal can never block the thing that lifts
+it. And the refusal counts EARLIER sessions only, on both arms:
 until 2026-09-04 this one counted the current session too, so at the default of 2 a single
 earlier failure was enough, and the code was one session stricter than every document
 describing it.
+
+**The third was a deny budget, and it was withdrawn on evidence.** It shipped at 2 per
+signature per session, silently: a deny text that named the budget was read as a timetable
+by a session red-teaming this gate on 2026-09-04, which met a reason ending "after which the
+call goes through whatever this store says" and retried until the budget expired, writing
+nothing down. Unadvertising it was the first repair and it did not hold. Driven against the
+installed package on 2026-09-05, both of two refused sessions spent both denies on the
+identical command — re-issued verbatim, with the intervening sentence "Let me try running
+the script directly with a simpler approach" — and then ran it, writing neither a lesson nor
+a dismissal. Silence did not make the valve safer; it made the wall look like weather rather
+than a decision, and a wall that expires is one a session waits out whether or not the
+expiry is printed. So `REPEAT_LESSON_MAX_DENIES` now defaults to `unlimited`. The argument
+for removing the valve rather than raising it is what a false positive costs with no expiry:
+ONE lesson line, once, for that signature forever, and a lesson may record that the failure
+is EXPECTED — a red-green test run, a probe whose error is the answer, a store whose shape
+match is stale. The deny says so in one clause, so a session holding a real false positive
+has a true sentence to write. Against that, a budget buys a session the right to skip the
+sentence, which is the whole of what the gate is for. `unlimited` is spelled as a word
+rather than encoded as a number so that `0` can keep the meaning it always had, never
+refuse; a positive integer restores a budget of that many refusals, and a typo lands on the
+documented default the same way `REPEAT_LESSON_GATE`'s guard errs.
 
 **A dismissal used to count exactly as much as a lesson, and it no longer does.** The
 argument for symmetry was that the gate's business is a decision on the record rather than a
@@ -1546,6 +1560,26 @@ live store on 2026-09-04: of 310 commands, 141 verdicts change, and 134 of those
 exemption they should never have had. A re-run hours later against a store grown to 312 gave
 143 and 136.
 
+**A prefix runner was that hole in a shorter costume, and the same method found it.** `env`,
+`command`, `source` and `.` sat on the head allowlist as though they were inspection
+commands. Every one of them RUNS THE NEXT WORD. Measured live against the installed package
+on 2026-09-05: `python3 scripts/count_words.py --file data/f2.txt` was denied and `env
+python3 scripts/count_words.py --file data/f2.txt` ran, and driving the two versions of the
+`--eligible-of` door by hand answers `exempt-allowlist` against `eligible` for `env python3
+x.py`, `command python3 x.py`, `source x.sh` and `. x.sh` alike. The repair goes in two
+directions and both are one rule: judge the program that will really start, and where it
+cannot be judged, refuse the exemption. `segment_head` now steps over `env`, `command`,
+`exec`, `nohup`, `builtin`, `nice`, `timeout`, `caffeinate`, `sudo`, `doas`, `stdbuf`,
+`setsid` and `ionice` — past each one's modelled options and past `timeout`'s duration word
+— to the program they start, while `command -v` and `command -V` start nothing and are
+judged as `command`, where a bare `which` already lands. `source` and `.` left the allowlist
+and are not coming back, because what they run is in a file this walk may not read; that is
+the same reason `eval`, `sh -c` and `xargs` were never on it. Anything unmodelled leaves the
+word that stopped the walk as the head, and a word that is not a program name is on no list.
+The scale is the opposite of the repair above and is worth stating for that reason: driving
+both versions of that door over the 429 distinct `fail` commands in the live store on
+2026-09-05, **0** verdicts change. The hole was real, and nothing had ever walked through it.
+
 ## `skillnote promote` moves a note and never copies one
 
 A lesson recorded against one project turns out not to be about that project. The cheap
@@ -1588,7 +1622,7 @@ twice: typing the subcommand without `--dry-run`. The two refusals that remain a
 a lookup cannot settle on its own, a previously rejected proposal and an unmeasured routing
 pin, and both name the flag that overrides them.
 
-## The learning events widened to `mcp__.*`, and the refusing one did not
+## The learning events widened to `mcp__.*`, and the refusing one dropped its matcher
 
 The failure issue #19 names by example is an MCP tool dying and the session finishing the
 job with `gh`, and the cross-tool recovery rule is written for exactly that pair. Under the
@@ -1596,9 +1630,22 @@ job with `gh`, and the cross-tool recovery rule is written for exactly that pair
 could only ever be exercised by driving the script by hand. `PostToolUseFailure` and
 `PostToolUse`, the two events that learn, therefore take `Bash|Skill|mcp__.*`.
 
-`PreToolUse` does not, and that is evidence rather than caution. Both of its arms leave on
-a `Bash` test inside the script, and both escapes from the refusal live inside that branch,
-so a wider matcher there would buy one fork per MCP call and no behaviour whatsoever. A
+`PreToolUse` went further and now carries no matcher whatsoever, and that too is evidence
+rather than appetite. It was `Bash|Skill` on the argument that both of its arms left on a
+`Bash` test inside the script, so a wider selection would buy one fork per MCP call and no
+behaviour at all. A red team of the installed package on 2026-09-05 answered that argument:
+a session this gate refused on a `Bash` call ran `Read data/f2.txt` instead and finished the
+job. Issue #43's word is "force", and forcing a session to write the lesson down *before
+continuing* is a claim about continuing — which is any tool, not one of them. So the
+narrowing came off the entry and the lesson arm's `Bash` test came off with it; what
+survives inside that test is the single exemption a `Bash` call can have, the command that
+ends the refusal. The repeat arm keeps its own `Bash` test, because both of ITS escapes do
+still live inside that branch. What an entry with no matcher is actually handed was measured
+rather than assumed
+([the no-matcher probe](CLAUDE-CODE-BEHAVIOR.md#a-pretooluse-entry-with-no-matcher-is-delivered-every-tool)),
+and what the widening costs is counted rather than timed: four program starts on the path a
+session that has bound no recovery takes, which is now every tool call it makes, pinned by
+`ProcessCountTest`. A
 matcher is a regex over the tool name rather than a substring
 ([the matcher probe](CLAUDE-CODE-BEHAVIOR.md#a-hook-matcher-is-a-regex-over-the-tool-name-not-a-substring)),
 which is what makes a third alternative free on the two events that take it.

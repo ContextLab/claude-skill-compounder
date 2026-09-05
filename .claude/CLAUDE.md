@@ -406,6 +406,22 @@ from a live red team rather than review -- `cd build && tar -xf ../release.tgz` 
 while the bare `tar -xf ../release.tgz` was denied, and a haiku session found it unaided on
 its fifth attempt.
 
+**`segment_head` steps over PREFIX RUNNERS as of 2026-09-05, and `source` and `.` left
+`head_allowlisted` in the same change.** `env`, `command`, `source` and `.` sat on that list
+as inspection commands while every one of them RUNS THE NEXT WORD, so `env python3 x.py`
+answered `exempt-allowlist` where the bare `python3 x.py` answered `eligible` -- measured
+live against the installed package, and reproducible in one line per command with
+`printf '%s' '<cmd>' | bash hooks/repeat-gate.sh --eligible-of Bash`. `segment_head` now
+walks past `env`, `command`, `exec`, `nohup`, `builtin`, `nice`, `timeout`, `caffeinate`,
+`sudo`, `doas`, `stdbuf`, `setsid` and `ionice` -- through each one's modelled options
+(`sh_flag_solo`, `sh_flag_arg`, `sh_runner_opts`) and `timeout`'s duration word -- to the
+program they start, and `command -v`/`command -V` start nothing so they are judged as
+`command`. `source` and `.` are simply absent from both head lists now, beside `eval`,
+`sh -c` and `xargs`, because what they run is in a file the walk may not read. Unlike the
+per-segment change above this one moved NOTHING on the live store: driving both versions of
+`--eligible-of` over the 429 distinct `fail` commands there on 2026-09-05, 0 verdicts
+change, so the hole was real and had never been walked through.
+
 **The same file carries the lesson arms, and they are the refusal that ships ON.**
 Cross-tool recovery comes first, because without it the fail-then-fix of scenario 2 is
 never even observed: a failure of tool X followed, within `REPEAT_RECOVERY_WINDOW` (5)
@@ -448,7 +464,7 @@ same success also bound was invisible to the lesson gate, and -- observed live o
 2026-09-03 -- the session was told `TEST_TIMEOUT=... ./run_tests.sh` while the marker was
 rewritten to `cat notes/OPEN-THREADS.md`. First binding wins now. `claim_once`
 covers only the duplicate the two wirings deliver; no claim can see a duplicate inside one
-event, so the de-duplication is the row's own. THE SECOND TIME, IT REFUSES: `lesson_gate` denies the next `Bash` call when a
+event, so the de-duplication is the row's own. THE SECOND TIME, IT REFUSES: `lesson_gate` denies the next call of ANY tool when a
 signature recovered in THIS session has fail rows from `REPEAT_MIN_SESSIONS` or more
 distinct EARLIER sessions, no dismissal a person wrote, and no standing lesson. EARLIER
 means earlier: the count drops rows whose `.session` is this one, on the lesson arm as well
@@ -468,17 +484,27 @@ real session id or the literal `cli`. **The gate honours only a human's dismissa
 (`(.actor // "human") == "human"`, so rows written before the field existed count as human).
 A model's dismissal is not refused and not silently dropped: it is written, it is on the
 record, it lifts nothing, and `skillrepeat list` reports that signature's LESSON column as
-`dismissed-by-model`. The gate's own budget still lifts it -- `REPEAT_LESSON_MAX_DENIES`
-(2) refusals per signature per session -- but **the deny text no longer states the budget**.
-The reason used to end by naming it and saying that the call then went through whatever the
-store said, and a session red-teaming this gate on 2026-09-04 read that as a schedule: it
-retried until the budget expired and wrote no lesson at all. A refusal that advertises its
-own expiry is an instruction to wait it out, so the budget is enforced silently, as the
-safety valve that stops a false positive trapping a session rather than as a term offered to
-the session in front of it. The default stays 2 on the live store rather than on nerve: nine
-sessions have armed a lesson marker, one deny has ever been spent, and none reached two. The
-per-segment head exemptions above apply here too, and `skillnote` and `skillrepeat` are
-exempt by name, so the gate can never refuse the command that ends it.
+`dismissed-by-model`. **Nothing else lifts it, because as of 2026-09-05
+`REPEAT_LESSON_MAX_DENIES` defaults to `unlimited` and the refusal has no expiry.** It
+shipped at 2 per signature per session, first advertised and then silent: the deny text used
+to name the budget and say the call then went through, and a session red-teaming this gate
+on 2026-09-04 read that as a schedule and retried until it expired. Going silent was not
+enough. Against the installed package on 2026-09-05, 2 of 2 refused sessions spent BOTH
+denies on the IDENTICAL command and then ran it, writing neither a lesson nor a dismissal --
+and on the live store 2 of the 16 sessions that have ever armed a lesson marker reached the
+cap, both of them that red team, so the sentence this paragraph used to carry (nine
+sessions, one deny ever spent, none reaching two) was false the day it was checked. What a
+false positive costs with no expiry is ONE lesson line for that signature forever, and the
+deny gained one clause saying a lesson may record that the failure is EXPECTED -- a
+red-green test run, a probe whose error is the answer -- so a session holding a real false
+positive has a true sentence to write rather than a wall to outwait. A positive integer
+restores a budget for anyone who wants the valve back and `0` still means never refuse;
+anything else, a typo included, lands on `unlimited`, and the deny names neither the knob
+nor the dismissal. **The per-segment head exemptions above do NOT apply to this arm any
+more.** Its one exemption is `lesson_cli_head`: a `Bash` call whose every segment head is
+`skillnote`, `skillrepeat` or `cd`, at least one of them a CLI -- `cat`, `git` and `ls` are
+CONTINUING, and the thing this arm refuses is continuing -- so the gate still can never
+refuse the command that ends it.
 
 It is ON by default, and `REPEAT_LESSON_GATE=0` is the only spelling that switches it off --
 exactly the reverse of `REPEAT_GATE_REFUSE`, where exactly `1` switches a refusal on. The
@@ -493,9 +519,16 @@ read from. The two learning events are wired `Bash|Skill|mcp__.*` (`REPEAT_LEARN
 `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`), so an `mcp__*` failure can
 be learned at all -- and that third alternative is UNPROVEN rather than proven, since no MCP
 tool failure has been observed arriving at a hook here and the store is the only surface that
-can settle it. The event that refuses stays narrow at `Bash|Skill` (`REPEAT_PRE_MATCHER`) on
-evidence rather than caution: both `PreToolUse` arms leave on `[ "$tool" = "Bash" ]` inside
-the script, so widening it would buy a fork per MCP call and no behaviour. The limit that
+can settle it. The event that refuses carries NO MATCHER AT ALL since 2026-09-05
+(`REPEAT_PRE_MATCHER = None` in the installer, and no `matcher` key on the `PreToolUse`
+entry in `hooks/hooks.json`), on evidence rather than appetite: a session this gate refused
+on a `Bash` call answered with `Read data/f2.txt` and finished the job, and "before
+continuing" is a claim about any tool. So the lesson arm's `[ "$tool" = "Bash" ]` came off
+with the matcher and it now refuses every tool while a marker is armed for the session,
+subagents included, since they share the session id. The repeat arm keeps its own `Bash`
+test, because both of ITS escapes live inside that branch. The not-armed path -- what almost
+every delivery now pays -- is exactly four process starts (`cat`, `jq`, `tr`, `cut`), pinned
+by `ProcessCountTest` in `tests/test_repeat_gate.py`. The limit that
 follows from all of it belongs to the other CLI: `bin/skillnote` refuses `--lesson` for a
 fail row whose tool is not `Bash`, because `hooks/remind.sh` keys a command reminder on
 `.tool_input.command` and a `Skill` or MCP call has none, so a lesson for one of those is a

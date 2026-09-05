@@ -330,8 +330,8 @@ the failed call, the error, the call that worked, and the two commands that reco
 was learned. Once per signature per session, as a record of what happened rather than an
 instruction.
 
-**The second time, it is required.** The `PreToolUse` arm declines the next `Bash` call
-when a signature recovered in *this* session also has `fail` rows from
+**The second time, it is required.** The `PreToolUse` arm declines the next call of any
+tool when a signature recovered in *this* session also has `fail` rows from
 `REPEAT_MIN_SESSIONS` distinct **earlier** sessions and no lesson has been written down
 about it. Earlier means earlier: rows carrying this session's own id are dropped from that
 count, on both refusing arms. Until 2026-09-04 this arm counted the current session too, so
@@ -379,19 +379,27 @@ not to be about that project. The line, the attachments and the reminder's scope
 move, and the project block keeps a one-line tombstone naming where it went. It is a move
 and never a copy, and `--to project` exits 2, because the hierarchy only goes up.
 
-Two limits are worth knowing. The refusal is `Bash`-only, and a command is exempt from it
-only when EVERY segment's head is on one of the gate's two lists — `cd build && tar -xf x`
-is not exempt for its `cd`, and a command whose quoting the splitter cannot model is not
-exempt at all — while `skillnote` and `skillrepeat` are exempt by name, so it can never
-refuse the call that would lift it. And `skillnote --lesson` refuses a signature whose `fail` row is
+Two limits are worth knowing. The refusal is no longer `Bash`-only. Since 2026-09-05 its
+`PreToolUse` entry carries no matcher at all, so while a marker is armed a call of ANY
+tool is refused — a session refused on a `Bash` call had answered with a `Read` and
+finished the job, and continuing is any tool. The single exemption is `lesson_cli_head`: a
+`Bash` command whose every segment head is `skillnote`, `skillrepeat` or `cd`, at least
+one of them a CLI, so the call that lifts the refusal can never itself be refused. The
+head allowlists — every segment's head on one of the gate's two lists, `cd build && tar
+-xf x` not exempt for its `cd`, a command whose quoting the splitter cannot model not
+exempt at all — belong to the repeat arm, which stays `Bash`-only. And `skillnote
+--lesson` refuses a signature whose `fail` row is
 not a `Bash` call, because the reminder half is keyed on `.tool_input.command` and a
 `Skill` or MCP call carries none; for those, the lesson is an ordinary note plus a keyword
-reminder. A session that meets that refusal has the deny budget and nothing else, since a
-dismissal it writes itself lifts nothing.
+reminder. A session that meets that refusal has nothing left of its own: a dismissal it
+writes itself lifts nothing, and the refusal no longer expires, so a person has to type
+the one line.
 
-Unlike the repeat gate's refusal, this one ships **on**. `REPEAT_LESSON_GATE=0` is the
-only thing that switches it off, and `REPEAT_LESSON_MAX_DENIES` bounds how often it may
-speak about one signature in one session before it lets go for good.
+Unlike the repeat gate's refusal, this one ships **on**, and it does not let go.
+`REPEAT_LESSON_GATE=0` is the only thing that switches it off, and
+`REPEAT_LESSON_MAX_DENIES` defaults to `unlimited`: the two exits are a standing lesson on
+the ledger and a `dismiss` row a person wrote. A positive integer restores a budget of
+that many refusals per signature per session for anyone who wants the valve back.
 
 ## What the installer writes into your `CLAUDE.md`
 

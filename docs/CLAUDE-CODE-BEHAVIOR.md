@@ -963,6 +963,42 @@ a wiring that depends on it is unproven, not proven.
 
 ---
 
+## A `PreToolUse` entry with no matcher is delivered every tool
+
+**Finding.** A hook entry that omits the `matcher` key altogether receives every tool call the
+session makes, not some default subset. One such entry recorded `Read`, `Edit`, `Bash`,
+`Skill` and `ToolSearch` — five distinct tool names, two of which no matcher in this package
+has ever selected.
+
+**How established.** Claude Code 2.1.260, macOS 25.6.0, 2026-09-05. A scratch project whose
+`.claude/settings.json` held one `PreToolUse` entry with no `matcher` key at all —
+`{"hooks":[{"type":"command","command":"…"}]}` — running a script that appends the payload's
+`.tool_name` to a file. Three headless `claude -p` runs in that directory: the first asked
+for a file read, an `Edit` and a shell command; the second asked for the `Grep` and `Glob`
+tools by name; the third asked for one `Skill` invocation and nothing else. What the file
+held after each:
+
+```
+run 1   Read ×2   Edit   Bash ×2   ToolSearch
+run 2   ToolSearch ×2        (the session answered that Grep and Glob were unavailable)
+run 3   Skill
+```
+
+**What it means.** Leaving the key out is not a wider version of naming the tools you expect.
+Such an entry runs on everything, tools that did not exist when it was wired included, so
+the cost that matters is its cheapest path rather than its busiest — and that cost is now
+paid once per tool call rather than once per `Bash` call. Counting program starts on the
+do-nothing path is the only budget that survives; a stopwatch on the working path measures
+the wrong event.
+
+**Limits.** `Grep` and `Glob` were not in the probe session's tool set, so nothing here says
+whether they arrive. Nothing was measured for `mcp__*`: no probe reached one. Five names were
+observed and they are the whole of the evidence, so this is an existence result about the
+omitted key rather than a proof that every tool without exception is handed over. It says
+nothing about entries with no matcher on other events.
+
+---
+
 ## `PreToolUse` `additionalContext` reaches the model; an *allow* reason reaches nothing
 
 **Finding.** Three emit shapes, measured side by side.

@@ -2317,8 +2317,8 @@ EOF
     # reason and carried on, so naming it made the refusal free. A dismissal a model
     # writes is recorded and does not lift this (WHO MAY DISMISS in the header), and a
     # deny that advertised an escape which no longer works would be worse than one that
-    # omits it. THE BUDGET IS NOT NAMED EITHER, for the reason the AND IT LETS GO stanza
-    # in the header gives: this text used to end by saying how many times it could be
+    # omits it. THE BUDGET IS NOT NAMED EITHER, for the reason the AND IT NO LONGER LETS GO stanza
+    # in the header gives (a budget is now opt-in): this text used to end by saying how often it could be
     # spent and that the call then went through, and a session read that as a schedule
     # and retried until it expired without writing anything down. What is left is the
     # refusal, the fail-then-fix facts, and the one command that lifts it -- statements

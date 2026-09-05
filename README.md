@@ -413,8 +413,8 @@ lesson moves up a level with `skillnote promote`, and a skill goes the last leve
 The ten wired scripts divide into three kinds. Three carry something into the session and
 can be read past: the checkpoint that asks whether a skill already covers this, the
 reminder hook, and four of the mission's five moments. Five can refuse: the claim gate and
-the documentation gate outright, the apply gate once per session, the lesson gate at most
-twice per signature per session, and the mission once per prompt on a completion claim. The repeat
+the documentation gate outright, the apply gate once per session, the lesson gate on every
+tool until the lesson is written down, and the mission once per prompt on a completion claim. The repeat
 gate's older arm can too, and ships off. Three only record: a ledger row per skill
 invocation, and a queue row per candidate, written at the end of a session and again from
 whatever a compaction is about to discard.
