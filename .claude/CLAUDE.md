@@ -498,7 +498,15 @@ an unrelated success does not merely add a wrong row, it destroys the right one 
 (`shell_tool() { [ "$1" = "Bash" ]; }` -- `Bash` and nothing else) says the tool is a shell. **That
 store grows, so re-run the join rather than quoting those figures back** -- late on the same
 day it stood at 241 bindings. A capped floor of `min(2, |fail tokens|)` was tried against it
-and admitted exactly one binding more, on the word `echo`, and was rejected. An exact
+and admitted exactly one binding more, on the word `echo`, and was rejected. What WAS added,
+on 2026-09-05, is a second way to earn the binding rather than a lower floor: the same
+first-segment program plus at least one shared non-flag argument of any length
+(`head_args_of`, `head_arg_bind`; `REPEAT_RECOVERY_HEAD_ARG`, `0` off), because the e2e
+journey's own fail-then-fix, `ls --nonexistent-flag .` fixed by `ls -la .`, shares no
+three-letter token at all. `git push` then `git status` does not bind under it, `cd` and
+assignments are stepped over, and replayed on the live store (772 candidate pairs, 434 bound
+either way) it added nothing; before its `cd` clause it added four, all false, all under
+`cd`. An exact
 self-recovery -- a success whose
 normalised call EQUALS the failure -- always binds, because the refusal arm's self-recovery
 exclusion is built on those rows and `pwd` carries one token. Non-shell tools are unchanged,
@@ -871,7 +879,7 @@ the ledger (`SKILLFORGE_DOCTOR_JQ_VERSION` beside it is an ordinary pin, for the
 `doctor` branch a jq from 2015 would otherwise be needed to reach). A new script needs its
 own clock: pinning someone else's does nothing to it. This list was derived by running
 `grep -rhoE '\b(CI|CLAUDE_SKILL_COMPOUNDER|INSIGHT|SKILLFORGE|SKILLNOTE|SKILLUSE|SKILLREPEAT|SKILLREPORT|STATUSLINE|SKILL_COMPOUNDER|CLAIM_GATE|DOC_GATE|REPEAT_GATE|REPEAT_MIN|REPEAT_RECOVERY|REPEAT_LESSON|REMIND|PRECOMPACT|APPLY_GATE|APPLY_PENDING|MISSION|SKILLCONTRIB)_[A-Z0-9_]+'
-hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **156** names, over
+hooks/ bin/ statusline/ skill_compounder/ install.sh | sort -u` -- **157** names, over
 **22** prefixes, re-run 2026-09-04 on the #43 completion tree. A grep
 that reads gitignored `.pyc` files as source adds a `Binary file
 skill_compounder/__pycache__/installer.cpython-NN.pyc matches` line per cached bytecode

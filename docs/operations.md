@@ -332,7 +332,7 @@ work. Over the 231 distinct same-tool `Bash` bindings on this machine's store on
 binding *consumes* its armed failure, so an unrelated success ate the arming the real fix
 needed (the counts are in `hooks/repeat-gate.sh`'s header, under THE SAME-TOOL RULE IS NOT
 EVIDENCE FOR A SHELL). A same-tool binding for a shell now wants
-`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared tokens, the floor and the comparison the
+`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared tokens, or (since 2026-09-05, `REPEAT_RECOVERY_HEAD_ARG`) the same first-segment program plus one shared non-flag argument of any length, the floor and the comparison the
 cross-tool rule already used. Two carve-outs: a success whose normalised call equals the
 failed one binds whatever that is set to, because the refusal's self-recovery exclusion
 rests on those rows and `pwd` carries one token; and every other tool is untouched, since
@@ -592,7 +592,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](../README.md#what-runs-against-the-api).
-All sixty-one are environment variables, and they are not the whole set — this
+All sixty-two are environment variables, and they are not the whole set — this
 prints every name the hooks, the six CLIs, the status line and `install.sh` read, 143 of
 them as of 2026-09-04 (`uninstall.sh` and `scripts/` are outside it):
 
@@ -698,6 +698,7 @@ place in `~/.claude/settings.json`:
 |`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful calls of a tool this hook is wired for, in the same agent, after which an armed failure stops looking for the call that fixed it, by either the same-tool rule or the cross-tool one|
 |`REPEAT_RECOVERY_MIN_TOKENS`|`2`|the hook entries|Content tokens two normalised calls must share before a success of a **different** tool binds as the recovery. `0` disables cross-tool binding and leaves the same-tool rule untouched. A floor, not a calibration|
 |`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`|`2`|the hook entries|The same floor for a success of the **same** tool, applied only where that tool is a general-purpose shell (`Bash`), which names no operation of its own. `0` restores the unconditional same-tool binding this script shipped until 2026-09-03. A success whose normalised call equals the failed one binds whatever this is set to, and no other tool is affected|
+|`REPEAT_RECOVERY_HEAD_ARG`|`1`|the hook entries|The second way a `Bash` same-tool binding is earned when the token floor above is not met: the two commands' first segment heads name the same program AND share at least one non-flag argument word of any length (`ls --nonexistent-flag .` then `ls -la .`; `git push` then `git status` does not). `cd` and assignments are stepped over. Replayed on the live store on 2026-09-05 it added no binding the token rule had not made. `0` switches it off|
 |`REPEAT_LESSON_GATE`|`1`|the hook entries|Set to `0` to switch the lesson refusal off. On by default, which is the reverse of `REPEAT_GATE_REFUSE`, because this arm fires only where a failure and its recovery were both seen in the session it is speaking to. Exactly `0` is off and any other value is on, so a typo lands on the shipped default|
 |`REPEAT_LESSON_MAX_DENIES`|`unlimited`|the hook entries|Refusals the lesson arm may spend on one signature in one session. The default is no expiry: only a standing lesson or a human's `skillrepeat dismiss` ends the refusal. A positive integer restores a budget of that many refusals per signature per session; `0` means it never refuses. Anything else lands on `unlimited`|
 |`REPEAT_GATE_STDERR`|`0`|the hook entries|Set to `1` to leave the repeat gate's stderr connected, for `bash -x`. By default the gate closes it with a builtin `exec` before its first process start: `execve` charges the environment against `ARG_MAX`, and in a 200-byte band of environment size just under the one at which the hook cannot launch at all, `jq` launched and every `sed` in the normaliser could not, so bash printed `Argument list too long` up to seven times per tool call on the terminal. Exit status and the store are unaffected either way|
