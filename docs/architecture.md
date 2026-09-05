@@ -25,12 +25,12 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`skills/<the rest>/`|The seed pool, below. Useful before you have forged anything|
 |`skills/contribute-skill/`|Proposes a proven local skill back to this repo as a pull request|
 |`hooks/mission.sh`|States the user's own requests back, verbatim, at five moments. Wired on `SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse` and `Stop`, and the `PreToolUse` entry is the one of ours with no matcher: [The mission](#the-mission). Off switch `MISSION_ENABLED=0`. It reads its prompts from `claude-history-surfer` and stores none of its own. It sweeps its own per-session directories on a `MISSION_PRUNE_EVERY` draw, at the two exits that were going to deliver nothing anyway — the periodic arm inside its interval, and the early return when the prompt store is absent — and never the running session's own|
-|`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?" Every nudge it delivers is written to `<state>/reminders/nudges.jsonl` with the lineage id it is about, which is what makes `skillreport`'s conversion a count rather than an estimate|
+|`hooks/compound-improvement.sh`|Two throttled reminders: "does a skill already exist?" and "is this worth crystallizing?" Every nudge it delivers appends a row to `<state>/reminders/nudges.jsonl`, but only the queue arm's row carries the candidate's own lineage id: the checkpoint and prose arms pass the literal arm names `ci-checkpoint` and `ci-prose`, which attributes a row to an arm and never to a delivery (`grep -n log_nudge hooks/compound-improvement.sh`, and `jq -r .id` over that file). What that costs `skillreport`'s conversion figure is in [measurement.md](measurement.md)|
 |`hooks/insight-capture.sh`|Queues skill candidates a session flags, for one batched review a week|
 |`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
-|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure`, `PostToolUse` and `PreToolUse`, matcher `Bash\|Skill`. Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure` and `PostToolUse` with matcher `Bash\|Skill\|mcp__.*`, and on `PreToolUse` with matcher `Bash\|Skill` — the two events that learn are wider than the one that refuses (`REPEAT_LEARN_MATCHER` and `REPEAT_PRE_MATCHER` in `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`). Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
@@ -134,19 +134,34 @@ signed off.
 **The last two were promoted, not seeded.** They were forged locally, lived in
 `~/.claude/skills` as the only copy of themselves, and were brought in on 2026-09-01
 after the session that needed the skills above also needed both of these. Their
-usage evidence is **none**, and the first draft of this paragraph said otherwise. Checked
-row by row: `parallel-agents-one-codebase` has 17 recorded invocations and every one is
-`harness=true` in a `routing-probe-*` directory, which is this package measuring itself.
-`dead-guard-detection` has 28, of which 27 are the same. Its one non-harness row is stamped
-28 seconds after its own forge closed, by the session that forged it, which is a forge
-finishing rather than a skill being reused.
+usage evidence was **none** when this paragraph was first written, and the draft before
+that said otherwise. **The counts below grow; re-run the join rather than quoting them
+back**, over your own ledger:
 
-So both are here on the strength of the defects they name recurring in this repository, and
-on nothing else. By the bar `contribute-skill` sets for proposing a skill upstream -- clean
-from the red-team loop **and** used again since it was forged -- neither would qualify
-today. That bar governs proposing to strangers rather than shipping to yourself, and the
-difference is deliberate, but the gap is recorded here rather than left for a reader to
-discover.
+```bash
+jq -rs --arg s parallel-agents-one-codebase 'map(select(.event=="use" and .name==$s))
+  | "total=\(length) harness_or_probe=\(map(select((.harness==true)
+    or ((.cwd//"")|test("routing-probe")))) | length)"' \
+  ~/.claude/skill-compounder/ledger.jsonl
+```
+
+As of 2026-09-05 on this machine, `parallel-agents-one-codebase` has 26 recorded
+invocations, 23 of them `harness=true` or in a `routing-probe-*` directory, which is this
+package measuring itself. The three that are not are dated 2026-09-02, 2026-09-03 and
+2026-09-04, and the last of those was invoked from `~/hypertools` — the first row either of
+these two has that is a session outside this repository reaching for the skill.
+`dead-guard-detection` has 34, of which 33 are harness or probe. Its one non-harness row is
+stamped 28 seconds after the `dead-guard-check` forge's `done` row, by the session that
+forged it, which is a forge finishing rather than a skill being reused.
+
+So `dead-guard-detection` is here on the strength of the defect it names recurring in this
+repository and on nothing else, and `parallel-agents-one-codebase` has since been reached
+for three times outside the harness, once from another project. By the bar
+`contribute-skill` sets for proposing a skill upstream -- clean
+from the red-team loop **and** used again since it was forged -- the second now has rows to
+show and the first still does not. That bar governs proposing to strangers rather than
+shipping to yourself, and the difference is deliberate, but the gap is recorded here rather
+than left for a reader to discover.
 
 **A defect this exposed:** the forge was named `dead-guard-check` and the skill it produced
 is `dead-guard-detection`. `skillreport` joins uses to forges BY NAME, so it reports that
@@ -507,7 +522,10 @@ readers being told the same thing.
 Idempotence is keyed per event under `<state>/mission/<session>/`, on the payload's
 `prompt_id`, `tool_use_id` or `agent_id`, because [both wirings](#as-a-plugin) deliver every
 event twice. That tree is the one thing here that sweeps itself: on a `MISSION_PRUNE_EVERY`
-draw, at the single call site where nothing was going to be delivered anyway, it removes
+draw, at either of the two call sites where nothing was going to be delivered anyway — the
+periodic arm inside its interval, and the early return taken when the prompt store is
+absent (`grep -n prune_stale_sessions hooks/mission.sh` prints the definition and both) —
+it removes
 other sessions' directories once they have gone `MISSION_PRUNE_TTL` unchanged, and never
 the running session's own — a claim taken out from under a live session re-opens the double
 delivery it exists to close ([DESIGN.md](DESIGN.md)). Every delivery appends one row to
@@ -625,10 +643,13 @@ cannot have. A session that meets that refusal has the deny budget and nothing e
 dismissal carries no such restriction, but a dismissal written from inside a session lifts
 nothing either, so what ends the refusal there is `REPEAT_LESSON_MAX_DENIES` running out.
 Separately, the
-gate's wiring matcher is `Bash|Skill` and MCP tool names are deliberately not matched at
-all: `mcp__.*` may well work, and nothing here has measured that a matcher regex is applied
-to an MCP tool name. A wiring that silently matches nothing is worse than one that admits
-its scope, and widening it is one string.
+gate is wired at two widths. The two events that LEARN carry `Bash|Skill|mcp__.*`
+(`REPEAT_LEARN_MATCHER`), so an `mcp__*` failure can be learned at all; the event that
+REFUSES stays at `Bash|Skill` (`REPEAT_PRE_MATCHER`), because both `PreToolUse` arms leave
+on a `[ "$tool" = "Bash" ]` test inside the script and widening it would buy a fork per MCP
+call and no behaviour. The third alternative is UNPROVEN rather than proven: no MCP tool
+failure has been observed arriving at a hook here, and the store is the only surface that
+can settle it.
 
 ## Three levels: project, user, general
 
@@ -733,8 +754,16 @@ a forge, plus the two the cheap tiers and the round cap added — and to say so 
 |What was written down instead of forged|`note`: one row per `skillnote` entry, with its scope, its target file and its id. A second `add` of the same text writes no row|
 |What an extra red-team round cost|`escalate`: one row per round bought past a forge's budget, carrying the blocking counts that bought it and the round budget before and after|
 
-`note`, `apply` and `escalate` are invisible to every reader written before them: each reader
-picks its events by name, and no selector lists any of the three.
+`note`, `apply` and `escalate` were invisible to every reader written before them, and that
+is the property the rule buys: each reader picks its events **by name**, so a row nobody
+has taught a selector about is skipped rather than miscounted. Readers written since do
+list them. `bin/skillreport`'s `apply_join` selects `apply` alongside `done`, and its
+`FUNNEL` block names five events outright — `note`, `start`, `use`, `apply` and `verdict` —
+which is why that block can be a partition rather than an estimate. `escalate` is still
+selected by nothing: `grep -rn escalate bin/` finds only the `skillforge` line that writes
+it. Check with `grep -nE '"(apply|note|escalate)"' bin/skillreport` rather than trusting
+this paragraph; what must not change is the by-name rule, because a selector widened to a
+negation would swallow every event added after it.
 
 Three fields cut across the rows instead of belonging to one. `from` is the lineage id a
 `start`, `origin`, `apply` or `verdict` descends from; `candidate` is the same id on a

@@ -274,8 +274,13 @@ value that far out is a mistake and the default is the only width known to rende
 The bound that finally matters is the SEGMENT, not the knob. Each width is legal on its
 own and they still sum past the line — `SKILLFORGE_TAIL_WIDTH=400` alone renders 445
 columns and 200/400/400 renders 629 — so the three are checked together against one
-terminal line (400 columns) plus 23 columns of measured fixed furniture and a margin for
-the `[k/N]` counter and a four-digit step field. If they do not fit, all three return to
+terminal line (`SEGMENT_MAX=400`) plus one allowance, `SEGMENT_CHROME`, which is the only
+number in the code: **40**. That 40 is 23 columns of measured fixed furniture — the
+spinner, the word `forge`, the bar's brackets, `step/steps`, the percentage and the
+separators — plus the margin for the two things that widen it, the `[k/N]` counter and a
+four-digit step field. The 23 is recorded in the comment above the constant and nowhere
+else, so `grep -n SEGMENT_CHROME statusline/skillforge-status.sh` is where to check both.
+If they do not fit, all three return to
 their defaults; shrinking one to make room would render a geometry nobody asked for and
 give no clue why.
 
@@ -485,8 +490,13 @@ be kept, fixed, or retired?" is a question the agent can actually answer against
 
 ## A test cannot read prose for meaning, so `test_doctrine_sync.py` stopped trying
 
-The rule above is mirrored into `docs/architecture.md` and `.claude/CLAUDE.md`, and it
-has been
+The rule above is mirrored into four places, not two: `skills/skill-compounder/SKILL.md`,
+`docs/architecture.md`, `.claude/CLAUDE.md`, and the `DOCTRINE_TEXT` constant in
+`skill_compounder/installer.py` that becomes the stanza in a user's global `CLAUDE.md` —
+read them off `MIRRORS` in `tests/test_doctrine_sync.py` rather than from this sentence,
+since that dictionary is what the suite enforces. The first two also carry an anchor
+comment per pinned sentence (`ANCHORED`); the other two are condensed restatements with no
+room for one. The rule has been
 silently deleted from a mirror before, so `tests/test_doctrine_sync.py` guards it. Three
 versions of that guard tried to enforce it by scanning the prose for the rule, and each was
 defeated on first contact by a fresh reviewer — not by a bug in a pattern, by a rewording:
@@ -626,11 +636,14 @@ ends in `exit`, for the same reason `hooks/session-review.sh` is.
 `curl | bash` clones to `~/.claude/skill-compounder-app`; the README also documents
 installing from your own clone. Doing one and then the other, or simply `mv`-ing the
 checkout, used to wedge the package in both directions. Ownership of a link was decided by
-`realpath(link)` falling inside the *current* `app_home`, so after the move all thirteen
-links failed the test at once: install reported "NOT LINKED, you already have something by
+`realpath(link)` falling inside the *current* `app_home`, so after the move every link
+failed the test at once: install reported "NOT LINKED, you already have something by
 that name" for every one of them and uninstall reported "left in place (not ours)",
-leaving nine dangling skill links and four dangling CLI links forever, with the message
-blaming the user for them.
+leaving them dangling forever, with the message
+blaming the user for them. On 2026-08-25, when this was found, that was thirteen links —
+nine skills and four CLIs. The package has grown since; `ls -d skills/*/ | wc -l` and
+`ls bin/ | wc -l` answered 12 and 6 on 2026-09-05, and the failure was never about how
+many there were.
 
 Widening the test is the obvious repair and the wrong one. A rule that matches
 `<anything>/skills/<name>` adopts the link of someone whose own `no-silent-stub` lives in
@@ -723,7 +736,8 @@ on content, cap at `MAX_BACKUPS`, and suffix rather than clobber.
 ## Uninstall may never refuse
 
 A cold review found that a `settings.json` which does not parse stopped uninstall dead:
-exit 1, and all thirteen links still in place. `remove_hooks` had already been written to
+exit 1, and every link still in place — thirteen of them on 2026-08-25, more now, and the
+count was never the point. `remove_hooks` had already been written to
 tolerate a shape it cannot read, for exactly this reason, but `read_settings` raised a
 layer above it. The rule is now uniform and it is worth stating as a rule: **install may
 refuse, uninstall never does.** A user whose config was corrupted by anything at all is
@@ -991,7 +1005,7 @@ variable name is replaced with a placeholder. A second spelling would be a secon
 unsafe name somebody thought of in one file and not the others — which is the failure the
 byte-identical rule exists to prevent, arriving one level up.
 
-## Three gates, and the reason there are now three
+## Five hooks can refuse, and each refuses where its evidence is
 
 `hooks/claim-gate.sh` was for a long time the one component here that refused anything, and
 its own header argued that a refusal is a different mechanism from a reminder rather than a
@@ -1005,7 +1019,13 @@ variable. A thread absorbed in one fix answers *"is this recurring?"* honestly w
 every time, because from inside the fix it is not recurring.
 
 So the three components issue #19 asked for are refusals, not notices, and each refuses at
-the only moment its evidence exists.
+the only moment its evidence exists. Three was the count that issue asked for and it is not
+the count today: `grep -lE 'permissionDecision:"deny"|decision:"block"' hooks/*.sh` answers
+five on 2026-09-05 — `apply-gate.sh`, `claim-gate.sh`, `doc-gate.sh`, `mission.sh` and
+`repeat-gate.sh` — because `hooks/mission.sh` gained a `Stop` block and `hooks/repeat-gate.sh`
+gained a second refusing arm. Recount with that command rather than this paragraph, and
+with that command rather than a looser one: grepping for the bare word `permissionDecision`
+answers five files and they are the wrong five.
 
 **The documentation gate refuses at the push, because that is where the diff is knowable.**
 A session about to push knows exactly which commits are leaving and exactly which files they
@@ -1109,12 +1129,21 @@ skip an id a later tombstone covers. That is the rule `skillrepeat forget` alrea
 for the reason it follows it, and it also means the hook never has to open the store for
 writing while a CLI may be appending to it.
 
-**Nothing prunes either file yet, and that is a decision rather than an omission.** The
-budget that bounds cost is a read bound — `REMIND_MAX_ROWS` reads the tail — so growth costs
+**The store is still never pruned, and that is a decision rather than an omission; the
+delivery log stopped being the same case.** For the store, the budget that bounds cost is a
+read bound — `REMIND_MAX_ROWS` reads the tail — so growth costs
 disk and not latency, and no reminder becomes wrong merely by getting old. A pruner would
 have to decide which rows are dead, and the only honest input to that is hit counts nobody
 has yet. Writing one now would mean guessing a retention rule and then measuring against a
-store the rule had already shaped.
+store the rule had already shaped. None of that argument covers `hits.jsonl`, which is a
+log of what was delivered rather than a set of rules a reader has to be complete about:
+losing its oldest rows costs a count, not a reminder, so since issue #33 the same
+`REMIND_MAX_ROWS` bounds it on WRITE as well, rewritten to its last `REMIND_MAX_ROWS` on
+the delivery path only and through a `mktemp` in the log's own directory so the `mv` is a
+rename. The per-session directories under `<state>/remind/` are swept on the same change,
+on a `REMIND_PRUNE_EVERY` draw and never the sweeping session's own pair. Read the trim off
+`hooks/remind.sh`'s hits-cap block, and `tests/test_remind.py`'s `HitsCapTest` and
+`PruneTest` for what each one is pinned to do.
 
 **Every line the hook emits is framed as a record of something that happened, never as an
 instruction.** The wording was measured together with the delivery field, and both results
@@ -1429,7 +1458,7 @@ looks like an oversight. It is the population each arm can reach.
 The repeat arm refuses on an inference from history: this call failed in enough earlier
 sessions, so the next attempt is likely wrong too. Its population was measured and found
 empty, which is the argument recorded under
-[Three gates](#three-gates-and-the-reason-there-are-now-three).
+[Five hooks can refuse](#five-hooks-can-refuse-and-each-refuses-where-its-evidence-is).
 
 The lesson arm refuses on a fact about the session in front of it. A call failed here, a
 different call fixed it here, the store already holds fail rows for that signature from

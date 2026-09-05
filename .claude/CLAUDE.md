@@ -22,8 +22,11 @@ listed here; the other two are procedures reached from `docs/development.md`:
 - `docs/CLAUDE-CODE-BEHAVIOR.md` is verified behavior of **Claude Code itself**, useful to
   a project that shares no code with this one. Each entry is meant to name the finding, how
   it was established by running something, and the CLI version where it was recorded, and
-  as of 2026-09-04 two do not carry a version -- "A child running and its result arriving
-  are separate events" and "SessionStart fires before anyone has typed". Re-derive the gap
+  as of 2026-09-05 exactly one does not, and it is the one that could not: "SessionStart
+  fires before anyone has typed" was established by counting `SessionStart:startup` events
+  over 475 stored transcripts spanning every CLI version installed here, so there is no
+  single version to name and the entry says so. "A child running and its result arriving
+  are separate events" was the other one and now cites 2.1.245. Re-derive the gap
   rather than trusting this sentence:
   `awk '/^## /{if(h!=""&&!v)print h; h=$0; v=0} /2\.1\.2[0-9]+/{v=1} END{if(h!=""&&!v)print h}' docs/CLAUDE-CODE-BEHAVIOR.md`
   (it also prints the "Recorded elsewhere" pointer section, which is not an entry). Add a
@@ -346,10 +349,19 @@ Two of its constants are worth knowing before touching either. `CLAIM_GATE_MAX_B
 `16777216`; it was `67108864` and that cap was **dead code on BSD**, because `wc -c < file`
 prints a leading-space-padded count and the numeric `case` guard read the space as
 non-numeric and zeroed the value. `tr -cd '0-9'` is the fix and the `case` stays as the
-belt. And the header's calibration carries **two** false-positive rates, not one: 2.9% on
-the corpus the rules were tuned against and 3.4% held out. Quote the held-out figure; the
+belt. And the header's calibration carries **three** rates, not two, and they are BLOCK
+rates rather than false-positive rates -- `grep -nE '[0-9]\.[0-9]%' hooks/claim-gate.sh`
+prints all of them. On the corpus the rules were tuned against, the `Stop` arm blocked
+2.9% (6 of 205 closing messages, of which 4 were relays flagged by design and **2** were
+wrong) and the COMMIT arm blocked 3.2% (3 of 93 `git commit` invocations, **1** a clean
+false positive) -- the third rate, and the one the two-rate sentence omitted, because the
+commit arm is a second arm on a second corpus and not a restatement of the first. Held
+out, the `Stop` arm blocked 3.4% (3 of 88), down from 8.0% before the 2026-08-26 fixes.
+Quote the held-out figure; the
 tuned one was optimistic by roughly threefold, and the arm the tuned corpus recorded as
-never firing was the arm carrying the difference.
+never firing was the arm carrying the difference. A second independent draw of 88 under
+the same rule measured 5.7% before those fixes, so the pair agrees on the order of
+magnitude and nothing finer.
 
 **Of the other four, `hooks/repeat-gate.sh` carries two refusals that ship opposite ways
 round, and `hooks/doc-gate.sh` is configured differently in this repo.** The repeat refusal

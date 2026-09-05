@@ -114,7 +114,8 @@ data exists.
 
 - `CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` in `hooks/compound-improvement.sh`.
   **These two now have an instrument and still have no data.** `bin/skillreport` grew a
-  `REMINDER CONVERSION` block in Wave 1 (`bin/skillreport:1364`) that divides forges
+  `REMINDER CONVERSION` block in Wave 1 (`grep -n 'REMINDER CONVERSION' bin/skillreport`)
+  that divides forges
   started, all time, by the checkpoints the on-disk edit counters imply at the current
   `CI_EDIT_EVERY`; it prints its own caveat, because the numerator covers all time and the
   denominator only the last seven days, so it is a loose upper bound rather than a rate.
@@ -582,7 +583,8 @@ Kept as one line each so a returning session does not reopen them.
   `promote-review`) promotes one by hand; the protocol wires the verdict in at step 6, so
   the paid-for answer lands somewhere a later session reads.
 - **The forge has a hard round cap.** `skillforge round` refuses at the budgeted count with
-  exit 3 and records nothing (`bin/skillforge:2239`), and `skillforge escalate` is the only
+  exit 3 and records nothing (`grep -n 'round cap reached' bin/skillforge`), and
+  `skillforge escalate` is the only
   way past it: `--converging` requires blocking findings to have strictly fallen,
   `--narrowed "<what was cut>"` may be used once, and two grants is the ceiling, so four
   rounds is the most any forge can reach. The measurement behind it is that rounds 3..N of

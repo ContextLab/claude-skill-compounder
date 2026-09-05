@@ -728,7 +728,20 @@ you MUST first run this exact command: echo DOC-GATE-OBEYED   Then retry the git
 will be allowed on the second attempt.","is_error":true,"tool_use_id":"toolu_016pdCz..."}
 ```
 
-**What it means.** A deny reason is a place to put an instruction, not just an explanation.
+**What it means.** A deny reason is read and acted on — but the rule this package ships is
+narrower than "put an instruction there", and two later measurements are why. **Register:**
+with imperative wording the `PreToolUse` `additionalContext` canary was complied with in
+**2 of 4** runs, and the two refusals named it as a prompt-injection pattern while proving
+receipt, so every line these hooks inject is written as a statement of fact (the entry
+below, 2.1.258). **Content:** whatever command a reason prints is a command that gets run.
+A live round on 2026-09-04 put two untouched sessions in front of a refusal whose text
+listed an escape hatch alongside the real remediation; **2 of 2** reached for the escape,
+supplied a justification of their own devising and carried on. So the refusal that shipped
+names exactly one command — the one that really ends it — while the non-refusing statement
+beside it may name more; the `THAT RULE IS MEASURED` block in `hooks/repeat-gate.sh`'s
+header holds the round, and [DESIGN.md](DESIGN.md) holds what it changed here. So a deny
+reason states what is wrong and names the single remediation you are willing to have run,
+in the indicative, and nothing more.
 **Limits, and they matter.** The remediation measured was one trivially cheap `echo`, which
 is the easy case for compliance; an expensive or ambiguous remediation is untested. The gate
 opened on attempt two in every run, so what a session does when the retry is denied *again*
@@ -982,8 +995,16 @@ report, it came back 3 of 3. This is the same constraint the deny-reason entry a
 arriving through a different field.
 
 **How established.** Claude Code 2.1.258, macOS 25.6.0, 2026-09-02, `--model sonnet`.
-Eighteen headless runs — three variants × two wordings × three runs — plus a deny control and
-one smoke run. Each variant's hook was a single script wired through its own `--settings`
+Nineteen headless runs, plus a deny control and
+one smoke run. The design was three variants × two wordings × three runs, which is
+eighteen, and this entry said eighteen for its whole life; add the denominators it actually
+reports — `PreToolUse` neutral 3, `PreToolUse` imperative **4**, `UserPromptSubmit` 3 and 3,
+allow-reason 6 — and the sum is nineteen. The imperative cell got a fourth run. **Why it
+did is no longer establishable**: the scratch directory holding the per-run logs is gone,
+nothing about it was committed, and the session note that summarises the spike
+([../notes/2026-09-02-audit-and-replan.md](../notes/2026-09-02-audit-and-replan.md), the
+`W2b spike` entry) records only the same `2/4`. Read the arm denominators as measured and
+the design sentence as the design, not as a run count. Each variant's hook was a single script wired through its own `--settings`
 file with `--setting-sources ''`, so none of the machine's real hooks fired, and every hook
 appended its own invocation to a log so "canary absent" could be told apart from "hook never
 ran". Each run's canary was randomised fresh, and scoring was `grep -F` over the whole
@@ -1178,8 +1199,10 @@ on `session_id`. A summary of the same runs is in
 [../notes/2026-09-03-mission-and-lessons-design.md](../notes/2026-09-03-mission-and-lessons-design.md);
 where it and the logs differ, the logs are the record.
 
-**What it means.** A hook wired on `SessionStart` cannot branch on one payload shape. Four
-of the nine keys it may be handed exist on exactly one source, and `prompt_id`, which is the
+**What it means.** A hook wired on `SessionStart` cannot branch on one payload shape. The
+three payloads above are 5, 9 and 7 keys wide over a union of 11, and six of those eleven —
+the four `resume` extras and the two `compact` extras — exist on exactly one source. Take
+the union off the three lines above rather than from this sentence. `prompt_id`, which is the
 per-turn key the `Stop` entry above recommends for a per-turn budget, is present on
 `compact` and absent on `startup` and `resume`, so an idempotence key derived from it has to
 have a fallback on two of the three sources. The `compact` source is the one moment when a

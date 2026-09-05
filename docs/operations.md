@@ -31,9 +31,15 @@ any healthy forge here has lived. `--name` narrows which forges are considered a
 lower the bar. `skillforge start` on a name held by a forge past the TTL reaps it and says
 so, instead of refusing.
 
-`skillforge doctor` is the health check for everything else: jq, the state directory, the
-settings entries, the status line, the skill links, the ledger, the reminder counters and
-the open forges. Every hook here opens with `command -v jq || exit 0`, so a missing jq or
+`skillforge doctor` is the health check for everything else, and it runs eleven checks in
+one fixed order — jq, state, settings, statusline, skills, surfer, ledger, counters,
+forges, mission, review — in the text form and under `--json` alike, so the two cannot
+report different counts. Run `bash bin/skillforge doctor` and read the trailing
+`N pass, N warn, N fail` line rather than trusting this list. Three of those rows exist for
+the mission: `surfer` says whether the dependency `hooks/mission.sh` reads its prompts from
+is present, `mission` says whether anything has been delivered, and `review` is the only
+surface that reports which way `SKILL_COMPOUNDER_REVIEW` is set.
+Every hook here opens with `command -v jq || exit 0`, so a missing jq or
 a state directory gone read-only stops all of it with nothing said anywhere — from
 outside, indistinguishable from a package that had nothing to report.
 
@@ -599,11 +605,20 @@ of 12 rather than switching the checkpoint off, because nothing in the header ev
 words.
 
 `skill_compounder/installer.py` is outside that command's paths as well, and it reads
-three names of its own, all install-time and all about the history-surfer dependency.
+six names of its own, all at install time — `grep -n 'os.environ.get'
+skill_compounder/installer.py` printed six read sites on 2026-09-05; re-run it rather than
+trusting this count. Four are about the history-surfer dependency.
 `SKILL_COMPOUNDER_NO_SURFER=1` skips the step, leaving the mission hook inert until
 `surfer` arrives some other way. `SKILL_COMPOUNDER_SURFER_URL` changes what is cloned,
 and exists so the suite can clone a real local checkout with no network at all.
-`SKILL_COMPOUNDER_SURFER_HOME` changes where the checkout goes. Set them on the command
+`SKILL_COMPOUNDER_SURFER_HOME` changes where the checkout goes. `CLAUDE_HISTORY_SURFER_DIR`
+is not ours at all: `_surfer_store()` reads it because that is how history-surfer's own
+installer resolves its data directory, and the check for an existing store has to look
+where the other project would have put one. The remaining two are neither install-time
+options nor about the dependency. `SKILL_COMPOUNDER_NOW` pins the clock on the backup
+stamp, one of the fourteen clocks the suite freezes; `SKILL_COMPOUNDER_DOCTRINE` set to
+`0`, `no`, `off` or `false` suppresses the doctrine stanza the installer writes into the
+global `CLAUDE.md`, and an explicit argument beats it. Set them on the command
 that runs the installer; `~/.claude/settings.json` is read by nothing at install time.
 
 `CLAUDE_SKILL_COMPOUNDER` is in the alternation for those two names alone, and it has to
@@ -660,7 +675,7 @@ place in `~/.claude/settings.json`:
 |`REMIND_PRUNE_TTL`|`604800`|the hook entries|Seconds a session's cooldown-stamp or delivery-claim directory under `remind/` may go unchanged before a sweep removes it. The sweeping session's own pair is never removed, whatever its age|
 |`REMIND_PRUNE_EVERY`|`25`|the hook entries|Hook invocations between sweeps of `remind/`. `0` switches the sweep off|
 |`MISSION_ENABLED`|`1`|the hook entries|Set to `0` to switch the mission off entirely: no moment fires and nothing is recorded|
-|`MISSION_SURFER_ROOT`|unset; the hook then reads `CLAUDE_HISTORY_SURFER_DIR`, and failing that `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer`|the hook entries|Where claude-history-surfer keeps its per-project prompt store. Rung 1 of three, and the only one this package owns: the two below it are history-surfer's own resolution (`history_surfer/config.py:37-42`), so the writer and this reader stay on one file without anyone setting a second variable. The hook reads that store and writes nothing to it|
+|`MISSION_SURFER_ROOT`|unset; the hook then reads `CLAUDE_HISTORY_SURFER_DIR`, and failing that `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer`|the hook entries|Where claude-history-surfer keeps its per-project prompt store. Rung 1 of three, and the only one this package owns. Rung 2 is history-surfer's own override, read by its `data_dir()`, so setting it moves the writer and this reader together. Rung 3 is where the two DIVERGE, and the hook's header says so: history-surfer's `claude_dir()` keys on `CLAUDE_HISTORY_SURFER_CLAUDE_DIR` and reads `CLAUDE_CONFIG_DIR` nowhere, while this hook reads `CLAUDE_CONFIG_DIR`, which is what the rest of this package falls back to and what Claude Code itself honours. They agree whenever neither variable is set, which is every default machine; export one of them and rung 1 is what settles it. The hook reads that store and writes nothing to it|
 |`MISSION_FIRST_CHARS`|`1200`|the hook entries|Characters of the session's first substantive request quoted in full|
 |`MISSION_RECENT`|`3`|the hook entries|Most recent requests quoted alongside it|
 |`MISSION_EACH_CHARS`|`400`|the hook entries|Characters of each of those|
@@ -684,7 +699,14 @@ place in `~/.claude/settings.json`:
 |`STATUSLINE_CACHE_PRUNE_EVERY`|`200`|the `statusLine` entry|Cache misses between sweeps of dead cache entries. The key is a hash of session id and directory, so every session leaves a file; sampled because this runs once a second|
 |`SKILL_COMPOUNDER_STATE`|`~/.claude/skill-compounder`|the top-level `env` block|Where runtime state lives|
 
-Only the eight `CI_*` variables are read by `hooks/compound-improvement.sh`;
+Only the eight `CI_*` variables in the table above are read by
+`hooks/compound-improvement.sh` as settings, and eight is not how many `CI_*` names that
+script mentions: `grep -ohE '\bCI_[A-Z0-9_]+\b' hooks/compound-improvement.sh | sort -u`
+printed ten on 2026-09-05. The two with no row are not knobs. `CI_NOW` is the test clock,
+and no `_NOW` name has a row for the reason given further down. `CI_DEBUG_DUMP` is a path
+the script appends its raw stdin payload to when it is set, for looking at a payload by
+hand; it changes no behaviour, and a row for it would invite someone to carry a debug sink
+in `settings.json`.
 `SKILL_COMPOUNDER_USE_LOG` is read by `hooks/skill-use.sh`, which is a hook entry too.
 The `CLAIM_GATE_*`, `DOC_GATE_*` and `APPLY_GATE_*` variables, and every `REPEAT_*` one
 **but `REPEAT_MIN_SESSIONS`, `REPEAT_GATE_REFUSE` and `REPEAT_GATE_NOW`**, are each read
