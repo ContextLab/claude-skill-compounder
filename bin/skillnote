@@ -9,7 +9,7 @@
 #   skillnote promote <id> --to global [--project <dir>]
 #   skillnote list    [--scope project|global|memory|remind] [--json]
 #   skillnote where   [--scope project|global|memory|remind] [--project <dir>]
-#   skillnote remove  <id>
+#   skillnote remove  <id> [--keep-reminder] [--project <dir>]
 #   skillnote --help
 #
 # WHY THIS EXISTS. `skills/skill-compounder/SKILL.md` has always had a cheap branch --
@@ -62,8 +62,19 @@
 #
 # --attach <path> IS THE "CODE OR SCRIPTS" HALF, and it is valid with or without --lesson.
 # The file is COPIED (executable bit and all) into <scope>/lessons/<note id>/ and the note
-# line gains a ` (attached: <rel>)` suffix, so the script that finally worked is reachable
-# from the sentence that says what it was for. Two refusals, both exit 2 and both BEFORE a
+# line gains a ` (attached: <path>)` suffix, so the script that finally worked is reachable
+# from the sentence that says what it was for.
+#
+# THE SUFFIX IS WRITTEN IN WHATEVER FORM RESOLVES FROM WHERE THE LINE IS READ, and the two
+# scopes are genuinely different. A project note is read by a session sitting in that
+# repository, so `.claude/lessons/<id>/<file>` is the path it would type. A GLOBAL note is
+# read from every repository on the machine, and there `.claude/lessons/...` names a
+# directory in whichever project happens to be open -- which does not exist. Measured
+# 2026-09-05: a session in another project was handed exactly that line and had to run
+# `find ~/.claude` for the file. So the global and memory scopes write the path
+# `~`-anchored -- `~/.claude/lessons/<id>/<file>` -- and a claude directory outside $HOME,
+# which no `~` can name, gets the absolute path instead. Both forms resolve from anywhere;
+# the relative one is the only one that does not, and it is now used only where it does. Two refusals, both exit 2 and both BEFORE a
 # byte is copied: a source outside the working tree or $HOME, because this CLI is called
 # by hooks and by detached sessions and a flag that can copy /etc/anything into a repo is
 # a flag that eventually will; and an existing destination, because nothing here is ever
@@ -94,6 +105,18 @@
 # `skillrepeat forget` follows, for the reason it follows it: the store is written by a
 # hook nobody watches and one bad expression could erase an hour of it. A memory note is
 # deleted, but its file is copied aside with the backup prefix below first.
+#
+# REMOVE FOLLOWS THE LESSON'S OTHER HALF, and until 2026-09-05 it did not. `--lesson`
+# writes TWO things under two different ids -- the note, and a reminder whose id is a hash
+# over "remind|<scope>|<text>" -- so `remove <note id>` deleted the line and left the
+# reminder firing. Measured that day: the note was gone and hooks/remind.sh went on
+# stating it before every matching call, a lesson nobody could read any more. The join is
+# the ledger, which `--lesson` already wrote both ids into: `ledger_reminder_of` reads the
+# LAST `note` row carrying this id's `reminder_id`, so a `promote` row -- which carries the
+# id the reminder took at its new scope -- answers instead of the `add` row it superseded,
+# and the reminder is withdrawn wherever it now lives. The withdrawal is the same tombstone
+# every other removal appends, the id it withdrew goes onto the `remove` ledger row as
+# `reminder_id`, and one line says so. `--keep-reminder` leaves it, and says that too.
 #
 # CLAUDE DIRECTORY, in this order: $SKILLNOTE_CLAUDE_DIR, then `.claude_dir` from
 # <state>/install-manifest.json, then ${CLAUDE_CONFIG_DIR:-$HOME/.claude}. Identical to
@@ -201,8 +224,11 @@ usage() {
   echo
   echo "--attach <path> (repeatable, and valid without --lesson) copies the file to"
   echo "<scope>/lessons/<note id>/<basename>, keeps its executable bit, and appends"
-  echo "' (attached: <rel>)' to the note line so it is findable from the line. A path"
-  echo "outside the working tree or \$HOME is refused, and an existing attachment is never"
+  echo "' (attached: <path>)' to the note line so it is findable from the line. A project"
+  echo "note names it relative to the repository root ('.claude/lessons/...'); a global or"
+  echo "memory note names it '~/...', because a global line is read from every repository"
+  echo "and a relative path there names a directory that does not exist. A path outside"
+  echo "the working tree or \$HOME is refused, and an existing attachment is never"
   echo "overwritten. Both refusals happen before a byte is copied."
   echo
   echo "--candidate <id> records the LINEAGE this note descends from -- the queue"
@@ -217,6 +243,12 @@ usage() {
   echo "and leaves a one-line tombstone in the project block. Never a copy. '--to"
   echo "project' is refused: the hierarchy only goes up. Promoting a moved note again is"
   echo "a no-op that exits 0."
+  echo
+  echo "remove <id> takes the note AND the reminder a --lesson wrote beside it: the"
+  echo "reminder is found through the ledger row that recorded both ids, tombstoned in"
+  echo "the store hooks/remind.sh reads, and named on stdout and on the remove ledger"
+  echo "row. --keep-reminder leaves it live and says so. A reminder outliving its note"
+  echo "goes on stating a lesson that can no longer be read."
   echo
   echo "The memory scope IS read back by a later session, but ONLY through MEMORY.md:"
   echo "measured 2026-09-02 on Claude Code 2.1.258, a memory file that MEMORY.md does not"
@@ -570,21 +602,65 @@ norm_of_bash() { # <literal command> -> the normalised signature, or fails
 # linked -- so the working tree the user is still editing is untouched, and `cp -p` carries
 # the executable bit across, which is the whole difference between a file and a script.
 #
-# ATTACH_DIR is where the bytes land. ATTACH_BASE is what the printed path is relative TO,
-# and the two differ per scope so that the suffix on the line is readable from wherever
-# that line is read: from the repository root for a project note (`.claude/lessons/...`),
-# and from $HOME for a global one (`.claude/lessons/...` again, because the claude dir is
-# `~/.claude`). A memory note names it relative to its own directory.
-ATTACH_DIR=""; ATTACH_BASE=""; ATTACH_SUFFIX=""; ATTACH_JSON='[]'
+# ATTACH_DIR is where the bytes land. ATTACH_BASE and ATTACH_HOME decide how the path is
+# WRITTEN, and they differ per scope so that the suffix on the line resolves from wherever
+# that line is read.
+#
+# A PROJECT note is read by a session sitting in that repository, so the path is relative
+# to the repository root: `.claude/lessons/<id>/<file>`, which is what a reader would type.
+#
+# A GLOBAL note is read from EVERY repository on the machine, and this is where the old
+# rule was wrong rather than merely terse. It printed the path relative to `dirname
+# <claude dir>`, which on an ordinary machine is `$HOME` and produced the very same
+# `.claude/lessons/...` string -- indistinguishable from the project form and, from
+# anywhere but $HOME, naming nothing. `~`-anchored is the fix: one string, resolvable from
+# any directory, and visibly not a project path. MEMORY is the same case wearing a
+# different directory -- the file lives under the transcripts root, which no session's cwd
+# is ever inside -- so it is anchored the same way rather than left relative to its own
+# directory, which is a base the reader has no way to know.
+#
+# ATTACH_BASE is still what a relative form is relative to; ATTACH_HOME=1 switches on the
+# `~` form and makes ATTACH_BASE unused. Nothing is guessed when neither applies: a claude
+# directory outside $HOME cannot be written with a `~`, so it gets the ABSOLUTE path, which
+# resolves from anywhere too. `skillnote where --scope global` prints that same directory,
+# and both are read off claude_dir() rather than recomputed, so the two cannot disagree.
+ATTACH_DIR=""; ATTACH_BASE=""; ATTACH_HOME=0; ATTACH_SUFFIX=""; ATTACH_JSON='[]'
 
 attach_dirs() { # <scope> <project root> <note id>
   case "$1" in
-    project) ATTACH_BASE="$2"; ATTACH_DIR="$2/.claude/lessons/$3" ;;
-    global)  ad_c="$(claude_dir)"; ATTACH_BASE="$(dirname "$ad_c")"; ATTACH_DIR="$ad_c/lessons/$3" ;;
-    memory)  ATTACH_BASE="$TRANSCRIPTS/$(slug_of "$2")/memory"; ATTACH_DIR="$ATTACH_BASE/lessons/$3" ;;
+    project) ATTACH_BASE="$2"; ATTACH_HOME=0; ATTACH_DIR="$2/.claude/lessons/$3" ;;
+    global)  ad_c="$(claude_dir)"; ATTACH_BASE="$(dirname "$ad_c")"; ATTACH_HOME=1
+             ATTACH_DIR="$ad_c/lessons/$3" ;;
+    memory)  ATTACH_BASE="$TRANSCRIPTS/$(slug_of "$2")/memory"; ATTACH_HOME=1
+             ATTACH_DIR="$ATTACH_BASE/lessons/$3" ;;
     *)       return 1 ;;
   esac
   return 0
+}
+
+# The one place a destination becomes the text on the line, so the note, the ledger row and
+# a promoted line cannot spell it three ways. $HOME is tried BOTH as it is set and as it
+# resolves: the tests point HOME at a temp directory whose parent is a symlink on macOS, so
+# a comparison against only one of the two forms silently produces the absolute fallback.
+#
+# The `~` is TEXT THIS PRINTS, not a path this script opens, which is what SC2088 assumes
+# it must be. Nothing here ever expands it: the string is written into a markdown line and
+# a ledger row for a human and a later session to read, and both expand it themselves.
+# shellcheck disable=SC2088  # the tilde is the output, not a path we resolve
+attach_ref() { # <absolute path under ATTACH_DIR's tree> -> the text to print
+  if [ "$ATTACH_HOME" = "1" ]; then
+    ar_h="${HOME%/}"
+    case "$1" in "$ar_h"/*) printf '~/%s' "${1#"$ar_h"/}"; return 0 ;; esac
+    ar_h2="$(cd "$HOME" 2>/dev/null && pwd)" || ar_h2=""
+    ar_h2="${ar_h2%/}"
+    if [ -n "$ar_h2" ]; then
+      case "$1" in "$ar_h2"/*) printf '~/%s' "${1#"$ar_h2"/}"; return 0 ;; esac
+    fi
+    printf '%s' "$1"
+    return 0
+  fi
+  case "$1" in "$ATTACH_BASE"/*) printf '%s' "${1#"$ATTACH_BASE"/}"; return 0 ;; esac
+  printf '%s' "$1"
 }
 
 # `cd`-and-`pwd` rather than `realpath`, which is not on macOS before 12 and is not on the
@@ -638,8 +714,7 @@ ATTEOF
     # -p, so an executable stays executable. A lesson whose script arrives without its
     # mode is a lesson whose one command does not run.
     cp -p "$da_s" "$ATTACH_DIR/$da_b" 2>/dev/null || die3 "cannot copy $da_s to $ATTACH_DIR/$da_b"
-    da_rel="$ATTACH_DIR/$da_b"
-    case "$da_rel" in "$ATTACH_BASE"/*) da_rel="${da_rel#"$ATTACH_BASE"/}" ;; esac
+    da_rel="$(attach_ref "$ATTACH_DIR/$da_b")"
     ATTACH_SUFFIX="$ATTACH_SUFFIX (attached: $da_rel)"
     ATTACH_JSON="$(printf '%s' "$ATTACH_JSON" | jq -c --arg e "$da_rel" '. + [$e]' 2>/dev/null)"
     [ -n "$ATTACH_JSON" ] || die "could not build the attachment list (is jq healthy?)"
@@ -664,8 +739,27 @@ lesson_fail_row() { # <sig> -> that row, as one JSON object on stdout
   printf '%s' "$lf_r"
 }
 
+# THE WITHDRAWAL, IN ONE PLACE. Append-only: `remove` and `promote` both spell "this
+# reminder is gone" as a row saying so, never as a rewrite of the store a hook is writing
+# to. hooks/remind.sh skips a row whose id carries a tombstone at or after its `created`.
+tombstone_reminder() { # <reminder id> -> 0 when the row was appended
+  tr_row="$(jq -n -c --arg id "$1" --argjson ts "$(now)" '{id:$id, t:"remove", ts:$ts}' 2>/dev/null)"
+  [ -n "$tr_row" ] || return 1
+  mkdir -p "$STATE_ROOT" 2>/dev/null || true
+  printf '%s\n' "$tr_row" 2>/dev/null >> "$REMINDERS" || die3 "cannot append to $REMINDERS"
+  return 0
+}
+
+# Is this id a reminder the hook would still deliver?
+reminder_is_live() { # <reminder id>
+  [ -n "$(live_reminders | jq -r --arg id "$1" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]
+}
+
 # The reminder id recorded beside a note id, so `promote` can move the pair without a
-# second index. The ledger is the join: `--lesson` wrote both ids into one row.
+# second index, and so `remove` can withdraw the pair without one either. The ledger is the
+# join: `--lesson` wrote both ids into one row. The LAST such row answers, which is what
+# makes a promoted note work -- `promote` writes its own row carrying the id the reminder
+# took at global scope, and that row supersedes the `add` row underneath it.
 ledger_reminder_of() { # <note id> -> a reminder id, or nothing
   [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || return 0
   jq -s -R -r --arg id "$1" '
@@ -1000,10 +1094,13 @@ add_memory_note() { # <project root>
 #   4. the reminder is tombstoned at project scope and re-created at global
 #   5. one ledger row, action:"promote"
 #
-# The line is carried across VERBATIM: same id, same date, same `(attached: ...)` suffix.
-# `.claude/lessons/<id>/<file>` is read relative to the repository root from a project note
-# and relative to $HOME from a global one, and `~/.claude` makes those the same string, so
-# a rewrite would be churn on every ordinary machine and a guess on the rest.
+# The line is carried across with the same id and the same date, and ONE thing on it is
+# rewritten: a `(attached: .claude/lessons/<id>/...)` suffix becomes the `~`-anchored form,
+# because the line is about to be read from a file that every repository on the machine
+# sees and a relative path there names a directory in whichever project is open. See THE
+# SUFFIX IS WRITTEN IN WHATEVER FORM RESOLVES at the top of this file; the rewrite is one
+# `attach_ref` call on the destination the attachments are being moved to, so the promoted
+# line and a note added at --scope global spell the same location the same way.
 cmd_promote() {
   pr_id="${1:-}"
   [ -n "$pr_id" ] || die "promote needs an id: skillnote promote <id> --to global  ('skillnote list' prints them)"
@@ -1048,6 +1145,26 @@ cmd_promote() {
   if [ -d "$pr_from" ] && [ -e "$pr_toat" ]; then
     die "$pr_toat already exists, and nothing here overwrites. Move or remove it, then run this again. Nothing was written."
   fi
+
+  # The suffix, rewritten BEFORE the tombstone is cut from this line, so the two agree.
+  # `awk` and not a parameter substitution: the prefix carries a `.` and slashes, quoting
+  # inside `${x//pat/rep}` to keep those literal is bash 4.3 behaviour and this ships to
+  # bash 3.2.
+  pr_oldp="(attached: .claude/lessons/$pr_id/"
+  case "$pr_line" in
+    *"$pr_oldp"*)
+      ATTACH_HOME=1
+      pr_newp="(attached: $(attach_ref "$pr_cd/lessons/$pr_id")/"
+      pr_line="$(printf '%s\n' "$pr_line" | SN_OLD="$pr_oldp" SN_NEW="$pr_newp" awk '
+        BEGIN { o = ENVIRON["SN_OLD"]; n = ENVIRON["SN_NEW"] }
+        { out = ""
+          while ((p = index($0, o)) > 0) {
+            out = out substr($0, 1, p - 1) n
+            $0 = substr($0, p + length(o)) }
+          print out $0 }' 2>/dev/null)"
+      [ -n "$pr_line" ] || die3 "could not rewrite the attachment path on the line for $pr_id"
+      ;;
+  esac
 
   # The tombstone: the date off the original line, and the first 60 characters of what it
   # said, so the project block still answers "where did that go" without holding a second
@@ -1158,14 +1275,30 @@ cmd_remove() {
   [ -n "$rm_id" ] || die "remove needs an id: skillnote remove <id>  ('skillnote list' prints them)"
   case "$rm_id" in -*) die "remove takes an id, not an option" ;; esac
   shift
+  rm_keep=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --project) [ $# -ge 2 ] || die "--project needs a directory"; PROJECT_OPT="$2"; shift 2 ;;
-      *) die "unknown option '$1'" ;;
+      --keep-reminder) rm_keep=1; shift ;;
+      *) die "unknown option '$1' (try: skillnote --help)" ;;
     esac
   done
   rm_root="$(project_root)"
   rm_hit=0
+
+  # DECIDED BEFORE A LINE IS DELETED, because the note's own `remove` row has to record
+  # what went with it. `rm_rid` is the reminder this note's lesson wrote -- empty when
+  # there is none, when the id names the reminder itself (the arm at the bottom has that
+  # one), or when it has already been withdrawn. `rm_kill` is that same id unless
+  # --keep-reminder was asked for, and it is what the ledger rows carry.
+  rm_rid="$(ledger_reminder_of "$rm_id")"
+  [ "$rm_rid" = "$rm_id" ] && rm_rid=""
+  if [ -n "$rm_rid" ] && ! reminder_is_live "$rm_rid"; then rm_rid=""; fi
+  rm_kill="$rm_rid"
+  [ "$rm_keep" = "1" ] && rm_kill=""
+  RM_EXTRA="$(jq -n -c --arg rid "$rm_kill" \
+      '(if $rid == "" then {} else {reminder_id: $rid} end)' 2>/dev/null)"
+  [ -n "$RM_EXTRA" ] || RM_EXTRA='{}'
 
   for rm_scope in project global; do
     if [ "$rm_scope" = "project" ]; then rm_target="$rm_root/.claude/CLAUDE.md"
@@ -1183,7 +1316,9 @@ cmd_remove() {
     rm -f "$rm_tmp" 2>/dev/null
     echo "skillnote: removed $rm_id from $rm_target"
     rm_hit=1
+    LEDGER_EXTRA="$RM_EXTRA"
     ledger_append remove note "$rm_id" "$rm_scope" "$rm_target" "" "" "" "$rm_root"
+    LEDGER_EXTRA='{}'
   done
 
   # A memory note is a whole file, so it is copied aside with the backup prefix before it
@@ -1212,16 +1347,32 @@ cmd_remove() {
     done
   fi
 
-  # THE REMINDER IS TOMBSTONED, NEVER REWRITTEN. See the header.
-  if [ -n "$(live_reminders | jq -r --arg id "$rm_id" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]; then
-    rm_row="$(jq -n -c --arg id "$rm_id" --argjson ts "$(now)" '{id:$id, t:"remove", ts:$ts}' 2>/dev/null)"
-    if [ -n "$rm_row" ]; then
-      mkdir -p "$STATE_ROOT" 2>/dev/null || true
-      printf '%s\n' "$rm_row" 2>/dev/null >> "$REMINDERS" || die3 "cannot append to $REMINDERS"
+  # THE REMINDER IS TOMBSTONED, NEVER REWRITTEN. See the header. This arm is the id
+  # naming a reminder DIRECTLY -- what `add --remind` wrote, whose id is its own.
+  if reminder_is_live "$rm_id"; then
+    if tombstone_reminder "$rm_id"; then
       echo "skillnote: tombstoned reminder $rm_id in $REMINDERS"
       rm_hit=1
       ledger_append remove reminder "$rm_id" "" "$REMINDERS" "" "" "" "$rm_root"
     fi
+  fi
+
+  # AND THIS ARM IS THE LESSON'S OTHER HALF: a reminder written under a DIFFERENT id by
+  # `--lesson`, found through the ledger row that recorded both. Without it the line went
+  # and the reminder kept firing -- measured live on 2026-09-05, a lesson still being
+  # stated back after the note stating it was gone.
+  if [ -n "$rm_kill" ]; then
+    if tombstone_reminder "$rm_kill"; then
+      echo "skillnote: tombstoned reminder $rm_kill in $REMINDERS -- the lesson on $rm_id keyed it on the failing call"
+      rm_hit=1
+      LEDGER_EXTRA="$(jq -n -c --arg rid "$rm_kill" --arg nid "$rm_id" \
+          '{reminder_id: $rid, note_id: $nid}' 2>/dev/null)"
+      [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
+      ledger_append remove reminder "$rm_kill" "" "$REMINDERS" "" "" "" "$rm_root"
+      LEDGER_EXTRA='{}'
+    fi
+  elif [ -n "$rm_rid" ] && [ "$rm_hit" = "1" ]; then
+    echo "skillnote: reminder $rm_rid was left live in $REMINDERS (--keep-reminder); it still fires on the call the lesson was about"
   fi
 
   [ "$rm_hit" = "1" ] && return 0

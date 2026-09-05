@@ -1480,14 +1480,58 @@ class AttachTest(LessonCase):
         self.assertEqual(rows[0]["attachments"], 2)
         self.assertIn("[2 attached]", self.ok("list", "--scope", "project").stdout)
 
-    def test_a_global_attachment_lands_beside_the_global_claude_md(self):
+    def test_a_global_attachment_is_named_home_anchored_not_relative(self):
+        """A GLOBAL line is read from every repository on the machine, so a relative
+        `.claude/lessons/...` names a directory in whichever project happens to be open --
+        which does not exist. Measured 2026-09-05: a session in another project was handed
+        exactly that line and had to run `find ~/.claude` for the file."""
         r = self.ok("add", "--scope", "global", "global lesson", "--attach", "fix.sh")
         nid = r.stdout.split("(")[1].split(")")[0]
         self.assertTrue((self.home / ".claude" / "lessons" / nid / "fix.sh").is_file())
         line = self.block_lines(self.home / ".claude" / "CLAUDE.md")[0]
-        self.assertIn("(attached: .claude/lessons/%s/fix.sh)" % nid, line)
+        self.assertIn("(attached: ~/.claude/lessons/%s/fix.sh)" % nid, line)
+        self.assertNotIn("(attached: .claude/lessons/", line,
+                         "the relative form is the one that does not resolve")
 
-    def test_a_memory_attachment_lands_beside_the_memory_file(self):
+    def test_the_home_anchored_path_really_resolves_to_the_file(self):
+        """The point of the form, driven rather than asserted: expand the `~` against
+        $HOME the way a reader would and open what it names."""
+        r = self.ok("add", "--scope", "global", "resolvable", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        line = self.block_lines(self.home / ".claude" / "CLAUDE.md")[0]
+        ref = line.split("(attached: ")[1].split(")")[0]
+        self.assertTrue(ref.startswith("~/"), ref)
+        dest = self.home / ref[2:]
+        self.assertTrue(dest.is_file(), "%s does not name a file" % ref)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "#!/bin/sh\necho fixed\n")
+        del nid
+
+    def test_the_global_ledger_row_carries_the_same_form_as_the_line(self):
+        """Two records of one location that disagree is the drift this repo is built
+        around avoiding. They come from one function, and this is what says so."""
+        r = self.ok("add", "--scope", "global", "one form", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        row = [x for x in self.ledger_rows() if x.get("id") == nid][0]
+        self.assertEqual(row["attachments"], ["~/.claude/lessons/%s/fix.sh" % nid])
+        line = self.block_lines(self.home / ".claude" / "CLAUDE.md")[0]
+        self.assertIn("(attached: %s)" % row["attachments"][0], line)
+
+    def test_a_claude_dir_outside_home_gets_the_absolute_path(self):
+        """No `~` can name it, and this refuses to guess: the absolute path resolves from
+        anywhere too, which is the property the form exists for."""
+        elsewhere = self.root / "elsewhere-claude"
+        r = self.ok("add", "--scope", "global", "outside home", "--attach", "fix.sh",
+                    SKILLNOTE_CLAUDE_DIR=str(elsewhere))
+        nid = r.stdout.split("(")[1].split(")")[0]
+        line = self.block_lines(elsewhere / "CLAUDE.md")[0]
+        self.assertIn("(attached: %s/lessons/%s/fix.sh)" % (elsewhere, nid), line)
+        self.assertNotIn("~", line)
+
+    def test_a_memory_attachment_is_anchored_too(self):
+        """The memory file lives under the transcripts root, which no session's working
+        directory is ever inside, so a path relative to its own directory names a base the
+        reader has no way to know. Here the transcripts root is outside $HOME, so the
+        answer is the absolute path; the test below drives the ordinary case."""
         slug = str(self.proj).replace("/", "-")
         (self.transcripts / slug).mkdir(parents=True)
         r = self.ok("add", "--scope", "memory", "memory lesson", "--attach", "fix.sh")
@@ -1495,7 +1539,30 @@ class AttachTest(LessonCase):
         mdir = self.transcripts / slug / "memory"
         self.assertTrue((mdir / "lessons" / nid / "fix.sh").is_file())
         body = (mdir / "memory-lesson.md").read_text(encoding="utf-8")
-        self.assertIn("(attached: lessons/%s/fix.sh)" % nid, body)
+        self.assertIn("(attached: %s/lessons/%s/fix.sh)" % (mdir, nid), body)
+        self.assertNotIn("(attached: lessons/", body)
+
+    def test_a_memory_attachment_under_home_is_written_with_a_tilde(self):
+        """The ordinary machine: the transcripts root IS `~/.claude/projects`."""
+        transcripts = self.home / ".claude" / "projects"
+        slug = str(self.proj).replace("/", "-")
+        (transcripts / slug).mkdir(parents=True)
+        r = self.ok("add", "--scope", "memory", "memory lesson", "--attach", "fix.sh",
+                    SKILL_COMPOUNDER_TRANSCRIPTS=str(transcripts))
+        nid = r.stdout.split("(")[1].split(")")[0]
+        body = (transcripts / slug / "memory" / "memory-lesson.md").read_text(encoding="utf-8")
+        self.assertIn("(attached: ~/.claude/projects/%s/memory/lessons/%s/fix.sh)"
+                      % (slug, nid), body)
+
+    def test_a_project_attachment_is_still_relative(self):
+        """The half that was already right, pinned so the fix cannot swing past it: a
+        project note IS read from the repository root, and `.claude/lessons/...` is what a
+        reader sitting there would type."""
+        r = self.ok("add", "--scope", "project", "project lesson", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        line = self.block_lines()[0]
+        self.assertIn("(attached: .claude/lessons/%s/fix.sh)" % nid, line)
+        self.assertNotIn("~", line)
 
     def test_remind_with_attach_is_refused(self):
         r = self.note("add", "--remind", "--scope", "project", "r", "--keyword", "k",
@@ -1639,6 +1706,33 @@ class PromoteTest(LessonCase):
         self.assertEqual(len(live), 1, live)
         self.assertEqual(live[0]["scope"], "global")
 
+    def test_the_attachment_path_is_rewritten_to_the_home_anchored_form(self):
+        """The line is about to be read from a file every repository sees, so the one
+        thing rewritten on the way across is the attachment path. Left alone it would say
+        `.claude/lessons/...`, which from any project but this one names nothing."""
+        script = self.proj / "fix.sh"
+        script.write_text("#!/bin/sh\necho fixed\n", encoding="utf-8")
+        r = self.ok("add", "--scope", "project", "movable with a file", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        self.assertIn("(attached: .claude/lessons/%s/fix.sh)" % nid, self.block_lines()[0])
+        self.ok("promote", nid, "--to", "global")
+        line = [l for l in self.block_lines(self.home / ".claude" / "CLAUDE.md")
+                if nid in l][0]
+        self.assertIn("(attached: ~/.claude/lessons/%s/fix.sh)" % nid, line)
+        self.assertNotIn("(attached: .claude/lessons/", line)
+        dest = self.home / ".claude" / "lessons" / nid / "fix.sh"
+        self.assertTrue(dest.is_file(), "the rewritten path must name the moved file")
+
+    def test_a_promoted_line_with_no_attachment_is_carried_across_untouched(self):
+        """Non-vacuity for the rewrite: it must fire on the suffix and on nothing else."""
+        r = self.ok("add", "--scope", "project", "movable, no file")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        before = self.block_lines()[0]
+        self.ok("promote", nid, "--to", "global")
+        after = [l for l in self.block_lines(self.home / ".claude" / "CLAUDE.md")
+                 if nid in l][0]
+        self.assertEqual(before, after)
+
     def test_a_ledger_row_records_the_promotion(self):
         nid = self.add_project_note()
         self.promote(nid)
@@ -1764,12 +1858,160 @@ class PromoteTest(LessonCase):
 
 # ==================================================================== the help text
 
+@unittest.skipUnless(HAVE_NORM_OF, "repeat-gate does not answer --norm-of")
+class RemoveTakesTheReminderTooTest(LessonCase):
+    """`--lesson` writes TWO things under TWO ids, and `remove` used to take one of them.
+
+    The note id is a hash over "<scope>|<text>"; the reminder id is a hash over
+    "remind|<scope>|<text>", so they differ, and `remove <note id>` deleted the line and
+    left the reminder live. Measured 2026-09-05 on this machine: the note was gone and
+    hooks/remind.sh went on stating it before every matching call -- a lesson still being
+    delivered that nobody could read any more.
+
+    Every test here drives the REAL hook after the real CLI, because that is the only pair
+    that can show it: the store says nothing about what the hook does with it, and a hook
+    driven against a hand-written store says nothing about what the CLI wrote.
+    """
+
+    TEXT = "setup.py install needs setuptools here; pip install -e . is the one that works."
+
+    def add_lesson(self, text=None, **kw):
+        self.seed()
+        r = self.ok("add", "--lesson", FAIL_SIG, text or self.TEXT, **kw)
+        return r.stdout.split("(")[1].split(")")[0]
+
+    def reminder_id_of(self, note_id):
+        rows = [x for x in self.ledger_rows()
+                if x.get("id") == note_id and x.get("reminder_id")]
+        self.assertTrue(rows, "no ledger row joined the note to its reminder")
+        return rows[-1]["reminder_id"]
+
+    def test_it_delivers_before_the_remove(self):
+        """Non-vacuity for every test below: silence afterwards proves nothing unless the
+        reminder was really arriving beforehand."""
+        self.add_lesson()
+        self.assertIn("pip install -e .",
+                      self.delivered(self.run_remind(FAIL_CMD, session="s-before")))
+
+    def test_removing_the_note_silences_the_reminder(self):
+        nid = self.add_lesson()
+        self.delivered(self.run_remind(FAIL_CMD, session="s-before"))
+        self.ok("remove", nid)
+        r = self.run_remind(FAIL_CMD, session="s-after")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "",
+                         "the note is gone and the reminder is still being delivered")
+
+    def test_it_says_which_reminder_it_withdrew(self):
+        nid = self.add_lesson()
+        rid = self.reminder_id_of(nid)
+        out = self.ok("remove", nid).stdout
+        self.assertIn("tombstoned reminder %s" % rid, out)
+        self.assertIn(str(self.reminders), out)
+
+    def test_the_remove_ledger_row_names_the_reminder(self):
+        nid = self.add_lesson()
+        rid = self.reminder_id_of(nid)
+        removals = [x for x in self.ledger_rows() if x.get("action") == "remove"]
+        self.assertEqual([x["id"] for x in removals], [], "nothing removed yet")
+        self.ok("remove", nid)
+        removals = [x for x in self.ledger_rows() if x.get("action") == "remove"]
+        note_rows = [x for x in removals if x["kind"] == "note"]
+        rem_rows = [x for x in removals if x["kind"] == "reminder"]
+        self.assertEqual(len(note_rows), 1, removals)
+        self.assertEqual(note_rows[0]["reminder_id"], rid,
+                         "the note's own remove row must record what went with it")
+        self.assertEqual(len(rem_rows), 1, removals)
+        self.assertEqual(rem_rows[0]["id"], rid)
+        self.assertEqual(rem_rows[0]["note_id"], nid)
+
+    def test_the_store_is_tombstoned_and_never_rewritten(self):
+        """Append-only, the doctrine `skillrepeat forget` follows: the row stays in the
+        file and a tombstone is appended after it. The store is written by a hook nobody
+        watches, and one bad expression would erase an hour of it."""
+        nid = self.add_lesson()
+        rid = self.reminder_id_of(nid)
+        before = self.reminders.read_text(encoding="utf-8")
+        self.ok("remove", nid)
+        after = self.reminders.read_text(encoding="utf-8")
+        self.assertTrue(after.startswith(before), "the store was rewritten, not appended to")
+        rows = self.reminder_rows()
+        self.assertEqual(rows[-1], {"id": rid, "t": "remove", "ts": NOW})
+
+    def test_keep_reminder_leaves_it_live_and_says_so(self):
+        nid = self.add_lesson()
+        rid = self.reminder_id_of(nid)
+        out = self.ok("remove", nid, "--keep-reminder").stdout
+        self.assertIn("removed %s" % nid, out)
+        self.assertIn(rid, out)
+        self.assertIn("--keep-reminder", out)
+        self.assertNotIn("tombstoned", out)
+        self.assertIn("pip install -e .",
+                      self.delivered(self.run_remind(FAIL_CMD, session="s-kept")))
+        removals = [x for x in self.ledger_rows() if x.get("action") == "remove"]
+        self.assertEqual([x["kind"] for x in removals], ["note"])
+        self.assertNotIn("reminder_id", removals[0],
+                         "nothing was withdrawn, so nothing may be recorded as withdrawn")
+
+    def test_a_promoted_lesson_is_withdrawn_at_its_new_scope(self):
+        """`promote` tombstones the project reminder and writes a new row with a new id at
+        global scope, recording that id on its own ledger row. `remove` reads the LAST row
+        carrying this note's reminder_id, so it withdraws the one that is actually live --
+        the project id it superseded is already tombstoned and is not the answer."""
+        nid = self.add_lesson()
+        old_rid = self.reminder_id_of(nid)
+        self.ok("promote", nid, "--to", "global")
+        new_rid = self.reminder_id_of(nid)
+        self.assertNotEqual(new_rid, old_rid)
+        self.assertIn("pip install -e .",
+                      self.delivered(self.run_remind(FAIL_CMD, session="s-promoted")))
+        out = self.ok("remove", nid).stdout
+        self.assertIn("tombstoned reminder %s" % new_rid, out)
+        r = self.run_remind(FAIL_CMD, session="s-gone")
+        self.assertEqual(r.stdout.strip(), "", "the promoted reminder is still firing")
+
+    def test_a_note_with_no_reminder_removes_exactly_as_before(self):
+        r = self.ok("add", "--scope", "project", "a plain note")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        out = self.ok("remove", nid).stdout
+        self.assertNotIn("reminder", out)
+        removals = [x for x in self.ledger_rows() if x.get("action") == "remove"]
+        self.assertEqual(len(removals), 1, removals)
+        self.assertNotIn("reminder_id", removals[0])
+
+    def test_a_reminder_removed_by_its_own_id_still_works(self):
+        """The older arm, unchanged: `add --remind` writes a reminder whose id IS the id
+        the user is handed, and `remove` on it tombstones that one directly."""
+        r = self.ok("add", "--remind", "--scope", "project", "a bare reminder",
+                    "--keyword", "widget")
+        rid = r.stdout.split("(")[1].split(")")[0]
+        out = self.ok("remove", rid).stdout
+        self.assertIn("tombstoned reminder %s" % rid, out)
+        self.assertEqual(out.count("tombstoned reminder"), 1,
+                         "the direct arm and the lesson arm both fired on one id")
+
+    def test_removing_twice_is_not_an_error_and_withdraws_nothing_twice(self):
+        nid = self.add_lesson()
+        rid = self.reminder_id_of(nid)
+        self.ok("remove", nid)
+        second = self.note("remove", nid)
+        self.assertEqual(second.returncode, 2, second.stdout + second.stderr)
+        self.assertEqual(self.reminder_rows()[-1], {"id": rid, "t": "remove", "ts": NOW},
+                         "a second tombstone was appended for a reminder already gone")
+
+    def test_an_unknown_option_to_remove_names_the_help(self):
+        r = self.note("remove", "n0x0", "--keep-reminders")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("--help", r.stderr)
+
+
 class HelpDocumentsTheNewFlagsTest(SkillnoteCase):
 
     def test_help_names_every_flag_and_subcommand(self):
         out = self.ok("--help").stdout
         for token in ("--lesson", "--attach", "promote", "--to global",
-                      "skillrepeat list", "lessons/", "hierarchy only goes up"):
+                      "skillrepeat list", "lessons/", "hierarchy only goes up",
+                      "--keep-reminder", "remove <id>"):
             self.assertIn(token, out, "the help must document %s" % token)
 
 
@@ -1835,6 +2077,24 @@ class WhereTest(SkillnoteCase):
         self.assertTrue(g.endswith("/CLAUDE.md"), g)
         rem = self.ok("where", "--scope", "remind").stdout.strip()
         self.assertEqual(rem, str(self.reminders))
+
+    def test_it_names_the_directory_a_global_attachment_is_written_under(self):
+        """`where --scope global` and the `~`-anchored path on a global note both come off
+        claude_dir(), and this drives the pair: expand the tilde the way a reader would and
+        the file has to sit under the directory `where` printed."""
+        script = self.proj / "fix.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        said = self.ok("where", "--scope", "global").stdout.strip()
+        r = self.ok("add", "--scope", "global", "with a file", "--attach", "fix.sh")
+        nid = r.stdout.split("(")[1].split(")")[0]
+        line = self.block_lines(Path(said))[0]
+        ref = line.split("(attached: ")[1].split(")")[0]
+        self.assertTrue(ref.startswith("~/"), ref)
+        resolved = self.home / ref[2:]
+        self.assertTrue(resolved.is_file())
+        self.assertEqual(str(resolved.parent.parent.parent), str(Path(said).parent),
+                         "the attachment landed outside the directory `where` named")
+        del nid
 
     def test_it_creates_nothing(self):
         before = sorted(p.name for p in self.root.iterdir())

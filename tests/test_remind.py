@@ -276,6 +276,199 @@ class CommandTest(RemindCase):
         self.assert_silent(self.run_hook(self.prompt("gh issue comment 19 --body x")))
 
 
+# ==================================================================== the segment split
+class SegmentTest(RemindCase):
+    """A rule is keyed on ONE call; a session types that call inside a compound one.
+
+    Measured against the installed package on 2026-09-05: a lesson keyed on
+    `python3 setup.py install` fired for that command alone and said NOTHING for
+    `cd build && python3 setup.py install`, `ls; echo hi; python3 setup.py install` or
+    `python3 setup.py install 2>&1` -- and the compound form is the one a session actually
+    types, so the reminder was silent exactly when it was needed. The command is now split
+    the way hooks/repeat-gate.sh splits one and every segment is normalised.
+
+    The fixtures are built by running the real `--norm-of`, like every other command test
+    here: a hand-typed signature would keep passing on the day production stopped matching.
+    """
+
+    CMD = "python3 setup.py install"
+
+    def setUp(self):
+        super().setUp()
+        self.sig = norm_of(self.CMD)
+        self.write_rows(self.row("nseg1", "setuptools is missing here; pip install -e . works.",
+                                 commands=[self.sig], scope="global"))
+
+    def fires(self, command, session):
+        return self.context_of(self.run_hook(self.bash(command, session=session)),
+                               event="PreToolUse")
+
+    def test_the_bare_command_still_fires(self):
+        """The case that already worked. Everything below is an ADDITION to it."""
+        self.assertIn("pip install -e .", self.fires(self.CMD, "s-bare"))
+
+    def test_a_leading_cd_does_not_silence_it(self):
+        self.assertIn("pip install -e .",
+                      self.fires("cd build && " + self.CMD, "s-cd"))
+
+    def test_a_semicolon_run_up_does_not_silence_it(self):
+        self.assertIn("pip install -e .",
+                      self.fires("ls; echo hi; " + self.CMD, "s-semi"))
+
+    def test_a_trailing_redirection_does_not_silence_it(self):
+        """`2>&1` is not a separator, so this is ONE segment -- and the normaliser MASKS a
+        redirection rather than dropping it (`... 2>&1` -> `... <N>>&<N>`), so the segment
+        alone does not answer it. `strip_redirs` peels it off as an extra candidate."""
+        self.assertIn("pip install -e .", self.fires(self.CMD + " 2>&1", "s-redir"))
+
+    def test_a_redirection_to_a_file_does_not_silence_it_either(self):
+        self.assertIn("pip install -e .",
+                      self.fires(self.CMD + " > out.log 2>&1", "s-file"))
+        self.assertIn("pip install -e .",
+                      self.fires(self.CMD + " >out.log", "s-glued"))
+
+    def test_a_pipeline_stage_matches(self):
+        self.assertIn("pip install -e .",
+                      self.fires(self.CMD + " | tail -20", "s-pipe"))
+
+    def test_every_compound_form_together(self):
+        """One assertion per shape is easy to read and easy to leave a hole in. This is the
+        list, driven in one place, so a shape cannot be dropped by deleting a method."""
+        for i, cmd in enumerate((
+                "cd build && " + self.CMD,
+                "cd build; " + self.CMD,
+                self.CMD + " && echo done",
+                self.CMD + " || echo failed",
+                "ls; echo hi; " + self.CMD,
+                self.CMD + " 2>&1 | tail -5",
+                "set -e; cd build && " + self.CMD + " 2>&1")):
+            self.assertIn("pip install -e .", self.fires(cmd, "s-all%d" % i),
+                          "silent on %r" % cmd)
+
+    def test_a_segment_that_merely_contains_the_signature_is_silent(self):
+        """The rule holds a signature and the match is BYTE EQUALITY of a normalised
+        segment. A command that quotes the signature, or extends it, is a different call
+        and must stay silent -- otherwise the split would have traded one silence for a
+        reminder that arrives when it does not apply, which teaches the reader to skip the
+        next one."""
+        for i, cmd in enumerate(('echo "%s"' % self.CMD,
+                                 "echo %s >> notes.txt" % self.CMD,
+                                 'git commit -m "%s"' % self.CMD,
+                                 self.CMD + "-extra",
+                                 "python3 setup.py installx")):
+            self.assert_silent(self.run_hook(self.bash(cmd, session="s-sub%d" % i)))
+
+    def test_a_genuinely_different_compound_is_still_silent(self):
+        self.assert_silent(self.run_hook(self.bash("cd build && make all")))
+
+    def test_a_rule_keyed_on_a_compound_command_still_fires(self):
+        """The whole command is candidate ONE, so a rule written against a compound call
+        keeps working: nothing that fired before this change can stop firing."""
+        compound = "cd /tmp/forge && python3 setup.py install 2>&1 | tail -20"
+        self.write_rows(self.row("nseg2", "The compound rule.",
+                                 commands=[norm_of(compound)], scope="global"))
+        self.assertIn("The compound rule", self.fires(compound, "s-comp"))
+
+    def test_two_segments_matching_one_rule_deliver_it_once(self):
+        cmd = "%s && %s" % (self.CMD, self.CMD)
+        ctx = self.fires(cmd, "s-twice")
+        self.assertEqual(ctx.count("pip install -e ."), 1, ctx)
+        self.assertEqual(len(self.hit_rows()), 1, self.hit_rows())
+
+    def test_a_command_the_splitter_cannot_model_falls_back_to_the_whole_command(self):
+        """`split_segments` FAILS on an unterminated quote beside a separator, and the
+        fallback here is the whole command -- never no matching at all. A rule keyed on
+        such a command therefore still fires, which is what this drives."""
+        weird = "echo 'unclosed && " + self.CMD
+        self.write_rows(self.row("nseg3", "The unmodellable rule.",
+                                 commands=[norm_of(weird)], scope="global"))
+        self.assertIn("The unmodellable rule", self.fires(weird, "s-weird"))
+
+    def test_the_cap_keeps_the_whole_command_first(self):
+        """MAX_CANDIDATES bounds the forks. The whole command is candidate one, so a
+        command with more segments than the cap still matches a rule keyed on all of it."""
+        long_cmd = "; ".join("echo %d" % i for i in range(12)) + "; " + self.CMD
+        self.write_rows(self.row("nseg4", "The long rule.",
+                                 commands=[norm_of(long_cmd)], scope="global"))
+        self.assertIn("The long rule", self.fires(long_cmd, "s-long"))
+
+
+class SegmentCostGateTest(RemindCase):
+    """Nothing is normalised unless the store holds a command rule, and that is what pays
+    for the split. A store of keyword rules -- which is every store until someone writes a
+    lesson -- now costs no fork at all on a Bash call, where it used to fork the normaliser
+    on every one.
+
+    Both JSON spellings have to be recognised: `bin/skillnote` writes `"commands":[...]`
+    through `jq -c`, and every hand-written row here writes `"commands": [...]`.
+    """
+
+    def test_a_keyword_only_store_still_answers_a_prompt(self):
+        self.write_rows(self.row("nk", "A keyword rule.", keywords=["widget"]))
+        self.assertIn("A keyword rule", self.context_of(self.run_hook(self.prompt("widget"))))
+
+    def test_a_keyword_only_store_is_silent_on_a_bash_call(self):
+        self.write_rows(self.row("nk", "A keyword rule.", keywords=["widget"]))
+        self.assert_silent(self.run_hook(self.bash("python3 setup.py install")))
+
+    def test_an_empty_commands_array_does_not_open_the_gate(self):
+        """Non-vacuity for the test below: `"commands": []` must NOT read as a rule."""
+        self.write_rows(self.row("nk", "A keyword rule.", keywords=["widget"], commands=[]))
+        self.assert_silent(self.run_hook(self.bash("python3 setup.py install")))
+
+    def test_the_jq_written_spelling_opens_it(self):
+        """The writer in production is `jq -c`, which emits no space after the colon. A
+        gate that only recognised the hand-written spelling would be silent for every row
+        bin/skillnote ever wrote -- the exact shape of the 2026-09-02 defect."""
+        sig = norm_of("python3 setup.py install")
+        with open(self.store, "a", encoding="utf-8") as fh:
+            fh.write('{"id":"njq","text":"The compact rule.","match":{"keywords":[],'
+                     '"paths":[],"commands":["%s"]},"scope":"global","created":1756838400,'
+                     '"hits":0}\n' % sig)
+        ctx = self.context_of(self.run_hook(self.bash("cd build && python3 setup.py install")),
+                              event="PreToolUse")
+        self.assertIn("The compact rule", ctx)
+
+
+class SplitterSyncTest(unittest.TestCase):
+    """`split_segments` lives in hooks/repeat-gate.sh and is COPIED into hooks/remind.sh.
+
+    That gate exposes `--norm-of` and `--eligible-of` but no door onto the split itself,
+    and this hook cannot open one, so the copy is pinned instead of wished about: two
+    implementations of one rule drift, and the drift is invisible from either side -- a
+    reminder that quietly stops matching a shape the gate still splits. If a door ever
+    lands, delete the copy and call it; until then this test is the thing that notices.
+    """
+
+    def extract(self, path):
+        keep, inside = [], False
+        for line in open(path, encoding="utf-8"):
+            if line.rstrip("\n") == "split_segments() {":
+                inside = True
+            if inside:
+                keep.append(line)
+                if line.rstrip("\n") == "}":
+                    break
+        self.assertTrue(keep, "no split_segments() in %s" % path)
+        self.assertEqual(keep[-1].rstrip("\n"), "}", "unterminated split_segments in %s" % path)
+        return "".join(keep)
+
+    def test_the_two_copies_are_byte_identical(self):
+        gate = self.extract(NORMALISER)
+        hook = self.extract(HOOK)
+        self.assertEqual(gate, hook,
+                         "hooks/remind.sh's copy of split_segments has drifted from "
+                         "hooks/repeat-gate.sh's. Re-copy the function verbatim -- the "
+                         "hook matches command reminders per segment and a splitter that "
+                         "disagrees with the gate's matches a different set of calls.")
+
+    def test_the_extraction_is_not_vacuous(self):
+        """Both halves must really have been found, or the comparison above proves
+        nothing: two empty strings are equal."""
+        self.assertGreater(len(self.extract(NORMALISER).splitlines()), 40)
+        self.assertIn("SEGS=", self.extract(HOOK))
+
+
 # ==================================================================== the path arm
 class WriterReaderTest(RemindCase):
     """The row is written by the REAL `skillnote add --remind --command`, through a
@@ -955,8 +1148,25 @@ class CostTest(RemindCase):
         self.write_rows(*rows)
         return os.path.getsize(self.store)
 
-    def timed(self, label, payload):
-        size = self.fill()
+    def fill_with_a_command_rule(self, n=500):
+        """The same 500 rows, one of them keyed on a command, so `has_command_rule` opens
+        the gate and every candidate is really normalised. This is the expensive case the
+        segment split introduced, and it is the one worth a stopwatch."""
+        rows = []
+        for i in range(n - 1):
+            rows.append(self.row("nc%06d" % i, "Filler reminder number %d." % i,
+                                 keywords=["kw%d" % i, "other"],
+                                 paths=["src/%d/*.py" % i],
+                                 scope=PROJECT if i % 2 else "global",
+                                 created=1_756_000_000 + i))
+        rows.append(self.row("nhitcmd", "The one that matches.",
+                             commands=[norm_of("python3 setup.py install")],
+                             scope="global", created=1_756_900_000))
+        self.write_rows(*rows)
+        return os.path.getsize(self.store)
+
+    def timed(self, label, payload, filler=None, bound=0.300):
+        size = (filler or self.fill)()
         runs = []
         for i in range(5):
             p = dict(payload)
@@ -971,8 +1181,9 @@ class CostTest(RemindCase):
         median = runs[len(runs) // 2]
         print("\n[cost] remind/%s: 500 rows, %d bytes, median %.0f ms (min %.0f, max %.0f)"
               % (label, size, median * 1000, runs[0] * 1000, runs[-1] * 1000))
-        self.assertLess(median, 0.300,
-                        "a 500-row store took %.0f ms on %s" % (median * 1000, label))
+        self.assertLess(median, bound,
+                        "a 500-row store took %.0f ms on %s (bound %.0f ms)"
+                        % (median * 1000, label, bound * 1000))
         return median
 
     def test_a_prompt_against_500_rows(self):
@@ -982,8 +1193,35 @@ class CostTest(RemindCase):
         self.timed("PreToolUse/Write", self.write("/repo/src/1/x.py"))
 
     def test_a_bash_call_against_500_rows(self):
-        """The most expensive arm: it forks the shared normaliser as well."""
+        """A store of keyword and path rules -- every store until someone writes a lesson.
+        `has_command_rule` finds no command rule, so this arm forks NOTHING, where it used
+        to fork the normaliser unconditionally."""
         self.timed("PreToolUse/Bash", self.bash("gh pr list"))
+
+    def test_a_bash_call_against_a_store_that_holds_a_command_rule(self):
+        """Now the gate is open and the whole command is normalised: one fork."""
+        self.timed("PreToolUse/Bash+cmd", self.bash("python3 setup.py install"),
+                   filler=self.fill_with_a_command_rule)
+
+    def test_a_compound_bash_call_against_a_store_that_holds_a_command_rule(self):
+        """The worst case the split can reach on an ordinary command: the whole command
+        plus three segments, four forks of repeat-gate.sh. MAX_CANDIDATES is what stops a
+        pasted script going further.
+
+        THE BOUND IS ITS OWN, AND HIGHER, because the budget here is process starts rather
+        than bytes: four forks of an external script, measured at 160-169 ms on this
+        machine against 49-50 ms for the same store with the gate shut. 300 ms is the
+        figure the design fixes for the ORDINARY path and the three cases above still hold
+        it; a compound call against a store that holds a command rule is a different case.
+        800 rather than 500 is measured too, and it is not slack: running this file beside
+        one other test file put the same case at 396 ms and every other arm at roughly
+        double its solo figure, so a bound set from an idle machine is a coin toss on a
+        loaded one -- and a suite that goes red for load teaches its reader to re-run it
+        rather than to read it. What it still catches is the thing worth catching: a cap
+        that stopped bounding the forks."""
+        self.timed("PreToolUse/Bash+compound",
+                   self.bash("cd build; ls; python3 setup.py install 2>&1"),
+                   filler=self.fill_with_a_command_rule, bound=0.800)
 
 
 # ==================================================================== ids that are not names
