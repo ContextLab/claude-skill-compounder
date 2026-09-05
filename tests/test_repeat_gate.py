@@ -3116,6 +3116,256 @@ class SameToolBindingTest(GateCase):
                                  "%r" % (value, cmd))
 
 
+# ============================================================== (session, agent)
+class AgentScopedRecoveryTest(GateCase):
+    """A SUBAGENT SHARES ITS PARENT'S SESSION ID, so the recovery window may not be keyed
+    on the session alone.
+
+    Observed live on 2026-09-05 in this package's own store (session
+    f288cf8c-846d-4da7-89b9-f2574362ed2a): signature c2824570283x405-e2428498712x41 was
+    armed by a forge SUBAGENT's `cd <P>/watch-ci-run && python3 - <<EOF ... read_text ...`
+    and bound to the PARENT's `python3 - <<EOF p='docs/operations.md'; s=open(p).read()
+    ...`. Two calls sharing `python3` and one more token and nothing else. Both halves of
+    the cost the same-tool narrowing was made for landed at once: the parent was told a
+    lesson statement about a failure it never made, and the subagent's armed failure was
+    CONSUMED, so its own real recovery could no longer bind.
+
+    `agent_id` is the field that separates them, and it is on the post events. Measured on
+    Claude Code 2.1.260, macOS 25.6.0, 2026-09-05, by running a headless session whose
+    only job was to dispatch one general-purpose agent that ran one succeeding and one
+    failing `Bash` call, with a hook logging every payload: the agent's success arrived as
+    `PostToolUse` with `agent_id` `aafe1443cc49338d5`, its failure as `PostToolUseFailure`
+    with the SAME `agent_id`, and the parent's own `Bash` and its `Agent` call with NO
+    `agent_id` at all -- all four under one `session_id`. The payloads below carry the
+    field the way the platform delivers it: present inside an agent, absent in a parent.
+
+    NOTHING HERE MAY PASS BY ACCIDENT. Every test that asserts a NON-binding is paired
+    with the identical fixture inside one agent, which must bind -- otherwise a token
+    overlap that silently stopped working would make this whole class green."""
+
+    # The live pair, shortened only where the length carries nothing. They share `python3`
+    # and `read` after normalisation and nothing that makes them the same operation.
+    SUB_FAIL = ("cd /tmp/w/watch-ci-run && python3 - <<'EOF'\n"
+                "from pathlib import Path\n"
+                "print(Path('SKILL.md').read_text())\nEOF")
+    PARENT_OK = ("python3 - <<'EOF'\n"
+                 "p='docs/operations.md'\n"
+                 "s=open(p).read()\nprint(len(s))\nEOF")
+    ERR = "Exit code 1\nFileNotFoundError: [Errno 2] No such file or directory"
+
+    A = "aafe1443cc49338d5"      # the agent_id the 2026-09-05 probe actually recorded
+    B = "b17c2e94dd1102ab6"
+
+    def recoveries(self):
+        return [r for r in self.rows() if r["t"] == "recover"]
+
+    def fails(self):
+        return [r for r in self.rows() if r["t"] == "fail"]
+
+    def pending_names(self):
+        d = os.path.join(self.state, "repeats", "pending")
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def fail_in(self, session, agent, cmd=None, err=None):
+        self.tick()
+        p = self.failure(cmd or self.SUB_FAIL, session, error=err or self.ERR,
+                         tuid="toolu_f_%s_%d" % (agent or "parent", self.clock))
+        if agent:
+            p["agent_id"] = agent
+            p["agent_type"] = "general-purpose"
+        return self.run_hook(p)
+
+    def success_in(self, session, agent, cmd=None):
+        self.tick()
+        p = self.success(cmd or self.PARENT_OK, session,
+                         tuid="toolu_s_%s_%d" % (agent or "parent", self.clock))
+        if agent:
+            p["agent_id"] = agent
+            p["agent_type"] = "general-purpose"
+        return self.run_hook(p)
+
+    # ------------------------------------------------------- the live defect itself
+    def test_a_success_in_another_agent_does_not_bind(self):
+        """Agent A fails, agent B succeeds with a token-sharing call inside the window."""
+        self.fail_in("s1", self.A)
+        self.success_in("s1", self.B)
+        self.assertEqual(self.recoveries(), [],
+                         "a success in a DIFFERENT agent was bound as the recovery: %r"
+                         % self.rows())
+
+    def test_a_success_in_the_parent_does_not_bind_a_subagents_failure(self):
+        """The live shape exactly: the subagent failed, the PARENT succeeded."""
+        self.fail_in("s1", self.A)
+        self.success_in("s1", None)
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    def test_a_success_in_a_subagent_does_not_bind_the_parents_failure(self):
+        """The other direction, which is the same defect seen from the other side."""
+        self.fail_in("s1", None)
+        self.success_in("s1", self.A)
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    def test_the_same_pair_inside_one_agent_still_binds(self):
+        """NON-VACUITY for all three above. Identical commands, identical window, one
+        agent -- so what those tests measure is the AGENT and not a token overlap that
+        quietly stopped reaching the threshold."""
+        self.fail_in("s1", self.A)
+        self.success_in("s1", self.A)
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertEqual(rec[0]["agent_id"], self.A)
+
+    def test_the_same_pair_inside_the_parent_still_binds(self):
+        """The parent's own key is the one this change leaves byte-identical, so its
+        behaviour has to be unchanged as well."""
+        self.fail_in("s1", None)
+        self.success_in("s1", None)
+        self.assertEqual(len(self.recoveries()), 1, self.rows())
+
+    # ------------------------------------------------------- the failure stays armed
+    def test_another_agents_success_leaves_the_failure_armed(self):
+        """The cost was never only a wrong row: a binding CONSUMES its armed failure, so
+        the real fix arriving later could not be recorded at all. Agent B's success must
+        leave agent A's line where it was, and agent A's own later success must still find
+        it."""
+        self.fail_in("s1", self.A)
+        self.success_in("s1", self.B)
+        self.success_in("s1", None)
+        self.assertEqual(self.recoveries(), [], self.rows())
+        self.success_in("s1", self.A)
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertEqual(rec[0]["agent_id"], self.A)
+        self.assertEqual(rec[0]["sig"], self.fails()[0]["sig"])
+
+    def test_another_agents_successes_do_not_spend_the_window(self):
+        """The window is counted per (session, agent) too. WINDOW successes in agent B,
+        which under a per-session window would have run agent A's line out, and then agent
+        A's own success still binds."""
+        self.fail_in("s1", self.A)
+        for _ in range(6):
+            self.success_in("s1", self.B)
+        self.success_in("s1", self.A)
+        self.assertEqual(len(self.recoveries()), 1, self.rows())
+
+    def test_the_window_still_runs_out_inside_one_agent(self):
+        """NON-VACUITY for the test above: the same six successes IN AGENT A do spend it,
+        so the previous test is measuring the key and not a window that never expires."""
+        self.fail_in("s1", self.A)
+        for i in range(6):
+            self.run_hook(self.filler("s1", i, agent_id=self.A,
+                                      agent_type="general-purpose"))
+        self.success_in("s1", self.A)
+        self.assertEqual(self.recoveries(), [], self.rows())
+
+    # ------------------------------------------------------- the key on disk
+    def test_the_pending_file_is_named_for_the_pair(self):
+        self.fail_in("s1", self.A)
+        self.fail_in("s1", self.B)
+        self.fail_in("s1", None)
+        self.assertEqual(self.pending_names(),
+                         sorted(["s1", "s1+%s" % self.A, "s1+%s" % self.B]))
+
+    def test_the_parents_pending_file_keeps_its_old_name(self):
+        """A session running ACROSS this change keeps the failures it had already armed,
+        because the parent's key is the name the file had before -- `<sid>`, with no
+        suffix. If this ever becomes `<sid>+something` the upgrade silently disarms every
+        live session."""
+        self.fail_in("s1", None)
+        self.assertEqual(self.pending_names(), ["s1"])
+
+    def test_an_agent_id_outside_the_identity_class_cannot_escape_the_directory(self):
+        """The sanitiser, driven rather than asserted about.
+
+        `..` survives it, because `.` is INSIDE the identity class -- what does not
+        survive is the separator, so `../../etc` becomes the single harmless component
+        `.._.._etc` and the file lands in `pending/` like any other. The guard on the next
+        line covers the two names that would still be dangerous alone, `.` and `..`, and
+        the test below drives that one."""
+        self.fail_in("s1", "../../etc")
+        self.assertEqual(self.pending_names(), ["s1+.._.._etc"])
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.state, "repeats", "pending", "s1+.._.._etc")))
+
+    def test_a_dot_agent_id_becomes_the_safe_name(self):
+        self.fail_in("s1", ".")
+        self.assertEqual(self.pending_names(), ["s1+_"])
+
+    # ------------------------------------------------------- the rows carry the key
+    def test_the_fail_row_carries_the_agent_id(self):
+        self.fail_in("s1", self.A)
+        self.assertEqual(self.fails()[0]["agent_id"], self.A)
+
+    def test_the_fail_row_of_a_parent_carries_a_null_agent_id(self):
+        """Present and null, not absent: a key a reader has to distinguish from a row
+        written before the field existed is a key nobody can join on."""
+        self.fail_in("s1", None)
+        row = self.fails()[0]
+        self.assertIn("agent_id", row)
+        self.assertIsNone(row["agent_id"])
+
+    def test_the_recover_row_carries_the_agent_id(self):
+        self.fail_in("s1", self.A)
+        self.success_in("s1", self.A)
+        self.assertEqual(self.recoveries()[0]["agent_id"], self.A)
+
+    def test_the_recover_row_of_a_parent_carries_a_null_agent_id(self):
+        self.fail_in("s1", None)
+        self.success_in("s1", None)
+        row = self.recoveries()[0]
+        self.assertIn("agent_id", row)
+        self.assertIsNone(row["agent_id"])
+
+    def test_a_cross_tool_row_still_says_so_alongside_the_agent_id(self):
+        """The two fields are written on opposite rules -- `agent_id` always, `cross_tool`
+        only when true -- and adding the first must not have disturbed the second."""
+        self.tick()
+        p = self.failure({"owner": "ContextLab", "repo": "claude-skill-compounder"},
+                         "s1", error="Exit code 1\nHTTP 403",
+                         tool="mcp__github__create_issue")
+        p["agent_id"] = self.A
+        self.run_hook(p)
+        self.success_in("s1", self.A,
+                        cmd="gh issue create --repo ContextLab/claude-skill-compounder")
+        rec = self.recoveries()
+        self.assertEqual(len(rec), 1, self.rows())
+        self.assertTrue(rec[0]["cross_tool"])
+        self.assertEqual(rec[0]["agent_id"], self.A)
+
+    # ------------------------------------------------------- what stays per session
+    def test_a_subagents_recovery_arms_the_lesson_marker_for_the_whole_session(self):
+        """DELIBERATE, and the opposite direction to everything above. The lesson marker
+        and the refusal built on it are per SESSION -- `lessons/<sid>` -- so an agent that
+        binds a recovery arms the gate for its parent too. Narrowing that to the agent
+        would let a session walk around a refusal by dispatching one."""
+        self.fail_in("s1", self.A)
+        self.success_in("s1", self.A)
+        sig = self.fails()[0]["sig"]
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", sig)[:96]
+        marker = os.path.join(self.state, "repeats", "lessons", "s1", "s-%s" % safe)
+        self.assertTrue(os.path.exists(marker),
+                        "the marker was not written under the session: %r"
+                        % self.pending_names())
+
+    def test_the_statement_is_emitted_to_the_agent_that_did_both_halves(self):
+        self.fail_in("s1", self.A)
+        r = self.success_in("s1", self.A)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        # Both halves of the pair, as the normaliser leaves them: the quoted paths are
+        # masked to `<S>`, so the assertion is on the code around them.
+        self.assertIn("read_text", ctx)
+        self.assertIn("open(p).read()", ctx)
+
+    def test_the_statement_is_not_emitted_to_an_unrelated_agent(self):
+        """The live symptom: the parent was told a lesson about a failure it never made."""
+        self.fail_in("s1", self.A)
+        r = self.success_in("s1", None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "",
+                         "an agent that made no failure was told about one: %r" % r.stdout)
+
+
 # ============================================================== the lesson statement
 class LessonStatementTest(GateCase):
     """THE FIRST TIME: SAY IT. A recovery used to write a row into a file nobody reads
@@ -4177,7 +4427,7 @@ class ProcessCountTest(GateCase):
     then execs the real program, so behaviour is unchanged and the log is complete.
 
     FOUR, and the list is the whole of it: `cat` reads the payload, one `jq` prints the
-    four fields the script dispatches on, and `tr` and `cut` are the identity sanitiser --
+    five fields the script dispatches on, and `tr` and `cut` are the identity sanitiser --
     which is byte-identical in twelve shipped scripts and may not be replaced by a cheaper
     spelling here. `date` is excluded and bounded separately for the reason precompact's
     pin excludes it: one stamp is one start on BSD and two on GNU, and folding that

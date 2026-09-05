@@ -323,6 +323,57 @@
 # was delivered". The store is the only surface that can tell the two apart.
 #
 # ====================================================================================
+# THE RECOVERY WINDOW IS KEYED ON (SESSION, AGENT), AND THE SESSION ALONE IS NOT ENOUGH.
+#
+# A SUBAGENT SHARES ITS PARENT'S SESSION ID. That is not an inference: it is recorded in
+# docs/CLAUDE-CODE-BEHAVIOR.md ("A subagent's file edits are attributed to the parent
+# session"), and it is what THE NOT-ARMED EXIT below relies on deliberately -- a subagent
+# dispatched by an armed session is refused on the same terms, because dispatching an
+# agent is continuing.
+#
+# For the REFUSAL that is right. For the RECOVERY WINDOW it was a defect, and the defect
+# is a wrong row plus a destroyed right one, the same pair the same-tool rule above was
+# narrowed for. A parent and every agent it dispatches interleave their tool calls into
+# ONE pending file, so a failure inside agent A arms a line that the next token-sharing
+# success ANYWHERE in the session binds -- in agent B, or in the parent. Observed live on
+# 2026-09-05, in this package's own store: signature c2824570283x405-e2428498712x41 was
+# armed by a forge subagent's `cd <P>/watch-ci-run && python3 - <<EOF ... read_text ...`
+# and bound to the PARENT's `python3 - <<EOF p='docs/operations.md'; s=open(p).read()
+# ...`, two calls that share `python3` and one more token and have nothing else to do
+# with each other. Both halves of the cost landed: the parent was told a lesson statement
+# about a failure it never made, and the subagent's armed failure was consumed, so its own
+# real recovery could no longer bind.
+#
+# SO THE PENDING FILE IS NAMED FOR THE PAIR. `agent_key()` builds it: `<sid>` for the
+# parent, `<sid>+<agent id>` for a dispatched agent. The separator is `+` because it is
+# OUTSIDE the identity character class `A-Za-z0-9._-` that both halves are sanitised into,
+# so a sanitised session id can never contain one and `<sid>+<aid>` can never collide with
+# some other session's `<sid>`. The parent's key is byte-identical to the name this file
+# had before, which is what lets a session running across the change keep the failures it
+# had already armed.
+#
+# THE FIELD IS `agent_id`, AND IT IS ON THE POST EVENTS. Measured on this machine, Claude
+# Code 2.1.260, macOS 25.6.0, 2026-09-05, with a headless session whose only job was to
+# dispatch one general-purpose agent that ran one succeeding and one failing `Bash` call,
+# and a hook logging every payload: the agent's success arrived as `PostToolUse` with
+# `agent_id` `aafe1443cc49338d5` and `agent_type` `general-purpose`, its failure arrived
+# as `PostToolUseFailure` with the SAME `agent_id`, and the parent's own `Bash` and its
+# `Agent` call both arrived with NO `agent_id` at all -- all four under one `session_id`.
+# n = 1 dispatch, one agent type, one CLI build. The same asymmetry was already recorded
+# for `PreToolUse` in docs/CLAUDE-CODE-BEHAVIOR.md at n = 4.
+#
+# WHAT STAYS PER SESSION, and it is deliberate in both directions. The lesson MARKER
+# (`lessons/<sid>`) and the refusal that reads it are per SESSION, so an agent that
+# recovers a failure arms the gate for the whole session including its parent -- that is
+# the point of the gate, and narrowing it to the agent would let a session walk around a
+# refusal by dispatching. The claim markers stay per session too: they are keyed on
+# `tool_use_id`, which is unique per call whoever made it.
+#
+# BOTH ROW TYPES NOW CARRY `agent_id`, null for the parent, so the store can be read per
+# agent after the fact. Nothing reads it yet; it is written because a key that cannot be
+# recovered from the store is a key nobody can check.
+#
+# ====================================================================================
 # THE LESSON GATE: the first time it is said, the second time it is required.
 #
 # The maintainer's scenario 2 is "after a failed attempt at doing something, and then
@@ -693,6 +744,10 @@
 #                                     The stream it counts is therefore far sparser than
 #                                     "every tool call", and a recovery five Bash calls
 #                                     later binds however many files were read in between.
+#                                     The window is counted PER (SESSION, AGENT): a
+#                                     subagent's calls do not spend the parent's window
+#                                     and cannot bind its failures. See THE RECOVERY
+#                                     WINDOW IS KEYED ON (SESSION, AGENT) above.
 #   REPEAT_GATE_MAX_BYTES   (4194304) store read budget; a larger store fails OPEN. The
 #                                     store is ROTATED at half this, by rename into
 #                                     repeats/archive/, so that never happens: an
@@ -939,24 +994,28 @@ case "${1:-}" in
 esac
 
 if [ -z "$ARGV_MODE" ]; then
-  # ONE jq READ FOR THE FOUR FIELDS THIS SCRIPT DISPATCHES ON, and the reason is the
+  # ONE jq READ FOR THE FIVE FIELDS THIS SCRIPT DISPATCHES ON, and the reason is the
   # PreToolUse wiring. That event carries NO MATCHER since 2026-09-05 (WHAT THE WIRING
   # ADMITS, below), so this script is now forked for EVERY tool call a session makes,
   # twice over with both wirings active -- a `Read`, a `Glob`, a `TodoWrite`. It used to
   # read `.hook_event_name`, `.session_id`, `.tool_name` and `.tool_use_id` in four
   # separate `jqr` calls, which is four `jq` starts on the commonest path in the package.
-  # One `jq` printing all four separated by US answers the same question, and what it
+  # One `jq` printing all five separated by US answers the same question, and what it
   # buys is measured rather than asserted: tests/test_repeat_gate.py::ProcessCountTest
   # pins the whole not-armed path at FOUR program starts -- `cat`, `jq`, `tr`, `cut` --
   # and fails on the fifth.
   #
   # `read` WITH IFS SET TO US KEEPS EMPTY FIELDS, which is why the separator is a control
   # byte and not whitespace: `a<US><US><US>` assigns one value and three empty strings,
-  # where IFS whitespace would collapse them and slide `tool` into `sid`.
+  # where IFS whitespace would collapse them and slide `tool` into `sid`. `agent_id` is
+  # the fifth and it is EMPTY on every event the parent session makes -- see THE RECOVERY
+  # WINDOW IS KEYED ON (SESSION, AGENT) in the header -- so it is read here rather than in
+  # a second jq, and the not-armed path still costs the four programs ProcessCountTest
+  # pins: adding a field to a jq already running costs no process at all.
   pfields="$(printf '%s' "$payload" | jq -r '
       [(.hook_event_name // ""), (.session_id // ""), (.tool_name // ""),
-       (.tool_use_id // "")] | join("\u001f")' 2>/dev/null)"
-  IFS=$'\037' read -r event sid tool tuid <<EOF
+       (.tool_use_id // ""), (.agent_id // "")] | join("\u001f")' 2>/dev/null)"
+  IFS=$'\037' read -r event sid tool tuid aid <<EOF
 $pfields
 EOF
   case "$event" in
@@ -1300,6 +1359,27 @@ claim_once() {
   return 0
 }
 
+# THE NAME OF THE PENDING FILE, AND NOTHING ELSE. Sets `akey` -- `<sid>` for the parent,
+# `<sid>+<agent id>` inside a dispatched agent -- for the two arms that arm and consume a
+# recovery window. The reasoning is THE RECOVERY WINDOW IS KEYED ON (SESSION, AGENT) in
+# the header; the two things to keep here are that `+` is outside the identity class both
+# halves are sanitised into, so the two shapes cannot collide, and that the parent's key
+# is the OLD name unchanged.
+#
+# CALLED FROM THE TWO POST ARMS ONLY, never on the PreToolUse path. The refusal is per
+# session by design and needs no agent, and this costs two program starts (`tr`, `cut`)
+# that tests/test_repeat_gate.py::ProcessCountTest pins the not-armed path against.
+# A parent pays none of them: the sanitiser runs only when `agent_id` was non-empty, the
+# same shape the `tool_use_id` guard above uses and for the same reason.
+agent_key() {
+  akey="$sid"
+  [ -z "${aid:-}" ] && return 0
+  asafe="$(printf '%s' "$aid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
+  case "$asafe" in ''|.|..) asafe=_ ;; esac
+  akey="$sid+$asafe"
+  return 0
+}
+
 # TWO SWEEPS, NOT ONE, AND THE SPLIT IS ABOUT WHICH ARM PAYS FOR WHICH TREE. This was a
 # single function called from the LEARN arm and the REFUSE arm, which put the CLAIMS sweep
 # on the PreToolUse deny path -- in front of a tool call the session is blocked on. The
@@ -1383,16 +1463,24 @@ if [ "$event" = "PostToolUseFailure" ]; then
   # hooks/session-review.sh shipped first.
   claim_once "f" || exit 0
 
+  # `agent_id` IS ALWAYS PRESENT AND IS null FOR THE PARENT, rather than absent there.
+  # It is the key half the row would otherwise not record, so a reader asking which agent
+  # a failure belongs to can answer it off the store instead of guessing from the session.
+  # `cross_tool` on the recover row goes the other way -- written only when true -- and
+  # the difference is that this one is a KEY and that one is a claim about evidence.
   row="$(jq -nc --arg ts "$now" --arg sig "$sig" --arg ck "$ck" --arg ec "$ecl" \
     --arg tool "$tool" --arg norm "$norm" --arg cmd "$cmd" --arg err "$err_head" \
-    --arg session "$sid" --arg tuid "$tuid" \
+    --arg session "$sid" --arg tuid "$tuid" --arg aid "${aid:-}" \
     '{t:"fail", ts:($ts|tonumber), sig:$sig, ck:$ck, ec:$ec, tool:$tool, norm:$norm,
-      cmd:$cmd, err:$err, session:$session, tuid:$tuid}' 2>/dev/null)" || exit 0
+      cmd:$cmd, err:$err, session:$session, tuid:$tuid,
+      agent_id:(if $aid == "" then null else $aid end)}' 2>/dev/null)" || exit 0
   [ -z "$row" ] && exit 0
   rotate_store
   printf '%s\n' "$row" >> "$STORE" 2>/dev/null || exit 0
 
-  # Arm the recovery window for this session. US (0x1f) rather than a tab: tab is IFS
+  # Arm the recovery window for THIS SESSION AND THIS AGENT -- `agent_key` names the
+  # file, and the header section THE RECOVERY WINDOW IS KEYED ON (SESSION, AGENT) says
+  # why the session alone was not enough. US (0x1f) rather than a tab: tab is IFS
   # whitespace, so `read` collapses runs of it and an empty field silently shifts every
   # field after it (docs/DESIGN.md, shell portability traps).
   #
@@ -1403,7 +1491,8 @@ if [ "$event" = "PostToolUseFailure" ]; then
   # success path of every armed session. A pending file written by an OLDER version has
   # four fields, so the three read back empty: no cross-tool binding and no statement,
   # which is the safe direction for a file that lives one session.
-  pf="$DIR/pending/$sid"
+  agent_key
+  pf="$DIR/pending/$akey"
   printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
     "$sig" "$ck" "$tool" "$WINDOW" "$(toks_of "$norm")" "$(oneline "$norm")" \
     "$(oneline "$err_head")" >> "$pf" 2>/dev/null || :
@@ -1419,7 +1508,7 @@ if [ "$event" = "PostToolUseFailure" ]; then
 fi
 
 # ==================================================================== arm 2: RECOVER
-# The first later success to satisfy EITHER rule, within a window of
+# The first later success BY THE SAME AGENT to satisfy EITHER rule, within a window of
 # REPEAT_RECOVERY_WINDOW successful calls of any tool THIS HOOK IS WIRED FOR, is that
 # signature's candidate recovery: the same TOOL, or a different tool sharing
 # REPEAT_RECOVERY_MIN_TOKENS content tokens with the failed call (CROSS-TOOL RECOVERY in
@@ -1431,7 +1520,12 @@ fi
 # candidate from being announced as one. Neither is a guess about intent -- both are
 # bounds on how much noise one session may contribute.
 if [ "$event" = "PostToolUse" ]; then
-  pf="$DIR/pending/$sid"
+  # The pending file of THIS agent, not of this session: a success inside a dispatched
+  # agent may not bind a failure its parent armed, nor the other way round. `agent_key`
+  # is two program starts inside an agent and none in a parent, and it runs before the
+  # `-f` test because the test is what it names.
+  agent_key
+  pf="$DIR/pending/$akey"
   [ -f "$pf" ] || exit 0
   compute_call || exit 0
   claim_once "s" || exit 0
@@ -1491,9 +1585,10 @@ if [ "$event" = "PostToolUse" ]; then
           # that appears on every row to say `no` is a key every one of them has to explain.
           rrow="$(jq -nc --arg ts "$now" --arg sig "$psig" --arg ck "$pck" --arg tool "$tool" \
             --arg norm "$norm" --arg cmd "$cmd" --arg session "$sid" --arg tuid "$tuid" \
-            --arg x "$bind" \
+            --arg x "$bind" --arg aid "${aid:-}" \
             '{t:"recover", ts:($ts|tonumber), sig:$sig, ck:$ck, tool:$tool, norm:$norm,
-              cmd:$cmd, session:$session, tuid:$tuid}
+              cmd:$cmd, session:$session, tuid:$tuid,
+              agent_id:(if $aid == "" then null else $aid end)}
              + (if $x == "cross" then {cross_tool:true} else {} end)' 2>/dev/null)"
           [ -n "$rrow" ] && printf '%s\n' "$rrow" >> "$STORE" 2>/dev/null
           done_sigs="$done_sigs$psig "

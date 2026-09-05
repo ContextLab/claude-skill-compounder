@@ -85,3 +85,13 @@ forged skill; issue comments.
   SendMessage with "re-check the disk state first". The live `hooks/repeat-gate.sh`
   carried the builder's half-landed change through the outage: `bash -n` parses and a
   `Read` PreToolUse probe exits 0 with no output, so no turn on this machine broke.
+- 2026-09-05 morning. Lesson-gate builder done and committed (505d27c), docs for it
+  (35c0106). Screencast re-recorded (dcac7c4): opens on a lesson, then `watch-ci-run`
+  forged for real; round 2 came back 6 blocking of 13 again, `escalate --converging` was
+  refused (exit 4, "not a fall"), `--narrowed` granted, so #34's cap has now refused AND
+  granted on a real forge. Two orchestrator slips: committed with doctrine sync red because
+  `| tail -1` masked the test's exit (fixed 91b0bb3, note n410812797x266); and the
+  recovery binding bound a forge subagent's failed heredoc to the parent's unrelated
+  heredoc because the binding is keyed per session and subagents share the id — a builder
+  is keying it per (session, agent_id) now. `SKILLFORGE_SKILLS_DIR` had no tuning-table
+  row (f70d073).
