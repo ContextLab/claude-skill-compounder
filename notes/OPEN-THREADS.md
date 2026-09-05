@@ -483,10 +483,11 @@ editing the prose alone.
   already on disk. Note the comment above that call says `--arg` is used to stay off
   jq 1.6; `--rawfile` there would move this file onto the 1.6 floor the rest of the
   package already sits on, so the two decisions have to be made together.
-- **#34: a forge has now run under the diet, and it failed at the cap.** This entry used
-  to read "no forge has run under the diet ... nothing has measured whether the diet's
-  round budget holds." That is answered, on 2026-09-05, by `watch-ci-run` — see the
-  section below for what it exercised and what it did not.
+- **#34: two forges have now run under the diet, and both failed at the cap.** This entry
+  used to read "no forge has run under the diet ... nothing has measured whether the diet's
+  round budget holds." That is answered, on 2026-09-05, by `watch-ci-run` and by its
+  re-forge `wait-for-ci` — see the section below for what they exercised, what they did
+  not, and why the candidate itself turned out to be a note rather than a skill.
 
 **CI green-ness is unverified until the push.** Everything above was fixed against
 GNU-shaped shims and a local run on macOS. No Ubuntu runner has seen this tree. Do not
@@ -501,13 +502,15 @@ is the explicit opt-in). #40 landed the same day: `README.md` is the front door 
 them is that the doctrine anchors moved to `docs/architecture.md`, which
 `tests/test_doctrine_sync.py` now reads as `PROTOCOL_DOC`.
 
-## Open: #34 is answered by a forge that FAILED, so half of the diet is still unexercised
+## Open: #34 is answered by two forges that FAILED, so half of the diet is still unexercised
 
 `watch-ci-run` is the first forge run end to end under the diet. It ran from `start` at
 epoch 1788579995 (2026-09-04 23:46:35 EDT) to `fail` at 1788614898 (2026-09-05 09:28:18
 EDT) and closed at the hard cap without shipping a skill. Everything below is re-derivable
 from `<state>/rounds/watch-ci-run.tsv`, the ledger
-(`grep watch-ci-run <state>/ledger.jsonl | jq -c '{ts,event,steps,rounds}'`) and
+(`grep '"name":"watch-ci-run"' <state>/ledger.jsonl | jq -c '{ts,event,steps,rounds}'` —
+anchor on the name, because a bare `grep watch-ci-run` also matches the second forge's
+`start` and `fail` rows, whose summaries name the forge they re-forge) and
 `<state>/quarantine/watch-ci-run-2026-09-05/WHY-ARCHIVED.md`.
 
 The four rounds went `blocking=6` of 13, `6` of 13, `5` of 13, `7` of 21. `escalate
@@ -515,9 +518,9 @@ The four rounds went `blocking=6` of 13, `6` of 13, `5` of 13, `7` of 21. `escal
 granted in its place, `--converging` was granted after round 3 on the strict fall 6 → 5,
 and after round 4 both spellings were refused because two grants is the ceiling. The
 ledger carries exactly two `escalate` rows for the name. Timing, and it is worth reading
-with the caveat: 581.7 minutes elapsed, of which a single 400.8-minute gap (2026-09-05
-01:10 to 07:51 EDT) is the monthly spend limit that killed reviewer D2 mid-round, leaving
-about 181 minutes active. That is against a 30-minute expectation for a narrow skill — but
+with the caveat: 581.7 minutes elapsed, inside which seven gaps run over ten minutes and
+the widest of them, 400.8 minutes (2026-09-05 01:10 to 07:51 EDT), is the monthly spend
+limit that killed reviewer D2 mid-round, leaving about 181 minutes active. That is against a 30-minute expectation for a narrow skill — but
 this forge escalated twice and ran four rounds, so it never attempted the shape that
 expectation describes. `docs/measurement.md` carries the figures and the three reasons
 they are not a budget measurement.
@@ -537,12 +540,92 @@ installed. `a06d49c` is the repair — exit 5 when the newest close row is a `fa
 liftable by `--force` — and it is tested but has still never run at the end of a successful
 forge.
 
-A second forge, `wait-for-ci`, started at epoch 1788615163 (2026-09-05 09:32:43 EDT) as a
-narrowed re-forge onto the check-runs endpoint. **Its outcome is pending and unknown as of
-this writing.** Do not record a result for it without reading the ledger.
+**The second forge, `wait-for-ci`, failed the same way, four minutes after the first one
+closed.** It was scoped as exactly the re-forge the first orchestrator asked for: start
+from `gh api repos/O/R/commits/<sha>/check-runs`, and compute no verdict of its own. It
+ran from `start` at epoch 1788615163 (2026-09-05 09:32:43 EDT) to `fail` at 1788621602
+(11:20:02 EDT), and the `fail` row carries the span itself — `duration` 6438 seconds,
+**107.3 minutes**, where its `WHY-ARCHIVED.md` says 108 off the wall clock. Three rounds,
+three cold readers, none a fork of the orchestrator or of each other, at `blocking=7` of
+10, `5` of 9 and `7` of 8 (`cat <state>/rounds/wait-for-ci.tsv`). `escalate --converging`
+was GRANTED after round 2 on the strict fall 7 → 5 and REFUSED after round 3 because
+5 → 7 is not a fall; the ledger carries exactly one `escalate` row for the name, a refusal
+writing none. `--narrowed`, the second grant, was still in hand and was deliberately NOT
+spent, and that decision is the finding rather than a shortfall: a narrowing cuts the
+subsystem the findings keep naming, and here that subsystem was the deliverable. Closed
+with `skillforge fail`, `steps` 6 → 8, no `apply` and no `verdict`, quarantined at
+`<state>/quarantine/wait-for-ci-2026-09-05/` with the orchestrator's, the builder's and
+three cold reviewers' sections appended unmerged.
 
-**The fact the next forge should build on, measured by this one and recorded in its
-`WHY-ARCHIVED.md`:** `gh run list --commit <sha>` works with a **full 40-character sha**
+**Both forges died in one subsystem, reached from two different endpoints: which checks
+count as this commit's CI.** The second forge's three wrong answers were each measured by
+a different cold reader against real public repositories. Check-runs plus the combined
+status endpoint gave a FALSE GREEN on `cli/cli` `aa72d77c`, where three workflow runs
+concluded `failure` but each died before creating a job, so none produced a check-run.
+Adding `check-suites` gave a FALSE FAILING on `BurntSushi/ripgrep` main tip `3fce3b5b` —
+exit 1, `VERDICT: FAILING (9 of 759)`, the 9 rows being two SCHEDULED re-runs of that same
+sha from 2026-08-07 and 2026-08-18. And the runless-suite rule written to bound THAT gave
+a third wrong answer in the first direction again, a FALSE GREEN on `home-assistant/core`
+`49b9cef7`. Each round's repair of the subsystem produced the next round's finding inside
+it, and the blocking count then rose — which is the doctrine's not-converging shape, for
+the second forge running.
+
+**What the pair now establishes, beyond what the first one did alone.** The round cap,
+both escalation spellings in both directions, closing with `skillforge fail` and the
+quarantine have been exercised by a real forge TWICE, on two different escalation paths:
+the first spent `--narrowed` and then `--converging` and hit the two-grant ceiling, the
+second was granted `--converging` once, refused it once, and left the second grant unspent
+by choice. A refusal leaves no ledger row either time, so the count of `escalate` rows is
+grants and not attempts — two for `watch-ci-run`, one for `wait-for-ci`.
+
+**What is still NOT exercised, after two forges rather than one:** `skillforge done`
+followed by `apply` and `verdict` on a forge that SUCCEEDS. That is unchanged and it is
+the half of the loop the ledger's five questions are built around; two failures do not
+approach it.
+
+**The tier gate's answer, which is the thing to carry forward.** Two forges, seven
+cold-reader rounds and both endpoints later, every blocking finding that closed either one
+sat in the same subsystem — so what the evidence supports is not a third design of that
+subsystem but the tier rule's own verdict: a candidate whose blocking findings sit in one
+subsystem across two forges is a note with a script attached, not a skill. That is what it
+became, at the user level rather than in this repo, on 2026-09-05: `skillnote add
+--attach` wrote note `n3725829701x412` into the global `~/.claude/CLAUDE.md` with
+`~/.claude/lessons/n3725829701x412/ci-checks.sh` beside it — a script that verifies the
+push with `git ls-remote`, expands the sha to 40 characters and prints the check-runs and
+statuses, computing no verdict at all. Confirm it with `grep -n 'ci-checks.sh'
+~/.claude/CLAUDE.md`, not from this line; a second note, `n1566376988x302`, carries the
+full-sha rule and the empty-`statuses` `pending` beside it. A third forge of this candidate needs a change of
+QUESTION, not a fourth inclusion rule — ask the repository which checks it treats as
+authoritative — and until someone has that, there is nothing here for the forge to do.
+
+**Open, and it belongs to `skillreport`: a cold reviewer's routing probe writes `use` rows
+for a skill that was never installed.** Every round runs the six trigger-precision prompts
+through real `claude -p` sessions, and each draw that fires the draft records a `use` row
+against the candidate's name. So both quarantined forges appear in
+`bash bin/skillreport skills 2>/dev/null` as a name with uses and nothing to account for
+them:
+
+```
+wait-for-ci
+  origin    NO ORIGIN ROW — this skill has rows here but nothing says where it came from
+  uses      0 genuine, 11 harness (a script drove the session)
+  applied   NOT APPLICABLE — the forge for this name was abandoned (fail 2026-09-05), so no skill shipped and there is no debt to discharge
+  verdict   none recorded
+```
+
+`watch-ci-run` prints the same shape with 17 harness uses and one `MISFIRED` verdict.
+Three of those four lines are right and one is misleading. The `harness` column is honest — the
+rows are marked as script-driven, and `0 genuine` is the true count — and `applied` names
+the abandoned forge. But `NO ORIGIN ROW` reads as a hole in the ledger when it is the
+fact: nothing was ever installed under either name, so no `origin` row could exist. A
+probe of a DRAFT is not a use of a SKILL, and nothing in the ledger distinguishes them
+today. Whether the repair is a distinct event name, a flag on the `use` row, or `skills`
+reading the newest close row before it reports the name at all is undecided. Do not fix it
+by suppressing the rows: they are the only surviving evidence that the routing gate was
+run at all.
+
+**The fact the next forge should build on, measured by the FIRST of the two and recorded
+in its `WHY-ARCHIVED.md`:** `gh run list --commit <sha>` works with a **full 40-character sha**
 and returns **zero rows at exit 0** for a short one — so expand the sha locally before
 passing it. The global note `n1407736601x223` says only that `--commit` "returned nothing
 here", which reads as the flag being broken; it is not broken, it is exact-match, and a
@@ -550,6 +633,11 @@ watcher built on a short sha fails open and silently. The same file records thre
 `git rev-parse origin/<branch>` fails open in three separate ways, a foreground poll loop
 dies at SIGTERM with exit 143 and no verdict, and `git ls-remote` is the check that cannot
 be stale. None of these depends on the broken part of the artifact.
+The second forge's `WHY-ARCHIVED.md` carries nine more of the same kind under **What is
+worth keeping**, none of them touching the broken part either — among them that the
+combined status endpoint answers `"state": "pending"` with an EMPTY `statuses` array for a
+commit that has no statuses at all, so a poller trusting `.state` waits forever on a commit
+with nothing to wait for.
 
 The design error that closed the forge was the endpoint, not the wording: three consecutive
 rounds found the verdict-selection subsystem, and round 4 showed that `gh run list` answers

@@ -376,6 +376,19 @@ wording: three consecutive rounds found the verdict-selection subsystem, and rou
 visible that the whole skill was built on `gh run list` when "did CI pass for this commit"
 is a question the check-runs endpoint answers directly.
 
+**The cap then did the same thing to the re-forge built on that endpoint, and the second
+failure is what settles the candidate.** `wait-for-ci` ran three rounds at `blocking=7` of
+10, `5` of 9 and `7` of 8 (`cat <state>/rounds/wait-for-ci.tsv`), had `--converging`
+granted after round 2 on the strict fall 7 → 5 and refused after round 3 because 5 → 7 is
+not a fall, left its second grant unspent — `--narrowed` cuts the subsystem the findings
+keep naming, and here that subsystem was the deliverable — and closed with `fail` 107.3
+minutes after `start`, leaving exactly one `escalate` row, no `apply` and no `verdict`. So
+both failures land in the same place: every blocking finding that closed either forge sat
+in the subsystem of which checks count as this commit's CI, and a candidate whose blocking
+findings sit in one subsystem across two forges and seven cold-reader rounds has been
+answered by the tier gate rather than by the cap — it is a note with a script attached
+rather than a skill, which is what this one became.
+
 Paste the trigger, do not summarise it: it is the one thing about a forge that nothing can
 recover afterwards, because a quote is what a person actually said or what a hook actually
 emitted, and by the time anyone reads the row the moment is gone. `--trigger-kind` says who

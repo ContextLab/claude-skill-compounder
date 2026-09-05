@@ -314,27 +314,34 @@ figure about the lesson gate's false-positive rate needs that fixed first, and t
 on — and now ships without an expiry, so a false positive costs one lesson line rather than
 two attempts' patience.
 
-## What the first forge under the diet actually cost
+## What the first two forges under the diet actually cost
 
 [`architecture.md`](architecture.md) sets the diet's expectation: *"A narrow skill should
 close in under 30 minutes; when it does not, the scope was wrong rather than the budget."*
-`watch-ci-run` is the first real forge to test it, and it took far longer than that and
-then failed at the cap. What the timings are worth is the point of this section, because
-elapsed and active are nowhere near the same number here.
+Two forges have now tested it, `watch-ci-run` and its re-forge `wait-for-ci`, and both
+took far longer than that and then failed at the cap. What the timings are worth is the
+point of this section, because for the first of them elapsed and active are nowhere near
+the same number.
 
 `WHY-ARCHIVED.md` in `<state>/quarantine/watch-ci-run-2026-09-05/` dates the forge
 2026-09-04 23:48 EDT to 2026-09-05 09:30 EDT. Its own ledger rows are a little tighter:
 `start` at epoch 1788579995 (2026-09-04 23:46:35 EDT) and `fail` at 1788614898
-(2026-09-05 09:28:18 EDT), **581.7 minutes** apart. But exactly one gap over ten minutes
-sits inside that span, **400.8 minutes** wide, from 2026-09-05 01:10 to 07:51 EDT — and
+(2026-09-05 09:28:18 EDT), **581.7 minutes** apart. The recipe below returns **seven**
+gaps over ten minutes inside that span, and six of them are rounds in progress; the
+seventh is **24047** seconds, **400.8 minutes**, from 2026-09-05 01:10 to 07:51 EDT, and
 that overnight window is the monthly spend limit `WHY-ARCHIVED.md` records killing
 reviewer D2 before it could write a report. Net of it the forge was active for **about 181
 minutes**, three hours rather than ten. Re-derive all four figures from the store:
 
 ```bash
-grep watch-ci-run <state>/ledger.jsonl | jq -r '.ts' \
+grep '"name":"watch-ci-run"' <state>/ledger.jsonl | jq -r '.ts' \
   | awk 'NR>1 && $1-p > 600 {printf "GAP %d s between %d and %d\n", $1-p, p, $1} {p=$1}'
 ```
+
+The `"name":` anchor is load-bearing and this paragraph was written without it: a bare
+`grep watch-ci-run` also matches the SECOND forge's `start` and `fail` rows, whose
+summaries name the forge they re-forge, and it therefore reports an eighth gap of 6439
+seconds that belongs to a different forge entirely.
 
 Three things that number is not. It is **not** a measurement of the diet's budget, because
 this forge escalated twice and ran four rounds rather than two — the shape the 30-minute
@@ -343,6 +350,32 @@ artifact of one account's billing month and would not recur on another. And **n 
 under the second limit at the foot of this document. What it does support is the narrower
 claim: a forge that runs to the hard cap costs hours of wall clock even before an outage,
 so the cap terminating it is doing the work the diet asked of it.
+
+**The second forge cost a fifth of the first one's elapsed time, three fifths of its
+active time, and here the two are one number.** `wait-for-ci` was a narrowed re-forge of the same candidate onto the check-runs
+endpoint the first one's orchestrator named, and it failed at the cap too. Its `start` is
+at epoch 1788615163 (2026-09-05 09:32:43 EDT) and its `fail` at 1788621602 (11:20:02 EDT),
+and that row carries the span itself: `duration` **6438** seconds, **107.3 minutes**. Its
+`WHY-ARCHIVED.md` says 108, which is the wall clock rounded rather than the row; take the
+row. The gap recipe above, pointed at this name, returns five gaps over ten minutes and
+the widest is **1539** seconds — but each is a round in progress, nothing in the
+quarantine record names an outage or a spend limit, and there is therefore no active
+figure here distinct from the elapsed one:
+
+```bash
+grep '"name":"wait-for-ci"' <state>/ledger.jsonl | jq -r '.ts' \
+  | awk 'NR>1 && $1-p > 600 {printf "GAP %d s between %d and %d\n", $1-p, p, $1} {p=$1}'
+```
+
+The three caveats hold, and the first of them tightens by one round rather than lifting.
+This forge escalated **once** and ran **three** rounds —
+`grep '"name":"wait-for-ci"' <state>/ledger.jsonl | jq -c 'select(.event=="fail") |
+{rounds,rounds_planned,steps}'` prints `3`, `3` and `8` — so it came one round closer to
+the two-round shape the 30-minute line describes and still ran three and a half times over
+it. It is still not a cost, because a forge that fails buys evidence rather than a skill.
+And **n is 2**, which is a second reading rather than a distribution. What the pair
+supports is the first one's narrow claim, twice over: a forge that runs to the hard cap
+costs hours of wall clock, and neither of these was stopped by a budget.
 
 ## The PreCompact budget is per jq build
 

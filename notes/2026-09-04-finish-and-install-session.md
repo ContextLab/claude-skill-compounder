@@ -109,3 +109,19 @@ forged skill; issue comments.
   its own) dispatched at 09:35 with a fresh orchestrator. Local install re-run at 09:29:
   the `PreToolUse` entry for repeat-gate lost its matcher in the real settings.json, doctor
   11 pass.
+- 2026-09-05 12:xx EDT: the narrowed forge `wait-for-ci` ALSO failed at the cap (rounds
+  7/10, 5/9, 7/8 blocking; `--converging` granted after round 2, refused after round 3;
+  107 min by the ledger; quarantined at `~/.claude/skill-compounder/quarantine/wait-for-ci-2026-09-05/`).
+  Same subsystem from a different endpoint: check-runs alone gave a false green (cli/cli),
+  adding check-suites gave a false failing (ripgrep's scheduled re-runs) and a false green
+  (home-assistant). Two forges say "which checks count" has no rule that holds across
+  repositories. The tier gate's answer for this candidate is a note with a script: recorded
+  at the user level as n3725829701x412 with `ci-checks.sh` attached (prints check-runs and
+  statuses for a commit, verifies the push with `git ls-remote`, computes no verdict;
+  exercised on 86297ec, five rows, exit 0) and n1566376988x302 (full-sha rule; `status`
+  answers `pending` with an empty list for a commit no status API saw). No third forge.
+- User checked alignment ("are you using the new design?"): answered with the scorecard
+  above; the drift named was the forge's cost profile, and the user's design (a skill is a
+  markdown file plus scripts; the cheap tiers first) is what the attached-script note is.
+- All scripts lint clean under shellcheck 0.11.0 and 0.9.0. Final suite and clean-env runs
+  started 12:xx; docs agent on the second forge's outcome running.
