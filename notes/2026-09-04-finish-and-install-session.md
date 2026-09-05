@@ -177,3 +177,9 @@ forged skill; issue comments.
   `skillnote remove`, the lessons dir deleted, `~/.claude/CLAUDE.md` has no trace.
   Remaining: repeat-gate builder (same-head binding rule, lesson_facts), docs pass, journey
   re-run on the final tree, suite, push.
+- Final verification 2026-09-05 evening: journey on the final tree, 17 of 17 PASS, 13 calls,
+  130.5 s (step 15 now binds `ls --nonexistent-flag .` to `ls -la .` under the same-program
+  rule); every script clean under shellcheck 0.11.0 and 0.9.0. Two orchestrator slips in the
+  fix wave, both from `;` chains that ran on after a failure (a broken `bin/skillnote` was
+  moved into place for about a minute and restored from HEAD; a docs commit landed with two
+  sentences missing, fixed in f38f9a2); recorded as global note n3586731267x318.
