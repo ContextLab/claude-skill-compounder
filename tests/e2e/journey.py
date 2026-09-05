@@ -1636,7 +1636,7 @@ def step12_mission_compact(j):
                   "\n".join(json.dumps(r) for r in mission_hits(j, before)) or "(none)")
         resumed = [r for r in rows if r.get("moment") == "resume"]
         said_it = MISSION_PHRASE_12.lower() in answer.lower()
-        s.note("`moment` is **resume**, not `compact`: hooks/mission.sh:344 folds "
+        s.note("`moment` is **resume**, not `compact`: hooks/mission.sh folds (`grep -n 'compact|resume) moment=\"resume\"' hooks/mission.sh`) "
                "`SessionStart` sources `compact` and `resume` into one arm, because both "
                "are a session that has lost what was said.")
         s.note("The phrase coming back is evidence the REQUEST TEXT survived; the "

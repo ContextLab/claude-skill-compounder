@@ -130,3 +130,11 @@ forged skill; issue comments.
   pushed 4c0e9ae to `main` and `resume/after-v0.3.1`; CI run 33977345612, 5 of 5 jobs
   success; comments posted on #19, #30, #31, #34, #42, all left open with their blockers;
   README Status block refreshed. Open after this session: #19, #30, #31, #34, #42.
+- 2026-09-05 afternoon, user asked whether the full pipeline was tested with production
+  runs and the resulting skills' output examined. Honest answer: hooks yes (15 sessions),
+  journey NOT re-run since today's changes, no cross-session loop driven, no skill output
+  judged for quality. Three agents dispatched: the 17-step journey re-run on the current
+  tree; a production loop (lesson written in session A, reminder acted on in session B,
+  the attached ci-checks.sh found and called from a different project, promote to level
+  B, note read-back); five seed skills driven with real tasks and their output judged
+  against planted defects.
