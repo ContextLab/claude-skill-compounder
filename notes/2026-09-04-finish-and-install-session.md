@@ -95,3 +95,17 @@ forged skill; issue comments.
   heredoc because the binding is keyed per session and subagents share the id — a builder
   is keying it per (session, agent_id) now. `SKILLFORGE_SKILLS_DIR` had no tuning-table
   row (f70d073).
+- 2026-09-05 09:30 EDT: the `watch-ci-run` forge FAILED at the hard cap and is quarantined
+  (`~/.claude/skill-compounder/quarantine/watch-ci-run-2026-09-05/WHY-ARCHIVED.md`): rounds
+  6/13, 6/13, 5/13, 7/21 blocking; `escalate --converging` refused after round 2 (6 -> 6 is
+  not a fall), `--narrowed` granted, `--converging` granted after round 3 (6 -> 5), both
+  refused after round 4 (two grants is the ceiling). The design error: `gh run list` answers
+  "which runs have this sha as head", not "did CI pass for this commit", which the check-runs
+  API answers directly; four rounds tried to turn one into the other. So #34's cap has now
+  refused, granted twice, and refused again on a real forge, and the protocol's
+  never-ship-half-working rule fired for real. Wall clock 2026-09-04 23:48 to 09-05 09:30,
+  with the spend-limit outage in the middle; nowhere near 30 minutes. A second, narrowed
+  forge (`wait-for-ci`, built on the check-runs endpoint, the script computes no verdict of
+  its own) dispatched at 09:35 with a fresh orchestrator. Local install re-run at 09:29:
+  the `PreToolUse` entry for repeat-gate lost its matcher in the real settings.json, doctor
+  11 pass.
