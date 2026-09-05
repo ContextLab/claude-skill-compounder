@@ -109,7 +109,9 @@ PLATFORM = (ROOT / "docs" / "CLAUDE-CODE-BEHAVIOR.md").read_text()
 # `statusline.sh` only, and skipped any row whose name did not start with `CI_`. Read the
 # whole of what ships instead, so a row for an imaginary knob has nowhere to hide.
 SCRIPTS = "".join(f.read_text() for d in ("bin", "hooks", "statusline")
-                  for f in sorted((ROOT / d).iterdir()) if f.is_file())
+                  for f in sorted((ROOT / d).iterdir())
+                  if f.is_file() and not f.name.startswith("."))  # a builder's
+                  # atomic-replace scratch copy (hooks/.x.work) is not a shipped script
 
 # The forging protocol only. Assertions about it must not be satisfiable by a stray match
 # in Troubleshooting further down the file -- that is exactly how the first version of
