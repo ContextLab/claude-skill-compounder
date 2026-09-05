@@ -133,6 +133,79 @@ your own ledger; the shape below is the instrument, not a result.
   documentation gate's overrides, counted rather than only permitted, because an escape
   nobody counts is indistinguishable from a gate nobody has.
 
+## What the reminder conversion sweep counts
+
+`skillreport`'s `REMINDER CONVERSION` block joins the delivery log the hook has kept since
+2026-09-04. `scripts/reminder_conversion.py` answers the older and wider question that log
+cannot reach yet: across every transcript on this machine, how many sessions were nudged,
+and how many of them produced anything. It is the sweep behind issue #30's 10.5%, written
+down as a program so the figure is re-derivable rather than quoted.
+
+```bash
+python3 scripts/reminder_conversion.py                     # overall and per project
+python3 scripts/reminder_conversion.py --until 2026-09-02  # before the cheap tiers
+python3 scripts/reminder_conversion.py --since 2026-09-02  # after them
+python3 scripts/reminder_conversion.py --json
+python3 scripts/reminder_conversion.py --selftest          # fixture on disk, asserts counts
+```
+
+It reads `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/*.jsonl`, `<state>/ledger.jsonl`
+and `<state>/reminders/nudges.jsonl`, writes nothing, and prints every figure as
+numerator/denominator. `--projects-dir` and `--state-dir` point it at a fixture instead.
+The eight match rules, and the reason for each, are the module docstring; the two that
+decide the headline are that a delivery is an `attachment` record of type
+`hook_additional_context` carrying `[skill-compounder]` (the record that says the context
+reached the model — for `UserPromptSubmit` it is the only record written), and that the
+denominator is the checkpoint and prompt arms alone, since the prose arm names
+`ai-tell-audit` and the queue arm names `skillinsight`.
+
+**What it printed here, on 2026-09-04 at 23:58 EDT, over 2014 transcript files.** Every
+figure in this section came from one snapshot of the three commands above. The store is
+live and grows while a session runs, so re-run them rather than quoting these forward.
+
+|Window|Nudged sessions|Invoked `skill-compounder`|Ran `skillnote` or `skillinsight`|Any of the three|
+|-|-|-|-|-|
+|all time|1030|100/1030 (9.7%)|10/1030 (1.0%)|107/1030 (10.4%)|
+|before 2026-09-02|862|90/862 (10.4%)|1/862 (0.1%)|90/862 (10.4%)|
+|from 2026-09-02|169|10/169 (5.9%)|9/169 (5.3%)|17/169 (10.1%)|
+
+The pre-tier row is the 10.5% baseline re-derived by a different program: issue #30 recorded
+866 nudged, 96 invoked, 91 both, and this sweep finds 862 nudged and 90 both over a store
+that now holds 2014 transcript files against the 1456 the original names. The two agree to
+within four sessions, which is what makes the script a replacement for the quotation rather
+than a second opinion about it.
+
+**Most of that denominator is this package measuring itself, and the sweep says so rather
+than dropping it.** A session any of whose records carries `entrypoint: "sdk-cli"` was
+started by a script — `claude -p`, which is how every routing probe and end-to-end test in
+this repository runs — and the prompt arm fires on the first prompt of every one of them.
+Of the 1030 nudged sessions, 19 are human-driven, and among those 19 the conversions are
+6/19 to `skill-compounder`, 9/19 to a tier CLI and 12/19 to any of the three. Read by
+project slug rather than by entrypoint the same split shows: 781 slugs carry a nudged
+session, 10 of them are real project directories and the other 771 are temp roots, and those
+10 hold 29 nudged sessions and 6 conversions. This repository's own slug holds 199
+deliveries on the two counted arms across 6 nudged sessions, of which 3 invoked the skill.
+
+**The post-tier window is two days wide and its human-driven denominator is 10 sessions.**
+In it, 2 of 10 invoked the skill and 8 of 10 ran `skillnote` or `skillinsight`. Ten sessions
+decides nothing, and the reading a rate invites is the wrong one: those same two days are
+the days the tiers were built, so the sessions running `skillnote` are largely sessions
+whose subject was `skillnote`. Nothing in that row should be read as the tiers beating
+10.5%.
+
+**The id join is empty, and not because nothing matched.** `<state>/reminders/nudges.jsonl`
+grows while you read it, so run the sweep for the current count; on 2026-09-04 it held 170
+rows, all carrying an id, over three distinct ids — `ci-checkpoint`, `ci-skill-check` and
+`ci-prose` (`jq -r .id <state>/reminders/nudges.jsonl | sort -u`). Those are arm names, not
+per-delivery ids, so a join on them can attribute a ledger row to an arm and never to a
+delivery; the one arm whose id is per-candidate is the queue announcement, which has been
+delivered once in the whole transcript store and not since the log existed. On the other
+side of the join, no ledger row carries a `from` field at all — run
+`jq -r 'select(.from != null)' <state>/ledger.jsonl | wc -l`, which answered 0 against a
+1069-row ledger on 2026-09-04 — so there is nothing for the ids to match. What the sweep
+can report is the session-level join, 6 of the 13 sessions in the log having written a
+ledger row, and it labels that a sequence rather than a cause.
+
 ## What the mission counts
 
 `hooks/mission.sh` appends one row to `<state>/mission/hits.jsonl` for every delivery, and
@@ -335,13 +408,19 @@ every conversion figure in this repository was produced on the author's machine.
 session-review cost figures multiply a small number of observations, and the weekly ceiling
 derived from them is arithmetic rather than observation.
 
-**The reminder-to-invocation baseline is 10.5%, and it is a baseline rather than a
-verdict** (issue #30). Measured across 1456 transcripts over all projects: 866 sessions
-were nudged, 96 invoked `skill-compounder`, and 91 did both. Nothing has been changed
-against that number yet, and a nudge a session correctly ignores is a correct outcome, so
-the ceiling is unknown and 100% would be the wrong target. The measurement is in
-[`notes/2026-09-02-audit-and-replan.md`](../notes/2026-09-02-audit-and-replan.md), and what
-is open about it is in [`notes/OPEN-THREADS.md`](../notes/OPEN-THREADS.md).
+**The reminder-to-invocation baseline is a baseline rather than a verdict** (issue #30).
+`python3 scripts/reminder_conversion.py --until 2026-09-02` re-derives it as 90/862 (10.4%)
+on 2026-09-04, against the 91 of 866 the original sweep recorded in
+[`notes/2026-09-02-audit-and-replan.md`](../notes/2026-09-02-audit-and-replan.md). Nothing
+has been changed against that number yet, and a nudge a session correctly ignores is a
+correct outcome, so the ceiling is unknown and 100% would be the wrong target. Two limits
+sit on top of the three above and belong to this figure specifically: the post-tier window
+is **two days wide**, so `--since 2026-09-02` answers over 169 nudged sessions of which 10
+are human-driven; and **no nudge delivered before 2026-09-04 carries an id**, because
+`log_nudge` did not exist, so every delivery in the pre-tier window can be counted and none
+of them can be attributed. [What the reminder conversion sweep
+counts](#what-the-reminder-conversion-sweep-counts) is the whole output; what is open about
+it is in [`notes/OPEN-THREADS.md`](../notes/OPEN-THREADS.md).
 
 The two hook thresholds, `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`, are unvalidated for the
 same reason and should not move before that data exists:

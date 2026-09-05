@@ -27,15 +27,36 @@ The state root and the transcripts root are redirected with SKILL_COMPOUNDER_STA
 SKILL_COMPOUNDER_TRANSCRIPTS, which every shipped script reads for exactly this purpose,
 so nothing here can reach ~/.claude/skill-compounder.
 
-`CLAUDE_CONFIG_DIR` is the one knob NOT turned, and docs/CLAUDE-CODE-BEHAVIOR.md says
-why: a fresh config directory costs the run its credentials. Step 0 re-measures that
-claim rather than trusting it, and only then falls back to the path that does work --
-`--settings <out>/claude/settings.json` with `--setting-sources ''` (or `project`) and
-HOME left alone. The consequence is stated plainly in the report and in docs/e2e.md:
-sessions run on the operator's ambient credentials, Claude Code writes their transcripts
-into the REAL ~/.claude/projects/<slug-of-scratch-project>/, and the throwaway
-*personal* skills directory (<out>/claude/skills) is never on any session's roster, so
-the routing gate is measured at PROJECT scope instead.
+`CLAUDE_CONFIG_DIR` is the knob with TWO settings, and `--config-dir` picks between
+them.
+
+`--config-dir ambient` (the DEFAULT) leaves `HOME` and `CLAUDE_CONFIG_DIR` alone and
+swaps the configuration for one call at a time: `--settings <out>/claude/settings.json`
+with `--setting-sources ''` (or `project`). A throwaway config directory holds no login,
+and docs/CLAUDE-CODE-BEHAVIOR.md records why: on macOS the subscription credential lives
+in the Keychain and is reached through the ambient environment. Step 0 re-measures that
+rather than trusting it. Three consequences follow, all stated in the report: sessions
+run on the operator's ambient credentials, Claude Code writes their transcripts into the
+REAL ~/.claude/projects/<slug-of-scratch-project>/, and the throwaway *personal* skills
+directory (<out>/claude/skills) is on no session's roster, so the routing gate is
+measured at PROJECT scope instead.
+
+`--config-dir fresh` is the isolation issue #42 asks for, and it needs a credential
+handed in through the environment rather than borrowed from the Keychain.
+`CLAUDE_CODE_OAUTH_TOKEN` (minted by `claude setup-token`) or `ANTHROPIC_API_KEY` must be
+set; the harness refuses to start without one and never logs its value. Then
+`CLAUDE_CONFIG_DIR` points at <out>/claude for every process, and NO `--settings` and no
+`--setting-sources` flag is passed at all: the throwaway config IS the config. Both
+variables were measured to be consulted under a fresh config directory on CLI 2.1.260 --
+an invalid `CLAUDE_CODE_OAUTH_TOKEN` answered `Failed to authenticate. API Error: 401
+Invalid bearer token` and an invalid `ANTHROPIC_API_KEY` answered `Invalid API key · Fix
+external API key`, where no credential at all answers `Not logged in · Please run
+/login`. Which of the three consequences the mode removes, and the fact that NO run with
+a real token has been made yet, is in docs/e2e.md.
+
+`--check-auth` spends ONE call answering whether the chosen mode can authenticate, and
+exits. The journey is thirteen calls; twelve of them are wasted discovering a stale token
+at step 2.
 
 COST. Aim: under 15 `claude -p` calls, all `--model sonnet` with a small `--max-turns`.
 The forge step drives the CLI half only -- no builder agents, no red-team agents -- which
@@ -57,6 +78,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +100,34 @@ NOTE_TEXT = (
 )
 
 REMIND_CMD = "./quokka-check.sh"
+
+# The two environment variables a fresh CLAUDE_CONFIG_DIR was MEASURED to consult on CLI
+# 2.1.260 (2026-09-04), in the order this harness prefers them: `claude setup-token`
+# mints the first against the operator's subscription, and the second is an API key that
+# bills separately. The NAME is reported; the VALUE is never printed, logged or written
+# into the report.
+TOKEN_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+# The probe prompt, and the refusals judged as STRINGS rather than as exit statuses.
+# Measured on 2.1.260, 2026-09-04: all three refusals below print their sentence on
+# STDOUT with an empty stderr and exit **1**, so the status says only that something went
+# wrong and cannot tell "no credential" from "the credential was rejected" -- which is
+# the distinction fresh mode is made of. The string is what separates them.
+AUTH_PROBE_PROMPT = "Reply with exactly the word: pineapple"
+AUTH_REFUSALS = ("Not logged in", "Please run /login", "Invalid API key",
+                 "Failed to authenticate", "Fix external API key")
+
+
+def credential_name():
+    """The NAME of the credential variable present in the environment, or None.
+
+    Never returns, prints or logs the value. A journey report is an artifact an
+    operator pastes into an issue.
+    """
+    for name in TOKEN_VARS:
+        if os.environ.get(name, "").strip():
+            return name
+    return None
 
 
 # --------------------------------------------------------------------------- reporting
@@ -125,6 +175,15 @@ class Journey:
         self.started = time.time()
         self.auth_mode = "undetermined"
         self.transcript_sessions = []
+        # "ambient" (the default: HOME and CLAUDE_CONFIG_DIR left alone, configuration
+        # swapped per call with --settings) or "fresh" (CLAUDE_CONFIG_DIR points INTO
+        # <out> and a credential is handed in through the environment). See the module
+        # docstring and docs/e2e.md.
+        self.config_mode = getattr(args, "config_dir", "ambient")
+        # Set to a reason string to record every REMAINING step SKIPPED. The only thing
+        # that sets it is step 0 failing its authentication probe in fresh mode: twelve
+        # further calls cannot answer a question a bad token already answered.
+        self.abort = None
 
     # -- paths ---------------------------------------------------------------
     @property
@@ -154,6 +213,19 @@ class Journey:
     @property
     def settings(self):
         return self.claude_dir / "settings.json"
+
+    @property
+    def projects_root(self):
+        """Where Claude Code writes this run's session transcripts.
+
+        It follows CLAUDE_CONFIG_DIR, which is the whole point of the fresh mode: in
+        ambient mode the transcripts land in the operator's REAL ~/.claude/projects/,
+        which is consequence 2 in docs/e2e.md and the one place outside <out> that mode
+        leaves anything.
+        """
+        if self.config_mode == "fresh":
+            return self.claude_dir / "projects"
+        return Path.home() / ".claude" / "projects"
 
     @property
     def surfer_store(self):
@@ -190,7 +262,15 @@ class Journey:
         # operator's real ~/.claude/history-surfer, and mission.sh's rung 2 is what makes
         # the reader follow the writer without a second variable.
         e["CLAUDE_HISTORY_SURFER_DIR"] = str(self.surfer_store)
-        e.pop("CLAUDE_CONFIG_DIR", None)
+        if self.config_mode == "fresh":
+            # The isolation of issue #42. Every process this journey starts -- the
+            # installer, the CLIs, the hooks a session fires and the session itself --
+            # reads the throwaway config directory and nothing of the operator's. The
+            # credential arrives in the environment instead (see credential_name()), so
+            # os.environ.copy() above already carries it and nothing here prints it.
+            e["CLAUDE_CONFIG_DIR"] = str(self.claude_dir)
+        else:
+            e.pop("CLAUDE_CONFIG_DIR", None)
         e.update(extra)
         return e
 
@@ -231,32 +311,44 @@ class Journey:
                env=None):
         """One real `claude -p` call, prompt on stdin, throwaway settings only.
 
-        `--setting-sources ''` is what takes the user's own hooks, skills, plugins and
-        CLAUDE.md away; `--settings <throwaway>` is what puts OURS back. Passing
-        `project` instead is how a step that needs the scratch project's CLAUDE.md or its
-        .claude/skills/ gets them, and it still loads nothing of the user's.
+        AMBIENT MODE. `--setting-sources ''` is what takes the user's own hooks, skills,
+        plugins and CLAUDE.md away; `--settings <throwaway>` is what puts OURS back.
+        Passing `project` instead is how a step that needs the scratch project's
+        CLAUDE.md or its .claude/skills/ gets them, and it still loads nothing of the
+        user's.
+
+        FRESH MODE. Neither flag is passed. CLAUDE_CONFIG_DIR (set by env()) already
+        points at the throwaway config, so the default sources -- user, project, local --
+        ARE the throwaway ones, and `--settings` pointed at the same file it is already
+        reading would only be a second copy to keep in step. `setting_sources` and
+        `with_settings` are therefore ignored here, deliberately: a step that asks for
+        `project` gets project settings either way.
         """
         if self.args.no_model:
             return None
         argv = ["claude", "-p", "--model", self.args.model,
-                "--max-turns", str(max_turns),
-                "--setting-sources", setting_sources,
-                "--strict-mcp-config"]
-        if with_settings:
-            argv += ["--settings", str(self.settings)]
+                "--max-turns", str(max_turns), "--strict-mcp-config"]
+        if self.config_mode != "fresh":
+            argv += ["--setting-sources", setting_sources]
+            if with_settings:
+                argv += ["--settings", str(self.settings)]
         if stream:
             argv += ["--output-format", "stream-json", "--verbose"]
         argv += list(extra)
         self.claude_calls += 1
         rc, out, err = self.run(argv, cwd=cwd, stdin_text=prompt, label=label,
                                 env=env, timeout=timeout or self.args.claude_timeout)
-        # An unauthenticated `claude -p` reports "Not logged in · Please run /login" as
-        # ORDINARY OUTPUT. Checked as a string and not as a status: the refusal is a
-        # sentence to the operator, and a harness that trusted the exit code would be
-        # betting the whole scenario on a number nothing documents.
-        if "Not logged in" in out or "Not logged in" in err:
-            raise RuntimeError("claude is not logged in for this call: %r"
-                               % (out or err)[:200])
+        # An unauthenticated `claude -p` reports "Not logged in · Please run /login" on
+        # STDOUT, as ORDINARY OUTPUT, and every refusal shape exits 1 alike (2.1.260).
+        # Checked as a string and not as a status: the refusal is a sentence to the
+        # operator, and the status cannot say which refusal it was. Every string in
+        # AUTH_REFUSALS, not just that one, because fresh mode meets the other shapes --
+        # a rejected token answers "Failed to authenticate." and a rejected key
+        # "Invalid API key".
+        for marker in AUTH_REFUSALS:
+            if marker in out or marker in err:
+                raise RuntimeError("claude refused this call on authentication (%s): %r"
+                                   % (marker, (out or err)[:200]))
         self._collect_session(out, stream)
         return {"rc": rc, "out": out, "err": err, "argv": argv}
 
@@ -296,7 +388,21 @@ class Journey:
         w("| model | %s |" % self.args.model)
         w("| `claude -p` calls | %d |" % self.claude_calls)
         w("| authentication path | %s |" % self.auth_mode)
+        w("| `--config-dir` mode | %s |" % self.config_mode)
+        w("| credential variable | %s |" % (credential_name() or
+                                            "(none in the environment)"))
         w("")
+        if self.config_mode == "fresh":
+            w("**Fresh-config mode.** `CLAUDE_CONFIG_DIR` pointed at `<out>/claude` for "
+              "every process, and no `--settings` and no `--setting-sources` flag was "
+              "passed to any session. Where a step's *What was run* line below still "
+              "names those flags it is quoting the default mode's shape; every "
+              "command's real argv is in `logs/*.cmd`. %s"
+              % ("The credential came from the environment variable named above and "
+                 "appears nowhere in this report." if credential_name() else
+                 "No credential was in the environment, so nothing that needed one "
+                 "could run."))
+            w("")
         w("## Summary")
         w("")
         w("Steps are listed in the order they RAN, which is not number order: 12-16 were "
@@ -434,6 +540,77 @@ def final_text(res):
 # --------------------------------------------------------------------------- the steps
 
 
+def auth_probe(j, config_dir=None, *, label="claude-auth-probe"):
+    """One real `claude -p`, answering only "can this configuration authenticate?".
+
+    Returns `(ok, answer, rc)`. `config_dir` is the CLAUDE_CONFIG_DIR the probe runs
+    under; None means "whatever env() gives this mode", which in ambient mode is the
+    operator's own.
+
+    `ok` is judged on the STRINGS in AUTH_REFUSALS and never on the exit status, because
+    the status does not separate the cases. Measured on CLI 2.1.260, 2026-09-04, under a
+    fresh `CLAUDE_CONFIG_DIR`, each on stdout with an empty stderr and each exiting 1:
+    no credential answered `Not logged in · Please run /login`;
+    `CLAUDE_CODE_OAUTH_TOKEN=invalid-for-probe` answered `Failed to authenticate. API
+    Error: 401 Invalid bearer token`; `ANTHROPIC_API_KEY=invalid-for-probe` answered
+    `Invalid API key · Fix external API key`. One status, three different facts, and the
+    two that matter here -- "hand a token in" versus "that token is bad" -- are
+    indistinguishable by it.
+    """
+    if config_dir is not None:
+        Path(config_dir).mkdir(parents=True, exist_ok=True)
+        env = j.env(CLAUDE_CONFIG_DIR=str(config_dir))
+    else:
+        env = j.env()
+    j.claude_calls += 1
+    rc, out, err = j.run(
+        ["claude", "-p", "--model", j.args.model, "--max-turns", "1",
+         "--setting-sources", "", "--strict-mcp-config"],
+        cwd=j.out, env=env, stdin_text=AUTH_PROBE_PROMPT, label=label,
+        timeout=j.args.claude_timeout)
+    answer = (out + err).strip()
+    ok = not any(m in answer for m in AUTH_REFUSALS)
+    return ok, answer, rc
+
+
+def check_auth_only(j):
+    """`--check-auth`: spend ONE call on the question, print the CLI's own answer, stop.
+
+    The full journey is thirteen calls. Twelve of them are spent before anything would
+    reveal a stale token, and a run that dies at step 2 has still spent step 0's call and
+    built a report full of FAILs that all say the same thing. This is that one call, on
+    its own, in whichever mode was asked for.
+    """
+    if j.args.no_model:
+        print("error: --check-auth needs one real call and --no-model spends none.",
+              file=sys.stderr)
+        return 2
+    # Each mode is probed the way it will actually run: fresh mode under a throwaway
+    # CLAUDE_CONFIG_DIR carrying only what the environment hands it, ambient mode under
+    # the operator's own configuration, which is what its sessions use.
+    probe_cfg = (j.out / "auth-probe-config") if j.config_mode == "fresh" else None
+    ok, answer, rc = auth_probe(j, probe_cfg, label="claude-check-auth")
+    print("--config-dir       : %s" % j.config_mode)
+    print("CLAUDE_CONFIG_DIR  : %s" % (("%s (throwaway, created for this probe)"
+                                       % probe_cfg) if probe_cfg
+                                      else "(the operator's own, as ambient mode runs)"))
+    print("credential variable: %s" % (credential_name() or "(none in the environment)"))
+    print("exit status        : %d" % rc)
+    print("the CLI answered   : %s" % (answer or "(empty)"))
+    if ok:
+        print("OK: this configuration authenticates. The journey can spend its calls.")
+        return 0
+    if j.config_mode == "fresh":
+        print("STOP: a throwaway CLAUDE_CONFIG_DIR cannot authenticate with what is in "
+              "this environment. Run `claude setup-token` and export the result as "
+              "CLAUDE_CODE_OAUTH_TOKEN.", file=sys.stderr)
+    else:
+        print("STOP: --config-dir ambient runs on the operator's own configuration and "
+              "it just refused, so the journey would fail at its first session. Log in "
+              "with `claude` or run `claude setup-token`.", file=sys.stderr)
+    return 3
+
+
 def step0_preflight(j):
     s = j.step("0", "preflight and the authentication decision")
     try:
@@ -457,22 +634,55 @@ def step0_preflight(j):
         # the report carries this machine's own answer.
         if j.args.no_model:
             j.auth_mode = "(not measured: --no-model)"
+            s.observe("--config-dir", j.config_mode)
             s.verdict("SKIPPED", "--no-model: the authentication probe spends a call")
             return
         probe_cfg = j.out / "auth-probe-config"
-        probe_cfg.mkdir(parents=True, exist_ok=True)
-        env = j.env(CLAUDE_CONFIG_DIR=str(probe_cfg))
-        j.claude_calls += 1
-        rc, out, err = j.run(
-            ["claude", "-p", "--model", j.args.model, "--max-turns", "1",
-             "--setting-sources", "", "--strict-mcp-config"],
-            cwd=j.out, env=env, stdin_text="Reply with exactly the word: pineapple",
-            label="claude-auth-probe", timeout=j.args.claude_timeout)
+        ok, combined, rc = auth_probe(j, probe_cfg)
         s.cmd("CLAUDE_CONFIG_DIR=<out>/auth-probe-config claude -p --model %s "
               "--max-turns 1 --setting-sources '' --strict-mcp-config" % j.args.model)
-        combined = (out + err).strip()
         s.observe("CLAUDE_CONFIG_DIR probe: rc=%d, output" % rc, combined or "(empty)")
-        if "Not logged in" in combined:
+        s.observe("--config-dir mode, and the credential it was given",
+                  "%s\ncredential variable: %s (the value is never read into this "
+                  "report)" % (j.config_mode,
+                               credential_name() or "(none in the environment)"))
+
+        if j.config_mode == "fresh":
+            # THE ISOLATION OF ISSUE #42. The probe just ran the way every later session
+            # will: a config directory with no stored login, authenticating on what the
+            # environment handed it. If that failed there is nothing to fall back to --
+            # falling back would silently restore the ambient identity the mode exists to
+            # remove -- so the run stops here rather than spending twelve more calls.
+            if ok:
+                j.auth_mode = (
+                    "PRIMARY: CLAUDE_CONFIG_DIR=<out>/claude, a self-contained config "
+                    "directory authenticating on %s from the environment. No "
+                    "--settings and no --setting-sources is passed to any session."
+                    % (credential_name() or "an unnamed credential"))
+                s.note("Consequences 1-3 of docs/e2e.md are the ones this mode is "
+                       "designed to remove: sessions carry no borrowed identity, "
+                       "transcripts land in <out>/claude/projects/, and the throwaway "
+                       "PERSONAL skills directory is on the roster, so step 8 measures "
+                       "routing at personal scope.")
+                s.verdict("PASS", "a fresh CLAUDE_CONFIG_DIR authenticated on %s: %r"
+                          % (credential_name(), combined[:120]))
+            else:
+                j.auth_mode = ("FAILED: --config-dir fresh, and the fresh directory "
+                               "could not authenticate.")
+                j.abort = ("step 0: --config-dir fresh could not authenticate (%r), so "
+                           "every later step would spend a call to be told the same "
+                           "thing. Run `claude setup-token` and export "
+                           "CLAUDE_CODE_OAUTH_TOKEN." % combined[:120])
+                s.note("No fallback is taken. `--settings` with the ambient credential "
+                       "is the OTHER mode, and taking it here would quietly restore the "
+                       "identity this one exists to remove.")
+                s.verdict("FAIL", "a fresh CLAUDE_CONFIG_DIR printed %r and exited %d "
+                                  "with credential variable %s; the run stops."
+                          % (combined[:120], rc,
+                             credential_name() or "(none in the environment)"))
+            return
+
+        if not ok:
             j.auth_mode = (
                 "FALLBACK: `--settings <out>/claude/settings.json` with "
                 "`--setting-sources ''` (or `project`), HOME and CLAUDE_CONFIG_DIR left "
@@ -480,11 +690,13 @@ def step0_preflight(j):
                 "machine, so sessions run on the operator's ambient credentials and "
                 "Claude Code writes their transcripts into the real "
                 "~/.claude/projects/<slug>/.")
-            s.note("The probe exited %d here. The harness does not judge on that: every "
-                   "`claude` call in this file raises on the `Not logged in` STRING, "
-                   "because a refusal that reaches the operator as ordinary output is "
-                   "the shape that a status check silently passes, and nothing "
-                   "guarantees the status across CLI builds." % rc)
+            s.note("The probe exited %d here. The harness does not judge on that: "
+                   "every `claude` call in this file raises on the AUTH_REFUSALS "
+                   "STRINGS instead. On 2.1.260, measured 2026-09-04, no credential, a "
+                   "rejected OAuth token and a rejected API key all print their own "
+                   "sentence on stdout and all exit 1, so the status cannot say which "
+                   "of the three happened -- and nothing guarantees it across CLI "
+                   "builds either." % rc)
             s.note("Consequence carried by every later step: the throwaway *personal* "
                    "skills directory (`<out>/claude/skills`) is on no session's roster, "
                    "so step 8 measures routing at PROJECT scope.")
@@ -492,13 +704,17 @@ def step0_preflight(j):
                               "falling back to --settings + --setting-sources ''."
                       % (combined[:80], rc))
         else:
-            j.auth_mode = ("PRIMARY: CLAUDE_CONFIG_DIR=<out>/claude, a fully "
-                           "self-contained config directory.")
+            j.auth_mode = ("FALLBACK NOT NEEDED: a throwaway CLAUDE_CONFIG_DIR "
+                           "authenticated here, but --config-dir ambient was asked for "
+                           "and the later steps still take the --settings path.")
             s.verdict("PASS", "CLAUDE_CONFIG_DIR probe authenticated: %r"
                       % combined[:120])
-            s.note("Unexpected on macOS given docs/CLAUDE-CODE-BEHAVIOR.md; the later "
-                   "steps still use the fallback path, which is a superset of what the "
-                   "primary path proves.")
+            s.note("A fresh config directory authenticating means a credential is in "
+                   "this environment (%s). `--config-dir fresh` is the mode that USES "
+                   "it; this run does not, and the fallback path proves a superset of "
+                   "what it would."
+                   % (credential_name() or "not through one of the two variables "
+                                           "this harness knows"))
     finally:
         s.finish()
 
@@ -906,8 +1122,12 @@ def step5_candidate(j):
 
 
 def _find_transcript(j):
-    """The real transcript file for the newest session this journey created."""
-    root = Path.home() / ".claude" / "projects"
+    """The transcript file for the newest session this journey created.
+
+    Under the projects root the RUN's config directory writes to: the operator's real
+    ~/.claude/projects in ambient mode, <out>/claude/projects in fresh mode.
+    """
+    root = j.projects_root
     if not root.exists():
         return None
     best = None
@@ -1069,22 +1289,42 @@ def step8_routing(j):
         if not (src / "SKILL.md").exists():
             s.verdict("SKIPPED", "step 7 installed no skill to route")
             return
-        # WHY THE COPY. <out>/claude/skills is a PERSONAL skills directory, and a session
-        # only reads it when CLAUDE_CONFIG_DIR points at <out>/claude -- which step 0
-        # measured as losing the credential. Project scope is the scope this environment
-        # can actually measure, so the same SKILL.md is put where the scratch project
-        # loads it and the gate is run there. Reported as project scope, not personal.
-        dest = j.project / ".claude" / "skills" / SKILL_NAME
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src / "SKILL.md", dest / "SKILL.md")
-        s.observe("the skill under test", "%s\n(copied from %s; see the note below)"
-                  % (dest / "SKILL.md", src))
-        s.note("This is the routing gate at **n = 1**: one prompt, one model tier, one "
-               "CLI build. docs/CLAUDE-CODE-BEHAVIOR.md scores routing on the stream's "
-               "`Skill` tool call, never on the answer's prose, and so does this.")
-        s.note("Scope: **project**, not personal. The throwaway personal skills "
-               "directory is unreachable without CLAUDE_CONFIG_DIR, which step 0 "
-               "measured as unauthenticated on this machine.")
+        # WHICH SCOPE IS MEASURED, AND WHY IT DEPENDS ON THE MODE. <out>/claude/skills
+        # is a PERSONAL skills directory, and a session only reads it when
+        # CLAUDE_CONFIG_DIR points at <out>/claude. In ambient mode it does not -- step 0
+        # measured that directory as unauthenticated -- so the same SKILL.md is copied
+        # where the scratch project loads it and the gate runs at PROJECT scope. In fresh
+        # mode the personal roster IS reachable, which is consequence 3 of docs/e2e.md
+        # removed, so nothing is copied and the gate runs where the forge installed it.
+        if j.config_mode == "fresh":
+            dest = src
+            s.observe("the skill under test",
+                      "%s\n(the throwaway PERSONAL roster, reached through "
+                      "CLAUDE_CONFIG_DIR=<out>/claude; nothing was copied into the "
+                      "project)" % (dest / "SKILL.md"))
+            s.note("This is the routing gate at **n = 1**: one prompt, one model tier, "
+                   "one CLI build. docs/CLAUDE-CODE-BEHAVIOR.md scores routing on the "
+                   "stream's `Skill` tool call, never on the answer's prose, and so "
+                   "does this.")
+            s.note("Scope: **personal**. This is the one measurement `--config-dir "
+                   "fresh` changes, and it is consequence 3 of docs/e2e.md -- the "
+                   "throwaway personal skills directory being on no session's roster. "
+                   "A FAIL here is a real finding about personal-scope routing and not "
+                   "a harness problem.")
+        else:
+            dest = j.project / ".claude" / "skills" / SKILL_NAME
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / "SKILL.md", dest / "SKILL.md")
+            s.observe("the skill under test", "%s\n(copied from %s; see the note below)"
+                      % (dest / "SKILL.md", src))
+            s.note("This is the routing gate at **n = 1**: one prompt, one model tier, "
+                   "one CLI build. docs/CLAUDE-CODE-BEHAVIOR.md scores routing on the "
+                   "stream's `Skill` tool call, never on the answer's prose, and so "
+                   "does this.")
+            s.note("Scope: **project**, not personal. The throwaway personal skills "
+                   "directory is unreachable without CLAUDE_CONFIG_DIR, which step 0 "
+                   "measured as unauthenticated on this machine. `--config-dir fresh` "
+                   "is the mode that measures personal scope.")
         if j.args.no_model:
             s.verdict("SKIPPED", "--no-model")
             return
@@ -1183,7 +1423,7 @@ def step10_report(j):
     try:
         # Copy just this journey's own transcripts into the throwaway transcripts root,
         # so skillreport's invocation recovery reads the journey's sessions and no others.
-        root = Path.home() / ".claude" / "projects"
+        root = j.projects_root
         copied = []
         for sid in j.transcript_sessions:
             for p in root.glob("*/%s.jsonl" % sid):
@@ -1485,7 +1725,7 @@ def step13_mission_subagent(j):
         agent_id = sub_rows[0].get("agent_id") if sub_rows else None
         sub_tx, injected = None, []
         if sid and agent_id:
-            for p in (Path.home() / ".claude" / "projects").glob(
+            for p in j.projects_root.glob(
                     "*/%s/subagents/agent-%s.jsonl" % (sid, agent_id)):
                 sub_tx = p
                 for r in jsonl(p):
@@ -1599,8 +1839,8 @@ def repeat_rows(j, kind=None, session=None):
     return rows
 
 
-def _transcript_for(sid):
-    root = Path.home() / ".claude" / "projects"
+def _transcript_for(j, sid):
+    root = j.projects_root
     if not sid or not root.exists():
         return None
     for p in root.glob("*/%s.jsonl" % sid):
@@ -1646,7 +1886,7 @@ def step15_lesson_first_time(j):
         # additionalContext, which --output-format stream-json does not echo. Claude
         # Code writes it into the session transcript, so that is where it is read from,
         # with the stream checked too in case a later build echoes it.
-        transcript = _transcript_for(sid)
+        transcript = _transcript_for(j, sid)
         hay = res["out"]
         if transcript is not None and transcript.exists():
             hay += "\n" + transcript.read_text(errors="replace")
@@ -1865,9 +2105,24 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="One canonical end-to-end journey through claude-skill-compounder. "
                     "Spends real claude -p calls; never run it in CI.")
-    ap.add_argument("--out", required=True,
+    ap.add_argument("--out",
                     help="directory to build the throwaway world in and keep every "
-                         "artifact under (created if absent; must be empty or new)")
+                         "artifact under (created if absent; must be empty or new). "
+                         "Required, except with --check-auth, which makes its own.")
+    ap.add_argument("--config-dir", choices=("ambient", "fresh"), default="ambient",
+                    help="ambient (default): HOME and CLAUDE_CONFIG_DIR are left alone "
+                         "and each session gets the throwaway configuration through "
+                         "--settings with --setting-sources. fresh: CLAUDE_CONFIG_DIR "
+                         "points at <out>/claude, neither flag is passed, and a "
+                         "credential must be in the environment "
+                         "(CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`, or "
+                         "ANTHROPIC_API_KEY). See docs/e2e.md.")
+    ap.add_argument("--check-auth", action="store_true",
+                    help="spend ONE claude -p call answering whether the chosen "
+                         "--config-dir can authenticate, print the CLI's own answer, "
+                         "and exit (0 authenticated, 3 not). Run it before a real "
+                         "journey: the journey is thirteen calls and none of the other "
+                         "twelve would tell you anything new about a stale token.")
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--timeout", type=float, default=180.0,
                     help="seconds for an ordinary command")
@@ -1882,22 +2137,45 @@ def main(argv=None):
                          "the harness, not for a real run.")
     args = ap.parse_args(argv)
 
-    out = Path(args.out).expanduser().resolve()
-    if out.exists() and any(out.iterdir()):
-        print("error: %s exists and is not empty. Pick a fresh --out." % out,
+    # THE REFUSAL, BEFORE ANYTHING IS BUILT OR SPENT. `--config-dir fresh` has no stored
+    # login to fall back on, so without a credential in the environment every one of the
+    # thirteen calls would be answered `Not logged in · Please run /login`. --check-auth
+    # is exempt on purpose: "have I got a token?" is exactly what an operator without one
+    # runs, and it answers in one call with the CLI's own words. --no-model spends none.
+    if args.config_dir == "fresh" and not args.no_model and not args.check_auth \
+            and not credential_name():
+        print("error: --config-dir fresh needs a credential in the environment and "
+              "found neither %s: run `claude setup-token` and export the result as "
+              "CLAUDE_CODE_OAUTH_TOKEN (or set ANTHROPIC_API_KEY), because a throwaway "
+              "CLAUDE_CONFIG_DIR has no stored login and answers `Not logged in · "
+              "Please run /login`." % " nor ".join(TOKEN_VARS), file=sys.stderr)
+        return 2
+
+    if args.out:
+        out = Path(args.out).expanduser().resolve()
+        if out.exists() and any(out.iterdir()):
+            print("error: %s exists and is not empty. Pick a fresh --out." % out,
+                  file=sys.stderr)
+            return 2
+    elif args.check_auth:
+        out = Path(tempfile.mkdtemp(prefix="journey-check-auth-"))
+    else:
+        print("error: --out is required (it is optional only with --check-auth).",
               file=sys.stderr)
         return 2
     out.mkdir(parents=True, exist_ok=True)
     (out / "logs").mkdir(exist_ok=True)
 
     j = Journey(out, args)
+    if args.check_auth:
+        return check_auth_only(j)
     only = {x.strip() for x in args.only.split(",") if x.strip()}
-    print("e2e journey -> %s" % out)
+    print("e2e journey -> %s  (--config-dir %s)" % (out, args.config_dir))
     for fn in STEPS:
         num = fn.__name__[4:fn.__name__.index("_")]
-        if only and num not in only:
+        if j.abort or (only and num not in only):
             s = j.step(num, fn.__name__[fn.__name__.index("_") + 1:].replace("_", " "))
-            s.verdict("SKIPPED", "--only %s" % args.only)
+            s.verdict("SKIPPED", j.abort or ("--only %s" % args.only))
             s.finish()
             continue
         try:
