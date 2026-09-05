@@ -114,6 +114,21 @@
 # SessionStart's reach the PARENT only. `permissionDecision:"allow"` with a reason reaches
 # NOTHING, silently -- do not reach for it here.
 #
+# EVERY REQUEST IS A PREFIXED BLOCK, NEVER A QUOTED STRING. Each one is rendered as a
+# header line `(request N of M, T chars)` and then every line of the text -- blank lines
+# included -- carrying the fixed prefix `> `, with a blank line after it. The form it
+# replaces was `(request 1 of 1) "<text>"`, and it lost the boundary the moment a prompt
+# contained a double quote of its own: observed on 2026-09-05 in a real subagent block,
+# `... copied exactly: "Without using any tools, ...: UNKNOWN." Do not mention ...`, whose
+# nested imperative could not be told from the agent's own task. A prefix cannot be closed
+# early by anything the text contains -- the request is exactly the run of prefixed lines
+# under its header -- while a closing quote is one character the user can type. A prompt
+# that already begins a line with `> ` merely reads as `> > `, one level deeper, and a
+# prompt containing the literal `(request 2 of 9, 40 chars)` is prefixed like every other
+# line of it. A truncated request ends with `> [... N more chars]` on its own prefixed
+# line, so the cut is stated inside the same channel rather than in a trailing
+# parenthetical that the eye reads as part of the text.
+#
 # WORDING IS PART OF THE MEASUREMENT. Imperative wording in an injected context was
 # refused as prompt injection in 2 of 4 runs, and the Stop arm's own probe came back with
 # the model quoting the reason and declining the instruction inside it. So every line this
@@ -630,16 +645,38 @@ fi
 # one character cost hooks/remind.sh 230 ms of its 270.
 #
 # `words` is built from LITERAL splits for the same reason: a regex word split runs once
-# per prompt, and this runs before every tool call.
+# per prompt, and this runs before every tool call. `quoted` splits on a literal newline
+# for the third time in the same program, and it is the function that makes a request's
+# boundary unambiguous: PREFIX_LINE goes on EVERY line of it, the empty ones included, so
+# the request is the maximal run of prefixed lines under its header and nothing the text
+# contains can end it early.
 #
 # The budget is applied by rendering every candidate -- the first substantive request alone,
 # then with one recent request, then two, up to MISSION_RECENT -- and taking the longest
 # that fits inside MISSION_MAX_CHARS. Dropping the OLDEST of the recent block first keeps
 # the two things a session most needs: what was originally asked, and what was asked last.
+# THE PREFIX IS A CONSTANT AND IT IS ASCII, not a knob. Markdown's quotation marker
+# is what a reader already takes to mean "this text is quoted, not addressed to
+# you"; a box-drawing bar would read as well and would put a multibyte glyph into a
+# package that has been bitten by one three times (docs/DESIGN.md). It is not tunable
+# because the boundary does not rest on the prefix being rare -- any prompt can begin
+# a line with `> ` and one that does simply reads as `> > ` -- it rests on EVERY line
+# of the request carrying it, under a header that says how many characters the whole
+# request was. A prefix chosen per-installation would be one more thing a reader of
+# the block would have to be told.
+PREFIX_LINE='> '
+
 JQ_RENDER='
 def parse: split("\n") | map(select(length > 0)) | map(fromjson? // empty);
 def words: tostring | split("\t") | join(" ") | split("\r") | join(" ")
            | split("\n") | join(" ") | split(" ") | map(select(length > 0)) | length;
+def quoted($t; $cap):
+  (if ($t | length) > $cap then $cap else ($t | length) end) as $n
+  | ($t[0:$n] | split("\n") | map($pfx + .)) as $ls
+  | (if ($t | length) > $n
+     then ($ls + [$pfx + "[... " + ((($t | length) - $n) | tostring) + " more chars]"])
+     else $ls end)
+  | join("\n");
 
 ($fc | tonumber) as $FC
 | ($ec | tonumber) as $EC
@@ -683,13 +720,10 @@ def words: tostring | split("\t") | join(" ") | split("\r") | join(" ")
     | if $mode == "last" then
         (if ($subs | length) > 0 then $subs[-1] else ($N - 1) end) as $li
         | ($P[$li].t) as $t
-        | (if ($t | length) > $FC then ($t[0:$FC]) else $t end) as $s
         | ("The user'"'"'s last substantive request in this session, verbatim (request "
-           + (($li + 1) | tostring) + " of " + ($N | tostring) + "):\n\"" + $s + "\""
-           + (if ($t | length) > $FC
-              then " (the first " + ($FC | tostring) + " of "
-                   + (($t | length) | tostring) + " characters)"
-              else "" end)) as $TXT
+           + (($li + 1) | tostring) + " of " + ($N | tostring) + ", "
+           + (($t | length) | tostring) + " chars):\n"
+           + quoted($t; $FC)) as $TXT
         | ($TXT[0:$MX]) as $OUT
         | "\($N) \($OUT | length)\n" + $OUT
       else
@@ -705,13 +739,9 @@ def words: tostring | split("\t") | join(" ") | split("\r") | join(" ")
                   | . as $i
                   | (if $i == $fi then $FC else $EC end) as $cap
                   | ($P[$i].t) as $t
-                  | (if ($t | length) > $cap then ($t[0:$cap]) else $t end) as $s
                   | "(request " + (($i + 1) | tostring) + " of " + ($N | tostring)
-                    + ") \"" + $s + "\""
-                    + (if ($t | length) > $cap
-                       then " (the first " + ($cap | tostring) + " of "
-                            + (($t | length) | tostring) + " characters)"
-                       else "" end) ]) as $lines
+                    + ", " + (($t | length) | tostring) + " chars)\n"
+                    + quoted($t; $cap) ]) as $blocks
              | ([ $sh[]
                   | . as $i
                   | (if $i == $fi then $FC else $EC end) as $cap
@@ -722,12 +752,12 @@ def words: tostring | split("\t") | join(" ") | split("\r") | join(" ")
                 then ("[... " + ($CUT | tostring)
                       + " characters of this session'"'"'s requests are not quoted here ...]")
                 else "" end) as $mark
-             | (if ($mark | length) == 0 then $lines
-                elif ($lines | length) > 1 then ([$lines[0], $mark] + $lines[1:])
-                else ($lines + [$mark]) end) as $body
+             | (if ($mark | length) == 0 then $blocks
+                elif ($blocks | length) > 1 then ([$blocks[0], $mark] + $blocks[1:])
+                else ($blocks + [$mark]) end) as $body
              | ("The user'"'"'s requests in this session, verbatim, oldest first. "
                 + ($N | tostring) + " recorded; " + (($sh | length) | tostring)
-                + " quoted below.\n" + ($body | join("\n"))) ]) as $CAND
+                + " quoted below.\n\n" + ($body | join("\n\n"))) ]) as $CAND
         | ([ $CAND[] | select((. | length) <= $MX) ]) as $fit
         | (if ($fit | length) > 0 then ($fit | max_by(length)) else ($CAND[0][0:$MX]) end) as $OUT
         | "\($N) \($OUT | length)\n" + $OUT
@@ -738,7 +768,7 @@ def words: tostring | split("\t") | join(" ") | split("\r") | join(" ")
 jq -n -r --rawfile promptsraw "$TMP/prompts" --rawfile overlayraw "$TMP/overlay" \
    --arg sid "$sid_raw" --arg cur "$CUR" --arg mode "$render_mode" \
    --arg fc "$FIRST_CHARS" --arg ec "$EACH_CHARS" --arg rc "$RECENT" \
-   --arg mx "$MAX_CHARS" --arg sw "$SHORT_WORDS" \
+   --arg mx "$MAX_CHARS" --arg sw "$SHORT_WORDS" --arg pfx "$PREFIX_LINE" \
    "$JQ_RENDER" > "$TMP/render" 2>/dev/null
 
 [ -s "$TMP/render" ] || exit 0

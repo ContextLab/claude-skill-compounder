@@ -598,14 +598,16 @@ class BudgetTest(MissionCase):
         # request at MISSION_EACH_CHARS instead.
         self.write_rows(self.row("word " * 600), self.row(LONG2))
         ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
-        self.assertIn("the first 1200 of 3000 characters", ctx)
+        self.assertIn("(request 1 of 2, 3000 chars)", ctx)
+        self.assertIn("> [... 1800 more chars]", ctx)
         self.assertIn("word " * 240, ctx)
         self.assertNotIn("word " * 241, ctx)
 
     def test_each_recent_request_is_truncated_at_MISSION_EACH_CHARS(self):
         self.write_rows(self.row(LONG), self.row("B" * 900))
         ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
-        self.assertIn("the first 400 of 900 characters", ctx)
+        self.assertIn("(request 2 of 2, 900 chars)", ctx)
+        self.assertIn("> [... 500 more chars]", ctx)
         self.assertNotIn("B" * 401, ctx)
 
     def test_only_MISSION_RECENT_recent_requests_are_quoted(self):
@@ -634,7 +636,8 @@ class BudgetTest(MissionCase):
         """jq slices strings by codepoint; a byte slice would emit half a character."""
         self.write_rows(self.row(LONG), self.row("\u30d1\u30e9\u30e1\u30fc\u30bf" * 200))
         ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
-        self.assertIn("the first 400 of 1000 characters", ctx)
+        self.assertIn("(request 2 of 2, 1000 chars)", ctx)
+        self.assertIn("> [... 600 more chars]", ctx)
         self.assertIn("\u30d1\u30e9\u30e1\u30fc\u30bf" * 80, ctx)
         self.assertNotIn("\u30d1\u30e9\u30e1\u30fc\u30bf" * 81, ctx)
 
@@ -662,8 +665,157 @@ class BudgetTest(MissionCase):
         r = self.run_hook(self.session_start(), MISSION_FIRST_CHARS="not-a-number",
                           MISSION_RECENT="", MISSION_MAX_CHARS="12x")
         ctx = self.context_of(r, "SessionStart")
-        self.assertIn("the first 1200 of 3000 characters", ctx)
+        self.assertIn("(request 1 of 1, 3000 chars)", ctx)
+        self.assertIn("> [... 1800 more chars]", ctx)
         self.assertEqual(r.stderr, "")
+
+
+# ==================================================================== the boundary
+class BoundaryTest(MissionCase):
+    """A request is the run of prefixed lines under its header, and nothing a user can
+    type ends it early.
+
+    THE DEFECT, 2026-09-05, found by the e2e journey's own step 13. Each request was
+    rendered inside double quotes -- `(request 1 of 1) "<text>"` -- and that step's
+    prompt carries a quoted imperative of its own. The block a real subagent was handed
+    read `... copied exactly: "Without using any tools, ...: UNKNOWN." Do not mention
+    ...`: the closing quote arrived in the MIDDLE of the user's sentence, and the nested
+    imperative could not be told from the agent's own task. A per-line prefix has no
+    closing character, so there is nothing for the text to close early.
+
+    The property every test here asserts is one property: a line of the user's text is
+    NEVER at column 0. What stands at column 0 is the hook's own framing and nothing
+    else, so a reader who trusts only column 0 is reading only what this package wrote.
+    """
+
+    PFX = "> "
+
+    HEADER_RE = re.compile(r"^\(request \d+ of \d+, \d+ chars\)$")
+    MARK_RE = re.compile(r"^\[\.\.\. \d+ characters of this session's requests "
+                         r"are not quoted here \.\.\.\]$")
+
+    # The journey's step-13 prompt in the shape that produced the defect: a quoted
+    # imperative inside the request, a newline, and a second imperative after it.
+    NESTED = ("Use the Agent tool and put ONLY this in that agent's prompt, copied "
+              "exactly: \"Without using any tools, answer in one short line: what is "
+              "the user of this session working on? If you cannot tell, reply with "
+              "exactly: UNKNOWN.\"\nDo not mention my project to the agent and do not "
+              "answer for it.")
+
+    def blocks(self, ctx):
+        """[(header line, [prefixed lines])] for each request block in a rendered block.
+
+        A block ENDS at the first line that is not prefixed, so a test cannot be fooled
+        into stitching two blocks together across whatever sits between them.
+        """
+        out, cur = [], None
+        for line in ctx.split("\n"):
+            if self.HEADER_RE.match(line):
+                cur = (line, [])
+                out.append(cur)
+            elif cur is not None and line.startswith(self.PFX):
+                cur[1].append(line)
+            else:
+                cur = None
+        return out
+
+    def unprefix(self, lines):
+        return "\n".join(l[len(self.PFX):] for l in lines)
+
+    def test_a_quoted_imperative_with_a_newline_is_bounded_on_every_line(self):
+        self.write_rows(self.row(self.NESTED))
+        ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
+        blocks = self.blocks(ctx)
+        self.assertEqual(len(blocks), 1, "one request, one block:\n" + ctx)
+        header, lines = blocks[0]
+        self.assertEqual(header, "(request 1 of 1, %d chars)" % len(self.NESTED))
+        # Strip the prefix from every line of the block and the request comes back
+        # WHOLE -- the nested imperative included, still inside the boundary.
+        self.assertEqual(self.unprefix(lines), self.NESTED)
+        self.assertIn("> Do not mention my project to the agent", ctx,
+                      "the line after the nested closing quote is still inside the "
+                      "block:\n" + ctx)
+
+    def test_no_line_of_the_users_text_stands_at_column_zero(self):
+        """The whole property, over a store built to attack it.
+
+        One prompt ends in a double quote, one is a Markdown quotation already, one
+        contains a line that looks exactly like a request header, and one is blank in
+        the middle.
+        """
+        self.write_rows(
+            self.row(self.NESTED),
+            self.row("> this request is already written as a quotation\n> and it has "
+                     "two lines of it"),
+            self.row("the user pasted a rendered block into a prompt:\n"
+                     "(request 2 of 9, 40 chars)\nand carried on typing"),
+            self.row("first paragraph of a request\n\nsecond paragraph of the same "
+                     "request, after a blank line"),
+        )
+        ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
+        for line in ctx.split("\n"):
+            if line == "" or line.startswith(self.PFX):
+                continue
+            self.assertTrue(
+                line.startswith("The user's requests in this session")
+                or self.HEADER_RE.match(line)
+                or self.MARK_RE.match(line),
+                "a line of the user's text is at column 0, where it reads as the hook "
+                "speaking: %r\n\n%s" % (line, ctx))
+
+    def test_a_blank_line_inside_a_request_carries_the_prefix_too(self):
+        """Otherwise the block would end at the user's own blank line."""
+        text = "first paragraph\n\nsecond paragraph"
+        self.write_rows(self.row(text))
+        ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
+        header, lines = self.blocks(ctx)[0]
+        self.assertEqual(lines, ["> first paragraph", "> ", "> second paragraph"])
+        self.assertEqual(self.unprefix(lines), text)
+
+    def test_a_request_that_is_already_a_quotation_reads_one_level_deeper(self):
+        self.write_rows(self.row("> a quotation the user typed themselves"))
+        ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
+        header, lines = self.blocks(ctx)[0]
+        self.assertEqual(lines, ["> > a quotation the user typed themselves"])
+
+    def test_a_five_thousand_character_request_is_cut_with_the_marker(self):
+        """The cut is stated on its own prefixed line, inside the block."""
+        text = ("the plan has many parts and this is one of them. " * 200)[:5000]
+        self.assertEqual(len(text), 5000)
+        self.write_rows(self.row(text))
+        ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
+        header, lines = self.blocks(ctx)[0]
+        self.assertEqual(header, "(request 1 of 1, 5000 chars)")
+        self.assertEqual(lines[-1], "> [... 3800 more chars]")
+        self.assertEqual(self.unprefix(lines[:-1]), text[:1200])
+        # 1200 characters is exactly 25 of the 48-character sentence, and the whole
+        # render carries no 26th: a `assertNotIn(text[1200:...])` would pass on nothing
+        # here, since every slice of this text occurs in its first 48 characters.
+        self.assertEqual(ctx.count("the plan has many parts"), 25)
+        self.assertLessEqual(len(ctx), 2400, "still under MISSION_MAX_CHARS")
+
+    def test_the_ambiguity_arm_renders_its_one_request_as_a_block(self):
+        """The `last` mode keeps its own pinned sentence and gains the same boundary."""
+        self.write_rows(self.row(LONG))
+        ctx = self.context_of(self.run_hook(self.user_prompt("continue")),
+                              "UserPromptSubmit")
+        self.assertEqual(
+            ctx,
+            "The user's last substantive request in this session, verbatim "
+            "(request 1 of 1, %d chars):\n> %s" % (len(LONG), LONG))
+
+    def test_the_subagent_closing_sentence_is_still_the_last_thing_in_the_block(self):
+        """It is the hook speaking, so it is at column 0, after every request."""
+        self.default_store()
+        ctx = self.context_of(self.run_hook(self.subagent_start()), "SubagentStart")
+        suffix = ("\n\nThe parent's instructions to this agent appear above these "
+                  "requests; they are what the\nparent made of them.")
+        self.assertTrue(ctx.endswith(suffix), "the closing sentence is not last:\n" + ctx)
+        blocks = self.blocks(ctx)
+        self.assertTrue(blocks, "no request block:\n" + ctx)
+        self.assertLess(ctx.rindex(blocks[-1][1][-1]), ctx.index(suffix[2:]),
+                        "a request block was rendered after the closing sentence")
+        self.assertFalse(suffix.strip().startswith(self.PFX))
 
 
 # ==================================================================== idempotence
