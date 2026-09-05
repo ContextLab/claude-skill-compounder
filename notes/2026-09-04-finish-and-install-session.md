@@ -125,3 +125,8 @@ forged skill; issue comments.
   markdown file plus scripts; the cheap tiers first) is what the attached-script note is.
 - All scripts lint clean under shellcheck 0.11.0 and 0.9.0. Final suite and clean-env runs
   started 12:xx; docs agent on the second forge's outcome running.
+- Close-out 2026-09-05: final suite on the settled tree 54 files, ALL TESTS PASSED, 2 skips;
+  clean-env runs of every touched test file OK; shellcheck clean under 0.11.0 and 0.9.0;
+  pushed 4c0e9ae to `main` and `resume/after-v0.3.1`; CI run 33977345612, 5 of 5 jobs
+  success; comments posted on #19, #30, #31, #34, #42, all left open with their blockers;
+  README Status block refreshed. Open after this session: #19, #30, #31, #34, #42.
