@@ -1422,7 +1422,11 @@ Wrong rows are not the whole cost, which is why a binding is withheld rather tha
 tagged. A binding CONSUMES its armed failure: one recovery per arming, then the failure is
 disarmed, so an unrelated success eats the arming and the real fix, arriving two calls later
 inside the same window, can never be recorded at all. On that store one `cat` had disarmed
-four `gh issue view` failures. Nor is the row silent — the recovery arm states its pair back
+four `gh issue view` failures. The same consumption is why the window is keyed on the agent
+as well as the session since 2026-09-05: subagents share the parent's session id, and a forge
+subagent's failed heredoc was eaten by the orchestrator's unrelated heredoc two calls later,
+with the statement delivered to the wrong agent. Their post-tool payloads carry `agent_id`,
+so the pending file is named per agent (`agent_key()`), while the refusal stays per session. Nor is the row silent — the recovery arm states its pair back
 to the session as fact, and one such statement read `gh issue view <N> --comments`
 recovered by `cat notes/OPEN-THREADS.md`, in a script whose whole claim is that it reports
 what it measured.

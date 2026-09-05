@@ -304,7 +304,8 @@ not. `hooks/repeat-gate.sh` already learned the failure; it now also binds the f
 asks for it in writing.
 
 **A recovery no longer has to be the same tool.** A failure of one tool followed, within
-`REPEAT_RECOVERY_WINDOW` later calls, by a success of a *different* tool whose normalised
+`REPEAT_RECOVERY_WINDOW` later calls in the same agent (a subagent's calls and its parent's
+are separate windows under one session id), by a success of a *different* tool whose normalised
 input shares at least `REPEAT_RECOVERY_MIN_TOKENS` content tokens with the failed one is
 bound as its recovery, and the row is tagged `"cross_tool":true`, which records that the
 fix was found somewhere other than where the failure was. That is the shape of "the GitHub
@@ -662,7 +663,7 @@ place in `~/.claude/settings.json`:
 |`SKILL_COMPOUNDER_REPEAT_GATE`|`1`|the hook entries|Set to `0` to switch the repeat gate off entirely — it denies nothing and learns nothing|
 |`REPEAT_GATE_REFUSE`|`0`|the top-level `env` block|Set to `1` to arm the refusal. Off by default: across 81 recorded sessions it refused nothing, and every signature that reached the threshold was one the gate's own head rules exempt anyway ([#27](https://github.com/ContextLab/claude-skill-compounder/issues/27)) — re-derived after those rules were narrowed to a per-segment test on 2026-09-04, when 13 signatures stood at the threshold and all 13 were still exempt. Learning and recovery are unaffected either way. **Two components read it** — the gate, and `bin/skillrepeat`, which says on its own output whether the arm is armed|
 |`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Distinct **earlier** sessions a call must have failed in, the same way, before an attempt is denied. Both refusing arms drop rows carrying the current session's id, so nothing a session does to itself can lock it out; the lesson arm counted this session too until 2026-09-04, which made it one session stricter than its own documentation. At the default the lesson refusal therefore lands on the third occurrence, and `1` is the spelling of "refuse on the second". **Three components read it** — set it anywhere narrower and they disagree|
-|`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful calls of a tool this hook is wired for, after which an armed failure stops looking for the call that fixed it, by either the same-tool rule or the cross-tool one|
+|`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful calls of a tool this hook is wired for, in the same agent, after which an armed failure stops looking for the call that fixed it, by either the same-tool rule or the cross-tool one|
 |`REPEAT_RECOVERY_MIN_TOKENS`|`2`|the hook entries|Content tokens two normalised calls must share before a success of a **different** tool binds as the recovery. `0` disables cross-tool binding and leaves the same-tool rule untouched. A floor, not a calibration|
 |`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`|`2`|the hook entries|The same floor for a success of the **same** tool, applied only where that tool is a general-purpose shell (`Bash`), which names no operation of its own. `0` restores the unconditional same-tool binding this script shipped until 2026-09-03. A success whose normalised call equals the failed one binds whatever this is set to, and no other tool is affected|
 |`REPEAT_LESSON_GATE`|`1`|the hook entries|Set to `0` to switch the lesson refusal off. On by default, which is the reverse of `REPEAT_GATE_REFUSE`, because this arm fires only where a failure and its recovery were both seen in the session it is speaking to. Exactly `0` is off and any other value is on, so a typo lands on the shipped default|

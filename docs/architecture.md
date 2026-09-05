@@ -551,7 +551,10 @@ do was say anything, or ever insist.
 **Cross-tool recovery.** The gate learns a failure signature on `PostToolUseFailure` and
 binds the next success as its recovery. It now binds across tools as well: a success of a
 *different* tool, within `REPEAT_RECOVERY_WINDOW` later calls, whose normalised input shares
-at least `REPEAT_RECOVERY_MIN_TOKENS` content tokens with the failed one. A content token is
+at least `REPEAT_RECOVERY_MIN_TOKENS` content tokens with the failed one. The window is
+keyed on the session AND the agent (`agent_key()`), since subagents share the parent's
+session id and their post-tool payloads carry `agent_id`; the refusal itself stays per
+session. A content token is
 what survives splitting the normalised call on non-word characters, lowercased, three
 characters or longer, and not all digits, so a repository name, a path or a URL counts and
 `the` and `-v` do not. Those rows carry `cross_tool: true`, which records which rule bound

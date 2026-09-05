@@ -429,7 +429,14 @@ later calls, by a success of a DIFFERENT tool whose normalised input shares at l
 `REPEAT_RECOVERY_MIN_TOKENS` (2) content tokens with the failed one binds as the recovery
 and writes `"cross_tool":true` on the row (`toks_of`, `overlap_count` and the binding in
 `hooks/repeat-gate.sh`; the line numbers move, the function names do not). A content token
-is a lowercased run of word characters, three or more, not all digits.
+is a lowercased run of word characters, three or more, not all digits. **The window is keyed
+on (session, agent)**: `PostToolUse` and `PostToolUseFailure` inside a subagent carry
+`agent_id` (measured on 2.1.260; the parent's own calls carry none), and the pending-failure
+file is named `<sid>` for the parent and `<sid>+<agent>` in an agent (`agent_key()`), so a
+subagent's failure cannot be bound to the parent's unrelated success -- which is what
+happened live on 2026-09-05, when a forge subagent's failed heredoc was "recovered" by the
+orchestrator's heredoc two calls later. The lesson marker and the refusal stay per SESSION on
+purpose: dispatching an agent is continuing.
 `REPEAT_RECOVERY_MIN_TOKENS=0` turns cross-tool binding off.
 
 **The same-tool rule it extends is no longer left alone for a shell.** `Bash` is a universal
