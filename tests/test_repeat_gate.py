@@ -37,8 +37,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "repeat-gate.sh")
@@ -3116,6 +3118,224 @@ class SameToolBindingTest(GateCase):
                                  "%r" % (value, cmd))
 
 
+# ============================================================== head + argument
+class HeadArgumentBindingTest(GateCase):
+    """A TWO-CHARACTER PROGRAM HAS NO TOKENS, and the store said nothing about the plainest
+    fail-then-fix there is.
+
+    The e2e journey's step 15 (tests/e2e/journey.py) fails `ls --nonexistent-flag .` and
+    fixes it with `ls -la .`. A content token is three characters or more, `ls` is two, and
+    every other word of the failed call is a flag -- so the two share ZERO tokens against a
+    floor of two and the same-tool shell rule refused to bind them. Reproduced against the
+    real hook on 2026-09-05 before the second rule existed.
+
+    Every test here drives the real script with real payloads through stdin. One test per
+    pair the header pins, because a table asserted in a loop reports one failure for six
+    different reasons."""
+
+    ERR = "Exit code 1\nls: unrecognized option `--nonexistent-flag'"
+
+    def bind_kind(self, fail_cmd, ok_cmd, error=None, **env):
+        """None when nothing bound, `head` when the head-and-argument rule was what found
+        it, `token` when the token rule or an exact self-recovery did.
+
+        The distinction is read off the ROW rather than inferred, because the two rules
+        write the same `recover` row apart from one field, and a test that could not tell
+        them apart would pass on a rule that had stopped being tried at all."""
+        self.tick()
+        self.run_hook(self.failure(fail_cmd, "s1", error=error or self.ERR,
+                                   tuid="toolu_f_%d" % self.clock), **env)
+        self.tick()
+        self.run_hook(self.success(ok_cmd, "s1", tuid="toolu_s_%d" % self.clock), **env)
+        rec = [r for r in self.rows() if r["t"] == "recover"]
+        if not rec:
+            return None
+        return "head" if rec[0].get("head_arg") else "token"
+
+    # ------------------------------------------------- the six pairs the header pins
+    def test_ls_with_a_bad_flag_recovered_by_ls_binds(self):
+        """THE DEFECT. Same program, one shared non-flag argument (`.`), no shared token
+        at all -- so only the second rule can find it."""
+        self.assertEqual(self.bind_kind("ls --nonexistent-flag .", "ls -la ."), "head")
+
+    def test_git_push_recovered_by_git_status_does_not_bind(self):
+        """Same head, and NOTHING else: `push origin main` against `status`. The head alone
+        must never be enough, or every `git` call in a session binds every other one."""
+        self.assertIsNone(self.bind_kind("git push origin main", "git status"))
+
+    def test_gh_issue_view_recovered_by_gh_pr_list_does_not_bind(self):
+        self.assertIsNone(self.bind_kind("gh issue view 12", "gh pr list"))
+
+    def test_gh_issue_view_recovered_by_the_same_call_with_a_flag_binds(self):
+        """The token rule already bound this one on {issue, view}; the assertion is that it
+        still does, and that the new rule did not quietly take it over."""
+        self.assertEqual(self.bind_kind("gh issue view 12",
+                                        "gh issue view 12 --comments"), "token")
+
+    def test_cat_of_one_file_recovered_by_cat_of_another_is_not_bound_by_the_head_rule(self):
+        """THE PAIR THAT SEPARATES THE TWO RULES, and the assertion is on WHICH rule fired
+        rather than on the outcome.
+
+        `cat notes/x.md` and `cat notes/y.md` share their head and NO non-flag argument, so
+        the head-and-argument rule declines them -- which is the property this test exists
+        to hold. They do bind, because the token rule finds {cat, notes} against a floor of
+        two, and it bound them before this change as well: `md` and `x` are under three
+        characters and drop out, leaving two shared tokens. Asserting `is None` here would
+        be asserting that a rule this change did not touch behaves differently."""
+        self.assertEqual(self.bind_kind("cat notes/x.md", "cat notes/y.md"), "token")
+        self.tick()
+        self.assertEqual(self.bind_kind("cat notes/x2.md", "cat notes/y2.md",
+                                        REPEAT_RECOVERY_HEAD_ARG=0), "token",
+                         "the token rule's binding depended on the new rule being on")
+
+    def test_python_recovered_by_python3_falls_to_the_token_rule(self):
+        """The heads differ (`python` against `python3`), so the second rule cannot apply
+        and the first one decides: {module, python} against {module, python3} shares one
+        token against a floor of two."""
+        self.assertIsNone(self.bind_kind("python module.py", "python3 -m module"))
+
+    # ------------------------------------------------- what the rule refuses to do
+    def test_the_knob_switches_the_second_rule_off(self):
+        """NON-VACUITY for every `head` assertion above: with the knob off the same pair
+        goes back to binding nothing, so the tests are measuring the rule and not the
+        harness."""
+        self.assertIsNone(self.bind_kind("ls --nonexistent-flag .", "ls -la .",
+                                         REPEAT_RECOVERY_HEAD_ARG=0))
+
+    def test_a_shared_working_directory_is_not_a_shared_argument(self):
+        """`cd` NAMES NO OPERATION, and this is the live store's own evidence in one line.
+        Written without the `cd` clause the rule added four bindings to the store of
+        2026-09-05 and all four were wrong; three of them bound on the directory two
+        unrelated commands were run in."""
+        self.assertIsNone(self.bind_kind("cd /tmp/proj && rm -rf build",
+                                         "cd /tmp/proj && curl -sS http://x/y"))
+
+    def test_the_program_after_a_cd_is_the_head(self):
+        """Stepping over `cd` rather than refusing it is what keeps the dominant shape on
+        this machine -- `cd <P>/x && <program> ...` -- inside the rule at all."""
+        self.assertEqual(self.bind_kind("cd /tmp/proj && ls --nonexistent-flag .",
+                                        "cd /tmp/proj && ls -la ."), "head")
+
+    def test_two_programs_under_one_cd_do_not_bind_on_a_shared_argument(self):
+        """The walk stops at the operator after the head is found, so `.` belonging to two
+        DIFFERENT programs is not a shared argument."""
+        self.assertIsNone(self.bind_kind("cd /tmp/proj && rm -rf .",
+                                         "cd /tmp/proj && ls -la ."))
+
+    def test_a_bare_mask_is_not_a_shared_argument(self):
+        """`<N>` is what the normaliser writes where any integer was, so two calls sharing
+        one share a number that neither of them contains any more.
+
+        The pair is chosen so the mask is the ONLY thing they could bind on: `issue view`
+        against `pr list` share no word, and both end in an integer. Without the exclusion
+        every numbered call in a session would bind every other one."""
+        self.assertIsNone(self.bind_kind("gh issue view 12", "gh pr list 34"))
+
+    def test_one_shared_subcommand_under_one_program_is_enough_and_that_is_a_limit(self):
+        """WHAT THE RULE ADMITS, stated rather than left to be discovered. `gh issue view`
+        and `gh run view` are different operations on different resources, and they bind:
+        the head agrees and `view` is a shared non-flag word. The token rule declines them
+        ({issue, view} against {run, view} is one shared token against a floor of two), so
+        this binding is one the second rule adds.
+
+        It is left in. The live store of 2026-09-05 shows the rule adding NOTHING to 772
+        real co-occurring pairs, so tightening here would be tuning against a case nobody
+        has met, and every tightening this rule has taken so far cost a true binding as
+        well. If a shape like this turns up in a real statement, this test is where the
+        evidence goes."""
+        self.assertEqual(self.bind_kind("gh issue view 12", "gh run view 34"), "head")
+
+    def test_a_redirect_does_not_end_up_as_the_shared_argument(self):
+        """`2>&1` normalises to `<N>>&<N>`, which contains a mask and must still read as
+        the redirect it is rather than as a word two commands have in common."""
+        self.assertIsNone(self.bind_kind("gh issue view 12 2>&1", "gh pr list 2>&1"))
+
+    # ------------------------------------------------- the live store
+    def test_the_live_store_gains_no_binding_from_the_second_rule(self):
+        """THE CLAIM ON REAL DATA. Runs the REAL hook over every (fail, success) pair the
+        live store shows co-occurring in one session and agent within 600 seconds under
+        DIFFERENT signatures -- successes that were genuinely available to an armed failure
+        and did not bind it, which is the only population this store can offer for the
+        question the header asks. Asserts on counts and prints counts; the store holds
+        command text and none of it leaves this process.
+
+        Measured 2026-09-05: 772 such pairs, 434 bound either way, and the second rule adds
+        ZERO. Before the `cd` clause it added four, every one of them false. The number is
+        not pinned -- the store grows -- but the ADDITION is, because a rule that starts
+        binding unrelated commands is the failure this whole section was written about."""
+        live = os.path.join(os.path.expanduser("~"), ".claude", "skill-compounder",
+                            "repeats", "index.jsonl")
+        if not os.path.exists(live):
+            print("\n[live] no store on this machine; the pairs above stand alone")
+            return
+        rows = []
+        with open(live, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+        groups = {}
+        for r in rows:
+            if r.get("tool") != "Bash" or r.get("t") not in ("fail", "recover"):
+                continue
+            groups.setdefault((r.get("session"), r.get("agent_id")),
+                              {"fail": [], "recover": []})[r["t"]].append(r)
+        pairs = set()
+        for d in groups.values():
+            for f in d["fail"]:
+                for k in d["recover"]:
+                    if (f.get("sig") != k.get("sig")
+                            and 0 <= k.get("ts", 0) - f.get("ts", 0) <= 600):
+                        pairs.add((f.get("cmd", ""), k.get("cmd", "")))
+        pairs = sorted(p for p in pairs if p[0] and p[1])
+        if not pairs:
+            print("\n[live] the store holds no co-occurring pair to judge")
+            return
+
+        def verdict(pair):
+            """One pair in its own state root, so 772 of them cannot see each other."""
+            fc, oc = pair
+            root = tempfile.mkdtemp(dir=self.tmp)
+            env = dict(self.env(), SKILL_COMPOUNDER_STATE=root)
+            env["REPEAT_GATE_NOW"] = "1000"
+            subprocess.run(["bash", HOOK], input=json.dumps(
+                self.failure(fc, "s1", tuid="tf")), capture_output=True, text=True,
+                env=env, timeout=180)
+            env["REPEAT_GATE_NOW"] = "1001"
+            subprocess.run(["bash", HOOK], input=json.dumps(
+                self.success(oc, "s1", tuid="ts")), capture_output=True, text=True,
+                env=env, timeout=180)
+            store = os.path.join(root, "repeats", "index.jsonl")
+            out = []
+            if os.path.exists(store):
+                with open(store, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line:
+                            try:
+                                out.append(json.loads(line))
+                            except ValueError:
+                                pass
+            rec = [x for x in out if x.get("t") == "recover"]
+            return (bool(rec), bool(rec and rec[0].get("head_arg")))
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            got = list(pool.map(verdict, pairs))
+        bound = sum(1 for b, _ in got if b)
+        added = [pairs[i] for i, (_, h) in enumerate(got) if h]
+        print("\n[live] %d co-occurring pairs, %d bind, the head-and-argument rule adds %d"
+              % (len(pairs), bound, len(added)))
+        self.assertEqual(added, [],
+                         "the second rule newly binds %d live pair(s), each of which a "
+                         "reader has to judge:\n%s"
+                         % (len(added), "\n".join("  failed: %s\n  worked: %s" % p
+                                                  for p in added)))
+
+
 # ============================================================== (session, agent)
 class AgentScopedRecoveryTest(GateCase):
     """A SUBAGENT SHARES ITS PARENT'S SESSION ID, so the recovery window may not be keyed
@@ -3405,19 +3625,109 @@ class LessonStatementTest(GateCase):
         for bad in ("run", "write", "record", "please", "you", "do", "call", "use"):
             self.assertNotIn(bad, first_words, "imperative opener %r in:\n%s" % (bad, ctx))
 
-    def test_the_statement_stays_under_seven_hundred_characters(self):
+    def test_the_statement_stays_under_twelve_hundred_bytes(self):
         """Measured against input that saturates both normalisers, not against a typical
         command: the caps inside the builder are what has to hold, and the widest input
-        the gate can produce is the only thing that tests them."""
+        the gate can produce is the only thing that tests them.
+
+        BYTES AND NOT CHARACTERS. The budgets inside `lesson_facts` are in `cut -c` units,
+        which are characters under a UTF-8 locale and bytes otherwise, so the cap the
+        header states is enforced once by `fit_bytes` over the assembled block and is a
+        byte cap. This asserts the same quantity."""
         ctx = self.context_of(self.recover_once(cmd=SATURATING_CMD, error=SATURATING_ERR,
                                                 fix=SATURATING_CMD.replace("gh ", "curl ")))
         self.assertIsNotNone(ctx)
-        self.assertLess(len(ctx), 700, "the statement is %d characters:\n%s"
-                        % (len(ctx), ctx))
+        self.assertLess(len(ctx.encode("utf-8")), 1200,
+                        "the statement is %d bytes:\n%s" % (len(ctx.encode("utf-8")), ctx))
         # ...and it is not short because the pieces went missing.
         self.assertGreater(len(ctx), 300, ctx)
         self.assertIn("skillnote add --lesson", ctx)
         self.assertIn("skillrepeat dismiss", ctx)
+
+    def test_a_statement_of_multibyte_glyphs_still_fits_the_byte_cap(self):
+        """THE REASON THE CAP IS MEASURED RATHER THAN SUMMED. A command of three-byte
+        glyphs passes every `cut -c` budget in the builder at a third of the byte cost the
+        budget was written for, and `fit_bytes` is the only thing between that and a
+        statement three times the stated size."""
+        wide = "grep -rn " + ("\u4e2d\u6587\u30c6\u30b9\u30c8" * 60) + " ."
+        ctx = self.context_of(self.recover_once(cmd=wide + " --colour",
+                                                fix=wide + " --no-colour",
+                                                error="Exit code 2\n" + "\u00e9" * 300))
+        self.assertIsNotNone(ctx)
+        self.assertLess(len(ctx.encode("utf-8")), 1200,
+                        "the statement is %d bytes" % len(ctx.encode("utf-8")))
+
+    # ------------------------------------------------- the three truncation shapes
+    LONG_HEAD = ("python3 scripts/run.py --input data/set-a.jsonl --model claude-opus "
+                 "--temperature 0 --max-tokens 4096 --retries 3 --checkpoint every-fifty "
+                 "--shard alpha --workers eight --output warehouse/results/run-alpha.jsonl "
+                 "--log warehouse/logs/run-alpha.log ")
+    TRACEBACK = ('Exit code 1\n'
+                 'Traceback (most recent call last):\n'
+                 '  File "/private/tmp/claude-501/x/y/run.py", line 12, in <module>\n'
+                 '    import numpy\n'
+                 'ImportError: No module named numpy')
+
+    def test_a_truncated_field_says_that_it_was_truncated(self):
+        """A field that was cut and a field that ended look identical without the mark, and
+        a reader who cannot tell them apart reads a truncated command as the whole one."""
+        long_cmd = "grep -rn pattern " + " ".join("dir%02d/file.txt" % i for i in range(60))
+        ctx = self.context_of(self.recover_once(cmd=long_cmd + " --colour",
+                                                fix=long_cmd + " --no-colour"))
+        self.assertIsNotNone(ctx)
+        self.assertIn("\u2026", ctx, "a cut field carried no ellipsis:\n%s" % ctx)
+
+    def test_two_calls_with_a_shared_long_head_are_quoted_from_where_they_differ(self):
+        """THE FIRST REAL STATEMENT OF 2026-09-05. A long `failed:` and a long `worked:`
+        were both cut at 90 characters into the same bytes, ending `--output wa`, while the
+        change the recovery was ABOUT sat past the cut -- so the arm reported a call
+        recovering itself. The shared head is now stated once and each call is quoted from
+        the word where they diverge."""
+        ctx = self.context_of(self.recover_once(
+            cmd=self.LONG_HEAD + "--strategy incremental --verbose",
+            fix=self.LONG_HEAD + "--strategy full --verbose",
+            error="Exit code 2\nbad strategy"))
+        self.assertIsNotNone(ctx)
+        self.assertIn("both:", ctx, "the shared head was not stated once:\n%s" % ctx)
+        failed = [l for l in ctx.split("\n") if l.strip().startswith("failed:")][0]
+        worked = [l for l in ctx.split("\n") if l.strip().startswith("worked:")][0]
+        self.assertNotEqual(failed.strip(), worked.strip(),
+                            "the two calls came out as the same line:\n%s" % ctx)
+        self.assertIn("incremental", failed, ctx)
+        self.assertIn("full", worked, ctx)
+        self.assertNotIn("incremental", worked, ctx)
+
+    def test_the_error_carries_its_last_line_as_well_as_its_first(self):
+        """THE SECOND REAL STATEMENT OF 2026-09-05. `error:` was a `head -3` joined into
+        one line and cut at 70 characters, which on a Python traceback reads
+        `Exit code 1 Traceback (most recent call last): File "/private/tmp/clau` -- three
+        lines of banner and no `ImportError:` anywhere. The exception line is the LAST one,
+        and `head -3` had thrown it away before anything could look."""
+        ctx = self.context_of(self.recover_once(cmd="python3 run.py",
+                                                fix="python3 run.py --fix",
+                                                error=self.TRACEBACK))
+        self.assertIsNotNone(ctx)
+        err = [l for l in ctx.split("\n") if l.strip().startswith("error:")][0]
+        self.assertIn("ImportError: No module named numpy", err,
+                      "the exception line never reached the statement:\n%s" % ctx)
+        self.assertIn("Exit code 1", err, "the first line went missing:\n%s" % ctx)
+
+    def test_a_one_line_error_is_not_quoted_as_first_and_last(self):
+        """NON-VACUITY the other way: `x … x` for an error that has one line would be the
+        repair reading worse than the defect."""
+        ctx = self.context_of(self.recover_once(error="just the one line"))
+        self.assertIsNotNone(ctx)
+        err = [l for l in ctx.split("\n") if l.strip().startswith("error:")][0]
+        self.assertEqual(err.strip(), "error:   just the one line", ctx)
+
+    def test_the_stored_row_keeps_the_error_head_it_always_had(self):
+        """The row's `err` field is a display field two CLIs print. The error tail travels
+        in the pending record, which lives one session; widening the row to repair a
+        statement would change what every stored row looks like."""
+        self.recover_once(cmd="python3 run.py", fix="python3 run.py --fix",
+                          error=self.TRACEBACK)
+        fail = [r for r in self.rows() if r["t"] == "fail"][0]
+        self.assertEqual(fail["err"], "\n".join(self.TRACEBACK.split("\n")[:3]))
 
     def test_a_cross_tool_recovery_says_it_too(self):
         self.tick()

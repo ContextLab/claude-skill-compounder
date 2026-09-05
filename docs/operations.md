@@ -384,15 +384,33 @@ is refused, exit 2, naming `skillrepeat list`.
 
 `--attach <path>` is the "code or scripts" half and is valid with or without `--lesson`.
 The file is copied, executable bit and all, into `<scope>/lessons/<note id>/`, and the
-note line gains a ` (attached: <rel>)` suffix so the script that finally worked is
-reachable from the sentence saying what it was for. Two refusals, both exit 2 and both
+note line gains a ` (attached: <path>)` suffix so the script that finally worked is
+reachable from the sentence saying what it was for. The path is written in whatever form
+resolves from where the line is read: a project note names it relative to the repository
+root (`.claude/lessons/<id>/<file>`), while a global or memory note — read from every
+repository on the machine, where that string names a directory in whichever project is
+open — names it `~/.claude/lessons/<id>/<file>`, falling back to the absolute path when
+the claude directory is not under `$HOME`. One function, `attach_ref()`, writes all three,
+so the note, the ledger row and a promoted line cannot spell one location three ways. Two
+refusals, both exit 2 and both
 before a byte is copied: a source outside the working tree or `$HOME`, and a destination
 that already exists.
 
 `skillnote promote <id> --to global` moves a project lesson up a level once it turns out
 not to be about that project. The line, the attachments and the reminder's scope all
 move, and the project block keeps a one-line tombstone naming where it went. It is a move
-and never a copy, and `--to project` exits 2, because the hierarchy only goes up.
+and never a copy, and `--to project` exits 2, because the hierarchy only goes up. One
+thing on the line is rewritten on the way: an `(attached: .claude/lessons/...)` suffix
+becomes the `~`-anchored form, so the promoted line spells the file the same way a note
+added at `--scope global` would.
+
+`skillnote remove <id>` takes the reminder with the note. A `--lesson` writes two records
+under two ids, and until 2026-09-05 removing the note left the reminder firing a lesson
+nobody could read any more. The reminder is found through the ledger row that recorded
+both ids — a `promote` row wins over the `add` row beneath it, so a promoted lesson is
+withdrawn at the scope it moved to — tombstoned in the store `hooks/remind.sh` reads
+rather than rewritten, and named both on stdout and on the `remove` ledger row.
+`--keep-reminder` leaves it live and says so.
 
 Two limits are worth knowing. The refusal is no longer `Bash`-only. Since 2026-09-05 its
 `PreToolUse` entry carries no matcher at all, so while a marker is armed a call of ANY

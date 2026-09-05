@@ -164,3 +164,16 @@ forged skill; issue comments.
   which per-agent lists satisfy); session-handoff correct outcome, but Phase 4's validator
   locator never finds `check-handoff.sh` under the standard install because the skill dir
   is a symlink and `find` does not follow it. A builder is making the three SKILL.md edits.
+- Fix wave from the production runs, committed: bc1680f (claim-gate recognises `gh api`
+  check-runs/status/check-suites/actions-runs and their tab rows; a quoted or negated CI
+  phrase is a mention; compound-improvement strips quoted spans and `<...>` placeholders
+  before the redirect check and wants a path-shaped token for durable prose), fa70d4e
+  (mission requests render as `> `-prefixed blocks under `(request N of M, T chars)`),
+  32d7e87 (`skillnote remove` withdraws the lesson's reminder with an append-only
+  tombstone; global attachments carry `~/` paths; remind.sh matches per segment with the
+  splitter pinned identical to repeat-gate's, Bash median 73 -> 50 ms), fab3940 (three
+  seed SKILL.md sentences), 5e746aa (doctrine test skips a builder's dotfile scratch copy).
+  One builder's smoke test wrote a stray global note (n715494077x20); removed with
+  `skillnote remove`, the lessons dir deleted, `~/.claude/CLAUDE.md` has no trace.
+  Remaining: repeat-gate builder (same-head binding rule, lesson_facts), docs pass, journey
+  re-run on the final tree, suite, push.

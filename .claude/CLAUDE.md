@@ -124,12 +124,33 @@ is to cost anything at all: the dated line in the scoped `CLAUDE.md`, a reminder
 fail row in `<state>/repeats/index.jsonl`, and one ledger `note` row carrying `lesson_sig`,
 `reminder_id` and `attachments`. An unknown signature exits 2 and points at `skillrepeat list`.
 `--attach <path>` repeats and is valid without `--lesson`: it copies the file into
-`<scope>/lessons/<note id>/`, preserves the executable bit and appends `(attached: <rel>)`
+`<scope>/lessons/<note id>/`, preserves the executable bit and appends `(attached: <path>)`
 to the line, refusing a path outside the working tree or `$HOME` and an occupied
-destination before a single byte is copied. `skillnote promote <id> --to global` MOVES a
+destination before a single byte is copied. **That path is written in whatever form
+resolves from where the line is READ**, and `attach_ref()` is the single place a
+destination becomes text, so the note, the ledger row and a promoted line cannot spell it
+three ways. A project note is read by a session sitting in that repository, so it names
+the file relative to the repository root: `.claude/lessons/<id>/<file>`. A global or a
+memory note is read from every repository on the machine, where that same string names a
+directory in whichever project happens to be open, so those two scopes name it
+`~`-anchored -- `~/.claude/lessons/<id>/<file>` -- and a claude directory outside `$HOME`,
+which no `~` can name, gets the ABSOLUTE path. Measured 2026-09-05: a session in another
+project was handed the relative form and had to run `find ~/.claude` for the file.
+`skillnote promote <id> --to global` MOVES a
 project note -- the line, its attachments and its reminder's scope together -- and leaves a
 one-line tombstone that says where it went; never a copy, and `--to project` exits 2, because
-the hierarchy only goes up.
+the hierarchy only goes up. It rewrites exactly ONE thing on the line it carries across,
+the `(attached: ...)` suffix, through that same `attach_ref`, so a promoted line and a note
+added at `--scope global` spell one location one way. **`skillnote remove <id>` takes the
+reminder with the note**, which until 2026-09-05 it did not: `--lesson` writes two records
+under two ids, and removing the note left the reminder firing a lesson nobody could read
+any more. The join is the ledger, which `--lesson` wrote both ids into --
+`ledger_reminder_of` reads the LAST ledger row for that note id carrying a `reminder_id`,
+so a `promote` row, which carries the id the reminder took at its new scope, answers
+instead of the `add` row it superseded and the withdrawal follows the pair wherever it now
+lives. The withdrawal is the same append-only tombstone every other removal writes, the id
+goes onto the `remove` ledger row as `reminder_id`, and one line of output says so;
+`--keep-reminder` leaves it live and says that too.
 
 **`skillnote where` exists so that nothing else has to resolve a scope for itself.** It
 prints the absolute path a note or a reminder of a given `--scope` (`project`, `global`,
@@ -215,10 +236,26 @@ carry, and `docs/DESIGN.md` for the decision.
 **The edit checkpoint counts `Bash`, not just `Write|Edit`.** `mutates_file()` in
 `hooks/compound-improvement.sh` inspects `tool_input.command` and counts only commands
 that write. Detection from a command string is a lower bound on purpose: a heredoc into
-`python3 -` calling `write_text` is caught, a runtime-assembled path is not. Undercounting
+`python3 -` calling `write_text` is caught, a runtime-assembled path is not. Since
+2026-09-05 the redirect alternative reads a SEPARATE copy of the command with single- and
+double-quoted spans and `<...>` placeholders blanked, so the `>` inside `skillnote add
+--lesson <sig> "<what was learned>"` is no longer a redirect and writing a note is no
+longer an edit. Only that alternative reads the stripped copy, and the split is the point:
+`write_text`, `writeFileSync` and `open(..., 'w')` live INSIDE quotes by construction --
+`python3 -c "...write_text(...)..."` -- so running them against it would erase the very
+writes this branch was widened to catch. A placeholder is `<...>` with NO whitespace in
+it, which is what keeps `cat < a.txt > b.txt` a write; what it concedes is a redirect
+written inside quotes (`bash -c "echo x > f"`), which now goes uncounted. Undercounting
 delays a checkpoint; counting `ls` teaches the user to ignore it. A second branch fires
 `ai-tell-audit` once per durable-prose file per session, because that skill's description
-names a README but nothing otherwise connects editing one to invoking it.
+names a README but nothing otherwise connects editing one to invoking it -- and since the
+same change it fires only for a PATH-SHAPED token. `durable_prose` blanks quoted spans and
+`<...>` placeholders the same way, and what survives has to carry a `/` (`./README`, a
+prose file under a `docs/` directory, and every absolute path, which is what the
+`Write|Edit` branch passes) or a
+prose extension (`README.md`, `.rst`, `.txt`, `.markdown`). A bare `README` inside a
+string is a word in a sentence: `echo "see the README" > notes.txt` writes no README, and
+it fired the nudge for a file nothing had touched in two sessions on 2026-09-05.
 
 **`hooks/mission.sh` states the user's own requests back, verbatim, at the five moments a
 session is most likely to have lost them.** The mission is this session's prompts as the
@@ -229,7 +266,18 @@ order history-surfer itself resolves)
 filtered on `session_id`, with commands and empty prompts dropped, under a fixed budget:
 the first substantive request up to `MISSION_FIRST_CHARS` (1200), the most recent
 `MISSION_RECENT` (3) up to `MISSION_EACH_CHARS` (400) each, the whole capped at
-`MISSION_MAX_CHARS` (2400). It keeps NO copy of those prompts -- principle i of
+`MISSION_MAX_CHARS` (2400). **Each request is rendered as a prefixed block, never inside
+double quotes**: a header line `(request N of M, T chars)` and then every line of the text,
+the blank ones included, carrying the fixed `> ` prefix -- `PREFIX_LINE` in
+`hooks/mission.sh`, an ASCII constant and deliberately not a knob -- with `> [... N more
+chars]` on its own prefixed line where the cap cut it. The form it replaced was
+`(request 1 of 1) "<text>"`, and it lost the boundary the moment a prompt carried a double
+quote of its own: observed on 2026-09-05 in a real subagent block, where the user's own
+nested imperative could not be told from the agent's task. A prefix cannot be closed early
+by anything the text contains, and a closing quote is one character the user can type; a
+prompt that already begins a line with `> ` merely reads as `> > `. The header sentences,
+the closing sentence and `chars` (jq's `length`, never `${#CTX}`) are unchanged. It keeps
+NO copy of those prompts -- principle i of
 `notes/2026-09-03-mission-and-lessons-design.md`, a single source of truth -- so without
 history-surfer it emits nothing at all, and the `surfer` row of `skillforge doctor` is the
 surface that says why, rather than a second capture path that would drift from the first.
@@ -999,4 +1047,5 @@ there is nothing there to tune.
 - **2026-09-04** A numeric env knob read without the shape+magnitude case guard (''|*[!0-9]*|???????????*) reached bash arithmetic or [ -ge ] three separate times on 2026-09-04 (CI_PRUNE_EVERY=0 divide-by-zero exit 1, MISSION_PRUNE_* integer-expression stderr, CI_EDIT_EVERY/CI_NOW); add the guard with the knob, and the KnobGuardTest shape beside it, never later. <!-- id:n3159951125x355 -->
 - **2026-09-04** Every file:NNN citation in a doc moves with the next code wave: the cold review found seven off by 60-345 lines the same day they were written. Cite a function name, a moment= anchor or a grep, and reserve file:NNN for the script header that lives beside the line. <!-- id:n1788641960x272 -->
 - **2026-09-05** Adding a row to the tuning table in docs/operations.md means moving the spelled-out count phrase ('All sixty-one are environment variables') beside it, because tests/test_doctrine_sync.py::TuningTableTest pins that phrase to the row count; second time a row landed without it on 2026-09-05. <!-- id:n2661101721x298 -->
+- **2026-09-05** Four command-matching rules in hooks were wrong in the same way on 2026-09-05 and every one was caught by a live session, none by a test: remind.sh matched the whole command byte-for-byte (compound forms silent), claim-gate's CI-runner regex missed gh api .../check-runs, compound-improvement read the > in a "<file>" placeholder as a redirect, and the head allowlist exempted env/command as programs. A rule that matches command text ships only after a real claude -p session has been driven through the shape it is meant to catch and one it is meant to miss. <!-- id:n2151519607x568 -->
 <!-- skillnote:end -->

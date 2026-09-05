@@ -33,7 +33,7 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure` and `PostToolUse` with matcher `Bash\|Skill\|mcp__.*`, and on `PreToolUse` with NO matcher at all, so the lesson arm is delivered every tool a session calls (`REPEAT_LEARN_MATCHER` and `REPEAT_PRE_MATCHER = None` in `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`). Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
-|`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature or a path glob. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
+|`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature PER SEGMENT or a path glob. Nothing is normalised at all unless the store holds a command-keyed reminder, which makes the ordinary `Bash` call cheaper than it was; the whole command stays candidate 1, so nothing that matched before can stop matching, and at most `MAX_CANDIDATES` (6) texts are normalised. The splitter is copied byte for byte out of `hooks/repeat-gate.sh`, which exposes no door onto it, and `tests/test_remind.py::SplitterSyncTest` fails on any difference between the two copies. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, and is off until you switch it on** with `SKILL_COMPOUNDER_REVIEW=1`. After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and how to enable it: [What runs against the API](../README.md#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic. `start --from <id>` and `origin --from <id>` record which candidate a forge descends from, and `start --session` the session it began in|
 |`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver. `--lesson <sig>` writes both tiers as one record keyed to a failure the repeat gate learned, `--attach <path>` puts the script beside the note and links it from the line, and `promote <id> --to global` moves a project note up a level: [The lesson](#the-lesson). `--candidate <id>` carries the lineage the note descends from onto the reminder and the ledger row|
@@ -723,7 +723,10 @@ What changed is that each level now has a mechanism instead of a convention.
 
 **Promotion moves; it never copies.** `skillnote promote <id> --to global` takes the line,
 its id, its date, its attachments directory and its reminder to the user level, and leaves a
-one-line tombstone in the project block pointing at where it went. `--to project` is refused,
+one-line tombstone in the project block pointing at where it went. One thing on the line is
+rewritten rather than carried across: an `(attached: .claude/lessons/...)` suffix becomes
+the `~`-anchored form, because the line is about to be read from a file every repository on
+the machine sees and a relative path there names a directory in whichever project is open. `--to project` is refused,
 because the hierarchy only goes up, and promoting an already-moved note exits 0 and does
 nothing. One copy of a lesson is the whole point: two copies at two levels are two things to
 keep in step, and nothing keeps them.
@@ -761,7 +764,16 @@ covered.
 the transcript truncated to each turn's end so nothing was judged against evidence that did
 not exist yet: 6 blocks in 205 messages (2.9%) on the session the rules were tuned against,
 and 3 in 88 (3.4%) on a held-out draw from 14 transcripts of other projects, measured
-2026-08-26. Read the held-out figure, not the tuned one — the tuned corpus was optimistic
+2026-08-26. **Both are upper bounds as of 2026-09-05, and neither was re-run**, because
+the corpus is not in this repository. Two changes landed that day, each of which can only
+remove a block and never add one. The CI-runner recognition gained `gh api` paths ending
+in `check-runs`, `check-suites`, `status` or `actions/runs`, and the tab-row output those
+calls print, so a session that checked CI the way this repository's own note tells it to
+is no longer told nothing in the session ran anything. And a CI phrase inside double
+quotes, or negated within its own sentence by `no`, `not`, `never`, `whether` or `what
+counts as`, is now a mention rather than a claim — the same mention-versus-use argument
+the hypothetical-clause stripper already made, and both came from turns this gate blocked
+that day. Read the held-out figure, not the tuned one — the tuned corpus was optimistic
 by roughly threefold on work the gate had never seen. Of the 3, one is a relayed figure and
 is flagged on purpose; the other 2 quote a number in order to dispute it, and no
 deterministic rule separates quoting a figure from asserting it. The full calibration,

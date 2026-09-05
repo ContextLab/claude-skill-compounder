@@ -1130,7 +1130,11 @@ make them read differently would move a path two shipped scripts already agree o
 
 **Removal is a tombstone, and the asymmetry with a note is deliberate.** A note is one line
 in a `CLAUDE.md` that a person reads and edits, so `skillnote remove` deletes its line
-outright — a commented-out corpse in prose is litter someone has to read past every time. A
+outright — a commented-out corpse in prose is litter someone has to read past every time.
+Since 2026-09-05 that same command also withdraws the reminder a `--lesson` wrote beside
+the line, resolved through the ledger row that recorded both ids; a reminder outliving its
+note goes on stating a lesson that can no longer be read, and `--keep-reminder` is for the
+case where that is wanted on purpose. A
 reminder is a row in an append-only file written by a hook nobody is watching, where one bad
 expression in a rewrite loses every row at once, so removal appends `{"id":…,"t":"remove"}`
 and readers

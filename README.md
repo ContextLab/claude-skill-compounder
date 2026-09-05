@@ -175,7 +175,8 @@ skillnote add --remind --scope project "run the migration before the seed script
 `hooks/remind.sh` states that back when your prompt carries the keyword, or when a `Bash`,
 `Write` or `Edit` call matches the command signature. It denies nothing.
 `skillnote list --scope remind` shows what is armed, and `skillnote remove <id>` disarms
-one.
+one. Removing a lesson note withdraws the reminder written beside it as well, so neither
+outlives the other; `--keep-reminder` leaves it armed.
 
 When the lesson gate declines a call, it hands you the signature and the one command that
 answers it. That command writes both cheap tiers at once:

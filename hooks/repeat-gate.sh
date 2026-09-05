@@ -280,6 +280,101 @@
 # a one-line change when one turns up.
 #
 # ====================================================================================
+# A TWO-CHARACTER PROGRAM HAS NO TOKENS, which is how the rule above lost a real fix.
+#
+# The e2e journey's step 15 fails `ls --nonexistent-flag .` and fixes it with `ls -la .`.
+# That is a fail-then-fix in its plainest possible form, and the gate could not see it. A
+# content token is three characters or more (CROSS-TOOL RECOVERY below), `ls` is two, every
+# other word of the failed call is a flag, and the only thing left is `.`. Zero shared
+# tokens against a floor of two, so the store wrote the `fail` row and no `recover` row --
+# reproduced against the real hook on 2026-09-05, payloads through stdin.
+#
+# THE TOKEN RULE IS NOT LOOSENED. Lowering the floor to one would re-admit the 31 bindings
+# the section above measured as sharing exactly one token, 11 of them the word `echo`. So a
+# SECOND WAY TO EARN THE SAME BINDING is added beside it, and a success binds a `Bash`
+# failure when EITHER holds:
+#
+#   1. the two normalised calls share REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS content tokens
+#      (the rule above, unchanged), or
+#   2. their first segments name the SAME PROGRAM and share at least one NON-FLAG ARGUMENT
+#      WORD -- any length, a flag being a word that starts with `-`.
+#
+# Rule 2 is `head_arg_bind`, it is tried ONLY where rule 1 found nothing, and the row it
+# writes carries `head_arg:true`, so the two kinds of evidence stay countable apart the way
+# `cross_tool` already keeps the third apart. `REPEAT_RECOVERY_HEAD_ARG=0` switches it off.
+#
+# WHAT "FIRST SEGMENT" MEANS HERE, exactly, because every clause of it was paid for. The
+# walk takes words off the front of the ALREADY-NORMALISED call and stops at the first
+# shell operator, so the rule is about ONE command and `cd <P>/x && rm -rf .` cannot bind
+# `cd <P>/x && ls -la .` on the `.` that belongs to two different programs. A leading
+# `VAR=value` is stepped over, as `segment_head` steps over one. `<N>`, `<S>` and `<P>` are
+# stripped from a word before it is judged, so `<P>build.py` reads as the argument it is
+# while `<N>>&<N>` -- what `2>&1` normalises to -- reads as the redirect it is; and a word
+# that is nothing BUT a bare mask is no argument at all, since two calls sharing one share
+# a number or a string that neither of them contains any more.
+#
+# `cd` IS STEPPED OVER, AND THE LIVE STORE IS WHY. Written without that clause the rule
+# added exactly four bindings to the store of 2026-09-05, and all four were wrong: every
+# one had head `cd`, three of them binding on a shared working directory (`<P>/scratchpad`
+# twice, `<P>/proj` once) and the fourth on the word `echo`. `cd` names no operation --
+# the same objection `shell_tool()` raises against `Bash` one level down -- so `cd` and its
+# destination are stepped over, along with the ONE separator that follows them while no
+# head has been found yet, and the head is the program that runs after. Stepping over
+# rather than refusing is what keeps the dominant shape on this machine,
+# `cd <P>/x && <program> ...`, inside the rule at all.
+#
+# WHAT IT WAS MEASURED TO COST AND TO BUY, on the live store of 2026-09-05: 906 rows, 505
+# `fail`, 400 `recover`, 396 of those same-tool `Bash`, and all 396 with a locatable fail
+# row by the join the section above describes -- 383 distinct (fail, success) pairs.
+#
+#   COST. 772 (fail, success) pairs co-occurred in one session and agent within 600
+#   seconds carrying DIFFERENT signatures: successes that were really available to an armed
+#   failure and did not bind it, which is the only population this store can offer for the
+#   question "what would the new rule newly bind". Driven through the real hook, 434 of the
+#   772 bind either way and the head-and-argument rule adds ZERO. Before the `cd` clause it
+#   added the four above, all false.
+#
+#   BUY. Over the 396 bindings the store already holds, with the token rule switched off
+#   (`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS=99`), rule 2 alone reproduces 24 of them: a
+#   `git add -A && git commit ... && git log --oneline -<N>` recovered by the same three
+#   commands under a `cd`, a `grep -c` recovered by a `grep -n`. So it agrees with bindings
+#   the older rule already made, rather than only adding a class of its own.
+#
+# WHAT NEITHER FIGURE IS. Nothing in this store labels a binding true or false, so no
+# precision figure comes out of it; and the pairs the rule EXISTS for -- a real fix the old
+# rule refused -- are absent by construction, because a success that bound nothing was never
+# written down. The e2e pair is exactly that case, which is why it is a test and not a row.
+#
+# WHAT THE RULE ADMITS, stated rather than left to be discovered. One shared subcommand
+# under one program is enough: `gh issue view <N>` binds `gh run view <N>` on `view`, and
+# those are different operations on different resources. The token rule declines that pair
+# (one shared token against a floor of two), so it is a binding this rule ADDS. It is left
+# in, because the 772 real pairs above show the rule adding nothing at all -- tightening
+# here would be tuning against a case nobody has met, and every tightening this rule has
+# taken so far cost a true binding as well. The test named
+# `test_one_shared_subcommand_under_one_program_is_enough_and_that_is_a_limit` is where the
+# evidence goes if a real statement ever shows this shape.
+#
+# THE PAIRS THE RULE IS PINNED AGAINST, each measured through the real hook and each with
+# a test of its own in tests/test_repeat_gate.py:
+#
+#   ls --nonexistent-flag .  -> ls -la .                      BINDS, by rule 2 (`ls`, `.`)
+#   git push origin main     -> git status                    no bind: no shared argument
+#   gh issue view <N>        -> gh pr list                    no bind: no shared argument
+#   gh issue view <N>        -> gh issue view <N> --comments   BINDS, and rule 1 already
+#                                                             bound it
+#   cat notes/x.md           -> cat notes/y.md                rule 2 DECLINES it -- the
+#                                                             only shared word is the head
+#                                                             -- while rule 1 binds it on
+#                                                             {cat, notes} and always did.
+#                                                             The pair binds, and this
+#                                                             change did not alter that.
+#   python module.py         -> python3 -m module             falls to rule 1, the heads
+#                                                             differing; rule 1 finds one
+#                                                             shared token against a floor
+#                                                             of two, so no bind
+#
+# ====================================================================================
 # CROSS-TOOL RECOVERY, and the whole of the evidence it has.
 #
 # The same-tool rule above cannot see the shape the maintainer actually described: a
@@ -698,6 +793,13 @@
 #                                     those rows and a short call like `pwd` carries only
 #                                     one token. Non-shell tools are unaffected: see
 #                                     THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL.
+#   REPEAT_RECOVERY_HEAD_ARG      (1) the SECOND way a `Bash` same-tool binding can be
+#                                     earned: the same first-segment program plus one
+#                                     shared non-flag argument word. Exactly `0` is off;
+#                                     every other value, a typo included, is the shipped
+#                                     default. Tried only where the token rule found
+#                                     nothing, and the row it writes says `head_arg:true`.
+#                                     See A TWO-CHARACTER PROGRAM HAS NO TOKENS.
 #   REPEAT_LESSON_GATE            (1) 0 switches the lesson refusal off. Exactly `0` is
 #                                     off and everything else is on -- the opposite
 #                                     spelling from REPEAT_GATE_REFUSE, and deliberately:
@@ -881,6 +983,14 @@ MIN_TOKENS="${REPEAT_RECOVERY_MIN_TOKENS:-2}"
 # nothing. A misspelling lands on the documented default.
 SAME_TOKENS="${REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS:-2}"
 case "$SAME_TOKENS" in ''|*[!0-9]*) SAME_TOKENS=2 ;; esac
+# THE SECOND WAY A SHELL'S SAME-TOOL BINDING CAN BE EARNED, and it ships ON, so exactly
+# `0` is off and every other value -- a typo included -- lands on the documented default.
+# That is REPEAT_LESSON_GATE's spelling and the reverse of REPEAT_GATE_REFUSE's, for the
+# reason both of those give: the state a misspelling reaches has to be the shipped one.
+# It exists so the rule can be driven both ways against the live store by ONE script; see
+# A TWO-CHARACTER PROGRAM HAS NO TOKENS for what that measured.
+HEAD_ARG="${REPEAT_RECOVERY_HEAD_ARG:-1}"
+case "$HEAD_ARG" in 0) HEAD_ARG=0 ;; *) HEAD_ARG=1 ;; esac
 # EXACTLY `0` IS OFF AND EVERYTHING ELSE IS ON, which is the reverse of REFUSE above and
 # is argued in the ENV stanza: this knob ships ON, so the spelling that survives a typo
 # has to be the documented default rather than the safest-looking one.
@@ -1252,6 +1362,106 @@ overlap_count() {
   printf '%s' "$oc_n"
 }
 
+# ---------------------------------------------------------------- head and arguments
+# THE SECOND WAY A SHELL'S SAME-TOOL BINDING CAN BE EARNED. See A TWO-CHARACTER PROGRAM
+# HAS NO TOKENS in the header for what it is for and what it was measured to add. Splits
+# an ALREADY-NORMALISED, one-lined command into two globals:
+#
+#   hd_head   the first segment's head word -- the program being run -- or empty
+#   hd_args   that segment's non-flag argument words, space-delimited AND space-wrapped
+#             so `overlap_count`'s glob membership test reads it unchanged
+#
+# THE WALK STOPS AT THE FIRST SHELL OPERATOR, which is what keeps this rule about ONE
+# command rather than about a pipeline: `cd <P>/x && rm -rf .` and `cd <P>/y && ls .` must
+# not bind on the `.` that belongs to two different programs. Stopping early can only
+# SHRINK the argument set, so every misjudgement this walk can make costs a binding rather
+# than inventing one -- the direction the whole gate errs in.
+#
+# A BARE MASK IS NOT AN ARGUMENT. `<N>`, `<S>` and `<P>` are what the normaliser writes
+# where an integer, a quoted string and a directory used to be, so two commands sharing
+# one share nothing: `gh issue view <N>` and `gh run view <N>` would otherwise bind on a
+# number neither of them contains any more. The masks are stripped from the word before
+# the operator test, so `<P>build.py` reads as the argument it is while `<N>>&<N>` -- what
+# `2>&1` normalises to -- reads as the redirect it is and ends the segment.
+head_args_of() {
+  hd_head=""; hd_args=" "; ha_skip=0; ha_cd=0
+  ha_rest="$1"
+  while [ -n "$ha_rest" ]; do
+    ha_rest="${ha_rest# }"
+    [ -z "$ha_rest" ] && break
+    ha_w="${ha_rest%% *}"
+    ha_rest="${ha_rest#"$ha_w"}"
+    # The word with every bare mask removed, used ONLY for the operator test and for the
+    # emptiness test below. `$ha_w` itself is what is compared and stored.
+    ha_b="$ha_w"
+    while :; do
+      case "$ha_b" in
+        *'<N>'*) ha_b="${ha_b%%'<N>'*}${ha_b#*'<N>'}" ;;
+        *'<S>'*) ha_b="${ha_b%%'<S>'*}${ha_b#*'<S>'}" ;;
+        *'<P>'*) ha_b="${ha_b%%'<P>'*}${ha_b#*'<P>'}" ;;
+        *) break ;;
+      esac
+    done
+    case "$ha_b" in
+      *';'*|*'|'*|*'&'*|*'('*|*')'*|*'{'*|*'}'*|*'<'*|*'>'*)
+        # THE ONE SEPARATOR THE WALK CROSSES is the one after a `cd` that has not yet
+        # produced a head: `cd <P>/x && <program> ...` is one operation with a preamble,
+        # and it is the dominant shape on this machine. Every other separator ends the
+        # segment, so the rule stays about ONE command and `cd <P>/x && rm -rf .` cannot
+        # bind `cd <P>/x && ls -la .` on the `.` that belongs to two different programs.
+        if [ -z "$hd_head" ] && [ "$ha_cd" = "1" ]; then ha_cd=0; ha_skip=0; continue; fi
+        break ;;
+    esac
+    if [ -z "$hd_head" ]; then
+      # A leading `VAR=value` is not the program. `env` IS one, and is left alone here for
+      # the same reason `segment_head` treats it as a head: naming it would be a rule about
+      # one spelling, and this rule already errs toward binding nothing.
+      case "$ha_w" in *=*) continue ;; esac
+      # `cd` NAMES NO OPERATION, AND ON THE LIVE STORE THAT WAS THE WHOLE OF THE COST. It
+      # is the same objection `shell_tool()` raises against `Bash` one level down: a
+      # command whose head is `cd` says only where it ran, so two of them bind on a
+      # working directory. Every one of the four bindings this rule added to the live
+      # store of 2026-09-05 before this clause had head `cd`, and all four were wrong --
+      # three sharing `<P>/scratchpad` or `<P>/proj` and one sharing `echo`. So `cd` and
+      # its destination are STEPPED OVER rather than refused, and the head is the program
+      # that runs after it. Stepping over keeps the dominant shape on this machine --
+      # `cd <P>/x && <program> ...` -- inside the rule, where refusing `cd` outright would
+      # have put every such command outside it.
+      if [ "$ha_skip" = "1" ]; then ha_skip=0; continue; fi
+      case "$ha_w" in cd|pushd) ha_skip=1; ha_cd=1; continue ;; popd) ha_cd=1; continue ;; esac
+      hd_head="$ha_w"
+      continue
+    fi
+    case "$ha_w" in -*) continue ;; esac
+    [ -z "$ha_b" ] && continue
+    case "$hd_args" in *" $ha_w "*) ;; *) hd_args="$hd_args$ha_w " ;; esac
+  done
+}
+
+# Does the head-and-argument rule bind these two normalised calls? $1 the failed one, $2
+# the one that just succeeded. Both heads must be the SAME PROGRAM and the two must share
+# at least one non-flag argument word. Returns 0 when it binds.
+#
+# NO FORKS: this runs for every armed failure the token rule did not already bind, which on
+# a busy session is every pending line on every successful call.
+head_arg_bind() {
+  head_args_of "$1"; hab_h="$hd_head"; hab_a="$hd_args"
+  [ -z "$hab_h" ] && return 1
+  head_args_of "$2"
+  [ "$hab_h" = "$hd_head" ] || return 1
+  # One shared word is enough because the heads already agree; `overlap_count` counts the
+  # rest for nobody, so the test stops at the first hit.
+  hab_rest="$hd_args"
+  while [ -n "$hab_rest" ]; do
+    hab_rest="${hab_rest# }"
+    [ -z "$hab_rest" ] && break
+    hab_t="${hab_rest%% *}"
+    hab_rest="${hab_rest#"$hab_t"}"
+    case "$hab_a" in *" $hab_t "*) return 0 ;; esac
+  done
+  return 1
+}
+
 # WHICH TOOLS THE TOOL NAME IS EVIDENCE ABOUT, and the only place that decides it. See
 # THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL in the header: `Bash` names no operation,
 # so its same-tool binding is content-tested; every other tool name does, so it is not.
@@ -1262,29 +1472,171 @@ shell_tool() { [ "$1" = "Bash" ]; }
 # sentence and its newlines would end the record.
 oneline() { printf '%s' "$1" | tr '\n\t' '  ' | squeeze; }
 
+# RS (0x1e), the one control byte the pending record does not already spend: US (0x1f)
+# separates its fields and the newline terminates its rows.
+LESSON_RS=$'\036'
+
+# THE ERROR HEAD WITH ITS LINE STRUCTURE INTACT, and that is the whole of the difference
+# from `oneline` above. A Python traceback names the class of the failure on its LAST line,
+# and one-lining the head threw that boundary away before anything could look for it -- see
+# THE ERROR IS A FIRST LINE AND A LAST LINE below for the real statement that cost.
+errline() { printf '%s' "$1" | tr '\t' ' ' | tr '\n' "$LESSON_RS"; }
+
+# Truncation that SAYS SO. $1 the text, $2 the budget. A field that was cut and a field
+# that ended look identical without the ellipsis, and a reader who cannot tell them apart
+# reads a truncated command as the whole command -- which is exactly how a statement of
+# 2026-09-05 reported two different calls as the same one.
+#
+# `cut -c` counts characters under a UTF-8 locale and bytes otherwise (docs/DESIGN.md,
+# shell portability traps). That is why this function's budget is a SHAPE and the byte cap
+# is enforced once, by measurement, over the assembled block.
+cap() {
+  cap_s="$(printf '%s' "$1" | cut -c1-"$2")"
+  if [ "$cap_s" = "$1" ]; then printf '%s' "$cap_s"; else printf '%s…' "$cap_s"; fi
+}
+
+# THE COMMON LEADING WORDS OF TWO CALLS, and each one's tail from the first word where
+# they differ. Sets `sc_pre`, `sc_a` and `sc_b`.
+#
+# WORD-WISE AND NOT CHARACTER-WISE, for two reasons. A divergence reported in the middle of
+# a token tells a reader less than one reported at the argument that changed; and there is
+# no portable way to index a string of glyphs (docs/DESIGN.md), while there is a portable
+# way to peel a word off the front of one.
+split_common() {   # $1 failed, $2 worked
+  sc_pre=""; sc_a="$1"; sc_b="$2"
+  while [ -n "$sc_a" ] && [ -n "$sc_b" ]; do
+    sc_wa="${sc_a%% *}"; sc_wb="${sc_b%% *}"
+    [ "$sc_wa" = "$sc_wb" ] || break
+    case "$sc_a" in *" "*) sc_a="${sc_a#* }" ;; *) sc_a="" ;; esac
+    case "$sc_b" in *" "*) sc_b="${sc_b#* }" ;; *) sc_b="" ;; esac
+    sc_pre="$sc_pre$sc_wa "
+  done
+}
+
+# THE ERROR IS A FIRST LINE AND A LAST LINE, because a traceback puts the answer on the
+# last one. A real statement of 2026-09-05 read
+#
+#   error:   Exit code 1 Traceback (most recent call last): File "/private/tmp/clau
+#
+# -- three lines joined into one by `oneline` and then cut at 70 characters, so the
+# `ImportError:` naming what was actually wrong never reached the session it was written
+# for. The lines arrive RS-separated from `errline`; a head carrying no RS is one line and
+# is printed once rather than as `x … x`. A pending file written by an OLDER version
+# carries a space-joined head, which has no RS either and reads as that single line: the
+# old behaviour, for the one session such a file can live.
+lesson_error() {
+  le_first=""; le_last=""; le_rest="$1"
+  while [ -n "$le_rest" ]; do
+    case "$le_rest" in
+      *"$LESSON_RS"*) le_l="${le_rest%%"$LESSON_RS"*}"; le_rest="${le_rest#*"$LESSON_RS"}" ;;
+      *) le_l="$le_rest"; le_rest="" ;;
+    esac
+    le_l="${le_l# }"; le_l="${le_l% }"
+    [ -z "$le_l" ] && continue
+    [ -z "$le_first" ] && le_first="$le_l"
+    le_last="$le_l"
+  done
+  if [ -z "$le_first" ]; then
+    :
+  elif [ "$le_first" = "$le_last" ]; then
+    cap "$le_first" 200
+  else
+    printf '%s … %s' "$(cap "$le_first" 100)" "$(cap "$le_last" 100)"
+  fi
+}
+
+# THE ONE PLACE THAT KNOWS THE BYTE COUNT. Every budget above is in `cut -c` units, which
+# are characters under a UTF-8 locale and bytes otherwise, so a block of multibyte glyphs
+# can pass every field budget and still run past the cap. This measures what was actually
+# assembled and shrinks it until it fits, and it is where the stated cap becomes true.
+#
+# `wc -c` PADS ITS COUNT WITH LEADING SPACES ON BSD, which is the defect that made
+# CLAIM_GATE_MAX_BYTES dead code for the life of that constant: a numeric guard read the
+# space as non-numeric and zeroed the value. `tr -cd '0-9'` is the fix and the `case` is
+# the belt, here as there.
+fit_bytes() {   # $1 text, $2 byte budget -> stdout
+  fb_s="$1"; fb_i=0
+  while [ "$fb_i" -lt 4 ]; do
+    fb_n="$(printf '%s' "$fb_s" | wc -c | tr -cd '0-9')"
+    case "$fb_n" in ''|*[!0-9]*) break ;; esac
+    [ "$fb_n" -le "$2" ] && break
+    fb_c="$(printf '%s' "$fb_s" | wc -m | tr -cd '0-9')"
+    case "$fb_c" in ''|*[!0-9]*|0) break ;; esac
+    fb_c=$(( fb_c * ( $2 - 8 ) / fb_n ))
+    [ "$fb_c" -lt 40 ] && fb_c=40
+    fb_s="$(printf '%s' "$fb_s" | cut -c1-"$fb_c")…"
+    fb_i=$(( fb_i + 1 ))
+  done
+  printf '%s' "$fb_s"
+}
+
 # THE FACTS the recovery arm emits and the lesson gate quotes back, built in one place and
 # stored ONCE in the marker file, so the two can never say different things about which
-# call failed or which one worked. Every variable part is capped, and the caps are what
-# keep the emitted statement under 700 characters -- tests/test_repeat_gate.py measures it
-# against saturating input rather than trusting this sentence.
+# call failed or which one worked.
+#
+# THE STATEMENT IS UNDER 1200 BYTES, and that is a MEASURED cap rather than the sum of the
+# field budgets: `fit_bytes` weighs what was actually assembled, because `cut -c` counts
+# characters under a UTF-8 locale and bytes otherwise. tests/test_repeat_gate.py drives it
+# with input that saturates both normalisers rather than trusting this sentence.
+#
+# IT WAS 90 CHARACTERS A COMMAND AND 70 FOR THE ERROR UNTIL 2026-09-05, and two real
+# statements that day are why it is not. A statement is delivered ONCE per signature per
+# session, so those budgets were buying nothing and costing the whole content of the arm:
+#
+#   THE TWO COMMANDS CAME OUT IDENTICAL. A long `failed:` and a long `worked:` were both
+#   cut at 90 characters into the same bytes, ending `--output wa`, while the change the
+#   recovery was ABOUT -- `--strategy incremental` becoming `--strategy full` -- sat past
+#   the cut. The arm reported a call recovering itself. So the budgets are raised, a field
+#   that was cut now says so with a visible ellipsis, and where the two truncations would
+#   still be identical the shared head is stated ONCE on a `both:` line and each call is
+#   quoted FROM THE WORD WHERE THEY DIVERGE.
+#
+#   THE ERROR LOST ITS EXCEPTION. `error:` was a `head -3` joined into one line and cut at
+#   70 characters, which on a Python traceback reads
+#     Exit code 1 Traceback (most recent call last): File "/private/tmp/clau
+#   -- three lines of banner and no `ImportError:` at all. The error now carries its LINE
+#   STRUCTURE through the pending record (`errline`) and is quoted as `first … last` when
+#   those differ; the LEARN arm fetches the last non-empty line separately, because
+#   `head -3` had already thrown it away.
 #
 # THE FACTS ARE SHARED; THE COMMAND BLOCK IS NOT, and that split is the whole of the
 # 2026-09-04 change. The statement names both commands, because a person reading their
 # own session's transcript is entitled to know that `skillrepeat dismiss` exists. The DENY
 # names only the one a session can act on. What is quoted back byte for byte is the part
 # that could otherwise disagree, which was never the command list.
-lesson_facts() {   # $1 failed norm, $2 error head, $3 what worked
-  ls_f="$(printf '%s' "$1" | cut -c1-90)"
-  ls_e="$(printf '%s' "$2" | cut -c1-70)"
-  ls_w="$(printf '%s' "$3" | cut -c1-90)"
-  printf '%s' "A call that failed in this session has since succeeded a different way, and
+lesson_facts() {   # $1 failed norm, $2 error head (RS-separated lines), $3 what worked
+  ls_e="$(lesson_error "$2")"
+  ls_f="$(cap "$1" 220)"
+  ls_w="$(cap "$3" 220)"
+  if [ "$ls_f" = "$ls_w" ] && [ "$1" != "$3" ]; then
+    # THE TWO CALLS SURVIVED TRUNCATION AS THE SAME LINE, and that is not a cosmetic
+    # defect: a statement of 2026-09-05 quoted a `failed:` and a `worked:` that were byte
+    # for byte identical, both ending `--output wa`, while the change the recovery was
+    # ABOUT -- `--strategy incremental` becoming `--strategy full` -- sat past the cut. The
+    # arm reported a call recovering itself. So where the head is shared it is stated ONCE
+    # and each call is quoted FROM THE WORD WHERE THEY DIVERGE, which is the only part of
+    # either one a reader needs in order to see what changed.
+    split_common "$1" "$3"
+    ls_body="  both:    $(cap "$sc_pre" 200)
+  failed:  …$(cap "$sc_a" 200)
+  error:   $ls_e
+  worked:  …$(cap "$sc_b" 200)"
+  else
+    ls_body="  failed:  $ls_f
+  error:   $ls_e
+  worked:  $ls_w"
+  fi
+  # 950 BYTES FOR THE FACTS, so that the STATEMENT this block is the body of stays under
+  # 1200: `lesson_statement` adds a fixed six lines plus the signature twice, and a
+  # signature is under 40 characters by construction. The number is enforced, not asserted
+  # -- see `fit_bytes` -- and tests/test_repeat_gate.py measures the assembled statement
+  # against saturating input rather than trusting this sentence.
+  fit_bytes "A call that failed in this session has since succeeded a different way, and
 the store recorded that as its recovery.
 
-  failed:  $ls_f
-  error:   $ls_e
-  worked:  $ls_w
+$ls_body
 
-No lesson references this signature yet."
+No lesson references this signature yet." 950
 }
 
 # THE STATEMENT: the facts, plus the two commands that exist, with the second one labelled
@@ -1491,11 +1843,29 @@ if [ "$event" = "PostToolUseFailure" ]; then
   # success path of every armed session. A pending file written by an OLDER version has
   # four fields, so the three read back empty: no cross-tool binding and no statement,
   # which is the safe direction for a file that lives one session.
+  #
+  # THE LAST NON-EMPTY LINE OF THE ERROR TRAVELS WITH IT, and the `head -3` above is
+  # exactly why it has to be fetched separately. A Python traceback spends its first three
+  # lines on `Exit code 1`, the `Traceback (most recent call last):` banner and the first
+  # stack frame; the line that says WHAT went wrong is the LAST one. On 2026-09-05 a real
+  # statement quoted those three, cut them at 70 characters, and lost the `ImportError:`
+  # that was the whole content of the failure.
+  #
+  # THE ROW'S `err` FIELD IS LEFT ALONE. It is a display field two CLIs already print, and
+  # widening it would change every stored row to repair a statement. Only the pending
+  # record -- which lives one session and feeds nothing but the statement -- carries the
+  # tail. `tail -40` bounds the scan: an error can be megabytes, and a last line worth
+  # quoting is never 40 lines from the end of one.
+  err_last="$(printf '%s' "$err_raw" | tail -40 | grep -v '^[[:space:]]*$' | tail -1 \
+               | cut -c1-200)"
+  err_rec="$err_head"
+  [ -n "$err_last" ] && err_rec="$err_head
+$err_last"
   agent_key
   pf="$DIR/pending/$akey"
   printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
     "$sig" "$ck" "$tool" "$WINDOW" "$(toks_of "$norm")" "$(oneline "$norm")" \
-    "$(oneline "$err_head")" >> "$pf" 2>/dev/null || :
+    "$(errline "$err_rec")" >> "$pf" 2>/dev/null || :
   # A session that fails hundreds of times must not grow this without bound; the oldest
   # armed failures are also the ones whose window has long since run out.
   if [ "$(wc -l < "$pf" 2>/dev/null | tr -cd '0-9')" -gt 200 ] 2>/dev/null; then
@@ -1555,7 +1925,7 @@ if [ "$event" = "PostToolUse" ]; then
     [ -z "${psig:-}" ] && continue
     case "${prem:-}" in ''|*[!0-9]*) continue ;; esac
     [ "$prem" -gt 0 ] || continue
-    bind=""
+    bind=""; hbind=""
     if [ "${ptool:-}" = "$tool" ]; then
       # THE SAME-TOOL RULE IS NOT EVIDENCE FOR A SHELL (header). For `Bash` the tool
       # matching means nothing, so the content test the cross-tool rule uses is applied
@@ -1567,9 +1937,21 @@ if [ "$event" = "PostToolUse" ]; then
         if [ "$snorm_done" = "0" ]; then snorm="$(oneline "$norm")"; snorm_done=1; fi
         if [ -n "${pfnorm:-}" ] && [ "$pfnorm" = "$snorm" ]; then
           bind="same"
-        elif [ -n "${ptoks:-}" ]; then
-          if [ "$ctoks_done" = "0" ]; then ctoks=" $(toks_of "$norm")"; ctoks_done=1; fi
-          if [ "$(overlap_count "$ctoks" "$ptoks")" -ge "$SAME_TOKENS" ]; then bind="same"; fi
+        else
+          if [ -n "${ptoks:-}" ]; then
+            if [ "$ctoks_done" = "0" ]; then ctoks=" $(toks_of "$norm")"; ctoks_done=1; fi
+            if [ "$(overlap_count "$ctoks" "$ptoks")" -ge "$SAME_TOKENS" ]; then bind="same"; fi
+          fi
+          # A TWO-CHARACTER PROGRAM HAS NO TOKENS (header). The token rule above cannot
+          # see `ls --nonexistent-flag .` recovered by `ls -la .` -- `ls` is two characters
+          # and every other shared word is a flag or a `.` -- so the head-and-argument rule
+          # is the SECOND way the same binding can be earned. It is tried only where the
+          # token rule found nothing, and the row records which rule found it, because a
+          # measurement that cannot separate the two cannot be re-run.
+          if [ -z "$bind" ] && [ "$HEAD_ARG" = "1" ] && [ -n "${pfnorm:-}" ] \
+             && head_arg_bind "$pfnorm" "$snorm"; then
+            bind="same"; hbind="head"
+          fi
         fi
       fi
     elif [ -n "${ptoks:-}" ] && [ "$MIN_TOKENS" -gt 0 ]; then
@@ -1585,11 +1967,12 @@ if [ "$event" = "PostToolUse" ]; then
           # that appears on every row to say `no` is a key every one of them has to explain.
           rrow="$(jq -nc --arg ts "$now" --arg sig "$psig" --arg ck "$pck" --arg tool "$tool" \
             --arg norm "$norm" --arg cmd "$cmd" --arg session "$sid" --arg tuid "$tuid" \
-            --arg x "$bind" --arg aid "${aid:-}" \
+            --arg x "$bind" --arg h "${hbind:-}" --arg aid "${aid:-}" \
             '{t:"recover", ts:($ts|tonumber), sig:$sig, ck:$ck, tool:$tool, norm:$norm,
               cmd:$cmd, session:$session, tuid:$tuid,
               agent_id:(if $aid == "" then null else $aid end)}
-             + (if $x == "cross" then {cross_tool:true} else {} end)' 2>/dev/null)"
+             + (if $x == "cross" then {cross_tool:true} else {} end)
+             + (if $h == "head" then {head_arg:true} else {} end)' 2>/dev/null)"
           [ -n "$rrow" ] && printf '%s\n' "$rrow" >> "$STORE" 2>/dev/null
           done_sigs="$done_sigs$psig "
           # THE MARKER IS WRITTEN BESIDE THE ROW, FOR EVERY SIGNATURE THIS SUCCESS BOUND,

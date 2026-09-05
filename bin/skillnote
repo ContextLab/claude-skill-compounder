@@ -1300,6 +1300,26 @@ cmd_remove() {
       '(if $rid == "" then {} else {reminder_id: $rid} end)' 2>/dev/null)"
   [ -n "$RM_EXTRA" ] || RM_EXTRA='{}'
 
+  # THE LESSON'S OTHER HALF GOES FIRST, so the note's own `remove` row is the LAST
+  # `note`/`remove` row the ledger holds for this id -- tests/test_skillrepeat.py reads
+  # the withdrawal off that last row, and a reminder tombstone appended after it made
+  # the last row name the reminder instead (2026-09-05). This arm is the lesson's other half: a reminder written under a DIFFERENT id by
+  # `--lesson`, found through the ledger row that recorded both. Without it the line went
+  # and the reminder kept firing -- measured live on 2026-09-05, a lesson still being
+  # stated back after the note stating it was gone.
+  if [ -n "$rm_kill" ]; then
+    if tombstone_reminder "$rm_kill"; then
+      echo "skillnote: tombstoned reminder $rm_kill in $REMINDERS -- the lesson on $rm_id keyed it on the failing call"
+      rm_hit=1
+      LEDGER_EXTRA="$(jq -n -c --arg rid "$rm_kill" --arg nid "$rm_id" \
+          '{reminder_id: $rid, note_id: $nid}' 2>/dev/null)"
+      [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
+      ledger_append remove reminder "$rm_kill" "" "$REMINDERS" "" "" "" "$rm_root"
+      LEDGER_EXTRA='{}'
+    fi
+  fi
+
+
   for rm_scope in project global; do
     if [ "$rm_scope" = "project" ]; then rm_target="$rm_root/.claude/CLAUDE.md"
     else rm_target="$(claude_dir)/CLAUDE.md"; fi
@@ -1357,21 +1377,7 @@ cmd_remove() {
     fi
   fi
 
-  # AND THIS ARM IS THE LESSON'S OTHER HALF: a reminder written under a DIFFERENT id by
-  # `--lesson`, found through the ledger row that recorded both. Without it the line went
-  # and the reminder kept firing -- measured live on 2026-09-05, a lesson still being
-  # stated back after the note stating it was gone.
-  if [ -n "$rm_kill" ]; then
-    if tombstone_reminder "$rm_kill"; then
-      echo "skillnote: tombstoned reminder $rm_kill in $REMINDERS -- the lesson on $rm_id keyed it on the failing call"
-      rm_hit=1
-      LEDGER_EXTRA="$(jq -n -c --arg rid "$rm_kill" --arg nid "$rm_id" \
-          '{reminder_id: $rid, note_id: $nid}' 2>/dev/null)"
-      [ -n "$LEDGER_EXTRA" ] || LEDGER_EXTRA='{}'
-      ledger_append remove reminder "$rm_kill" "" "$REMINDERS" "" "" "" "$rm_root"
-      LEDGER_EXTRA='{}'
-    fi
-  elif [ -n "$rm_rid" ] && [ "$rm_hit" = "1" ]; then
+  if [ -n "$rm_rid" ] && [ "$rm_hit" = "1" ] && [ -z "$rm_kill" ]; then
     echo "skillnote: reminder $rm_rid was left live in $REMINDERS (--keep-reminder); it still fires on the call the lesson was about"
   fi
 
