@@ -294,6 +294,7 @@ sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
 case "$sid" in ''|.|..) sid=_ ;; esac
 
 transcript="$(jqr '.transcript_path // empty')"
+cwd="$(jqr '.cwd // empty')"
 
 TMP="$(mktemp -d 2>/dev/null)" || exit 0
 cleanup() { [ -n "${TMP:-}" ] && rm -rf "$TMP" 2>/dev/null; }
@@ -876,6 +877,35 @@ echo $((sess_n + 1)) > "$sess_file" 2>/dev/null || :
 find "$STATE_DIR" -mindepth 2 -depth -type f -mtime +2 -delete 2>/dev/null
 find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +2 -empty -exec rmdir {} + 2>/dev/null
 
+# ---------------------------------------------------------------- test-runner hint
+# The wording used to hardcode "./run_tests.sh" -- this repo's own convention -- which is
+# meaningless, or actively wrong, in a project that has no such file. `cwd` (PLATFORM FACTS
+# 1) names the directory the session is actually working in, so a cheap look at what lives
+# there beats a hardcoded guess. Detection is `[ -f ]` builtins choosing AT MOST ONE `grep`
+# call (never layered across candidates, since the chain below short-circuits on the first
+# match), so no run ever spends more than one extra process on this. A missing or
+# unreadable `cwd`, or a directory matching none of the five known shapes, gets the plain
+# fallback rather than a false specific.
+runner_hint=""
+if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+  if [ -f "$cwd/run_tests.sh" ]; then
+    runner_hint="./run_tests.sh"
+  elif [ -f "$cwd/Makefile" ]; then
+    case "$(grep -m1 -E '^(test|check):' "$cwd/Makefile" 2>/dev/null)" in
+      test:*) runner_hint="make test" ;;
+      check:*) runner_hint="make check" ;;
+    esac
+  elif [ -f "$cwd/package.json" ] \
+       && grep -qE '"test"[[:space:]]*:' "$cwd/package.json" 2>/dev/null; then
+    runner_hint="npm test"
+  elif [ -f "$cwd/pyproject.toml" ] || [ -f "$cwd/pytest.ini" ]; then
+    runner_hint="pytest"
+  elif [ -f "$cwd/Cargo.toml" ]; then
+    runner_hint="cargo test"
+  fi
+fi
+[ -z "$runner_hint" ] && runner_hint="the project's test command"
+
 # The Stop `reason` reaches the model as "Stop hook feedback" rather than as tool-result
 # text, and is acted on (PLATFORM FACTS 4), so guidance is appropriate here.
 reason="Hold on -- this closing message asserts something the session did not produce.
@@ -887,8 +917,8 @@ does not count it. The commonest correct fix is therefore to RUN the thing yours
 to delete the number.
 
 Do one of these, and say which:
-  1. Run the command that produces the figure (for a test count in this repo:
-     ./run_tests.sh) and quote the number from its output.
+  1. Run the command that produces the figure (for a test count here:
+     ${runner_hint}) and quote the number from its output.
   2. Derive it in the open, from figures that ARE in the session, and show the arithmetic.
   3. Drop or soften the claim -- \"I did not re-run the suite\" is a complete answer.
 

@@ -148,6 +148,18 @@ class ClaimGateTest(unittest.TestCase):
         p.update(over)
         return p
 
+    def project_dir(self, *empty_files, **files_with_content):
+        """A real directory under self.tmp holding the given files, so the runner-hint
+        detection in hooks/claim-gate.sh (which reads `cwd` off the payload) sees real
+        content rather than the nonexistent "/repo" every other fixture uses."""
+        d = tempfile.mkdtemp(prefix="proj-", dir=self.tmp)
+        for name in empty_files:
+            open(os.path.join(d, name), "w", encoding="utf-8").close()
+        for name, content in files_with_content.items():
+            with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+                fh.write(content)
+        return d
+
     def pre_payload(self, command, session="s1", **over):
         p = {"hook_event_name": "PreToolUse", "session_id": session,
              "transcript_path": self.transcript, "cwd": "/repo",
@@ -201,13 +213,85 @@ class ClaimGateTest(unittest.TestCase):
 
     def test_unsupported_number_blocks_and_names_it(self):
         self.write_transcript(self.a_test_run(443))
-        r = self.run_hook(self.stop_payload("Done. The suite is now 1495 tests."))
+        proj = self.project_dir("run_tests.sh")
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
         reason = self.assert_blocked(r)
         self.assertIn("1495", reason)
         self.assertNotIn("443", reason)
         # The message must be actionable: it names what was missing and what to run.
         self.assertIn("no tool output", reason)
         self.assertIn("./run_tests.sh", reason)
+
+    # --------------------------------------------------- the test-runner hint is derived
+    # A hardcoded "./run_tests.sh" is this repo's own convention and is wrong, or
+    # meaningless, in any project that has no such file. The hint must instead be derived
+    # from what the working directory (`cwd`, carried on every payload) actually holds,
+    # with a plain fallback when none of the known shapes are present.
+    def test_runner_hint_makefile_test_target(self):
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir(**{"Makefile": "test:\n\tpytest\n"})
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("make test", reason)
+        self.assertNotIn("./run_tests.sh", reason)
+
+    def test_runner_hint_makefile_check_target(self):
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir(**{"Makefile": "check:\n\tpytest\n"})
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("make check", reason)
+
+    def test_runner_hint_package_json_scripts_test(self):
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir(**{
+            "package.json": '{"scripts": {"test": "jest"}}',
+        })
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("npm test", reason)
+
+    def test_runner_hint_pyproject_toml(self):
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir(**{"pyproject.toml": "[tool.pytest.ini_options]\n"})
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("pytest", reason)
+
+    def test_runner_hint_pytest_ini(self):
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir(**{"pytest.ini": "[pytest]\n"})
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("pytest", reason)
+
+    def test_runner_hint_cargo_toml(self):
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir(**{"Cargo.toml": "[package]\nname = \"x\"\n"})
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("cargo test", reason)
+
+    def test_runner_hint_falls_back_when_nothing_detected(self):
+        """A scratch project with none of the five known shapes -- this is the live
+        red-team finding: "./run_tests.sh" must not appear where no such file exists."""
+        self.write_transcript(self.a_test_run(443))
+        proj = self.project_dir()
+        r = self.run_hook(self.stop_payload(
+            "Done. The suite is now 1495 tests.", cwd=proj))
+        reason = self.assert_blocked(r)
+        self.assertIn("the project's test command", reason)
+        self.assertNotIn("./run_tests.sh", reason)
+        self.assertNotIn("make test", reason)
+        self.assertNotIn("npm test", reason)
+        self.assertNotIn("cargo test", reason)
 
     def test_comma_grouped_number_matches_plain_evidence(self):
         self.write_transcript(self.a_test_run(1495))
