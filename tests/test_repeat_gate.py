@@ -1254,12 +1254,12 @@ class NormOfTest(GateCase):
 
 
 class WiringTest(unittest.TestCase):
-    """The matcher is a REGEX over the tool name, and since 2026-09-03 it is TWO strings
-    over three events -- the same pair in BOTH install paths:
+    """The matcher is a REGEX over the tool name, and it is TWO strings over three events
+    -- the same pair in BOTH install paths:
 
         PostToolUseFailure  `Bash|Skill|mcp__.*`   the two events that LEARN and RECOVER
         PostToolUse         `Bash|Skill|mcp__.*`
-        PreToolUse          `Bash|Skill`           the one event that REFUSES
+        PreToolUse          no matcher at all      the one event that REFUSES
 
     Measured 2026-08-26 on 2.1.246 (docs/CLAUDE-CODE-BEHAVIOR.md, "A hook matcher is a
     regex over the tool name, not a substring"): of eight matchers on one event, `Bash`,
@@ -1270,18 +1270,28 @@ class WiringTest(unittest.TestCase):
     the widening is unproven rather than proven -- which is a thing the header has to keep
     saying, and which the prose assertions below pin.
 
-    The learning events are wider than the refusing one because nothing on PreToolUse reads
-    a non-Bash payload: `lesson_gate` leaves on `[ "$tool" = "Bash" ]` and the repeat arm's
-    Bash branch exits on everything else, both escape hatches being inside it. Below that
-    it is still a cost bound -- this hook forks on every delivery and the read tools are the
-    high-frequency ones -- and that bound is still the ONLY thing protecting Read/Glob/Grep
-    from this gate. An in-script ALLOWLIST for them stays forbidden: the event is never
-    delivered, so the case arm could never run. (The shape test at the top of the payload
-    read is not that arm. It names what the script has a rule for instead of sparing a tool
-    a refusal, and MatcherDeliveryTest drives it rather than reading the source.)"""
+    The learning events are now NARROWER than the refusing one, which is the reverse of
+    what it was until 2026-09-05, and the two questions are different. To LEARN, the script
+    must compute a signature, and it has a normalising rule for three payload shapes. To
+    REFUSE, it needs no signature for the call in front of it -- the signature is the one
+    the armed marker already names -- so there is nothing about a `Read` it cannot judge,
+    and a `Read` is exactly what the red team walked around a Bash refusal with.
+
+    The cost bound moved into the script with it: the not-armed path is four program
+    starts, pinned by ProcessCountTest. An in-script ALLOWLIST for Read/Glob/Grep stays
+    forbidden, and now for the stronger reason -- those tools are meant to receive the
+    refusal, so a `case "$tool" in Read|Glob|Grep)` arm would be the hole rather than dead
+    code. (The shape test at the top of the payload read is not that arm. It names what
+    the script has a rule for instead of sparing a tool a refusal, it no longer applies to
+    PreToolUse at all, and MatcherDeliveryTest drives it rather than reading the source.)"""
 
     EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
-    MATCHERS = {"PreToolUse": "Bash|Skill",
+    # `None` IS AN ABSENT KEY, NOT A NULL. The refusing event lost its matcher on
+    # 2026-09-05: the lesson gate refuses EVERY tool while a marker is armed, because a
+    # session it refused on a `Bash` call answered with `Read data/f2.txt` and finished
+    # the job. `g.get("matcher")` is what both sides are read with, so an entry that
+    # grew a `"matcher": null` would read the same here and is pinned separately below.
+    MATCHERS = {"PreToolUse": None,
                 "PostToolUse": "Bash|Skill|mcp__.*",
                 "PostToolUseFailure": "Bash|Skill|mcp__.*"}
 
@@ -1307,20 +1317,33 @@ class WiringTest(unittest.TestCase):
         self.assertIn('REPEAT_LEARN_MATCHER = "Bash|Skill|mcp__.*"', src,
                       "the installer and the plugin manifest disagree about the matcher "
                       "the two learning events carry")
-        self.assertIn('REPEAT_PRE_MATCHER = "Bash|Skill"', src,
+        self.assertIn("REPEAT_PRE_MATCHER = None", src,
                       "the installer and the plugin manifest disagree about the matcher "
                       "the refusing event carries")
+        # THE KEY IS ABSENT AND NOT NULL, on BOTH paths. `g.get("matcher")` cannot tell
+        # the two apart, and a `"matcher": null` is a value the harness would have to
+        # interpret -- nothing here has measured what it does with one.
+        for group in manifest["hooks"]["PreToolUse"]:
+            if any("repeat-gate.sh" in h.get("command", "")
+                   for h in group.get("hooks", [])):
+                self.assertNotIn("matcher", group,
+                                 "hooks.json writes a matcher key for the refusing event")
+        self.assertNotIn('"matcher": REPEAT_PRE_MATCHER', src,
+                         "the installer still writes the key unconditionally, so a None "
+                         "matcher would be serialised as a JSON null")
         self.assertNotIn("REPEAT_MATCHER", src,
                          "the single-matcher constant is gone; a surviving reference means "
                          "one of its three uses was left pointing at a name that no longer "
                          "exists, which is an ImportError at install time")
 
     def test_the_gate_carries_no_allowlist_for_a_tool_it_can_never_receive(self):
-        """A `case "$tool" in Read|Glob|Grep) exit 0` arm cannot fire under any of these
-        matchers -- `Bash|Skill` on PreToolUse, `Bash|Skill|mcp__.*` on the two that learn,
-        and no Read, Glob or Grep in either. Shipping a safety check nobody can reach is the
-        defect skills/dead-guard-detection exists for, and re-adding one must fail here
-        rather than read as caution.
+        """A `case "$tool" in Read|Glob|Grep) exit 0` arm is forbidden, and since
+        2026-09-05 for the STRONGER of the two reasons. It used to be dead code: the two
+        learning matchers are `Bash|Skill|mcp__.*` and PreToolUse was `Bash|Skill`, so no
+        Read, Glob or Grep was ever delivered. PreToolUse now carries no matcher, so such
+        an arm WOULD fire -- and firing is the defect, because those tools are precisely
+        what the lesson gate has to refuse. Dead code before, a bypass now; the assertion
+        is the same one either way.
 
         WHAT THIS DOES NOT FORBID is the `[ ]` shape test the payload read now begins with.
         That is not an exemption for a tool: it declines to compute a signature for a
@@ -3497,15 +3520,39 @@ class LessonGateTest(GateCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assert_allowed(self.probe("s3"))
 
-    # ------------------------------------------------------------------ and it lets go
-    def test_it_is_capped_at_REPEAT_LESSON_MAX_DENIES(self):
+    # -------------------------------------------------------- and it does NOT let go
+    def test_the_default_never_lets_go_however_long_the_session_waits(self):
+        """THE DEFECT THIS REPLACES, measured 2026-09-05 against the INSTALLED package
+        over 15 real sessions: the budget was 2 and unadvertised, and 2 of 2 refused
+        sessions spent BOTH denies on the IDENTICAL command -- "Let me try running the
+        script directly with a simpler approach", re-issued verbatim -- then ran it,
+        writing no lesson and no dismissal. A silent expiry is still an expiry.
+
+        The 3rd, 5th and 10th retry are asserted rather than just "a few more", because
+        the old cap let go at the 3rd: a test that stopped at two would pass on the very
+        behaviour this replaces."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
         self.fail_then_fix("s3")
-        self.assert_lesson_deny(self.probe("s3", command="npm install a"))
-        self.assert_lesson_deny(self.probe("s3", command="npm install b"))
-        self.assert_allowed(self.probe("s3", command="npm install c"))
-        self.assert_allowed(self.probe("s3", command="npm install d"))
+        for n in range(1, 11):
+            reason = self.assert_lesson_deny(
+                self.probe("s3", command="npm install left-pad"))
+            if n in (3, 5, 10):
+                self.assertIn("skillnote add --lesson", reason,
+                              "retry %d was refused without naming the way out" % n)
+
+    def test_a_budget_can_be_asked_for_and_then_it_lets_go(self):
+        """The valve is still there for anyone who wants it; it is no longer the default.
+        `REPEAT_LESSON_MAX_DENIES=2` reproduces exactly what shipped until 2026-09-05."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.assert_lesson_deny(self.probe("s3", command="npm install a",
+                                           REPEAT_LESSON_MAX_DENIES=2))
+        self.assert_lesson_deny(self.probe("s3", command="npm install b",
+                                           REPEAT_LESSON_MAX_DENIES=2))
+        self.assert_allowed(self.probe("s3", command="npm install c",
+                                       REPEAT_LESSON_MAX_DENIES=2))
 
     def test_the_cap_is_configurable(self):
         self.fail_then_fix("s1")
@@ -3517,10 +3564,53 @@ class LessonGateTest(GateCase):
                                        REPEAT_LESSON_MAX_DENIES=1))
 
     def test_a_cap_of_zero_refuses_nothing(self):
+        """`0` keeps the meaning it always had. It is the one numeric value that is not a
+        budget, which is why the default is the word `unlimited` and not a number: nothing
+        a reader could mistake for "no limit" is a number here."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
         self.fail_then_fix("s3")
         self.assert_allowed(self.probe("s3", REPEAT_LESSON_MAX_DENIES=0))
+
+    def test_a_typo_lands_on_unlimited_and_not_on_zero(self):
+        """The shape-and-magnitude guard, and its direction. This knob ships ON, so a
+        misspelling must land on the documented default rather than silently switching
+        the refusal off -- the same direction REPEAT_LESSON_GATE's guard errs in. Eleven
+        digits is the magnitude half: 23 nines is all digits and would otherwise reach
+        `[ -ge ]`."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        for value in ("", "two", "unlimited", "-1", "99999999999999999999999", "1.5"):
+            for _ in range(3):
+                self.assert_lesson_deny(
+                    self.probe("s3", command="npm install %s" % (value or "empty"),
+                               REPEAT_LESSON_MAX_DENIES=value))
+
+    def test_a_real_lesson_written_by_the_real_cli_lifts_it(self):
+        """NO FIXTURE ROW. `write_lesson_row` hand-writes the ledger line every other
+        test in this class reads, which pins whichever side its author was looking at;
+        this one runs `bin/skillnote add --lesson` for real, against a real state
+        directory, and then drives the gate that reads what it wrote. That is the only
+        shape that catches the two halves drifting apart."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        sig = self.sig()
+        self.assert_lesson_deny(self.probe("s3", command="npm install before"))
+        project = os.path.join(self.tmp, "project")
+        os.makedirs(project, exist_ok=True)
+        note = subprocess.run(
+            ["bash", os.path.join(REPO, "bin", "skillnote"), "add", "--lesson", sig,
+             "gh is not installed here; the --repo form of the same call works"],
+            cwd=project, input="", capture_output=True, text=True,
+            env=self.env(SKILLNOTE_NOW=self.clock), timeout=180)
+        self.assertEqual(note.returncode, 0, note.stdout + note.stderr)
+        ledger = os.path.join(self.state, "ledger.jsonl")
+        self.assertTrue(os.path.exists(ledger), note.stdout + note.stderr)
+        rows = [json.loads(l) for l in open(ledger, encoding="utf-8") if l.strip()]
+        self.assertTrue([r for r in rows if r.get("lesson_sig") == sig], rows)
+        self.assert_allowed(self.probe("s3", command="npm install after"))
 
     def test_a_double_delivered_pretooluse_refuses_once_and_spends_one(self):
         """Both wirings deliver the same event twice. Two refusals for one call is the
@@ -3537,23 +3627,56 @@ class LessonGateTest(GateCase):
 
     # ------------------------------------------------------------------ what it spares
     def test_the_two_commands_that_lift_it_are_never_themselves_refused(self):
+        """`bash -c 'skillnote list' && echo ok` is NO LONGER among them, and that is the
+        point rather than a casualty: `bash -c` is an unmodelled shape (what it runs is
+        inside a quoted argument) and `echo` is not a CLI that ends anything. The two
+        commands the deny prints, and a `cd` in front of either, are the whole list."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
         self.fail_then_fix("s3")
         for command in ('skillnote add --lesson %s "gh is missing"' % self.sig(),
                         "skillrepeat dismiss %s --why x" % self.sig(),
-                        "bash -c 'skillnote list' && echo ok"):
+                        "skillrepeat show %s" % self.sig(),
+                        'cd repo && skillnote add --lesson %s "x"' % self.sig()):
             self.assert_allowed(self.probe("s3", command=command))
+        self.assert_lesson_deny(self.probe("s3",
+                                           command="bash -c 'skillnote list' && echo ok"))
 
-    def test_the_head_allowlists_are_honoured(self):
+    def test_the_head_allowlists_are_NOT_honoured_by_this_arm(self):
+        """THE INVERSION OF 2026-09-05, and it is the whole substance of the fix. The
+        repeat arm keeps `head_allowlisted` -- guard 3 of BOOTSTRAP DEADLOCK, the commands
+        a session diagnoses with. The lesson gate cannot, because what it refuses is
+        CONTINUING and `cat`, `git` and `ls` are continuing. A session refused on `npm
+        install` and then allowed to `cat` the file it wanted has not been forced to write
+        anything down.
+
+        The runner exemption goes with it, and the deny text is what replaces it: a lesson
+        may record that a failure is EXPECTED, which is what a red suite is."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
         self.fail_then_fix("s3")
         for command in ("cd /tmp", "git status", "ls -la", "jq . x.json",
-                        "./run_tests.sh", "pytest tests/", "npm test"):
-            self.assert_allowed(self.probe("s3", command=command))
-        # NON-VACUITY: the same session, one command off both lists, is refused.
-        self.assert_lesson_deny(self.probe("s3", command="npm install left-pad"))
+                        "cat data/f2.txt", "./run_tests.sh", "pytest tests/", "npm test"):
+            self.assert_lesson_deny(self.probe("s3", command=command))
+        # ...and the deny says the thing that makes a red suite writable-down.
+        reason = self.assert_lesson_deny(self.probe("s3", command="./run_tests.sh"))
+        self.assertIn("EXPECTED", reason)
+
+    def test_the_repeat_arm_still_honours_the_head_allowlists(self):
+        """The inversion above is the LESSON gate's and nothing else's. Driven on the
+        repeat arm with its own switch on and the lesson gate off, so only one rule can
+        answer: `head_allowlisted` and `runner_head` are exactly as they were."""
+        self.teach("gh pr list --limit 5", ["s1", "s2"])
+        for command in ("cd /tmp", "git status", "ls -la", "./run_tests.sh", "npm test"):
+            self.tick()
+            self.assert_allowed(self.run_hook(self.attempt(command, "s3"),
+                                              REPEAT_GATE_REFUSE=1, REPEAT_LESSON_GATE=0))
+        # NON-VACUITY: the arm really is armed and really does deny in this configuration.
+        self.tick()
+        self.assertIn("already failed in",
+                      self.assert_denied(self.run_hook(
+                          self.attempt("gh pr list --limit 5", "s3"),
+                          REPEAT_GATE_REFUSE=1, REPEAT_LESSON_GATE=0)))
 
     def test_a_compound_command_does_not_smuggle_a_head_past_the_allowlist(self):
         """THE SAME FUNCTION, ASKED BY THE OTHER ARM. The lesson gate ships ON, so this
@@ -3565,13 +3688,14 @@ class LessonGateTest(GateCase):
         for command in ("cd build && tar -xf ../release.tgz",
                         "true && tar -xf ../release.tgz",
                         "cat x.tgz | tar -xf -"):
-            self.assert_lesson_deny(self.probe("s3", command=command,
-                                               REPEAT_LESSON_MAX_DENIES=99))
-        # ...and the shapes the split must not cost are still allowed, by the same call.
-        for command in ("cd /tmp && ls -la", "git commit -m 'a && b'",
-                        "cd repo && ./run_tests.sh", "ls 2>&1 | head"):
-            self.assert_allowed(self.probe("s3", command=command,
-                                           REPEAT_LESSON_MAX_DENIES=99))
+            self.assert_lesson_deny(self.probe("s3", command=command))
+        # THE SHAPES THAT USED TO BE THE OTHER HALF OF THIS TEST -- `cd /tmp && ls -la`,
+        # `ls 2>&1 | head` -- are refused now too, because this arm has no head allowlist
+        # any more. They are asserted in test_the_head_allowlists_are_NOT_honoured_by_this_arm
+        # and on the REPEAT arm, which still has one, in
+        # SegmentHeadTest. What has to survive HERE is the split not costing the escape:
+        self.assert_allowed(self.probe(
+            "s3", command="cd repo && skillnote add --lesson %s 'a && b'" % self.sig()))
 
     def test_a_compound_command_reaching_for_the_recording_CLI_still_runs(self):
         """Guard 4 is a SUBSTRING over the whole command and the split does not touch it,
@@ -3613,26 +3737,69 @@ class LessonGateTest(GateCase):
         self.assertIn("Nothing ran and nothing was written", two)
         self.assertIn("skillnote add --lesson", two)
 
-    def test_the_budget_still_works_while_going_unmentioned(self):
-        """The valve is unchanged; only the advertisement is gone. Two refusals on one
-        signature and the third attempt goes through, exactly as before."""
+    def test_a_requested_budget_still_works_while_going_unmentioned(self):
+        """The valve is unchanged where it is asked for; only the advertisement is gone,
+        and the default no longer carries one. Two refusals on one signature under an
+        explicit `REPEAT_LESSON_MAX_DENIES=2` and the third attempt goes through."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
         self.fail_then_fix("s3")
-        self.assert_lesson_deny(self.probe("s3", command="npm install a"))
-        self.assert_lesson_deny(self.probe("s3", command="npm install b"))
-        self.assert_allowed(self.probe("s3", command="npm install c"))
+        self.assert_lesson_deny(self.probe("s3", command="npm install a",
+                                           REPEAT_LESSON_MAX_DENIES=2))
+        self.assert_lesson_deny(self.probe("s3", command="npm install b",
+                                           REPEAT_LESSON_MAX_DENIES=2))
+        self.assert_allowed(self.probe("s3", command="npm install c",
+                                       REPEAT_LESSON_MAX_DENIES=2))
 
-    def test_a_skill_call_is_never_refused_by_it(self):
-        """Bash-only, for the reason the repeat arm is Bash-only: neither escape hatch
-        exists for a Skill call, and refusing one blocks the mechanism this package
-        exists to promote."""
+    # ------------------------------------------------- EVERY tool, not just Bash
+    def test_every_tool_is_refused_while_a_marker_is_armed(self):
+        """SCENARIO 6, MEASURED 2026-09-05 against the installed package: a session this
+        gate refused on a `Bash` call answered `Read data/f2.txt` and finished the job,
+        spending one of its two denies and writing nothing. A gate that refuses one tool
+        refuses nothing.
+
+        `mcp__x__y` is in the list because the matcher is gone rather than widened to a
+        pattern: an absent matcher selects a tool whose name no alternation was written
+        for."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
         self.fail_then_fix("s3")
+        for tool, payload in (("Read", {"file_path": "/repo/data/f2.txt"}),
+                              ("Grep", {"pattern": "x", "path": "/repo"}),
+                              ("Edit", {"file_path": "/repo/a.py", "old_string": "a",
+                                        "new_string": "b"}),
+                              ("Glob", {"pattern": "**/*.py"}),
+                              ("Skill", {"skill": "anything"}),
+                              ("Task", {"prompt": "count the files"}),
+                              ("mcp__github__create_issue", {"owner": "o", "repo": "r"})):
+            self.tick()
+            reason = self.assert_lesson_deny(
+                self.run_hook(self.attempt(payload, "s3", tool=tool)))
+            self.assertIn("skillnote add --lesson", reason,
+                          "%s was refused without naming the way out" % tool)
+
+    def test_the_command_that_lifts_it_is_the_one_thing_that_still_runs(self):
+        """The exemption is not "Bash": it is a Bash call reaching for one of the two CLIs.
+        Same session, same marker, one call through and one refused."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        self.assert_allowed(self.probe(
+            "s3", command='skillnote add --lesson %s "gh is missing"' % self.sig()))
         self.tick()
-        self.assert_allowed(self.run_hook(self.attempt({"skill": "anything"}, "s3",
-                                                       tool="Skill")))
+        self.assert_lesson_deny(self.run_hook(
+            self.attempt({"file_path": "/repo/data/f2.txt"}, "s3", tool="Read")))
+
+    def test_a_session_with_no_marker_is_not_refused_on_any_tool(self):
+        """NON-VACUITY for the widened event, and the thing that would make it unusable if
+        it were wrong: with no recovery bound, every tool goes through untouched."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1", error=self.ERR))
+        for tool, payload in (("Read", {"file_path": "/repo/a.py"}),
+                              ("Skill", {"skill": "anything"}),
+                              ("Task", {"prompt": "count the files"})):
+            self.tick()
+            self.assert_allowed(self.run_hook(self.attempt(payload, "s1", tool=tool)))
+        self.assert_allowed(self.probe("s1", command="npm install left-pad"))
 
     def test_a_call_with_no_tool_use_id_is_not_refused(self):
         """An unclaimed refusal is emitted TWICE under the double delivery both wirings
@@ -3891,6 +4058,217 @@ class SegmentHeadTest(GateCase):
                                  capture_output=True, text=True, env=self.env(),
                                  timeout=180).stdout.strip()
             self.assertEqual(got, want, command)
+
+
+# ====================================================== a word that runs the next word
+class PrefixRunnerTest(GateCase):
+    """`env` ON AN ALLOWLIST IS `env` EXEMPTING EVERYTHING.
+
+    Measured live 2026-09-05 against the installed package, session 8449d34a: the same
+    session was DENIED `python3 scripts/count_words.py --file data/f2.txt` and then RAN
+    `env python3 scripts/count_words.py --file data/f2.txt`. `env`, `command`, `source`
+    and `.` all sat on `head_allowlisted` as though they were inspection commands; every
+    one of them runs the next word, or a whole file.
+
+    Reproducible with no store and no session at all:
+
+        printf 'env python3 x.py' | bash hooks/repeat-gate.sh --eligible-of Bash
+
+    answered `exempt-allowlist` before this change.
+
+    THE TWO REPAIRS RUN IN OPPOSITE DIRECTIONS. A prefix runner is STEPPED OVER to the
+    program it runs, so the program is what gets judged. A shape whose program cannot be
+    read off the argv at all -- `source`, `.`, `eval`, `sh -c`, `xargs` -- is simply on no
+    list, so its head is judged and found on neither. Both land on "judge what will run,
+    and refuse the exemption when that cannot be known"."""
+
+    def verdict(self, command):
+        return subprocess.run(["bash", HOOK, "--eligible-of", "Bash"], input=command,
+                              capture_output=True, text=True, env=self.env(),
+                              timeout=180).stdout.strip()
+
+    def test_a_prefix_runner_is_judged_by_the_program_it_runs(self):
+        for command in ("env python3 x.py",
+                        "command python3 x.py",
+                        "nohup python3 x.py &",
+                        "time python3 x.py",
+                        "sudo -n python3 x.py",
+                        "sudo -u root python3 x.py",
+                        "exec python3 x.py",
+                        "nice -n 5 python3 x.py",
+                        "nice -5 python3 x.py",
+                        "timeout 600 python3 x.py",
+                        "timeout -s KILL 30s python3 x.py",
+                        "caffeinate -i python3 x.py",
+                        "env FOO=1 BAR=2 python3 x.py",
+                        "env -u PYTHONPATH python3 x.py",
+                        "/usr/bin/env python3 x.py"):
+            self.assertEqual(self.verdict(command), "eligible", command)
+
+    def test_the_same_prefix_runners_carry_a_real_exemption_through(self):
+        """NON-VACUITY, and it is the half that makes the walk a walk rather than a ban:
+        stepping over `env` has to find `git` as readily as it finds `python3`."""
+        for command in ("env git status",
+                        "sudo -n ls -la",
+                        "nice -n 5 cat x",
+                        "env -u FOO cat x"):
+            self.assertEqual(self.verdict(command), "exempt-allowlist", command)
+        for command in ("timeout 600 ./run_tests.sh",
+                        "env pytest tests/",
+                        "nohup make build &"):
+            self.assertEqual(self.verdict(command), "exempt-runner", command)
+
+    def test_a_runner_that_runs_nothing_is_judged_on_its_own_name(self):
+        """A bare `env` prints the environment; `command -v x` is a lookup and starts no
+        process. Both are what `which` is, and both stay exempt -- which is also the one
+        verdict the live-store join would otherwise have moved."""
+        for command in ("env", "command -v jq", "command -V jq",
+                        "command -v podman colima orb 2>&1"):
+            self.assertEqual(self.verdict(command), "exempt-allowlist", command)
+
+    def test_a_shape_whose_program_cannot_be_read_is_not_exempt(self):
+        """FAIL CLOSED, which is this function's direction everywhere. `source` and `.`
+        run a FILE; `eval` and `sh -c` run a string; `xargs` takes its program from stdin.
+        None of them can be judged by walking the argv, so none of them is on a list."""
+        for command in ("source x.sh",
+                        ". x.sh",
+                        ". ./venv/bin/activate",
+                        'eval "$c"',
+                        "bash -c 'python3 x.py'",
+                        "sh -c 'python3 x.py'",
+                        "zsh -c 'python3 x.py'",
+                        "xargs rm < list.txt",
+                        "env --bogus-flag cat x",
+                        "timeout --bogus 600 cat x",
+                        "sudo --bogus cat x"):
+            self.assertEqual(self.verdict(command), "eligible", command)
+
+    def test_the_arm_agrees_with_the_door_on_the_repro(self):
+        """The door is a read-only view of the arm's rules, so the REAL arm is driven on
+        the same shape. `env` in front of a command is its own callkey -- the store keys
+        the text it was given -- so what this pins is that the `env` form, having failed
+        in two earlier sessions, is now refused where the exemption used to spare it.
+
+        NON-VACUITY comes from the bare form beside it: both refuse now, and before this
+        change the first of them did and the second did not."""
+        env_form = "env python3 scripts/count_words.py --file data/f2.txt"
+        bare_form = "python3 scripts/count_words.py --file data/f2.txt"
+        self.teach(env_form, ["s1", "s2"])
+        self.teach(bare_form, ["s1", "s2"])
+        self.tick()
+        self.assert_denied(self.run_hook(self.attempt(bare_form, "s3")))
+        self.tick()
+        self.assert_denied(self.run_hook(self.attempt(env_form, "s4")))
+        # ...and the door says the same about both, which is what the two instruments read.
+        self.assertEqual(self.verdict(env_form), "eligible")
+        self.assertEqual(self.verdict(bare_form), "eligible")
+
+
+# ================================================== what it costs when it does nothing
+class ProcessCountTest(GateCase):
+    """THE COST MODEL IS HOW MANY PROGRAMS RUN, so that is what is pinned.
+
+    The refusing event lost its matcher on 2026-09-05, so this hook is now forked for
+    EVERY tool call a session makes -- twice over with both wirings active. A stopwatch
+    assertion tight enough to catch one added `jq` is tight enough to flake on a loaded
+    machine; counting the execs is deterministic and fails for exactly the reason the
+    budget is ever blown. The method is tests/test_precompact.py::ProcessCountTest's: every
+    external the script can reach is shimmed with a script that records its own name and
+    then execs the real program, so behaviour is unchanged and the log is complete.
+
+    FOUR, and the list is the whole of it: `cat` reads the payload, one `jq` prints the
+    four fields the script dispatches on, and `tr` and `cut` are the identity sanitiser --
+    which is byte-identical in twelve shipped scripts and may not be replaced by a cheaper
+    spelling here. `date` is excluded and bounded separately for the reason precompact's
+    pin excludes it: one stamp is one start on BSD and two on GNU, and folding that
+    variance in is what forces slack into a ratchet."""
+
+    SHIMMED = ("jq", "cat", "tr", "cut", "date", "find", "wc", "mkdir", "rmdir", "rm",
+               "head", "sed", "awk", "cksum", "mktemp", "stat", "grep", "sort", "uniq")
+
+    def shim_path(self):
+        bindir = os.path.join(self.tmp, "shims")
+        os.makedirs(bindir, exist_ok=True)
+        self.execlog = os.path.join(self.tmp, "execs.log")
+        for name in self.SHIMMED:
+            real = shutil.which(name, path=BASE_PATH)
+            if not real:
+                continue
+            p = os.path.join(bindir, name)
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nprintf '%%s\\n' %s >> '%s'\nexec '%s' \"$@\"\n"
+                         % (name, self.execlog, real))
+            os.chmod(p, 0o755)
+        return "%s:%s" % (bindir, BASE_PATH)
+
+    def execs(self):
+        if not os.path.exists(self.execlog):
+            return []
+        with open(self.execlog, encoding="utf-8") as fh:
+            return [l for l in fh.read().splitlines() if l]
+
+    @staticmethod
+    def without_date(runs):
+        return [r for r in runs if r != "date"]
+
+    def env(self, **extra):
+        extra.setdefault("REPEAT_GATE_REFUSE", None)
+        return GateCase.env(self, **extra)
+
+    def run_counted(self, payload, **extra):
+        body = json.dumps(payload)
+        return subprocess.run(["bash", HOOK], input=body, capture_output=True, text=True,
+                              env=self.env(PATH=self.shim_path(), **extra), timeout=180)
+
+    def test_the_not_armed_path_of_a_non_bash_tool_runs_four_programs(self):
+        """The path almost every delivery takes now: a `Read` in a session that has bound
+        no recovery. It must not read the store, must not `mktemp`, and must not pay a
+        second `jq` for a tool_use_id it will never use."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1", error=GH_ERR))
+        r = self.run_counted(self.attempt({"file_path": "/repo/a.py"}, "s1", tool="Read"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "", r.stdout)
+        runs = self.execs()
+        for never in ("mktemp", "find", "wc", "mkdir", "cksum", "sed"):
+            self.assertNotIn(never, runs,
+                             "a delivery with no marker armed ran %s: %r" % (never, runs))
+        self.assertLessEqual(len(self.without_date(runs)), 4,
+                             "the not-armed path ran %d programs besides date (%r); this "
+                             "runs on every tool call, so an added process needs a reason "
+                             "recorded next to it" % (len(self.without_date(runs)), runs))
+        self.assertLessEqual(runs.count("date"), 1,
+                             "one clock read at most on this path: %r" % runs)
+
+    def test_the_not_armed_path_of_a_bash_call_costs_the_same(self):
+        """A `Bash` call is not special until a marker is armed: the command text is read
+        only inside the lesson gate, which has already left."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1", error=GH_ERR))
+        r = self.run_counted(self.attempt("npm install left-pad", "s1"))
+        self.assertEqual(r.stdout, "", r.stdout)
+        self.assertLessEqual(len(self.without_date(self.execs())), 4,
+                             "%r" % self.execs())
+
+    def test_a_delivery_this_script_ignores_costs_two(self):
+        """A `PreCompact` or a `SessionStart` reaching this hook by a wiring mistake pays
+        the payload read and the one jq, and nothing else."""
+        self.tick(); self.run_hook(self.failure("gh pr list", "s1", error=GH_ERR))
+        p = self.attempt("ls", "s1")
+        p["hook_event_name"] = "PreCompact"
+        r = self.run_counted(p)
+        self.assertEqual(r.stdout, "", r.stdout)
+        self.assertLessEqual(len(self.without_date(self.execs())), 2,
+                             "%r" % self.execs())
+
+    def test_NON_VACUITY_the_armed_path_really_does_cost_more(self):
+        """A pin that could pass on a script doing nothing is not a pin. Same tool, same
+        session, one recovery bound: the count goes up and the store is read."""
+        self.tick(); self.run_hook(self.failure(FAILING_CMD, "s1", error=GH_ERR))
+        self.tick(); self.run_hook(self.success(FIX_CMD, "s1"))
+        r = self.run_counted(self.attempt({"file_path": "/repo/a.py"}, "s1", tool="Read"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        runs = self.without_date(self.execs())
+        self.assertGreater(len(runs), 4,
+                           "the armed path ran no more than the not-armed one: %r" % runs)
 
 
 if __name__ == "__main__":

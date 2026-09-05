@@ -179,15 +179,29 @@ COMMIT_MATCHER = "Bash"
 # observed arriving at a hook here, so this widening is UNPROVEN rather than proven, and
 # the store is the only surface that can settle it.
 REPEAT_LEARN_MATCHER = "Bash|Skill|mcp__.*"
-# THE EVENT THAT REFUSES STAYS NARROW, and that is evidence rather than caution. Both
-# PreToolUse arms are Bash-only inside the script: `lesson_gate` leaves on
-# `[ "$tool" = "Bash" ]`, and the repeat refusal's `if [ "$tool" = "Bash" ]` branch exits on
-# everything else because both of its escape hatches -- the `*skillrepeat*` guard and
-# `allowlisted_head` -- live inside that branch. Nothing on that event reads a non-Bash
-# payload, so widening it would buy a fork per MCP call and no behaviour at all. (`Skill` is
-# inert there for the same reason. It is left alone because narrowing a shipped matcher is
-# its own decision needing its own evidence, not a tidy-up done in passing.)
-REPEAT_PRE_MATCHER = "Bash|Skill"
+# THE EVENT THAT REFUSES CARRIES NO MATCHER AT ALL since 2026-09-05, which is the same
+# shape as `mission.sh`'s PreToolUse entry below and the reverse of what this constant used
+# to say. It read `Bash|Skill` on the argument that nothing on that event reads a non-Bash
+# payload. That argument was answered by a measurement rather than an opinion: in a live red
+# team of the installed package, a session the lesson gate refused on a `Bash` call answered
+# with `Read data/f2.txt` and finished the job. Issue #43 asks for a session to be forced to
+# write a lesson down "before continuing", and continuing is ANY tool -- so the gate now
+# refuses every tool while a lesson marker is armed, and the one exemption
+# (`lesson_cli_head`, a command reaching for `skillnote` or `skillrepeat`) lives in the
+# script where a matcher could never express it.
+#
+# THE COST IS REAL AND IS BOUNDED IN THE SCRIPT, not here. This is now a fork per tool call,
+# twice over with both wirings active, so the path taken when no marker is armed was cut to
+# four program starts -- `cat`, `jq`, `tr`, `cut` -- and pinned by
+# tests/test_repeat_gate.py::ProcessCountTest, which fails on the fifth. The two LEARNING
+# events keep their matcher: those must compute a signature, and this script has a
+# normalising rule for three payload shapes and no more.
+#
+# `None` rather than `"*"`, and the entry below omits the key entirely. An absent matcher is
+# the shape already measured to reach every tool on this event; `*` was one of the eight
+# probed matchers and reached a `Bash` call, but nothing here has measured it against a tool
+# whose name it would have to match as a regex, and there is no reason to find out.
+REPEAT_PRE_MATCHER = None
 # The reminder hook's PreToolUse matcher. Deliberately NOT `EDIT_MATCHER`, which is the
 # same three tools in a different order: these are two independent decisions about two
 # different scripts, and sharing the constant would make a change to one silently rewire
@@ -898,10 +912,17 @@ def merge_hooks(settings, app_home):
                                "timeout": 10}]})
         _pre_wired = True
     if _has_gate(app_home, "repeat-gate.sh"):
-        pre.append({"matcher": REPEAT_PRE_MATCHER,
-                    "hooks": [{"type": "command",
-                               "command": _gate_cmd(app_home, "repeat-gate.sh"),
-                               "timeout": 10}]})
+        # THE KEY IS OMITTED WHEN THE MATCHER IS `None`, never written as a null. A
+        # `"matcher": null` is a value the harness has to interpret and nothing here has
+        # measured what it does with one; an absent key is the shape `mission.sh` has
+        # shipped on this event since 2026-09-03. Written as a branch rather than a dict
+        # comprehension so that a future matcher for this entry is one word to restore.
+        _repeat_pre = {"hooks": [{"type": "command",
+                                  "command": _gate_cmd(app_home, "repeat-gate.sh"),
+                                  "timeout": 10}]}
+        if REPEAT_PRE_MATCHER is not None:
+            _repeat_pre = dict(matcher=REPEAT_PRE_MATCHER, **_repeat_pre)
+        pre.append(_repeat_pre)
         _pre_wired = True
     # FOURTH of the five, and the order is pinned by tests/test_plugin.py, which compares
     # the two wirings' matcher lists POSITIONALLY. It is also one of the two PreToolUse
@@ -913,8 +934,9 @@ def merge_hooks(settings, app_home):
                                "command": _gate_cmd(app_home, "remind.sh"),
                                "timeout": 10}]})
         _pre_wired = True
-    # LAST, and the only one of the five with no matcher: it is not looking for a call,
-    # it is counting them. See MISSION_MATCHER's absence above. It denies nothing either.
+    # LAST, and one of the TWO of the five with no matcher since 2026-09-05 -- the repeat
+    # gate is the other, for a different reason. This one is not looking for a call, it is
+    # counting them. See MISSION_MATCHER's absence above. It denies nothing either.
     if _has_gate(app_home, "mission.sh"):
         pre.append({"hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "mission.sh"),

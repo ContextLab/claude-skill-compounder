@@ -420,33 +420,52 @@
 #
 # SO SAY EXACTLY WHAT LIFTS IT. This paragraph used to end "the refusal is always
 # liftable, because `skillrepeat dismiss` has no such restriction", and that stopped
-# being true the day a model's dismissal stopped being honoured. Three things lift the
-# refusal and only three: a STANDING LESSON for the signature, adds minus removed ids,
-# which `--lesson` is the sole writer of and which is the one route it can refuse; a
+# being true the day a model's dismissal stopped being honoured. TWO things lift the
+# refusal and only two: a STANDING LESSON for the signature, adds minus removed ids,
+# which `--lesson` is the sole writer of and which is the one route it can refuse; and a
 # `dismiss` row a PERSON wrote, which carries no Bash restriction and lifts any
-# signature; and the deny budget below, REPEAT_LESSON_MAX_DENIES refusals per signature
-# per session, which runs out either way. A dismissal written from inside a session is
+# signature. The third used to be the deny budget running out, and it is gone at the
+# default -- see AND IT NO LONGER LETS GO. A dismissal written from inside a session is
 # stamped `actor:"model"` and lifts NOTHING -- WHO MAY DISMISS, above -- so for a
-# non-Bash signature there is nothing a session can do on its own but spend the budget.
-# That is the honest shape of it, and it is why the deny below prints one command and
-# marks the other "a person at a terminal only".
+# non-Bash signature there is nothing a session can do on its own, and the honest answer
+# there is that a person has to type one line. That is why the deny below prints one
+# command and marks the other "a person at a terminal only".
 #
-# AND IT LETS GO, SILENTLY. At most REPEAT_LESSON_MAX_DENIES refusals per signature per
-# session, after which the call goes through whatever the store says. A wall that never
-# lifts is a wall a session learns to route around, and the one thing this gate may not
-# become is noise. The head allowlists apply unchanged, plus `skillnote`, so neither
-# command this arm names can ever itself be refused.
+# AND IT NO LONGER LETS GO. REPEAT_LESSON_MAX_DENIES defaults to `unlimited`, and the two
+# exits are a STANDING LESSON on the ledger and a HUMAN's `skillrepeat dismiss`. Nothing
+# else ends it -- not waiting, not rewording, not a model's own dismissal.
 #
-# THE DENY DOES NOT SAY SO, AND THAT OMISSION IS AS DELIBERATE AS THE ONE ABOUT
-# `skillrepeat dismiss`. The reason text used to end "It is spent at most 2 times on one
+# THE BUDGET WAS THE HOLE AND IT WAS MEASURED TWICE. It shipped at 2, silently, on the
+# argument that a wall a session cannot lift is a wall it learns to route around. What was
+# measured on 2026-09-05, against the INSTALLED package over 15 real sessions: 2 of 2
+# refused sessions spent BOTH denies on the IDENTICAL command -- "Let me try running the
+# script directly with a simpler approach", re-issued verbatim -- and then ran it, writing
+# no lesson and no dismissal. The silence did not help: it made the wall look like weather
+# rather than a decision. On the live store of that day, 2 of the 16 sessions that had ever
+# armed a lesson marker reached the cap, and both were that red team; the sentence this
+# stanza used to carry, that none had reached two, was false the day it was checked.
+#
+# WHAT A FALSE POSITIVE NOW COSTS, stated plainly because it is the argument for removing
+# the valve rather than raising it: ONE LESSON LINE, once, for that signature forever. A
+# standing lesson lifts the refusal for good, and a lesson is allowed to say that the
+# failure is EXPECTED -- a red-green test run, a probe whose error is the answer, a store
+# whose shape match is stale. The deny text says so in one clause, so a session holding a
+# real false positive has a true sentence to write rather than a wall to outwait. Against
+# that, a budget buys a session the right to skip the sentence, which is the whole of what
+# the gate is for.
+#
+# THE DENY STILL DOES NOT NAME THE KNOB, and that omission is as deliberate as the one
+# about `skillrepeat dismiss`. The reason used to end "It is spent at most 2 times on one
 # signature in one session, after which the call goes through whatever this store says",
-# and a session red-teaming this gate on 2026-09-04 read that as a schedule: it retried
-# until the budget ran out and wrote no lesson at all. A refusal that advertises its own
-# expiry is an instruction to wait it out. So the reason states the refusal, the
-# fail-then-fix facts and the ONE command that lifts it, and says nothing about the
-# budget; REPEAT_LESSON_MAX_DENIES keeps working exactly as before, as the safety valve
-# that stops a false positive trapping a session, which is a property of the gate and not
-# a term offered to the session in front of it.
+# and a session red-teaming this gate on 2026-09-04 read that as a schedule. There is now
+# no schedule to advertise; a knob that names one is still not offered to the session.
+# REPEAT_LESSON_MAX_DENIES=<N> restores a budget of N for anyone who wants the valve back,
+# and REPEAT_LESSON_MAX_DENIES=0 means what it always meant, which is never refuse.
+#
+# THE HEAD ALLOWLISTS DO NOT APPLY TO THIS ARM ANY MORE. See `lesson_cli_head`: the only
+# call that runs while a marker is armed is one that reaches for `skillnote` or
+# `skillrepeat`, so the command that ends the refusal can never itself be refused, and
+# nothing else can be mistaken for it.
 #
 # IT IS ON BY DEFAULT AND THE REPEAT ARM IS NOT, and the asymmetry is the population each
 # one can reach. The repeat arm's population was measured and found empty (issue #27): 81
@@ -465,6 +484,12 @@
 #      REPEAT_MIN_SESSIONS distinct EARLIER sessions, so nothing a session does to itself
 #      can lock it out mid-flight.
 #   2. Deny-once-per-session-per-signature, above. Every refusal has a next attempt.
+# THREE OF THE FOUR BELOW BELONG TO THE REPEAT ARM ONLY. The lesson gate keeps 1 -- this
+# session's own failures never count -- and replaces 2, 3 and 4 with a single exemption
+# for the command that ENDS it (`lesson_cli_head`). It has to: the thing it refuses is
+# continuing, and `cat`, `git` and `ls` are continuing. What stops it being a trap is that
+# the escape is one command, is printed in the refusal, and can never itself be refused.
+#
 #   3. A HEAD ALLOWLIST, APPLIED TO EVERY SEGMENT AND NOT TO THE FIRST WORD. If the
 #      command's every segment head is one of the navigation, inspection, git, jq or
 #      skill* commands below, the call is never refused. `cd`, `ls`, `git`, `jq`, `cat`,
@@ -478,13 +503,20 @@
 #   4. Any command mentioning `skillrepeat` anywhere is never refused, so a compound
 #      command that clears the store cannot itself be blocked.
 #
-# WHAT THE WIRING ADMITS, AND WHAT THAT COSTS. It is TWO MATCHERS OVER THREE EVENTS since
-# 2026-09-03, the same pair in BOTH install paths (skill_compounder/installer.py and
-# hooks/hooks.json):
+# WHAT THE WIRING ADMITS, AND WHAT THAT COSTS. It is TWO MATCHERS OVER THREE EVENTS, the
+# same pair in BOTH install paths (skill_compounder/installer.py and hooks/hooks.json):
 #
 #   PostToolUseFailure   `Bash|Skill|mcp__.*`   the two events that LEARN and RECOVER
 #   PostToolUse          `Bash|Skill|mcp__.*`
-#   PreToolUse           `Bash|Skill`           the one event that REFUSES
+#   PreToolUse           NO MATCHER AT ALL      the one event that REFUSES
+#
+# THE REFUSING EVENT LOST ITS MATCHER ON 2026-09-05, and it is the same shape as
+# hooks/mission.sh's PreToolUse entry, which has never carried one. The reason is measured:
+# a session this gate refused on a `Bash` call answered with `Read data/f2.txt` and
+# finished the job (red team of the installed package, scenario 6). "Force claude to write
+# it down before continuing" is a claim about CONTINUING, and continuing is any tool. So
+# the lesson gate now refuses every tool while a marker is armed; see IT REFUSES EVERY
+# TOOL below for the one exemption and for what it costs.
 #
 # A matcher is a REGEX over the tool name, not a substring -- measured 2026-08-26 on
 # 2.1.246: of eight matchers on one event, `Bash`, `^Ba`, `Ba.*`, `Bash|mcp__.*`, `*` and
@@ -495,23 +527,25 @@
 # about whether `mcp__.*` reaches a real MCP tool, and none has been observed arriving
 # here, so the MCP half is UNPROVEN rather than proven.
 #
-# THE LEARNING EVENTS ARE WIDER THAN THE REFUSING ONE ON PURPOSE -- learn broadly, refuse
-# narrowly, the same asymmetry that records a `Skill` failure and never denies one. Nothing
-# on PreToolUse reads a non-Bash payload: `lesson_gate` leaves on `[ "$tool" = "Bash" ]`,
-# and the repeat arm's `if [ "$tool" = "Bash" ]` branch exits on everything else because
-# both of its escape hatches live inside it. Widening that event would buy a fork per MCP
-# call and no behaviour at all. (`Skill` is inert there for the same reason; narrowing a
-# shipped matcher is its own decision needing its own evidence, and is not done in passing.)
+# THE LEARNING EVENTS ARE STILL NARROWER THAN THE REFUSING ONE, WHICH IS THE REVERSE OF
+# WHAT IT WAS, and the two questions really are different. To LEARN, this script must
+# compute a signature, and it has a normalising rule for exactly three payload shapes; a
+# `Read` failure keyed by `norm_structured` is a row nothing can act on. To REFUSE, it
+# needs no signature for the call in front of it at all -- the signature is the one the
+# marker already names -- so there is nothing about a `Read` it cannot judge.
 #
-# The bound is still a COST bound: this hook forks a process on every delivery, twice over
-# with both wirings active, and the read tools are the high-frequency ones. What it still
-# costs is reach -- a Read, a Glob or a Grep that fails the same way in session after
-# session is invisible here, and the store will never carry it.
-# It is also the WHOLE of the protection those tools get. There is no in-script allowlist
-# for them, and there must not be one: a `case "$tool" in Read|Glob|Grep)` arm under any of
-# these matchers is a guard with no live path, which is precisely the defect
-# skills/dead-guard-detection exists to catch. Widening the matcher and re-adding the arm
-# are one decision, not two.
+# WHAT IT COSTS IS REAL AND IS PAID ON EVERY TOOL CALL. This hook forks a process on every
+# delivery, twice over with both wirings active, and the read tools are the high-frequency
+# ones. So the not-armed path was cut to FOUR program starts -- `cat`, `jq`, `tr`, `cut` --
+# and pinned there by tests/test_repeat_gate.py::ProcessCountTest, which fails on the
+# fifth. A session that has bound no recovery has no `lessons/<sid>` directory, and that
+# `[ -d ]` is a builtin.
+#
+# WHAT IT STILL COSTS IS REACH ON THE LEARN SIDE: a Read, a Glob or a Grep that fails the
+# same way in session after session is invisible to the store, and always was. There is no
+# in-script allowlist for them and there must not be one: a `case "$tool" in Read|Glob|Grep)`
+# arm is an EXEMPTION from a refusal, and the refusal is now exactly what those tools are
+# meant to receive.
 #
 # WHAT IS NOT THAT ARM is the shape test at the top of the payload read, and the difference
 # is the one to hold on to. It grants no tool an exemption from anything; it declines to
@@ -636,11 +670,21 @@
 #                                     It is bounded PER SIGNATURE PER SESSION and not per
 #                                     tool call, because the marker is removed the moment
 #                                     its signature is judged unable to qualify.
-#   REPEAT_LESSON_MAX_DENIES      (2) refusals the lesson gate may spend on one signature
-#                                     in one session before it lets go for good. 0 means
-#                                     it never refuses, which is what REPEAT_LESSON_GATE=0
-#                                     means as well; the two are separate because one is
-#                                     a switch and the other is a budget.
+#   REPEAT_LESSON_MAX_DENIES
+#                         (unlimited) refusals the lesson gate may spend on one signature
+#                                     in one session. THE DEFAULT IS NO EXPIRY: only a
+#                                     standing lesson or a human's dismissal ends it. See
+#                                     AND IT NO LONGER LETS GO for the measurement that
+#                                     removed the budget -- 2 of 2 refused sessions spent
+#                                     both denies on the identical command and wrote
+#                                     nothing. A positive integer restores a budget of
+#                                     that many refusals per signature per session, for
+#                                     anyone who wants the valve back. `0` means it never
+#                                     refuses, which is what REPEAT_LESSON_GATE=0 means as
+#                                     well; the two stay separate because one is a switch
+#                                     and the other is a budget. Anything else -- a typo,
+#                                     an empty export, eleven digits -- lands on
+#                                     `unlimited`, the documented default.
 #   REPEAT_RECOVERY_WINDOW        (5) successful calls of any tool THIS HOOK IS WIRED FOR
 #                                     -- on PostToolUse that is `Bash|Skill|mcp__.*`, and
 #                                     nothing else is delivered -- after which an armed
@@ -787,7 +831,14 @@ case "$SAME_TOKENS" in ''|*[!0-9]*) SAME_TOKENS=2 ;; esac
 # has to be the documented default rather than the safest-looking one.
 LESSON_GATE="${REPEAT_LESSON_GATE:-1}"
 case "$LESSON_GATE" in 0) LESSON_GATE=0 ;; *) LESSON_GATE=1 ;; esac
-LESSON_MAX="${REPEAT_LESSON_MAX_DENIES:-2}"
+# THE DEFAULT IS NO EXPIRY, and `unlimited` is spelled out rather than encoded as a
+# number. See AND IT NO LONGER LETS GO in the header: a budget the session can outwait is
+# a budget the session outwaits, measured twice. `0` keeps the meaning it always had --
+# never refuse -- so the two states cannot be confused by a reader of a shell history:
+# `0` is off, `unlimited` is the shipped default, and a positive integer is a budget for
+# anyone who wants one back. A typo lands on `unlimited`, the documented default, which
+# is the same direction REPEAT_LESSON_GATE's guard errs in.
+LESSON_MAX="${REPEAT_LESSON_MAX_DENIES:-unlimited}"
 MAX_BYTES="${REPEAT_GATE_MAX_BYTES:-4194304}"
 ROOT="${SKILL_COMPOUNDER_STATE:-$HOME/.claude/skill-compounder}"
 DIR="$ROOT/repeats"
@@ -816,7 +867,15 @@ command -v jq >/dev/null 2>&1 || exit 0
 case "$MIN_SESSIONS" in ''|*[!0-9]*) MIN_SESSIONS=2 ;; esac
 case "$WINDOW"       in ''|*[!0-9]*) WINDOW=5 ;; esac
 case "$MIN_TOKENS"   in ''|*[!0-9]*) MIN_TOKENS=2 ;; esac
-case "$LESSON_MAX"   in ''|*[!0-9]*) LESSON_MAX=2 ;; esac
+# THREE STATES, NOT TWO, so `LESSON_MAX` stays an integer every arithmetic test below can
+# read and `LESSON_UNLIMITED` carries the third. Every arm assigns both, so neither can be
+# unset under `set -u`. The magnitude half of the guard is here for the reason the others
+# carry it: 23 nines is all digits, so the shape half alone passes it through to `[ -ge ]`.
+case "$LESSON_MAX" in
+  unlimited)                LESSON_UNLIMITED=1; LESSON_MAX=0 ;;
+  ''|*[!0-9]*|???????????*) LESSON_UNLIMITED=1; LESSON_MAX=0 ;;
+  *)                        LESSON_UNLIMITED=0 ;;
+esac
 case "$MAX_BYTES"    in ''|*[!0-9]*) MAX_BYTES=4194304 ;; esac
 # DERIVED, not its own knob, so the two cannot drift apart: rotate at half the read
 # budget and the live half always fits inside it.
@@ -880,41 +939,81 @@ case "${1:-}" in
 esac
 
 if [ -z "$ARGV_MODE" ]; then
-  event="$(jqr '.hook_event_name // empty')"
+  # ONE jq READ FOR THE FOUR FIELDS THIS SCRIPT DISPATCHES ON, and the reason is the
+  # PreToolUse wiring. That event carries NO MATCHER since 2026-09-05 (WHAT THE WIRING
+  # ADMITS, below), so this script is now forked for EVERY tool call a session makes,
+  # twice over with both wirings active -- a `Read`, a `Glob`, a `TodoWrite`. It used to
+  # read `.hook_event_name`, `.session_id`, `.tool_name` and `.tool_use_id` in four
+  # separate `jqr` calls, which is four `jq` starts on the commonest path in the package.
+  # One `jq` printing all four separated by US answers the same question, and what it
+  # buys is measured rather than asserted: tests/test_repeat_gate.py::ProcessCountTest
+  # pins the whole not-armed path at FOUR program starts -- `cat`, `jq`, `tr`, `cut` --
+  # and fails on the fifth.
+  #
+  # `read` WITH IFS SET TO US KEEPS EMPTY FIELDS, which is why the separator is a control
+  # byte and not whitespace: `a<US><US><US>` assigns one value and three empty strings,
+  # where IFS whitespace would collapse them and slide `tool` into `sid`.
+  pfields="$(printf '%s' "$payload" | jq -r '
+      [(.hook_event_name // ""), (.session_id // ""), (.tool_name // ""),
+       (.tool_use_id // "")] | join("\u001f")' 2>/dev/null)"
+  IFS=$'\037' read -r event sid tool tuid <<EOF
+$pfields
+EOF
   case "$event" in
     PreToolUse|PostToolUse|PostToolUseFailure) ;;
     *) exit 0 ;;
   esac
   # THE REPEAT REFUSAL IS OFF UNLESS REPEAT_GATE_REFUSE=1 -- see the stanza under THREE
   # EVENTS. Tested HERE and not down at the arm so that a PreToolUse costs one fork and
-  # two jq reads when both refusals are off: no store read, no query, no marker written.
+  # one jq read when both refusals are off: no store read, no query, no marker written.
   # THE LESSON GATE IS THE SECOND TERM and it is the one that is ON by default, so the
   # exit is now taken only when BOTH are off. What keeps the default cheap is not this
-  # line but the marker directory the lesson gate tests first: a session that has bound
-  # no recovery pays one `[ -d ]` and leaves, with no store read at all.
+  # line but the marker directory tested a few lines below.
   if [ "$event" = "PreToolUse" ] && [ "$REFUSE" != "1" ] \
      && [ "$LESSON_GATE" != "1" ]; then exit 0; fi
-fi
-
-if [ -z "$ARGV_MODE" ]; then
-  now="${REPEAT_GATE_NOW:-}"
-  case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
-  case "$now" in ''|*[!0-9]*) exit 0 ;; esac
 
   # A row with no session cannot be counted per-session, and the whole gate is a count of
   # distinct sessions. Fail open rather than invent one.
-  sid="$(jqr '.session_id // empty')"
   [ -z "$sid" ] && exit 0
   sid="$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
   case "$sid" in ''|.|..) sid=_ ;; esac
 
-  tool="$(jqr '.tool_name // empty')"
+  # THE NOT-ARMED EXIT, AND IT IS THE PATH ALMOST EVERY DELIVERY TAKES. The lesson gate
+  # can do nothing at all for a session that has bound no recovery -- there is no
+  # `lessons/<sid>` directory for it to read a signature out of -- so with the repeat arm
+  # off (the shipped default) a PreToolUse leaves HERE, before the clock, before the
+  # `mktemp` and before the second jq the tuid guard used to cost. Four programs have run
+  # by this line and none of them touched the store.
+  #
+  # SUBAGENTS SHARE THE PARENT'S SESSION ID, so a subagent dispatched by an ARMED session
+  # finds the same marker directory and is refused on the same terms. Measured on this
+  # machine 2026-09-05, off <state>/mission/hits.jsonl: session
+  # f288cf8c-846d-4da7-89b9-f2574362ed2a carries a `dispatch` row with a null `agent_id`
+  # and a `subagent` row with `agent_id` ab41a53c274603592 under the SAME `session`, and
+  # four other sessions in that file show the same pairing. That is the intended reading
+  # of "before continuing": dispatching an agent is continuing.
+  if [ "$event" = "PreToolUse" ] && [ "$REFUSE" != "1" ] \
+     && [ ! -d "$DIR/lessons/$sid" ]; then exit 0; fi
+
   [ -z "$tool" ] && exit 0
+
+  now="${REPEAT_GATE_NOW:-}"
+  case "$now" in ''|*[!0-9]*) now="$(date +%s 2>/dev/null)" ;; esac
+  case "$now" in ''|*[!0-9]*) exit 0 ;; esac
 
   # THE SHAPES THIS SCRIPT HAS A RULE FOR, and nothing else. `norm_bash` keys a Bash
   # command; `norm_structured` keys a `Skill` or an `mcp__*` payload out of `.tool_input`.
   # Anything else leaves here, before the mktemp and before any arm, so a delivery this
-  # script cannot key costs one fork and three jq reads and writes nothing at all.
+  # script cannot key costs one fork and one jq read and writes nothing at all.
+  #
+  # IT DOES NOT APPLY TO `PreToolUse` ANY MORE, and that exception is the whole of what
+  # widening the refusing matcher required. The lesson gate refuses a call; it does not
+  # KEY one, so it needs no normalising rule for the payload in front of it -- it reads a
+  # marker directory named for the session and, for a `Bash` call only, the command text.
+  # A `Read` under an armed session is exactly the shape the red team of 2026-09-05 used
+  # to walk around a Bash refusal (`Read data/f2.txt` after the deny, scenario 6), so a
+  # test on `$tool` here would be the hole rather than the guard. The two events that
+  # LEARN still leave here, because those two really do have to compute a signature.
   #
   # IT IS A CONTRACT, NOT AN ALLOWLIST, and that is what keeps it off the dead-guard list
   # under WHAT THE WIRING ADMITS. `case "$tool" in Read|Glob|Grep)` is an EXEMPTION -- it
@@ -937,10 +1036,10 @@ if [ -z "$ARGV_MODE" ]; then
   # Written as `[ ]` tests rather than a `case`, for the reason spelled out above
   # `--eligible-of`: tests/test_repeat_gate.py::WiringTest fails the file on any `case`
   # over `$tool` outside a comment.
-  if [ "$tool" != "Bash" ] && [ "$tool" != "Skill" ] \
+  if [ "$event" != "PreToolUse" ] \
+     && [ "$tool" != "Bash" ] && [ "$tool" != "Skill" ] \
      && [ "${tool#mcp__}" = "$tool" ]; then exit 0; fi
 
-  tuid="$(jqr '.tool_use_id // empty')"
   # THE EMPTINESS TEST IS INSIDE THE `if` AND NOT ON THE ASSIGNMENT LINE, and that is
   # load-bearing twice over. An ABSENT tool_use_id must stay absent -- the lesson gate
   # declines to claim without one, and an unclaimed deny is emitted twice under the
@@ -1652,6 +1751,124 @@ split_segments() {
 # Empty when the segment holds no word at all, which is the `&&` case above. It sets a
 # variable rather than printing one, because a fork per segment is a fork this arm cannot
 # afford on PreToolUse.
+#
+# ====================================================================================
+# PREFIX RUNNERS, AND THEY WERE A HOLE IN THE ALLOWLIST RATHER THAN A GAP IN IT.
+#
+# `env`, `command`, `source` and `.` sat on `head_allowlisted` as though they were
+# inspection commands. They are not: each of them RUNS THE NEXT WORD. Measured live on
+# 2026-09-05 against the installed package, session 8449d34a: `python3
+# scripts/count_words.py --file data/f2.txt` was DENIED and `env python3
+# scripts/count_words.py --file data/f2.txt` RAN. Free to reproduce against this file --
+#   printf 'env python3 x.py' | bash hooks/repeat-gate.sh --eligible-of Bash
+# answered `exempt-allowlist`, and `command python3 x.py`, `source x.sh` and `. x.sh`
+# answered the same.
+#
+# THE TWO REPAIRS GO IN OPPOSITE DIRECTIONS AND BOTH ARE THE SAME RULE: judge the program
+# that will actually run, and where that cannot be judged, refuse the exemption.
+#
+#   STEPPED OVER, to the program they run: `env`, `command`, `exec`, `nohup`, `builtin`,
+#   `nice`, `timeout`, `caffeinate`, `sudo`, `doas`, `stdbuf`, `setsid`, `ionice`. Each
+#   carries its own option shape and only the options named in `sh_flag_solo` and
+#   `sh_flag_arg` are modelled; `timeout` additionally eats one DURATION word. `time` was
+#   already stepped over as a shell keyword and stays there.
+#
+#   NOT EXEMPT, EVER, because what they run is not a word this function can read:
+#   `source`, `.`, `eval`, and `sh -c` / `bash -c` / `zsh -c`. All four are simply absent
+#   from both head lists, so their head is judged and lands on neither -- and `source`
+#   and `.` were REMOVED from `head_allowlisted` to make that true. `xargs` is left the
+#   same way and deliberately: it takes its program from stdin, so no walk over the
+#   argv can name it.
+#
+# ANYTHING UNMODELLED FAILS TOWARD NOT EXEMPT, which is this whole function's direction:
+# when `sh_runner_opts` meets a flag it does not know, SEG_HEAD is set to that word, and
+# a word that is not a program name is on no list.
+
+# Flags one prefix runner takes that consume NO further word.
+sh_flag_solo() {
+  case "$1:$2" in
+    env:-i|env:-0|env:--ignore-environment|env:--null|env:-v|env:--debug) return 0 ;;
+    env:-u*|env:--unset=*|env:-C*|env:--chdir=*) return 0 ;;
+    command:-p) return 0 ;;
+    nice:-[0-9]*|nice:--[0-9]*) return 0 ;;
+    sudo:-n|sudo:-E|sudo:-H|sudo:-b|sudo:-S|sudo:-k|sudo:-A) return 0 ;;
+    doas:-n|doas:-s) return 0 ;;
+    timeout:--preserve-status|timeout:--foreground|timeout:-v|timeout:--verbose) return 0 ;;
+    timeout:--signal=*|timeout:--kill-after=*) return 0 ;;
+    caffeinate:-d|caffeinate:-i|caffeinate:-m|caffeinate:-s|caffeinate:-u) return 0 ;;
+    setsid:-f|setsid:-w|setsid:-c) return 0 ;;
+    stdbuf:-i*|stdbuf:-o*|stdbuf:-e*) return 0 ;;
+    ionice:-c*|ionice:-n*|ionice:-t) return 0 ;;
+    *:--) return 0 ;;
+  esac
+  return 1
+}
+
+# Flags that consume the NEXT word as their argument.
+sh_flag_arg() {
+  case "$1:$2" in
+    env:-u|env:-C) return 0 ;;
+    nice:-n) return 0 ;;
+    sudo:-u|sudo:-g|sudo:-p|sudo:-C|sudo:-r|sudo:-t) return 0 ;;
+    doas:-u|doas:-C) return 0 ;;
+    timeout:-s|timeout:-k) return 0 ;;
+    ionice:-c|ionice:-n|ionice:-p) return 0 ;;
+  esac
+  return 1
+}
+
+# Steps the GLOBAL `h` past one prefix runner's own options, leaving its first word at the
+# program that runner will execute. Returns 1 when it meets something it cannot model, and
+# leaves `h` starting at the word that stopped it so the caller can name it as the head.
+sh_runner_opts() {
+  sh_r="$1"
+  sh_skip=0
+  while :; do
+    case "$h" in ' '*) h="${h# }"; continue ;; esac
+    [ -z "$h" ] && return 1
+    sh_w="${h%% *}"
+    if [ "$sh_skip" = "1" ]; then
+      sh_skip=0
+      [ "$h" = "$sh_w" ] && return 1
+      h="${h#* }"
+      continue
+    fi
+    # `command -v` / `command -V` RUN NOTHING -- they are a lookup, and the word after
+    # them is a name being asked about rather than a program about to start. Answering 2
+    # tells the caller to judge `command` itself, which is where a plain `which` lands.
+    # Without this `command -v podman colima orb` was judged as `podman`, which is the
+    # ONE verdict the live-store join moved before this arm existed.
+    case "$sh_r:$sh_w" in
+      command:-v|command:-V) return 2 ;;
+    esac
+    case "$sh_w" in
+      -*)
+        if sh_flag_arg "$sh_r" "$sh_w"; then
+          sh_skip=1
+        else
+          sh_flag_solo "$sh_r" "$sh_w" || return 1
+        fi
+        [ "$h" = "$sh_w" ] && return 1
+        h="${h#* }"
+        continue ;;
+    esac
+    break
+  done
+  # `timeout` puts a DURATION between its options and the program it runs, and nothing
+  # else here does. A word that is not a duration means the walk has lost its place.
+  if [ "$sh_r" = "timeout" ]; then
+    sh_w="${h%% *}"
+    case "$sh_w" in
+      *[!0-9.smhd]*|'') return 1 ;;
+      *[0-9]*) ;;
+      *) return 1 ;;
+    esac
+    [ "$h" = "$sh_w" ] && return 1
+    h="${h#* }"
+  fi
+  return 0
+}
+
 segment_head() {
   h="$1"
   SEG_HEAD=""
@@ -1666,6 +1883,26 @@ segment_head() {
         [ "$h" = "$first" ] && return 0
         h="${h#* }"
         continue ;;
+    esac
+    # A PREFIX RUNNER WITH NOTHING AFTER IT is that word and no more -- a bare `env`
+    # prints the environment and runs nothing -- so it breaks out and is judged on its
+    # own name like any other head.
+    case "${first##*/}" in
+      env|command|exec|nohup|builtin|caffeinate|nice|timeout|sudo|doas|stdbuf|setsid|ionice)
+        [ "$h" = "$first" ] && break
+        sh_run="${first##*/}"
+        h="${h#* }"
+        sh_runner_opts "$sh_run"
+        sh_rc=$?
+        [ "$sh_rc" = "0" ] && continue
+        # 2: the runner runs nothing after all, so IT is the head. 1: unmodelled, and the
+        # word that stopped the walk is the head -- a word that is not a program name is
+        # on no list, which is the direction every failure in this file goes.
+        if [ "$sh_rc" = "2" ]; then SEG_HEAD="$sh_run"; return 0; fi
+        h="${h#"${h%%[! ]*}"}"
+        SEG_HEAD="${h%% *}"
+        [ -z "$SEG_HEAD" ] && SEG_HEAD="$sh_run"
+        return 0 ;;
     esac
     case "$first" in
       *=*) ;;
@@ -1683,11 +1920,61 @@ segment_head() {
 }
 
 # Guard 3 from the header, on ONE head.
+#
+# `source` AND `.` WERE REMOVED FROM THIS LIST ON 2026-09-05 and they are not coming back.
+# Both RUN A FILE, so `. x.sh` was exempt while everything x.sh contains was invisible to
+# every rule here -- the same defect as `env` in a shorter costume, and `--eligible-of`
+# answered `exempt-allowlist` for both. There is no repair that keeps them: what they run
+# is in a file this function may not read. `env` and `command` stay, because `segment_head`
+# now steps over them to the program they run and only a BARE `env` or `command`, which
+# runs nothing, reaches here under either name.
 head_allowlisted() {
   case "$1" in
-    cd|ls|pwd|echo|printf|cat|head|tail|less|wc|grep|egrep|fgrep|rg|find|which|command|type|env|export|git|jq|sed|awk|sort|uniq|diff|stat|file|date|true|:|source|.|skillrepeat|skillforge|skillinsight|skillreport|skillcontrib)
+    cd|ls|pwd|echo|printf|cat|head|tail|less|wc|grep|egrep|fgrep|rg|find|which|command|type|env|export|git|jq|sed|awk|sort|uniq|diff|stat|file|date|true|:|skillrepeat|skillforge|skillinsight|skillreport|skillcontrib)
       return 0 ;;
   esac
+  return 1
+}
+
+# THE ONLY EXEMPTION THE LESSON GATE HAS, and it is not `head_allowlisted`. That list is
+# guard 3 of BOOTSTRAP DEADLOCK -- the commands a session diagnoses with -- and the repeat
+# arm keeps it. The lesson gate cannot: the thing it is refusing is CONTINUING, and `cat`,
+# `git` and `ls` are continuing. Measured live 2026-09-05, scenario 6: a session refused on
+# a `Bash` call answered with `Read data/f2.txt` and finished the job, so a gate that
+# spares the inspection commands spares the bypass with them.
+#
+# So exactly one shape runs: a command that reaches for one of the two CLIs that END the
+# refusal. EVERY segment head must be `skillnote`, `skillrepeat` or `cd`, and at least one
+# must be a CLI -- `cd` because the deny prints a command the session has to be able to run
+# from wherever it is standing, and `cd repo && skillnote add --lesson ...` is that shape.
+# A bare `cd` alone is not exempt, which is the `rh_any` rule of `runner_head` written for
+# two names instead of one.
+#
+# THE FALLBACK IS THE OLD SUBSTRING TEST AND ONLY WHERE THE SPLIT FAILED. A lesson's text
+# is free prose the model writes, and `split_segments` refuses to model a backslash-escaped
+# quote next to a separator byte -- so the one command that lifts this could be refused by
+# the quoting of its own argument, which would be a trap with no way out at all. Where the
+# walk cannot model the text, a command MENTIONING either CLI is exempt. That is weaker
+# than the head test and it is bounded by never being reached for a command the walk can
+# read: `echo skillnote; python3 x.py` splits cleanly and is refused.
+lesson_cli_head() {
+  if split_segments "$1"; then
+    lc_any=0
+    while IFS= read -r lc_seg; do
+      segment_head "$lc_seg"
+      [ -z "$SEG_HEAD" ] && continue
+      case "$SEG_HEAD" in
+        skillnote|skillrepeat) lc_any=1 ;;
+        cd) ;;
+        *) return 1 ;;
+      esac
+    done <<EOF
+$SEGS
+EOF
+    [ "$lc_any" = "1" ] || return 1
+    return 0
+  fi
+  case "$1" in *skillnote*|*skillrepeat*) return 0 ;; esac
   return 1
 }
 
@@ -1843,29 +2130,32 @@ fi
 # Reached by PreToolUse only: arms 1 and 2 and both argv doors exit above. See THE LESSON
 # GATE in the header for what it is for and why its session count includes this session.
 #
-# IT IS BASH-ONLY AND HEAD-EXEMPT FOR THE SAME REASONS THE REPEAT ARM IS. A refused
-# `Skill` call has no escape hatch inside this script, and refusing one would block the
-# mechanism this whole package exists to promote. `skillnote` is added to the two head
-# lists here rather than inside `allowlisted_head`, and that is not tidiness: that
-# function is also the `--eligible-of` door, which bin/skillreport and bin/skillrepeat
-# read to report what the REPEAT arm would refuse. Adding a head there would silently
-# change a number two instruments print about a different rule.
+# IT REFUSES EVERY TOOL, AND THAT IS THE WHOLE OF WHAT CHANGED ON 2026-09-05. It was
+# Bash-only, on the argument that a refused `Skill` call has no escape hatch. The argument
+# was answered by a measurement: a session refused on a `Bash` call ran `Read data/f2.txt`
+# instead and finished the job (red team of the installed package, scenario 6). A gate
+# that refuses one tool refuses nothing; the user's word is "before continuing", and
+# continuing is any tool. So the matcher lost its narrowing (WHAT THE WIRING ADMITS) and
+# the `[ "$tool" = "Bash" ]` test here went with it.
 #
-# WHAT IT COSTS WHEN IT DOES NOTHING, which is the case that matters because it ships ON:
-# one `[ -d ]`. A session that has bound no recovery has no `lessons/<sid>` directory and
-# leaves on the first line. A session that has bound one pays a `find`, a jq read of the
-# command, the head tests, and then one parse of the store and one of the ledger -- and
-# the marker is REMOVED as soon as its signature is judged unable to qualify, so that
-# parse happens a bounded number of times per signature per session rather than on every
-# tool call for the rest of it.
+# THE ESCAPE HATCH IS NOT A TOOL, WHICH IS WHY REFUSING A `Skill` IS SAFE NOW. What lifts
+# this is `skillnote add --lesson`, a Bash command, and `lesson_cli_head` exempts it
+# whatever else is refused. Nothing else is needed to write a lesson down.
+#
+# WHAT IT COSTS WHEN IT DOES NOTHING, which is the case that matters because it now runs
+# on every tool call: FOUR program starts and a builtin `[ -d ]`, pinned by
+# ProcessCountTest. A session that has bound a recovery pays a `find`, one jq read of the
+# command on a Bash call only, the head test, and then one parse of the store and one of
+# the ledger -- and the marker is REMOVED as soon as its signature is judged unable to
+# qualify, so that parse happens a bounded number of times per signature per session
+# rather than on every tool call for the rest of it.
 lesson_gate() {
   [ "$LESSON_GATE" = "1" ] || return 0
-  [ "$LESSON_MAX" -gt 0 ] || return 0
+  if [ "$LESSON_UNLIMITED" != "1" ] && [ "$LESSON_MAX" -lt 1 ]; then return 0; fi
   # CHEAPEST TEST FIRST, ALL THE WAY DOWN, because this arm ships ON and most calls it
   # sees have nothing for it to do: a directory test, two string tests, then a fork.
   lg_dir="$DIR/lessons/$sid"
   [ -d "$lg_dir" ] || return 0
-  [ "$tool" = "Bash" ] || return 0
   # A payload with no tool_use_id cannot be claimed, and an unclaimed deny is emitted
   # TWICE under the double delivery both wirings produce. The learn arm can afford that
   # -- a duplicated row costs a line -- and a refusal cannot.
@@ -1873,11 +2163,17 @@ lesson_gate() {
   lg_files="$(find "$lg_dir" -mindepth 1 -maxdepth 1 -type f -name 's-*' 2>/dev/null \
                | head -20)"
   [ -z "$lg_files" ] && return 0
-  lg_cmd="$(jqr '.tool_input.command // empty')"
-  [ -z "$lg_cmd" ] && return 0
-  case "$lg_cmd" in *skillrepeat*|*skillnote*) return 0 ;; esac
-  allowlisted_head "$lg_cmd" && return 0
-  runner_head "$lg_cmd" && return 0
+  # EVERY TOOL, AND ONLY A `Bash` CALL HAS AN EXEMPTION. See IT REFUSES EVERY TOOL in the
+  # header: a `Read` is the shape the red team walked around a Bash refusal with, and the
+  # only reason to let a call through here is that it is the call that ENDS the refusal.
+  # `.tool_input.command` exists on a `Bash` payload and nowhere else, so the jq below is
+  # paid for by Bash calls alone; every other tool falls straight through to the store
+  # read with one fewer fork than a Bash call costs.
+  if [ "$tool" = "Bash" ]; then
+    lg_cmd="$(jqr '.tool_input.command // empty')"
+    [ -z "$lg_cmd" ] && return 0
+    lesson_cli_head "$lg_cmd" && return 0
+  fi
 
   [ -f "$STORE" ] && [ -r "$STORE" ] || return 0
   lg_size="$(wc -c < "$STORE" 2>/dev/null | tr -cd '0-9')"
@@ -1998,15 +2294,19 @@ EOF
     fi
     case "$lg_noted" in *" $lg_sig "*) rm -f "$lg_dir/s-$lg_safe" 2>/dev/null || :
                           continue ;; esac
-    # AND IT LETS GO. Counted before it is claimed, so the duplicate delivery cannot
-    # spend two of the budget on one event: the second delivery finds the same tuid
-    # already claimed and leaves without emitting.
-    lg_spent="$(find "$lg_dir/deny/$lg_safe" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
-                 | wc -l | tr -cd '0-9')"
-    case "$lg_spent" in ''|*[!0-9]*) lg_spent=0 ;; esac
-    if [ "$lg_spent" -ge "$LESSON_MAX" ]; then
-      rm -f "$lg_dir/s-$lg_safe" 2>/dev/null || :
-      continue
+    # AND IT DOES NOT LET GO, unless somebody set a budget. Counted before it is claimed,
+    # so the duplicate delivery cannot spend two of the budget on one event: the second
+    # delivery finds the same tuid already claimed and leaves without emitting. The whole
+    # block is skipped at the shipped default, which also saves the `find`, the `wc` and
+    # the `tr` on every refusal.
+    if [ "$LESSON_UNLIMITED" != "1" ]; then
+      lg_spent="$(find "$lg_dir/deny/$lg_safe" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+                   | wc -l | tr -cd '0-9')"
+      case "$lg_spent" in ''|*[!0-9]*) lg_spent=0 ;; esac
+      if [ "$lg_spent" -ge "$LESSON_MAX" ]; then
+        rm -f "$lg_dir/s-$lg_safe" 2>/dev/null || :
+        continue
+      fi
     fi
     mkdir -p "$lg_dir/deny/$lg_safe" 2>/dev/null || return 0
     mkdir "$lg_dir/deny/$lg_safe/$tuid" 2>/dev/null || return 0
@@ -2027,11 +2327,15 @@ EOF
 
 Nothing ran and nothing was written. Fail rows for this signature come from $lg_n distinct
 EARLIER sessions, and the recovery above was bound in this one. Writing the lesson down is
-what lifts this:
+what lifts this, and in this session it is the only thing that does:
 
   skillnote add --lesson $lg_sig \"<what was learned>\"
 
-  skillrepeat show $lg_sig"
+  skillrepeat show $lg_sig
+
+A lesson may record that this failure is EXPECTED -- a red-green test run, a probe whose
+error is the answer, a shape matched by a store that is stale -- and such a lesson lifts
+this exactly as any other one does."
     ( jq -n --arg r "$lg_reason" \
         '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny",
           permissionDecisionReason:$r}}' > "$TMP/ldeny.json" ) 2>/dev/null

@@ -79,3 +79,9 @@ forged skill; issue comments.
   Decision recorded here: the budget default becomes no expiry because the user's word in
   #43 is "force", and the false-positive cost with no expiry is one lesson line per
   signature ever.
+- 2026-09-05 ~01:30 EDT: the forge orchestrator (step 5/6, round-2 reviewer out), the
+  repeat-gate builder (mid-way through its tests) and the media agent were all killed by
+  the monthly spend limit on opus (HTTP 429, "resets 2am"). Resumed at 07:40 EDT by
+  SendMessage with "re-check the disk state first". The live `hooks/repeat-gate.sh`
+  carried the builder's half-landed change through the outage: `bash -n` parses and a
+  `Read` PreToolUse probe exits 0 with no output, so no turn on this machine broke.
