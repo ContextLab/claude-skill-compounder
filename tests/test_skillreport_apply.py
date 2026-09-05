@@ -780,6 +780,86 @@ class GateSurfacesTest(Base):
         self.assertIn("1 override(s) taken (1 inline).", out)
 
 
+# ==================================================== a verdict on an abandoned forge
+class FailedForgeVerdictTest(Base):
+    """A verdict naming a forge that was ABANDONED is not a verdict on a shipped skill.
+
+    The live ledger carries exactly one: `watch-ci-run` was closed with `skillforge fail`
+    and quarantined on 2026-09-05, and a MISFIRED row was written for it eleven seconds
+    later at exit 0. `skillforge verdict` refuses that row now, but the ledger is
+    append-only and the row stays on the record, so these readers have to say what it is
+    rather than print it like a judgement on something that shipped. `apply_join` pairs
+    `apply` rows against `done` rows only, so an abandoned forge is invisible to it and
+    the block used to read "no closed forge under this name".
+    """
+
+    def failed_forge(self, name, start=100, fail=400):
+        d = self.make_skill(name)
+        r = self.sh([str(FORGE), "start", name, "6", "summary for " + name,
+                     "--skill-dir", str(d), "--trigger", "verbatim trigger for " + name,
+                     "--trigger-kind", "user-prompt"], SKILLFORGE_NOW=T0 + start)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.sh([str(FORGE), "fail", "--name", name, "not converging"],
+                    SKILLFORGE_NOW=T0 + fail)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def plant_verdict(self, name, at, verdict="MISFIRED"):
+        """Appended by hand, and it has to be: the CLI refuses this row now (exit 5).
+        The live ledger holds one written before that gate existed."""
+        with self.ledger.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(
+                {"event": "verdict", "ts": T0 + at, "name": name, "verdict": verdict,
+                 "evidence": "round 4's cold reviewer: PASSED at exit 0",
+                 "confidence": "measured", "backfilled": False,
+                 "judgement": "model judgement over recorded evidence, not a measurement"},
+                separators=(",", ":")) + "\n")
+
+    def test_the_block_says_the_forge_failed_instead_of_reading_like_a_judgement(self):
+        self.failed_forge("dead-gate")
+        self.plant_verdict("dead-gate", 500)
+        out = self.report("skills")
+        block = re.search(r"^dead-gate$.*?(?=\n\n)", out, re.M | re.S)
+        self.assertIsNotNone(block, out)
+        block = block.group(0)
+        self.assertIn("verdict   1 MISFIRED", block, block)
+        self.assertIn("forge failed", block,
+                      "a verdict on an abandoned forge printed unqualified:\n" + block)
+        self.assertIn("verdict stands on the record only", block, block)
+        self.assertNotIn("no closed forge under this name", block,
+                         "a forge that failed is not a forge that never happened:\n"
+                         + block)
+        self.assertIn("NOT APPLICABLE", block, block)
+
+    def test_coverage_counts_it_apart_from_a_verdict_on_a_shipped_skill(self):
+        """Counted apart, never dropped: the row is on the ledger and pretending
+        otherwise is the same silence this block exists to end."""
+        self.forge("alpha-gate", start=100, done=400)
+        self.apply("alpha-gate", 800, "used", "used it on the push that caused it")
+        r = self.sh([str(FORGE), "verdict", "--name", "alpha-gate", "--verdict", "WORKED",
+                     "--evidence", "it refused the push"], SKILLFORGE_NOW=T0 + 900)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.failed_forge("dead-gate", start=1000, fail=1400)
+        self.plant_verdict("dead-gate", 1500)
+        line = [l for l in self.report("skills").splitlines()
+                if "skills with a verdict:" in l]
+        self.assertEqual(len(line), 1, line)
+        self.assertIn("skills with a verdict:          1", line[0], line[0])
+        self.assertIn("+1 whose forge was abandoned", line[0], line[0])
+
+    def test_a_re_forge_that_shipped_is_not_marked(self):
+        """The NEWEST close row decides. A name that failed and was then forged again to
+        a `done` and applied is a shipped skill, and its verdict is a plain verdict."""
+        self.failed_forge("twice", start=100, fail=200)
+        self.forge("twice", start=300, done=400)
+        self.apply("twice", 500, "used", "used it the second time")
+        r = self.sh([str(FORGE), "verdict", "--name", "twice", "--verdict", "WORKED",
+                     "--evidence", "it held"], SKILLFORGE_NOW=T0 + 600)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        block = re.search(r"^twice$.*?(?=\n\n)", self.report("skills"), re.M | re.S)
+        self.assertIsNotNone(block)
+        self.assertNotIn("forge failed", block.group(0), block.group(0))
+
+
 # ================================================================== the whole page
 class WholePageTest(Base):
     """One mixed ledger, every event type in it, read by every view."""

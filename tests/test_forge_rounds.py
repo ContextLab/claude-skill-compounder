@@ -463,6 +463,60 @@ class RaisedBudgetReachesTheLedgerTest(RoundsCase):
         self.assertEqual(done[0]["rounds_planned"], 3)
         self.assertEqual(done[0]["steps"], 8)
 
+    def test_the_close_row_and_the_reader_agree_with_the_round_record(self):
+        """DEFECT, 2026-09-05, from the first forge run under the diet. `watch-ci-run`
+        closed at step 9 of 10 with FOUR rounds on `<state>/rounds/<forge>.tsv`, its
+        `fail` row said `"rounds":3`, and `skillforge ledger` printed "3 of 4 round(s)"
+        for a forge whose own record carries four of four.
+
+        `rounds_completed` infers the count from the step reached, which is right only
+        while a forge spends exactly two steps per round. An ESCALATION buys a round
+        without the forge necessarily reaching the two steps that would imply it, so the
+        inference undercounts every escalated forge. The round record is the count.
+
+        The trajectory below is the real one: 6 steps, `--narrowed` then `--converging`,
+        four rounds recorded, closed at step 9 of the raised 10-step budget."""
+        self.start(steps=6)                            # 2 planned rounds
+        self.assertEqual(self.round(blocking=6, total=13).returncode, 0)
+        self.assertEqual(self.round(blocking=6, total=13).returncode, 0)
+        self.assertEqual(self.cli("escalate", "--name", "demo",
+                                  "--narrowed", "cut the listing subsystem").returncode,
+                         0)
+        self.assertEqual(self.round(blocking=5, total=13).returncode, 0)
+        self.assertEqual(self.cli("escalate", "--name", "demo",
+                                  "--converging").returncode, 0)
+        self.assertEqual(self.round(blocking=7, total=21).returncode, 0)
+        self.assertEqual(self.cli("step", "--name", "demo", "9", "closing").returncode, 0)
+        self.assertEqual(self.cli("fail", "--name", "demo",
+                                  "not converging: the same subsystem three rounds"
+                                  ).returncode, 0)
+
+        self.assertEqual(len(self.tsv().splitlines()), 4, self.tsv())
+        fail = self.rows("fail")
+        self.assertEqual(len(fail), 1, fail)
+        self.assertEqual((fail[0]["steps"], fail[0]["step"]), (10, 9), fail[0])
+        self.assertEqual(fail[0]["rounds"], 4,
+                         "the fail row disagrees with the four rounds on the record: %r"
+                         % fail[0])
+        self.assertEqual(fail[0]["rounds_planned"], 4, fail[0])
+
+        out = self.cli("ledger").stdout
+        row = [l for l in out.splitlines() if " demo  [fail]" in l]
+        self.assertEqual(len(row), 1, out)
+        self.assertIn("4 round(s)", row[0], row[0])
+        self.assertNotIn("3 of 4", row[0],
+                         "the reader still reads the step arithmetic: " + row[0])
+
+    def test_a_forge_with_no_round_record_falls_back_to_the_step_arithmetic(self):
+        """The round record is the count when there is one. When there is none -- nothing
+        was ever recorded, or the file was removed -- the arithmetic is the only thing
+        left to read, and it is what shipped before."""
+        self.start(steps=8)
+        self.assertEqual(self.cli("step", "--name", "demo", "6", "mid").returncode, 0)
+        self.assertEqual(self.cli("fail", "--name", "demo", "abandoned").returncode, 0)
+        self.assertIsNone(self.tsv(), "no round was recorded, so there is no record")
+        self.assertEqual(self.rows("fail")[0]["rounds"], 2)
+
     def test_the_escalate_row_is_invisible_to_the_start_to_outcome_join(self):
         """Every reader here selects its events BY NAME, so a new event type must not move
         an existing count. `escalate` is new; the join is `start` to `done`/`fail`."""

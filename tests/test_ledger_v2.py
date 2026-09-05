@@ -414,8 +414,42 @@ class UseHookTest(LedgerV2Case):
 # ------------------------------------------------------------------- the verdicts
 
 class VerdictTest(LedgerV2Case):
+    """A VERDICT IS A JUDGEMENT ABOUT A SKILL THAT SHIPPED AND WAS USED.
+
+    Every test here now stands on a real forge closed with `done` and a real `apply`
+    row, because that is what a verdict is about. They used to stand on an empty ledger,
+    which is the hole the two gates below close: on 2026-09-05 the first forge run under
+    the diet was closed with `skillforge fail` and quarantined, `skillforge apply`
+    refused correctly ("no forge is waiting to be applied ... Pending: (nothing)"), and
+    the `skillforge verdict` that followed was taken at exit 0, in silence. A MISFIRED
+    row now stands on the live ledger for a skill that was never installed and never
+    used.
+    """
+
+    def a_shipped_skill(self, name="widget", at=T0):
+        """start, done, apply -- the real CLI, three real rows, nothing pretended."""
+        r = self.forge("start", name, "4", "s", "--trigger", "t",
+                       "--trigger-kind", "agent-decision", now=at,
+                       SKILLFORGE_NO_INSTALL=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.forge("done", "--name", name, "ok", now=at + 10,
+                       SKILLFORGE_NO_INSTALL=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.forge("apply", "--name", name, "--outcome", "used",
+                       "--evidence", "put it on the problem that caused it", now=at + 20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def an_abandoned_forge(self, name="gone", at=T0):
+        r = self.forge("start", name, "4", "s", "--trigger", "t",
+                       "--trigger-kind", "agent-decision", now=at,
+                       SKILLFORGE_NO_INSTALL=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.forge("fail", "--name", name, "not converging", now=at + 10,
+                       SKILLFORGE_NO_INSTALL=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_a_verdict_carries_its_quote_and_says_it_is_a_judgement(self):
+        self.a_shipped_skill()
         r = self.forge("verdict", "--name", "widget", "--verdict", "WORKED",
                        "--evidence", "it caught the stub: 'return []' was flagged",
                        "--use-session", "sess-1", "--judged-by", "session review",
@@ -429,6 +463,7 @@ class VerdictTest(LedgerV2Case):
                       "a verdict must label itself a judgement, never a measurement")
 
     def test_a_claim_with_no_quote_behind_it_is_not_written(self):
+        self.a_shipped_skill()
         for verdict in ("WORKED", "NO-OP", "MISFIRED"):
             r = self.forge("verdict", "--name", "widget", "--verdict", verdict, now=T0)
             self.assertEqual(r.returncode, 2, r.stdout)
@@ -437,6 +472,7 @@ class VerdictTest(LedgerV2Case):
     def test_unknown_is_first_class_and_may_be_written_bare(self):
         """UNKNOWN is the honest outcome when there is nothing to quote. Requiring a
         quote for it would make the honest answer the unwritable one."""
+        self.a_shipped_skill()
         r = self.forge("verdict", "--name", "widget", "--verdict", "UNKNOWN", now=T0)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.rows("verdict")[0]["verdict"], "UNKNOWN")
@@ -446,6 +482,84 @@ class VerdictTest(LedgerV2Case):
                        "--evidence", "x", now=T0)
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertEqual(self.rows("verdict"), [])
+
+    # ------------------------------------------- the two gates (defect, 2026-09-05)
+
+    def test_a_verdict_on_an_abandoned_forge_is_refused_and_names_the_fail_row(self):
+        """The defect itself. An abandoned forge produced no skill, so there is nothing
+        a verdict could be about; what it learned belongs on the `fail` row's own phase,
+        which is where the session had already written it."""
+        self.an_abandoned_forge("gone")
+        r = self.forge("verdict", "--name", "gone", "--verdict", "MISFIRED",
+                       "--evidence", "the cold reviewer said so", now=T0 + 20)
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertIn("fail", r.stderr, r.stderr)
+        self.assertIn(str(T0 + 10), r.stderr,
+                      "the refusal must name the fail row it is refusing on: " + r.stderr)
+        self.assertEqual(self.rows("verdict"), [], "the row was written anyway")
+
+    def test_force_does_not_lift_the_abandoned_forge_refusal(self):
+        """`--force` says a use is on the record some other way. It cannot say a skill
+        exists."""
+        self.an_abandoned_forge("gone")
+        r = self.forge("verdict", "--name", "gone", "--verdict", "MISFIRED",
+                       "--evidence", "e", "--force", now=T0 + 20)
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertEqual(self.rows("verdict"), [])
+
+    def test_a_verdict_with_no_apply_row_is_refused_and_names_what_is_pending(self):
+        """A verdict judges what happened when the skill was put on the problem that
+        caused it, and the `apply` row is the only thing on this ledger that says it ever
+        was. The pending list comes from the same markers `apply` itself reads."""
+        r = self.forge("start", "widget", "4", "s", "--trigger", "t",
+                       "--trigger-kind", "agent-decision", now=T0,
+                       SKILLFORGE_NO_INSTALL=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.forge("done", "--name", "widget", "ok", now=T0 + 10,
+                                    SKILLFORGE_NO_INSTALL=1).returncode, 0)
+        r = self.forge("verdict", "--name", "widget", "--verdict", "WORKED",
+                       "--evidence", "e", now=T0 + 20)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("--force", r.stderr, r.stderr)
+        self.assertIn("Pending: widget", r.stderr,
+                      "the refusal must name the debt that is standing: " + r.stderr)
+        self.assertEqual(self.rows("verdict"), [])
+
+    def test_force_writes_a_verdict_when_the_use_is_on_the_record_some_other_way(self):
+        """The escape is real and it is counted: the row is written, so a use recorded
+        outside this ledger is not a dead end. A CLI that refuses with no way through is
+        a CLI callers stop calling."""
+        r = self.forge("start", "widget", "4", "s", "--trigger", "t",
+                       "--trigger-kind", "agent-decision", now=T0,
+                       SKILLFORGE_NO_INSTALL=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.forge("done", "--name", "widget", "ok", now=T0 + 10,
+                                    SKILLFORGE_NO_INSTALL=1).returncode, 0)
+        r = self.forge("verdict", "--name", "widget", "--verdict", "WORKED",
+                       "--evidence", "it caught the stub", "--force", now=T0 + 20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.rows("verdict")[0]["verdict"], "WORKED")
+
+    def test_a_re_forge_that_closes_done_opens_the_gate_again(self):
+        """One name legitimately carries a `fail` and then a `done`: re-forging after a
+        failed round is this protocol's own prescribed workflow, so the NEWEST close row
+        is what the name is now -- never the first."""
+        self.an_abandoned_forge("widget", at=T0)
+        self.a_shipped_skill("widget", at=T0 + 100)
+        r = self.forge("verdict", "--name", "widget", "--verdict", "WORKED",
+                       "--evidence", "it worked the second time", now=T0 + 200)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.rows("verdict")), 1)
+
+    def test_force_is_refused_by_the_two_commands_that_share_the_parser(self):
+        """`--force` is parsed by the shared use/verdict/origin argv loop because that is
+        where the no-value flags are listed. A flag read as a knob by one command and
+        swallowed by its neighbours is a flag whose absence nobody can explain later."""
+        for cmd, extra in (("use", ["--ok"]),
+                           ("origin", ["--origin", "adopted"])):
+            r = self.forge(cmd, "--name", "widget", *extra, "--force", now=T0)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("--force is only accepted by skillforge verdict", r.stderr)
 
 
 # -------------------------------------------------------------------- the backfill

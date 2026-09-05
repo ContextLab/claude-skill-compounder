@@ -29,7 +29,11 @@
 #                      [--tool-use-id <id>] [--recorded live|derived]
 #   skillforge verdict --name <skill> --verdict <WORKED|NO-OP|MISFIRED|UNKNOWN>
 #                      --evidence "<verbatim quote>" [--use-ts <epoch>]
-#                      [--use-session <id>] [--judged-by <who>]
+#                      [--use-session <id>] [--judged-by <who>] [--force]
+#                      Refused (exit 5) when the newest close row for the name is a
+#                      `fail`: an abandoned forge produced no skill to judge, and
+#                      `--force` does not lift that one. Refused (exit 2) when no
+#                      `apply` row says the skill was ever used; `--force` lifts that.
 #   skillforge apply   --name <skill> --outcome <used|declined|failed>
 #                      --evidence "<verbatim quote>" [--forge <forge>] [--session <id>]
 #                      [--force]
@@ -881,6 +885,51 @@ ledger_has_origin() { # <name>
     | map(select(.event == "origin" and .name == $n)) | length > 0' "$LEDGER" >/dev/null 2>&1
 }
 
+# WHAT HAPPENED TO THE FORGE OF THIS NAME, selected by name out of the two close events
+# and by nothing else -- the rule the whole file is written under. Prints
+# "<event> <ts>" for the NEWEST `done` or `fail` row, and returns 1 when the ledger holds
+# neither. Newest and not first: re-forging after a failed round is this protocol's own
+# prescribed workflow, so one name legitimately carries a `fail` and then a `done`, and
+# it is the last word that says what the name is now.
+ledger_last_close() { # <name> -> "<event> <ts>", or nothing
+  [ -n "${1:-}" ] || return 1
+  [ -s "$LEDGER" ] || return 1
+  # `-R -n` with `inputs`, the shape ledger_from_of uses and for its reason: `jq -s`
+  # aborts on the first malformed line and would take the whole lookup with it, and this
+  # ledger is append-only and hand-editable.
+  llc_out="$(jq -R -n -r --arg n "$1" '
+    [ inputs | (fromjson? // empty) | select(type == "object")
+      | select(.event == "done" or .event == "fail")
+      | select((.name // "") == $n) ]
+    | sort_by(.ts // 0) | last
+    | if . == null then "" else "\(.event) \((.ts // 0))" end' < "$LEDGER" 2>/dev/null)"
+  [ -n "$llc_out" ] || return 1
+  printf '%s' "$llc_out"
+}
+
+# HAS THIS SKILL EVER BEEN PUT ON THE PROBLEM. The `apply` row is the only thing on the
+# ledger that says so, and the match is the DUAL one `apply_join` in bin/skillreport
+# performs -- `.name` OR `.forge` -- because a skill installed under one name discharges
+# a forge run under another, and a single-name test would call that debt undischarged.
+ledger_has_apply() { # <name>
+  [ -n "${1:-}" ] || return 1
+  [ -s "$LEDGER" ] || return 1
+  jq -e -s -R --arg n "$1" '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) | select(type == "object") ]
+    | map(select(.event == "apply" and ((.name == $n) or (.forge == $n))))
+    | length > 0' "$LEDGER" >/dev/null 2>&1
+}
+
+# One epoch as a date, for a refusal that has to name a row a person will go and look at.
+# jq is a hard dependency of this script and `date` is not portable between BSD and GNU
+# for this (`-r` against `-d @`), so the one tool that is already required does it.
+ts_day() { # <epoch> -> YYYY-MM-DD, or the epoch itself when it will not render
+  case "${1:-}" in ''|*[!0-9]*) printf '%s' "${1:-?}"; return 0 ;; esac
+  td_out="$(jq -n -r --argjson t "$1" '$t | gmtime | strftime("%Y-%m-%d")' 2>/dev/null)"
+  [ -n "$td_out" ] || td_out="$1"
+  printf '%s' "$td_out"
+}
+
 # Same question for one recorded invocation, keyed on the tool_use id Claude Code gives
 # it. The hook that writes these already claims each event once, but the two guards catch
 # different failures: the claim marker is per session and ages out after an hour, while
@@ -1072,9 +1121,26 @@ ledger_close_line() { # <closed record file> <event>
   l_started="$(int_or_zero "$(field "$l_f" started)")"
   l_dur=$(( $(int_or_zero "$(field "$l_f" finished)") - l_started ))
   [ "$l_dur" -lt 0 ] && l_dur=0
+  # HOW MANY ROUNDS REALLY HAPPENED IS READ OFF THE ROUND RECORD WHEN THERE IS ONE, and
+  # the step arithmetic is only the fallback. `rounds_completed` infers the count from
+  # the step reached, which is right only while a forge spends exactly two steps per
+  # round; an ESCALATION buys a round without the forge necessarily reaching the two
+  # steps that would imply it, and the first forge to escalate twice closed at step 9 of
+  # 10 with FOUR rounds on <state>/rounds/<forge>.tsv and `"rounds":3` in its `fail` row.
+  # The tsv is the record the protocol actually writes, one line per red-team round, so
+  # it is the count -- and `rounds_planned`, derived from the raised budget, then agrees
+  # with it instead of standing one above it. A forge with no round file (nothing was
+  # ever recorded, or the record was removed) falls back to the arithmetic, which is the
+  # only thing left to read.
+  l_rfile="$(rounds_file "$l_name")"
+  if [ -f "$l_rfile" ]; then
+    l_rounds="$(rounds_count "$l_rfile")"
+  else
+    l_rounds="$(rounds_completed "$l_step")"
+  fi
   ledger_close_line_out="$(ledger_line "$2" "$l_name" "$l_steps" "$l_summary" \
     "$l_step" "$(field "$l_f" phase)" "$l_dur" \
-    "$(rounds_completed "$l_step")" "$(rounds_planned "$l_steps")")"
+    "$l_rounds" "$(rounds_planned "$l_steps")")"
   printf '%s' "$ledger_close_line_out"
 }
 
@@ -2745,7 +2811,7 @@ SLOTS
     NARGS=()
     while [ $# -gt 0 ]; do
       case "$1" in
-        --ok|--failed|--harness|--genuine) NARGS[${#NARGS[@]}]="$1"; shift ;;
+        --ok|--failed|--harness|--genuine|--force) NARGS[${#NARGS[@]}]="$1"; shift ;;
         --*=*) NARGS[${#NARGS[@]}]="$1"; shift ;;
         --*) [ $# -ge 2 ] || die "$1 requires a value"
              NARGS[${#NARGS[@]}]="$1=$2"; shift 2 ;;
@@ -2757,6 +2823,11 @@ SLOTS
     v_name="$NAME_OPT"; v_ok="true"; v_session=""; v_cwd=""; v_ep=""; v_harness=""
     v_id=""; v_recorded="live"; v_verdict=""; v_evidence=""; v_usets=""; v_usesession=""
     v_by=""; v_origin=""; v_dir=""; v_created=""; v_trigger=""; v_tkind=""
+    # Initialised here and not on the branch that sets it, for the reason `apply` gives
+    # about A_NO_MARKER: a variable this file reads with a `:-` default but never assigns
+    # on some path is a variable the ambient environment can supply, and this one lifts a
+    # refusal.
+    v_force=0
     # The lineage id. `origin` takes it explicitly; `verdict` and `apply` never do -- they
     # READ it off the forge's own `start` row, because a verdict typed by hand months later
     # is exactly the moment nobody remembers which queue record started it, and a field a
@@ -2765,6 +2836,7 @@ SLOTS
     for a in "$@"; do
       k="${a%%=*}"; v="${a#*=}"
       case "$k" in
+        --force)       v_force=1 ;;
         --ok)          v_ok="true" ;;
         --failed)      v_ok="false" ;;
         --harness)     v_harness="true" ;;
@@ -2790,6 +2862,14 @@ SLOTS
       esac
     done
     [ -n "$v_name" ] || die "usage: skillforge $cmd --name <skill> ..."
+    # `--force` lifts exactly one refusal and it belongs to exactly one command. Accepted
+    # by the shared parser above because that is where the no-value flags are listed, and
+    # refused here rather than silently ignored: a flag that is read as a knob by one
+    # command and swallowed by its neighbours is a flag whose absence from a row nobody
+    # can explain later.
+    if [ "$v_force" -eq 1 ] && [ "$cmd" != "verdict" ]; then
+      die "--force is only accepted by skillforge verdict (got 'skillforge $cmd')"
+    fi
     # The SAME refusal `start --from` applies, and it was missing here entirely:
     # `origin` is the other command that takes a lineage id from the caller.
     if [ -n "$v_from" ]; then
@@ -2874,6 +2954,38 @@ SLOTS
         # be written bare -- that is what makes it first-class rather than a failure.
         if [ "$v_verdict" != "UNKNOWN" ] && [ -z "$v_evidence" ]; then
           die "--evidence is required for $v_verdict: a verdict with no verbatim quote behind it is not written (UNKNOWN may be written bare)"
+        fi
+        # A VERDICT IS A JUDGEMENT ABOUT A SKILL THAT SHIPPED, and until 2026-09-05 this
+        # command would write one about anything. The first forge run under the diet was
+        # closed with `skillforge fail` and quarantined; `skillforge apply` correctly
+        # refused ("no forge is waiting to be applied ... Pending: (nothing)"), and the
+        # `verdict` that followed was taken, exit 0, in silence -- so a MISFIRED row now
+        # stands on the live ledger for a skill that was never installed and never used.
+        # The two gates below are that row's shape, in the order the caller can act on.
+        #
+        # FIRST: THE FORGE ITSELF. `done` and `fail` are the two close events, and the
+        # NEWEST one for this name says what the name is now. A `fail` means no skill was
+        # produced, so there is nothing a verdict could be about, and `--force` does NOT
+        # lift it -- what the forge learned belongs on the `fail` row's own phase, which
+        # is where this one already wrote it. A later `done` for the same name (the
+        # re-forge this protocol prescribes) closes the gate again by itself.
+        v_close="$(ledger_last_close "$v_name" || true)"
+        case "$v_close" in
+          fail\ *)
+            v_close_ts="${v_close#fail }"
+            refuse 5 "'$v_name' has no verdict to give: its newest close row is a fail at ts $v_close_ts ($(ts_day "$v_close_ts")), so no skill was produced, installed or used. What the forge learned belongs on that row's own phase and in the quarantine's WHY-ARCHIVED.md, not in a verdict about a skill that does not exist. Re-forge it and close with 'skillforge done' if there is something to judge." ;;
+        esac
+        # SECOND: THE USE. A verdict judges what happened when the skill was put on the
+        # problem that caused it, and the `apply` row is the only thing on the ledger that
+        # says it ever was. This one IS liftable, because a use recorded some other way is
+        # a real situation and a CLI that refuses without a way through is a CLI callers
+        # stop calling -- the argument `--trigger` and `apply --force` both turn on. What
+        # is pending comes from apply_pending_names, the same markers `apply` itself reads,
+        # so the two commands can never name different queues.
+        if [ "$v_force" -eq 0 ] && ! ledger_has_apply "$v_name"; then
+          v_pending="$(apply_pending_names)"
+          [ -n "$v_pending" ] || v_pending="(nothing)"
+          die "no apply row for '$v_name', so nothing on this ledger says the skill was ever put on the problem that caused it — and a verdict about an unused skill is the unsupported claim this ledger exists to refuse. Record the use first: skillforge apply --name $v_name --outcome used --evidence \"<verbatim quote>\". If the use is on the record some other way, write the verdict with --force. Pending: $v_pending."
         fi
         case "${v_usets:-0}" in ''|*[!0-9]*) v_usets="" ;; esac
         [ -n "$v_from" ] || v_from="$(ledger_from_of "$v_name")"

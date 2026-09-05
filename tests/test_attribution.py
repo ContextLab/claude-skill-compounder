@@ -441,8 +441,11 @@ class TheFunnelCountsEveryRowExactlyOnce(AttributionCase):
                    "--session", "sess-orphan", SKILLFORGE_NOW=NOW)
         self.forge("done", "--name", "orphan", "--skill-dir", str(d), "ok",
                    SKILLFORGE_NOW=NOW + 10)
+        # --force: verdict refuses without an apply row since 2026-09-05, and an apply
+        # row would be a third attributed row; this test is about the partition, not
+        # the apply rule, which tests/test_ledger_v2.py::VerdictTest pins.
         self.forge("verdict", "--name", "orphan", "--verdict", "WORKED",
-                   "--evidence", "e", SKILLFORGE_NOW=NOW + 20)
+                   "--evidence", "e", "--force", SKILLFORGE_NOW=NOW + 20)
 
         out = self.report()
         row = self.funnel_row(out, lineage)
@@ -464,7 +467,7 @@ class TheFunnelCountsEveryRowExactlyOnce(AttributionCase):
         self.forge("done", "--name", "judged", "--skill-dir", str(d), "ok",
                    SKILLFORGE_NOW=NOW + 10)
         self.forge("verdict", "--name", "judged", "--verdict", "UNKNOWN",
-                   "--evidence", "e", SKILLFORGE_NOW=NOW + 20)
+                   "--evidence", "e", "--force", SKILLFORGE_NOW=NOW + 20)
         out = self.report()
         intable, unattr, total = self.assert_every_row_lands_once(out)
         self.assertEqual((intable, unattr, total), (2, 0, 2),

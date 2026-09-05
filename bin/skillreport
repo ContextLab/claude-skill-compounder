@@ -679,11 +679,25 @@ if [ "$VIEW" = "skills" ]; then
     def plural($n; $one; $many): if $n == 1 then $one else $many end;
     def one: (. // "") | tostring | gsub("[\\n\\t\\r]"; " ");
     def clip($n): one | if (length > $n) then (.[0:$n] + "...") else . end;
+    # WHAT HAPPENED TO THE FORGE OF THIS NAME. `done` and `fail` are the two close
+    # events and the NEWEST one is what the name is now, because re-forging after a
+    # failed round is this protocol own prescribed workflow and one name legitimately
+    # carries a fail and then a done. Both arguments are already-bound variables, so
+    # neither is evaluated against whatever input the call happens to sit on.
+    def lastclose($cl; $nm): ([ $cl[] | select((.name // "") == $nm) ]
+                              | sort_by(.ts // 0) | last);
+    def failedforge($cl; $nm): ((lastclose($cl; $nm) | (.event // "")) == "fail");
     parse as $rec
     | [ $rec[] | select(.event == "origin") ]  as $origins
     | [ $rec[] | select(.event == "use") ]     as $uses
     | [ $rec[] | select(.event == "verdict") ] as $verdicts
     | [ $rec[] | select(.event == "horizon") ] as $horizons
+    # SELECTED BY NAME, never by negation, like every other reader here. `apply_join`
+    # above joins `done` rows only, so a forge that was ABANDONED is invisible to it and
+    # a verdict naming that forge used to print exactly like a verdict on a shipped
+    # skill. It is not dropped -- the row is on the append-only ledger and stays on the
+    # record -- it is annotated with the fail that stands behind it.
+    | [ $rec[] | select(.event == "done" or .event == "fail") ] as $closes
     | ( [ $origins[].name ] + [ $uses[].name ] + [ $verdicts[].name ]
         + [ $aj.forges[] | select(.applied) | (.apply_name // .name) ]
         + [ $aj.loose[].name ]
@@ -713,6 +727,8 @@ if [ "$VIEW" = "skills" ]; then
         | [ $u[] | select(.harness == null) ] as $unclassified
         | [ $u[] | select(.ok == false) ] as $failed
         | [ $verdicts[] | select(.name == $n) ] as $v
+        | failedforge($closes; $n) as $failed_forge
+        | lastclose($closes; $n) as $last_close
         # THE FIFTH QUESTION. Selected by name out of the join above, never by exclusion,
         # and kept separate from `uses` on purpose: a use is any invocation ever, an apply
         # is the one that closed the loop the forge opened.
@@ -799,7 +815,12 @@ if [ "$VIEW" = "skills" ]; then
            else empty end),
           (if ($ap | length) == 0 and ($unapplied | length) == 0
               and ($ap_elsewhere | length) == 0 then
-             "  applied   no closed forge under this name, so there is nothing to discharge"
+             # `apply_join` pairs `apply` rows against `done` rows, so an abandoned forge
+             # never reaches $unapplied and this line used to report it as no forge at
+             # all. A forge that failed is not a forge that never happened.
+             (if $failed_forge
+              then "  applied   NOT APPLICABLE — the forge for this name was abandoned (fail \($last_close.ts | day)), so no skill shipped and there is no debt to discharge"
+              else "  applied   no closed forge under this name, so there is nothing to discharge" end)
            else empty end),
           (if ($v | length) == 0 then
              "  verdict   none recorded"
@@ -807,6 +828,9 @@ if [ "$VIEW" = "skills" ]; then
              "  verdict   "
              + ([ $v | group_by(.verdict)[] | "\(length) \(.[0].verdict)" ] | join(", "))
              + "  (model judgements over quoted evidence, not measurements)"
+             + (if $failed_forge
+                then "\n            (forge failed \($last_close.ts | day); verdict stands on the record only — no skill shipped under this name)"
+                else "" end)
            end),
           ""
       ),
@@ -814,7 +838,16 @@ if [ "$VIEW" = "skills" ]; then
       "  skills with an origin row:      \($origins | length)",
       "  of those, trigger recorded:     \([ $origins[] | select((.trigger_verbatim // "") != "") ] | length)",
       "  skills with a recorded use:     \([ $uses[].name ] | unique | length)",
-      "  skills with a verdict:          \([ $verdicts[].name ] | unique | length)",
+      # A VERDICT ON AN ABANDONED FORGE IS NOT A VERDICT ON A SHIPPED SKILL, and this
+      # line is a coverage figure -- how much of the five questions the ledger can answer
+      # ABOUT SKILLS THAT EXIST. Counted separately rather than dropped: the row is on
+      # the ledger and pretending otherwise is the same silence this block exists to end.
+      ( ([ $verdicts[].name ] | unique) as $vnames
+        | ([ $vnames[] | select(failedforge($closes; .)) ] | length) as $vfailed
+        | "  skills with a verdict:          \(($vnames | length) - $vfailed)"
+          + (if $vfailed > 0
+             then " (+\($vfailed) whose forge was abandoned; those skills never shipped)"
+             else "" end) ),
       "  skills with an apply row:       \((([ $aj.forges[] | select(.applied) | (.apply_name // .name) ] + [ $aj.loose[].name ]) | unique | length))",
       "  forges closed, never applied:   \($aj.never) of \($aj.closed)",
       "  rows that were reconstructed:   \([ $rec[] | select(.backfilled == true) ] | length) of \($rec | length)",
