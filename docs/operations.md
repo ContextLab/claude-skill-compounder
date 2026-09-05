@@ -559,7 +559,7 @@ The bar is both a clean red-team result and evidence of local reuse. See
 Noisy reminders are a tuning problem. The knobs worth setting are in the table below; the
 automatic session review has its own, in
 [What runs against the API](../README.md#what-runs-against-the-api).
-All sixty are environment variables, and they are not the whole set — this
+All sixty-one are environment variables, and they are not the whole set — this
 prints every name the hooks, the six CLIs, the status line and `install.sh` read, 143 of
 them as of 2026-09-04 (`uninstall.sh` and `scripts/` are outside it):
 
