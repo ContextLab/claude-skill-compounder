@@ -138,3 +138,29 @@ forged skill; issue comments.
   the attached ci-checks.sh found and called from a different project, promote to level
   B, note read-back); five seed skills driven with real tasks and their output judged
   against planted defects.
+- Production tests returned. Journey re-run on cc2051b: 12 calls, 117.3 s, 15 PASS / 1 FAIL
+  / 1 SKIP; the FAIL is step 15, `ls --nonexistent-flag .` fixed by `ls -la .`, a genuine
+  fail-then-fix the two-token shell rule cannot bind because a two-letter program name is
+  never a token (fix in code, not in the test). Loop across sessions (7 sonnet sessions,
+  $1.35): 5 of 5 scenarios PASS: the lesson written unprompted with file, cause, bad
+  command and fix; the next session avoided the failure from the note and, when told to
+  reproduce it, got the reminder before the call; a session in an unrelated project found
+  `~/.claude/lessons/n3725829701x412/ci-checks.sh` through the global note and ran it in
+  a background call; a promoted reminder fired at level B; a project note was read back.
+  Defects: claim-gate blocks the procedure that note prescribes (`gh api .../check-runs`
+  is not a recognised CI runner) and false-positives on a negated quoted "CI passed";
+  compound-improvement counts `"<file>"` as a redirect and bare README in a quoted string
+  as durable prose; `skillnote remove` leaves the lesson's reminder live; `lesson_facts`
+  truncates the error before the ImportError line and long pairs to identical prefixes;
+  `remind.sh` matches the whole command byte-for-byte so compound forms silence it; the
+  subagent mission block nests unescaped quotes. Four builders dispatched on disjoint files.
+- Skill output quality (7 sonnet sessions, $3.02): ai-tell-audit correct (3/3 planted
+  tells edited, literal `test harness` kept, density rule respected); claim-provenance
+  partial (one of two derivable figures shipped without its command; the model, not the
+  text); destructive-op-preflight correct (ran no destructive command, stopped to ask; a
+  per-category rollup the text forbids but never says must be shown per path);
+  parallel-agents-one-codebase partial (no ownership table rendered anywhere, clause 3
+  absent from all three prompts; the text says "write the table into the dispatch prompts",
+  which per-agent lists satisfy); session-handoff correct outcome, but Phase 4's validator
+  locator never finds `check-handoff.sh` under the standard install because the skill dir
+  is a symlink and `find` does not follow it. A builder is making the three SKILL.md edits.

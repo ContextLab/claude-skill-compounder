@@ -29,7 +29,9 @@ Derive the file set before the work reveals it — do not ask agents what they w
 2. Add every file that must change with it: the module, its direct tests, its fixtures.
 3. `git log --format= --name-only -n 50 -- <file> | sort -u` shows what has historically changed alongside it — those are your likely collisions.
 
-Write the table into the dispatch prompts:
+Render the table in full in your own reply before you dispatch anything, then check it for
+disjointness by reading the rendered table, and only then copy each agent's row into that
+agent's prompt:
 
 ```
 | Agent | Owns (exclusive)                          | Task                          |
@@ -39,7 +41,7 @@ Write the table into the dispatch prompts:
 | C     | src/capabilities.py, tests/test_caps.py   | Restore revoked-token check   |
 ```
 
-**Check disjointness by reading the table.** List concrete file paths, not directories or globs — then overlap is visible by eye. This is a judgment step, not a scripted one: any check you script must run inside a SINGLE shell block, because separate Bash calls do not share shell state and a variable set in one block is empty in the next.
+**Check disjointness by reading the table.** A set of per-agent owned-file lists scattered across the dispatch prompts is not a table: with nothing rendered in one place, there is nothing to read for overlap, and the check is reported done without being performed. List concrete file paths, not directories or globs — then overlap is visible by eye. This is a judgment step, not a scripted one: any check you script must run inside a SINGLE shell block, because separate Bash calls do not share shell state and a variable set in one block is empty in the next.
 
 **Test files:** give each agent the tests covering only its modules — it cannot prove a fix without them. A test file covering two owned modules cannot be split: assign it to ONE agent and have the other report failures in it, or give both modules to a single agent.
 
@@ -59,6 +61,8 @@ Every agent prompt contains these four clauses verbatim:
    ```
    **Warning:** `git show HEAD:<path>` exits 128 for a file not in HEAD, and piping it straight to `grep` swallows that into an empty result that reads as "symbol absent" — which makes an agent retract a real finding. Guard it as above. If baseline and working tree disagree, it is an in-flight edit, not a defect.
 4. **If you broke another module's test, REPORT it — do not edit their files.** Name the test, name your change, stop.
+
+All four clauses are copied into every prompt as they are written above, not paraphrased and not summarised, and counting them in each prompt before dispatch is part of writing it: a prompt missing clause 3 leaves that agent unable to verify any cross-file observation it makes, so anything it reports about a file it does not own arrives unverified.
 
 Add the API contract when one agent's output is another's input (see Wave Sequencing).
 

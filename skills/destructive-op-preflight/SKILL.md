@@ -129,7 +129,8 @@ find build \( -type f -o -type l \) | head -5
 
 The manifest is one line per path from that output, plus one line per unpushed commit. Not
 per category: a five-line rollup satisfies every wording of "write a manifest" and tells you
-nothing.
+nothing. The per-path lines for everything with no recovery are shown to the reader; only
+paths whose recovery source is named may be rolled up.
 
 ```text
 BLAST RADIUS: git reset --hard origin/main && git clean -fdx

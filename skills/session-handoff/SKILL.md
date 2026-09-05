@@ -107,7 +107,7 @@ Fill every mandatory section. A section with nothing to report gets the literal 
 
 |Section|What goes in it, and the failure it prevents|
 |-|-|
-|`## Resume command`|Three lines: `cd` to the repo by **absolute, quoted** path, park whatever is in the tree with `git stash push` (findable afterwards in `git stash list`), then `git checkout -B` onto **the recorded sha**. Prevents an aborted checkout on a dirty tree, a surprise detached HEAD, and landing on a branch tip that has moved.|
+|`## Resume command`|Three lines: `cd` to the repo by **absolute, quoted** path, park whatever is in the tree with `git stash push` (findable afterwards in `git stash list`), then `git checkout -B` onto **the recorded sha**. Prevents an aborted checkout on a dirty tree, a surprise detached HEAD, and landing on a branch tip that has moved. Two more lines when `## State` records `uncommitted work: stashed as NAME`, and delete those two otherwise: `git stash list \| grep -F` the NAME, then `git stash pop` the ref it printed. Keyed on the message and never on `stash@{0}`, because the `git stash push` on line 2 takes position 0 and moves NAME to `stash@{1}`.|
 |`## State`|`branch:`, `commit:` with the full 40-character sha, pasted `git status --porcelain`, and `uncommitted work:` naming where the dirty tree went. Prevents reasoning against the wrong tree. The validator rejects `uncommitted work: none` when the tree is in fact dirty, because that is the one loss nothing else here can undo.|
 |`## Done and verified`|Each item with the command that proved it and the observed output. Prevents inherited false confidence.|
 |`## Done but NOT verified`|The honest list. Collapsing it upward is how a session inherits a claim as a fact.|
@@ -129,6 +129,8 @@ Fill every mandatory section. A section with nothing to report gets the literal 
 cd "<absolute path to the repo>"
 git stash push --message "before resuming <ISO-date>" || true
 git checkout -B resume/<topic> <full 40-char sha>
+git stash list | grep -F "<the NAME recorded under uncommitted work>"
+git stash pop "<the stash@{N} ref that grep printed>"
 ```
 
 ## State
@@ -190,8 +192,13 @@ this skill fires. Run the validator instead. It lives in `scripts/` beside the `
 you are reading; if you do not know that path:
 
 ```bash
-find ~/.claude ~/.config/claude . -name check-handoff.sh 2>/dev/null | head -1
+find -L ~/.claude ~/.config/claude . -maxdepth 6 -name check-handoff.sh 2>/dev/null | head -1
 ```
+
+`-L` is required because the standard install makes the installed skill directory a
+symlink into a checkout and `find` will not descend into a symlink without it, so the
+unfollowed form prints nothing and the gate two paragraphs down gets skipped as
+unavailable.
 
 Then `check-handoff.sh notes/<your-file>.md`. It exits non-zero and prints one
 `REJECT <rule>` line per problem. Fix and re-run until it exits 0. Do not report the
