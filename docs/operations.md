@@ -701,6 +701,7 @@ place in `~/.claude/settings.json`:
 |`SKILLCONTRIB_FORK_TRIES`|`30`|the top-level `env` block|Polls for a freshly created fork to become visible before `propose` gives up with exit 23|
 |`SKILLCONTRIB_FORK_SLEEP`|`2`|the top-level `env` block|Seconds between those polls|
 |`SKILLFORGE_SURFER_BIN`|*(the `surfer` on your `PATH`)*|the top-level `env` block|The executable `skillforge doctor` probes for the prompt store. Set it only where `surfer` is installed somewhere `PATH` does not reach|
+|`SKILLFORGE_SKILLS_DIR`|*(`<claude dir>/skills`)*|the top-level `env` block|Where `skillforge done` and `skillforge install` link a forged skill, and where `doctor` counts links. `dev/forge_demo.sh` points it at a temp directory so the README recording never writes into a real skills directory; a test does the same|
 |`STATUSLINE_BASE_TTL`|`5`|the `statusLine` entry|Seconds your base status line is cached|
 |`SKILLFORGE_IDLE_SECS`|`2700`|the top-level `env` block|Age past which a forge nothing has stepped is called idle. **Two components read it** — the status line and `skillforge list` — so setting it anywhere narrower makes them disagree about whether a forge is dead|
 |`SKILLFORGE_ACTIVE_TTL`|`21600`|the top-level `env` block|Seconds of **idle** time, measured since the last `step`, past which an `active` forge is presumed dead: `skillforge doctor` says WARN, `skillforge reap` writes it the `fail` row it never got, and `start` on that name reaps it rather than refusing|
