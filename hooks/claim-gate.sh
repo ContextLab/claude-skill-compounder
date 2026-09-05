@@ -695,7 +695,15 @@ if [ "$TIER2" != "0" ]; then
   ci_claim_re='ci[[:space:]]+(is[[:space:]]+)?(green|clean|passing|passed)|all[[:space:]]+green|(all[[:space:]]+)?checks?[[:space:]]+(are[[:space:]]+|have[[:space:]]+)?(green|pass|passed|passing|succeeded)|[0-9,]+[[:space:]]*/[[:space:]]*[0-9,]+[[:space:]]+checks?|green[[:space:]]+across[[:space:]]+[0-9,]+[[:space:]]+checks?'
 
   local_runner_re='run_tests|pytest|py\.test|unittest|npm[[:space:]]+(run[[:space:]]+)?test|yarn[[:space:]]+test|pnpm[[:space:]]+test|go[[:space:]]+test|cargo[[:space:]]+test|make[[:space:]]+(test|check)|ctest|jest|mocha|vitest|rspec|tox|bats|phpunit|dotnet[[:space:]]+test|gradle[[:space:]]+test|mvn[[:space:]]+test|plugin[[:space:]]+validate'
-  ci_runner_re='gh[[:space:]]+run|gh[[:space:]]+pr[[:space:]]+checks|gh[[:space:]]+workflow'
+  # `gh api` IS THE FOURTH SHAPE, added 2026-09-05 from a live block. A session that
+  # queried `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` and closed with "All
+  # five check-runs completed with success; CI is green for cc2051b7" was told that
+  # nothing in the session had run a test command -- the query is not `gh run`, and the
+  # rows it prints are not a `gh run` summary. Only the four REST paths that REPORT a
+  # check result are recognised (`/check-runs`, `/check-suites`, `/status`,
+  # `/actions/runs`): `gh api` is a general client, and a call to `/issues` or `/pulls`
+  # says nothing about CI. `[^;&|]*` keeps the path inside its own command segment.
+  ci_runner_re='gh[[:space:]]+run|gh[[:space:]]+pr[[:space:]]+checks|gh[[:space:]]+workflow|gh[[:space:]]+api[^;&|]*/(check-runs|check-suites|status|actions/runs)'
   # `gh run` / `gh pr checks` / `gh workflow` are in that list because CALIBRATION PUT THEM
   # THERE, and so is the whole shape of the window below. See the calibration note further
   # down for the measurement.
@@ -714,8 +722,34 @@ if [ "$TIER2" != "0" ]; then
   # project bans mocks; it asserts nothing about any run. A subordinating conjunction is
   # what marks the clause hypothetical, and it is stripped before the claim patterns see
   # the text. Measured: this exact sentence, in a real closing message, fired Tier 2.
+  #
+  # MENTION VERSUS USE, THE CI HALF, added 2026-09-05 from a live false positive. The
+  # model wrote `there's no universal rule for what counts as "CI passed,"` -- a sentence
+  # ABOUT the phrase, in the middle of a run -- and the turn was blocked. Two exclusions,
+  # both of which can only REMOVE a claim and never add one:
+  #   * a span inside DOUBLE QUOTES is quotation. The claim being discussed is not the
+  #     claim being made: the same mention/use argument the conditional stripper above
+  #     already makes, and the argument Tier 1 makes for `inline code spans`. An
+  #     unbalanced quote matches nothing and its text passes through untouched.
+  #   * a CI claim preceded, WITHIN ITS OWN SENTENCE, by `no`, `not`, `never`, `whether`
+  #     or `what counts as`. `[^.!?]*` is what keeps it inside the sentence -- it cannot
+  #     cross a terminator, so a negation two sentences earlier cannot silence a real
+  #     claim after it. The marker needs a NON-LETTER after it, or `nothing` reads as
+  #     `no` and `note` as `not`.
+  # Scoped to the CI claim on purpose: the local-suite claim has the staleness rule under
+  # it, which is a different question. The quote strip is shared, because a quotation is a
+  # quotation whichever claim it holds.
+  # The text is lowercased first so both rules can be written in one case; the only two
+  # readers of norm.txt are the `grep -qiE` pair below, so nothing downstream can tell.
+  # `#` is the sed delimiter because $ci_claim_re contains a `/` (its `N / M checks`
+  # alternative), and the two backreferences are \1..\3 -- groups that open BEFORE the
+  # interpolated pattern, so the capture groups inside it cannot renumber them.
   normalise_claim_text "$TMP/msg.txt" \
     | sed -E 's/(^|[^A-Za-z])([Ii]f|[Ww]hen|[Ww]henever|[Uu]nless|[Uu]ntil|[Oo]nce|[Ww]hether|[Ss]hould|[Aa]ssuming)[[:space:]]+(all[[:space:]]+|the[[:space:]]+|every[[:space:]]+|both[[:space:]]+|these[[:space:]]+|those[[:space:]]+)?tests?[[:space:]]+(all[[:space:]]+)?pass(es|ing|ed)?/\1 /g' \
+    | tr 'A-Z' 'a-z' \
+    | sed -E 's#"[^"]*"# #g' \
+    | sed -E "s#(^|[^a-z])(no|not|never|whether)([^a-z][^.!?]*)($ci_claim_re)#\1\2\3 #g" \
+    | sed -E "s#(what counts as)([^.!?]*)($ci_claim_re)#\1\2 #g" \
     > "$TMP/norm.txt" 2>/dev/null || : > "$TMP/norm.txt"
   claim_local=0; claim_ci=0
   grep -qiE "$local_claim_re" "$TMP/norm.txt" 2>/dev/null && claim_local=1
@@ -755,7 +789,7 @@ if [ "$TIER2" != "0" ]; then
           ((.toolUseResult
             | if type=="object" then (((.stdout // "")|tostring) + " " + ((.stderr // "")|tostring))
               elif type=="string" then . else "" end)
-           | if test("\"conclusion\": *\"(success|failure)\"|[0-9]+ (successful|failing) checks?|[Aa]ll checks were successful")
+           | if test("\"conclusion\": *\"(success|failure)\"|[0-9]+ (successful|failing) checks?|[Aa]ll checks were successful|(^|\n)check-run\t[^\t\n]*\t|(^|\n)status\t[^\t\n]*\t[^\t\n]*\t|(^|\n)commit [0-9a-f]{7,40} in [^ \n/]+/[^ \n]+")
              then "@@CIRUN@@"
              elif test("Ran [0-9]+ tests?|[0-9]+ (passed|failed)|OK \\(|FAILED \\(|=+ [0-9]+ (passed|failed)|ALL TESTS")
              then "@@RUN@@" else empty end)

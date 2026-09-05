@@ -437,6 +437,94 @@ class ClaimGateTest(unittest.TestCase):
         ])
         self.assert_silent(self.run_hook(self.stop_payload("CI green on main.")))
 
+    # ------------------------------------------------- the check-runs shape (2026-09-05)
+    # A real Stop block. The session followed the user's own CI note, which queries
+    # `gh api .../check-runs` rather than `gh run`, and reported the result; the gate
+    # answered "nothing in this session ran a test command". Both halves of that workflow
+    # are pinned here, because the note is usually run through a wrapper script whose
+    # COMMAND says nothing about CI and whose OUTPUT is where the evidence lives.
+    CHECK_ROWS = (
+        "commit cc2051b7abc1234def in ContextLab/claude-skill-compounder\n"
+        "check-run\tlint (ubuntu)\tcompleted\tsuccess\thttps://github.com/o/r/runs/1\n"
+        "check-run\ttests (macos)\tcompleted\tsuccess\thttps://github.com/o/r/runs/2\n"
+        "status\tci/build\tsuccess\t-\thttps://github.com/o/r/statuses/3\n"
+    )
+    CHECK_CLAIM = "All five check-runs completed with success; CI is green for cc2051b7."
+
+    def test_a_gh_api_check_runs_call_counts_as_a_ci_runner(self):
+        self.write_transcript([
+            user_prompt("is ci green"),
+            tool_call("toolu_1", "gh api repos/ContextLab/claude-skill-compounder"
+                                 "/commits/cc2051b7/check-runs --jq '.check_runs[]'"),
+            tool_result("toolu_1", self.CHECK_ROWS),
+        ])
+        self.assert_silent(self.run_hook(self.stop_payload(self.CHECK_CLAIM)))
+
+    def test_check_run_rows_count_as_a_ci_runner_whatever_ran_them(self):
+        """The command is a wrapper script: only its OUTPUT can say this was a CI query."""
+        self.write_transcript([
+            user_prompt("is ci green"),
+            tool_call("toolu_1", "bash ~/.claude/lessons/n3725829701x412/ci-checks.sh cc2051b7"),
+            tool_result("toolu_1", self.CHECK_ROWS),
+        ])
+        self.assert_silent(self.run_hook(self.stop_payload(self.CHECK_CLAIM)))
+
+    def test_an_unrelated_gh_api_call_is_not_a_ci_runner(self):
+        """`gh api` is a general client; only the check-reporting paths count."""
+        self.write_transcript([
+            user_prompt("read the issue"),
+            tool_call("toolu_1", "gh api repos/o/r/issues/43/comments"),
+            tool_result("toolu_1", '[{"body": "hi"}]\n'),
+        ])
+        reason = self.assert_blocked(self.run_hook(self.stop_payload("CI is green.")))
+        self.assertIn("nothing in this session ran a test command", reason)
+
+    # ------------------------------------------------ mention versus use (2026-09-05)
+    def test_a_ci_phrase_inside_double_quotes_is_a_mention(self):
+        """Blocked mid-run for writing a sentence ABOUT the phrase `CI passed`."""
+        self.write_transcript([
+            user_prompt("what should the gate do"),
+            tool_call("toolu_1", "grep -rn ci_claim hooks/claim-gate.sh"),
+            tool_result("toolu_1", "hooks/claim-gate.sh:695:ci_claim_re=...\n"),
+        ])
+        self.assert_silent(self.run_hook(self.stop_payload(
+            'The hard part is that there is no universal rule for what counts as '
+            '"CI passed," so I read the rows by hand.')))
+
+    def test_a_negated_ci_claim_is_a_mention(self):
+        """Same sentence, no quotes: `no ... CI passed` asserts nothing about any run."""
+        self.write_transcript([
+            user_prompt("what should the gate do"),
+            tool_call("toolu_1", "grep -rn ci_claim hooks/claim-gate.sh"),
+            tool_result("toolu_1", "hooks/claim-gate.sh:695:ci_claim_re=...\n"),
+        ])
+        for msg in ("There is no agreed definition of what counts as CI passed.",
+                    "I did not check whether CI is green on that commit.",
+                    "Nothing here decides whether all checks passed."):
+            self.assert_silent(self.run_hook(
+                self.stop_payload(msg, prompt="p-" + msg[:12])))
+
+    def test_a_plain_ci_claim_with_no_runner_still_blocks(self):
+        """The exemptions are narrow: an unhedged claim with nothing behind it blocks."""
+        self.write_transcript([
+            user_prompt("fix the bug"),
+            tool_call("toolu_1", "grep -rn foo src"),
+            tool_result("toolu_1", "src/a.py:1:foo\n"),
+        ])
+        reason = self.assert_blocked(self.run_hook(self.stop_payload("CI passed.")))
+        self.assertIn("nothing in this session ran a test command", reason)
+
+    def test_a_negation_in_an_earlier_sentence_does_not_excuse_a_later_claim(self):
+        """`[^.!?]*` keeps the exclusion inside one sentence, and this is what pins it."""
+        self.write_transcript([
+            user_prompt("fix the bug"),
+            tool_call("toolu_1", "grep -rn foo src"),
+            tool_result("toolu_1", "src/a.py:1:foo\n"),
+        ])
+        reason = self.assert_blocked(self.run_hook(self.stop_payload(
+            "I did not touch the workflow file. CI passed.")))
+        self.assertIn("nothing in this session ran a test command", reason)
+
     def test_bare_verified_is_deliberately_not_flagged(self):
         """Documented stance: 'verified' has real evidence no pattern can tie to it."""
         self.write_transcript([

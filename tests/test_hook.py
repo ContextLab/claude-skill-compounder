@@ -217,6 +217,70 @@ class BashEditVisibilityTest(unittest.TestCase):
         self.assertIn("Checkpoint after 3 file edits", r.stdout)
 
 
+class QuotedTextIsNotAWriteTest(unittest.TestCase):
+    """A `>` and a `README` inside an ARGUMENT are text, not a redirect and not a path.
+
+    Both halves were live false positives on 2026-09-05. `skillnote add --lesson <sig>
+    "<what was learned>"` counted as a file edit, because the `>` closing its own
+    placeholder read as a redirect -- so writing a note, the cheapest tier this package
+    has, advanced the edit checkpoint. And `durable_prose` matched the bare word README
+    anywhere in a command, so two sessions were told to audit a README that nothing had
+    written. These drive the real script against real payloads and read the counter back
+    off disk; nothing here is mocked and `CI_NOW` is pinned so the sweep cannot move.
+    """
+
+    LESSON = ('skillnote add --lesson c3939426218x107-e1059657752x76 '
+              '"zsh expands a bare word starting with = as a command lookup; '
+              'quote it or use printf <file>"')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def bash(self, command, sid="s1", uid="u1", **extra):
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+               "HOME": str(self.state), "SKILL_COMPOUNDER_STATE": str(self.state),
+               "CI_NOW": "1000", "CI_EDIT_EVERY": "99"}
+        env.update({k: str(v) for k, v in extra.items()})
+        payload = {"session_id": sid, "tool_name": "Bash", "tool_use_id": uid,
+                   "tool_input": {"command": command}}
+        return subprocess.run([str(HOOK), "edit"], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+
+    def counted(self, sid="s1"):
+        f = self.state / "reminders" / ("%s.edits" % sid)
+        return len(f.read_bytes()) if f.exists() else 0
+
+    def test_a_lesson_command_is_not_an_edit(self):
+        r = self.bash(self.LESSON)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self.counted(), 0,
+                         "the `>` of a <placeholder> inside an argument is not a redirect")
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_a_redirect_outside_quotes_is_still_an_edit(self):
+        """The strip must not cost the detection: this command really writes notes.txt."""
+        r = self.bash('echo "see the README" > notes.txt')
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self.counted(), 1, "a redirect outside quotes is a write")
+
+    def test_a_readme_named_only_inside_quotes_is_not_durable_prose(self):
+        """Same command: it writes notes.txt, and no README was touched."""
+        r = self.bash('echo "see the README" > notes.txt')
+        self.assertNotIn("ai-tell-audit", r.stdout,
+                         "a bare word in a quoted argument is not a path")
+
+    def test_a_real_readme_write_is_both_an_edit_and_prose(self):
+        """The guard: narrowing the two rules must not retire either one."""
+        r = self.bash("sed -i '' s/a/b/ README.md")
+        self.assertEqual(self.counted(), 1, "`sed -i` writes the file it names")
+        self.assertIn("ai-tell-audit", r.stdout)
+        self.assertIn("README.md", r.stdout)
+
+
 class ProseReminderTest(unittest.TestCase):
     """`ai-tell-audit` names a README in its description but had nothing to fire it."""
 

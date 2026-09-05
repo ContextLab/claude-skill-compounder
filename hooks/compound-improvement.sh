@@ -268,18 +268,47 @@ mutates_file() {
     | sed -E -e 's/[0-9]*>&[0-9-]*//g' \
              -e 's#[0-9]*>>?[[:space:]]*/dev/[a-zA-Z]*##g' \
              -e 's#[0-9]*>>?[[:space:]]*/(private/)?(tmp|var/tmp|var/folders)/[^[:space:];&|)]*##g')"
+  # A `>` INSIDE A QUOTED ARGUMENT OR A <placeholder> IS NOT A REDIRECT. Measured
+  # 2026-09-05: `skillnote add --lesson <sig> "<what was learned>"` reached the redirect
+  # branch on the `>` of its own placeholder, so WRITING A NOTE counted as a file edit and
+  # advanced the checkpoint -- a counter that fires on the cheapest tier is a counter the
+  # user learns to ignore, which is the argument the `ls` case above already makes.
+  #
+  # ONLY THE REDIRECT ALTERNATIVE READS THIS STRIPPED COPY, and that split is the point.
+  # The interpreter signatures below (`write_text`, `writeFileSync`, `open(...)`) live
+  # INSIDE quotes by construction -- `python3 -c "...write_text(...)..."` -- so running
+  # them against a quote-stripped string would erase the very writes this hook was widened
+  # to catch. They keep reading `$probe`.
+  #
+  # A placeholder is `<...>` with NO WHITESPACE in it, which is what keeps `cat < a.txt >
+  # b.txt` -- a real write -- from being erased as one: that `<` is followed by a space,
+  # so the pattern cannot reach the `>`. What this concedes is a redirect written inside
+  # quotes (`bash -c "echo x > f"`), which now goes uncounted. Undercounting only delays a
+  # checkpoint, which is the direction this whole function errs in.
+  redir="$(printf '%s' "$probe" \
+    | sed -E -e "s/'[^']*'/ /g" -e 's/"[^"]*"/ /g' -e 's/<[^<>[:space:]]*>/ /g')"
+  printf '%s' "$redir" | grep -qE '>[[:space:]]*[^&|>[:space:]]' && return 0
   printf '%s' "$probe" | grep -qE \
-    '>[[:space:]]*[^&|>[:space:]]|sed[[:space:]]+(-[^[:space:]]+[[:space:]]+)*-i|[[:space:]]tee[[:space:]]|(^|[[:space:];&|(])(cp|mv|install|patch|truncate|dd|rsync)[[:space:]]|git[[:space:]]+(apply|restore|checkout[[:space:]]+--|am)|write_text|writeFileSync|writeFile\(|\bopen\([^)]*["'"'"']w'
+    'sed[[:space:]]+(-[^[:space:]]+[[:space:]]+)*-i|[[:space:]]tee[[:space:]]|(^|[[:space:];&|(])(cp|mv|install|patch|truncate|dd|rsync)[[:space:]]|git[[:space:]]+(apply|restore|checkout[[:space:]]+--|am)|write_text|writeFileSync|writeFile\(|\bopen\([^)]*["'"'"']w'
 }
 
 # Paths in this edit that are durable prose other people will read. `ai-tell-audit` has
 # no trigger of its own: its description names a README, but nothing connects editing one
 # to invoking it, so it fires only if the session happens to think of it.
 durable_prose() {
+  # A NAME IS NOT A PATH. `echo "see the README" > notes.txt` writes notes.txt and no
+  # README, and the bare word used to fire the audit nudge for a file nothing had touched
+  # -- observed in two sessions on 2026-09-05. So quoted spans and `<...>` placeholders go
+  # first (a name inside an argument is prose ABOUT a file, not a file being written), and
+  # what survives has to be PATH-SHAPED: it carries a `/` (`./README`, `docs/x.md`, and
+  # every absolute path, which is what the Write/Edit branch passes), or it carries a
+  # prose extension (`README.md`). A bare `README` with neither is a word in a sentence.
   # Anything that is not a path character becomes a separator, which is portable in a way
   # that a tr set full of quotes and backticks is not.
-  printf '%s' "$1" | sed 's/[^A-Za-z0-9_./-]/ /g' | tr -s ' ' '\n' \
-    | grep -E '(^|/)(README|CONTRIBUTING|CHANGELOG|CODE_OF_CONDUCT)[^/]*$|(^|/)docs?/.*[.](md|rst|txt)$' \
+  printf '%s' "$1" \
+    | sed -E -e "s/'[^']*'/ /g" -e 's/"[^"]*"/ /g' -e 's/<[^<>[:space:]]*>/ /g' \
+    | sed 's/[^A-Za-z0-9_./-]/ /g' | tr -s ' ' '\n' \
+    | grep -E '/(README|CONTRIBUTING|CHANGELOG|CODE_OF_CONDUCT)[^/]*$|^(README|CONTRIBUTING|CHANGELOG|CODE_OF_CONDUCT)[^/]*[.](md|rst|txt|markdown)$|(^|/)docs?/.*[.](md|rst|txt)$' \
     | head -4
 }
 
