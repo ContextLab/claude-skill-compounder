@@ -66,6 +66,16 @@ your own ledger; the shape below is the instrument, not a result.
 - **`APPLIED`.** How many closed forges have no `apply` row — a forge that produced a tool
   and left the problem where it was. `skillreport applied` breaks it down and
   `skillforge pending` lists the markers still open.
+- **A verdict on an abandoned forge is annotated, never dropped.** `apply_join` pairs
+  `apply` rows against `done` rows only, so a forge that closed with `fail` was invisible to
+  it and a verdict naming that forge printed exactly like a verdict on a shipped skill. The
+  row stays on the append-only ledger and stays in the report; it is now marked
+  `verdict stands on the record only — no skill shipped under this name`, its `applied`
+  line reads `NOT APPLICABLE` with the fail's date, and the summary's
+  `skills with a verdict` figure subtracts them into a parenthesised
+  `(+N whose forge was abandoned; those skills never shipped)` rather than counting them as
+  coverage. Selected by name — `done` or `fail`, newest wins — like every other reader
+  there.
 - **`EXCLUDED AS PROBE/TEST HARNESS`.** Invocations from non-interactive sessions, where a
   script chose the skill and not a person, recognised by the transcript entrypoint
   (`sdk-cli`) rather than by directory. Reported on its own line rather than dropped,
@@ -303,6 +313,36 @@ did this gate refuse anything" is answerable for about 48 hours and not afterwar
 figure about the lesson gate's false-positive rate needs that fixed first, and the arm ships
 on — and now ships without an expiry, so a false positive costs one lesson line rather than
 two attempts' patience.
+
+## What the first forge under the diet actually cost
+
+[`architecture.md`](architecture.md) sets the diet's expectation: *"A narrow skill should
+close in under 30 minutes; when it does not, the scope was wrong rather than the budget."*
+`watch-ci-run` is the first real forge to test it, and it took far longer than that and
+then failed at the cap. What the timings are worth is the point of this section, because
+elapsed and active are nowhere near the same number here.
+
+`WHY-ARCHIVED.md` in `<state>/quarantine/watch-ci-run-2026-09-05/` dates the forge
+2026-09-04 23:48 EDT to 2026-09-05 09:30 EDT. Its own ledger rows are a little tighter:
+`start` at epoch 1788579995 (2026-09-04 23:46:35 EDT) and `fail` at 1788614898
+(2026-09-05 09:28:18 EDT), **581.7 minutes** apart. But exactly one gap over ten minutes
+sits inside that span, **400.8 minutes** wide, from 2026-09-05 01:10 to 07:51 EDT — and
+that overnight window is the monthly spend limit `WHY-ARCHIVED.md` records killing
+reviewer D2 before it could write a report. Net of it the forge was active for **about 181
+minutes**, three hours rather than ten. Re-derive all four figures from the store:
+
+```bash
+grep watch-ci-run <state>/ledger.jsonl | jq -r '.ts' \
+  | awk 'NR>1 && $1-p > 600 {printf "GAP %d s between %d and %d\n", $1-p, p, $1} {p=$1}'
+```
+
+Three things that number is not. It is **not** a measurement of the diet's budget, because
+this forge escalated twice and ran four rounds rather than two — the shape the 30-minute
+line describes was never attempted. It is **not** a cost, because the outage is an
+artifact of one account's billing month and would not recur on another. And **n is 1**,
+under the second limit at the foot of this document. What it does support is the narrower
+claim: a forge that runs to the hard cap costs hours of wall clock even before an outage,
+so the cap terminating it is doing the work the diet asked of it.
 
 ## The PreCompact budget is per jq build
 

@@ -240,6 +240,15 @@ percentage reads `over`, which is exactly as wide as ` 99%`. Integer division ma
 downstream: `rounds_completed` under-counted it and `skillreport`, which reads only the
 ledger, could never report it. `done` raises the step to the budget but never lowers it.
 
+`rounds_completed` is now the fallback rather than the source. It infers the count from the
+step reached, which is right only while a forge spends exactly two steps per round, and an
+escalation buys a round without the forge necessarily reaching those two steps — the first
+forge to escalate twice closed with four rounds recorded and `"rounds":3` in its `fail`
+row. So `ledger_close_line` reads `<state>/rounds/<name>.tsv` when there is one, counting
+its lines, and falls back to the arithmetic only for a forge that recorded no rounds at
+all. The tsv is what the protocol actually writes, one line per red-team round; the step
+count is an inference about it.
+
 Any status that is not `done` or `failed` is treated as running. Testing `= "active"` let
 `status: "paused"` fall through every safeguard at once.
 

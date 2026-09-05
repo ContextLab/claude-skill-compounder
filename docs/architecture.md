@@ -347,6 +347,35 @@ falling count of blocking findings, and `--narrowed "<what you cut>"` grants one
 the cold read a narrowed skill owes. Two grants is the ceiling, so the loop terminates at
 four rounds however the counts move.
 
+**Each refusal carries its own exit code**, so a script driving the CLI tells them apart
+without parsing prose: **2** is bad argv or a refusal the caller can fix by typing
+something else, **3** is the round cap, **4** is a refused escalation, and **5** is a
+verdict asked for on a forge that closed with `fail`. Re-derive the roster with
+`grep -n 'refuse [0-9]' bin/skillforge`; 2 is `die`, which the same file's comment above
+`refuse()` explains.
+
+**What the cap did the first time it met a real forge.** `watch-ci-run`, forged
+2026-09-04 into 2026-09-05, is the first forge run end to end under the diet, and it
+FAILED at the hard cap rather than shipping. Its four rounds
+(`cat <state>/rounds/watch-ci-run.tsv`) went `blocking=6` of 13, `6` of 13, `5` of 13,
+`7` of 21. `escalate --converging` was refused after round 2 at exit 4 — 6 → 6 is not a
+fall — `--narrowed` was granted in its place, `--converging` was granted after round 3 on
+the strict fall 6 → 5, and after round 4 both spellings were refused because two grants is
+the ceiling. The ledger carries exactly two `escalate` rows for the name
+(`grep watch-ci-run <state>/ledger.jsonl | jq -c 'select(.event=="escalate")'`). The forge
+closed with `skillforge fail`, `apply` refused it correctly, and the artifact is
+quarantined at `<state>/quarantine/watch-ci-run-2026-09-05/` with a `WHY-ARCHIVED.md`
+carrying the orchestrator's, the builder's and four cold reviewers' sections unmerged. So
+the round cap, both escalation spellings, the refusal after two grants, the fail-at-cap
+path and the quarantine have all now been exercised by a real forge rather than by tests
+alone. Two things the cap did NOT settle: `done` followed by `apply` and `verdict` on a
+forge that SUCCEEDS is still unexercised, and the one thing the cap could not catch was
+the `verdict` this forge then wrote in silence — the gate that refuses it at exit 5 is the
+repair, and it went in the day after. What closed the forge was a design error rather than
+wording: three consecutive rounds found the verdict-selection subsystem, and round 4 made
+visible that the whole skill was built on `gh run list` when "did CI pass for this commit"
+is a question the check-runs endpoint answers directly.
+
 Paste the trigger, do not summarise it: it is the one thing about a forge that nothing can
 recover afterwards, because a quote is what a person actually said or what a hook actually
 emitted, and by the time anyone reads the row the moment is gone. `--trigger-kind` says who
@@ -766,7 +795,7 @@ a forge, plus the two the cheap tiers and the round cap added — and to say so 
 |What was built|`origin`: one row per skill, with its directory and whether we ship it|
 |Was it put on the problem that caused it|`apply`: `used`, `declined` or `failed`, with the verbatim evidence, written at step 6 as the forge closes|
 |Used since|`use`: one row per invocation, written live by the `Skill` hook|
-|Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it, written at step 6 after the apply|
+|Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it, written at step 6 after the apply — and refused before it, twice over: exit 5 when the newest close row for that name is a `fail` (`--force` does **not** lift it, because no skill was produced for a verdict to be about), exit 2 when no `apply` row exists (`--force` does lift that one, for a use recorded some other way)|
 |What was written down instead of forged|`note`: one row per `skillnote` entry, with its scope, its target file and its id. A second `add` of the same text writes no row|
 |What an extra red-team round cost|`escalate`: one row per round bought past a forge's budget, carrying the blocking counts that bought it and the round budget before and after|
 

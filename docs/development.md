@@ -11,7 +11,9 @@ Working on this repository rather than using the package.
 ```
 
 `run_tests.sh` loops over `tests/test_*.py` and runs each as its own process, so a new file
-needs no registration; there are 53 of them (`ls tests/test_*.py | wc -l`).
+needs no registration; there are 54 of them (`ls tests/test_*.py | wc -l`, as of
+2026-09-05). Run the command rather than trusting the number — it moves with every file
+added.
 
 **A suite green here has gone red on CI twice in one day**, both times because this machine
 carries something the runner does not. So run at least the files you touched under a clean
@@ -39,10 +41,23 @@ else does. `tests/test_install_sh.py` drives `install.sh` itself rather than
 installer at it with `SKILL_COMPOUNDER_REPO_URL`, and exercises `--ref`, `--update` and
 `--rollback` with no network.
 
+`scripts/` holds the six programs that are neither shipped nor globbed by the suite
+(`ls scripts/*.py`). `setup.py` is the installer's entry point; `routing_claims.py` is the
+routing gate's reader, and the three `probe_*.py` beside it spend real `claude -p` calls to
+measure whether a description fires. `reminder_conversion.py` is the newest: it re-derives
+issue #30's nudge-to-output conversion rate from your own transcripts, so the figure is a
+command rather than a quote, and `--selftest` builds a fixture on disk and asserts every
+count. [measurement.md](measurement.md) is where its output is read.
+
 The suite never spends a model call. The acceptance journey that does — one pass through
 install, note, reminder, capture, forge, route, apply, report, the mission, the lesson gate
 and uninstall against a throwaway Claude config — is a script you run by hand, never in CI:
-`python3 tests/e2e/journey.py --out <a fresh dir>`. Seventeen steps
+`python3 tests/e2e/journey.py --out <a fresh dir>`. That default is `--config-dir ambient`,
+which isolates the *configuration* and leaves the credential alone; `--config-dir fresh`
+isolates both, pointing `CLAUDE_CONFIG_DIR` at the throwaway directory and taking the
+credential from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and refusing before it
+spends anything if neither is set — [e2e.md](e2e.md) documents both modes and what each
+one's isolation is worth. Seventeen steps
 (`grep -c '^def step' tests/e2e/journey.py`); the run of 2026-09-03 spent thirteen
 `claude -p` calls on the author's own subscription and took 150.9 s, every step PASS. Both
 figures move with the scenario — it was six calls over twelve steps before the mission and

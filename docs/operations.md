@@ -194,6 +194,20 @@ back when none is given, and both read it off the forge's own `start` or `origin
 A verdict written by hand months later is the moment nobody remembers which record began
 it, and a field a caller has to retype is a field that goes unrecorded.
 
+**What `verdict` does need is a forge that produced something and a record that it was
+used**, and it refuses in two directions rather than writing a row nobody can act on. If
+the newest `done`-or-`fail` row for that name is a `fail`, it exits **5** and `--force`
+does not lift it: no skill was produced, so there is nothing a verdict could be about, and
+what the forge learned belongs on the `fail` row's own phase and in the quarantine's
+`WHY-ARCHIVED.md`. A later `done` for the same name — the re-forge this protocol prescribes
+— clears it by itself. If there is no `apply` row for the name (matched on `.name` *or*
+`.forge`, the same dual test `skillreport`'s `apply_join` uses), it exits **2** and names
+the pending queue; that one **is** liftable with `--force`, because a use recorded some
+other way is a real situation and a CLI that refuses with no way through is a CLI callers
+stop calling. Both gates were driven in a throwaway state directory
+(`SKILL_COMPOUNDER_STATE=$(mktemp -d)`) on 2026-09-05: fail → 5 with and without `--force`;
+no apply → 2, and 0 under `--force`; `done` plus `apply` → 0.
+
 Two blocks of `skillreport` read the chain back. **FUNNEL** prints one line per lineage —
 `DELIVERED`, `ACTED ON`, `OUTCOME` — and prints its own definition under the table rather
 than leaving it here to drift:

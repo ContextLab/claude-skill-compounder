@@ -483,9 +483,10 @@ editing the prose alone.
   already on disk. Note the comment above that call says `--arg` is used to stay off
   jq 1.6; `--rawfile` there would move this file onto the 1.6 floor the rest of the
   package already sits on, so the two decisions have to be made together.
-- **#34: no forge has run under the diet.** The rewritten protocol has never been
-  executed end to end by a real forge, so nothing has measured whether the diet's round
-  budget holds.
+- **#34: a forge has now run under the diet, and it failed at the cap.** This entry used
+  to read "no forge has run under the diet ... nothing has measured whether the diet's
+  round budget holds." That is answered, on 2026-09-05, by `watch-ci-run` — see the
+  section below for what it exercised and what it did not.
 
 **CI green-ness is unverified until the push.** Everything above was fixed against
 GNU-shaped shims and a local run on macOS. No Ubuntu runner has seen this tree. Do not
@@ -499,6 +500,62 @@ is the explicit opt-in). #40 landed the same day: `README.md` is the front door 
 `docs/development.md` carry what it used to. The one thing to know before editing any of
 them is that the doctrine anchors moved to `docs/architecture.md`, which
 `tests/test_doctrine_sync.py` now reads as `PROTOCOL_DOC`.
+
+## Open: #34 is answered by a forge that FAILED, so half of the diet is still unexercised
+
+`watch-ci-run` is the first forge run end to end under the diet. It ran from `start` at
+epoch 1788579995 (2026-09-04 23:46:35 EDT) to `fail` at 1788614898 (2026-09-05 09:28:18
+EDT) and closed at the hard cap without shipping a skill. Everything below is re-derivable
+from `<state>/rounds/watch-ci-run.tsv`, the ledger
+(`grep watch-ci-run <state>/ledger.jsonl | jq -c '{ts,event,steps,rounds}'`) and
+`<state>/quarantine/watch-ci-run-2026-09-05/WHY-ARCHIVED.md`.
+
+The four rounds went `blocking=6` of 13, `6` of 13, `5` of 13, `7` of 21. `escalate
+--converging` was refused after round 2 at exit 4 (6 → 6 is not a fall), `--narrowed` was
+granted in its place, `--converging` was granted after round 3 on the strict fall 6 → 5,
+and after round 4 both spellings were refused because two grants is the ceiling. The
+ledger carries exactly two `escalate` rows for the name. Timing, and it is worth reading
+with the caveat: 581.7 minutes elapsed, of which a single 400.8-minute gap (2026-09-05
+01:10 to 07:51 EDT) is the monthly spend limit that killed reviewer D2 mid-round, leaving
+about 181 minutes active. That is against a 30-minute expectation for a narrow skill — but
+this forge escalated twice and ran four rounds, so it never attempted the shape that
+expectation describes. `docs/measurement.md` carries the figures and the three reasons
+they are not a budget measurement.
+
+**What is now exercised by a real forge rather than by tests alone:** the round cap; both
+escalation spellings, granted and refused; the refusal after two grants; closing with
+`skillforge fail`; `apply` refusing a forge that produced nothing; and the quarantine, with
+a `WHY-ARCHIVED.md` keeping the orchestrator's, the builder's and four cold reviewers'
+sections unmerged where they disagree.
+
+**What is NOT exercised, as of this writing:** `skillforge done` followed by `apply` and
+`verdict` on a forge that SUCCEEDS. Nothing here has walked that path with a real skill at
+the end of it, and it is the half of the loop the ledger's five questions are built around.
+The one defect this forge did expose there was found by inspection afterwards rather than
+by the cap: `verdict` accepted a row, silently and at exit 0, for a skill that was never
+installed. `a06d49c` is the repair — exit 5 when the newest close row is a `fail`, not
+liftable by `--force` — and it is tested but has still never run at the end of a successful
+forge.
+
+A second forge, `wait-for-ci`, started at epoch 1788615163 (2026-09-05 09:32:43 EDT) as a
+narrowed re-forge onto the check-runs endpoint. **Its outcome is pending and unknown as of
+this writing.** Do not record a result for it without reading the ledger.
+
+**The fact the next forge should build on, measured by this one and recorded in its
+`WHY-ARCHIVED.md`:** `gh run list --commit <sha>` works with a **full 40-character sha**
+and returns **zero rows at exit 0** for a short one — so expand the sha locally before
+passing it. The global note `n1407736601x223` says only that `--commit` "returned nothing
+here", which reads as the flag being broken; it is not broken, it is exact-match, and a
+watcher built on a short sha fails open and silently. The same file records three more:
+`git rev-parse origin/<branch>` fails open in three separate ways, a foreground poll loop
+dies at SIGTERM with exit 143 and no verdict, and `git ls-remote` is the check that cannot
+be stale. None of these depends on the broken part of the artifact.
+
+The design error that closed the forge was the endpoint, not the wording: three consecutive
+rounds found the verdict-selection subsystem, and round 4 showed that `gh run list` answers
+"which workflow runs have this sha as their head" while the question is "did CI pass for
+this commit", which `gh api repos/O/R/commits/<sha>/check-runs` answers directly. The
+artifact must not be installed from the quarantine.
 
 ## Closed
 

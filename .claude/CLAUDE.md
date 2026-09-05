@@ -735,6 +735,24 @@ fields as well as names, and #37 added three: `from` on `start`, `origin`, `appl
 selects, and `apply` and `verdict` read `from` back off the ledger by name rather than
 asking a caller who ran the forge months earlier.
 
+**`verdict` now reads two more things back off it, and refuses on what it finds.**
+`ledger_last_close` returns the NEWEST `done`-or-`fail` row for the name -- newest and not
+first, because re-forging after a failed round is this protocol's own prescribed workflow,
+so one name legitimately carries a `fail` and then a `done` and the last word is what the
+name is now -- and a `fail` refuses the verdict at exit 5, which `--force` does NOT lift.
+`ledger_has_apply` asks whether the skill was ever put on the problem that caused it, on
+the DUAL `.name`-or-`.forge` match `apply_join` in `bin/skillreport` performs, and its
+absence refuses at exit 2, which `--force` DOES lift. The asymmetry is the point: a forge
+that produced nothing has nothing to judge and no override can invent one, while a use
+recorded outside this ledger is an ordinary situation. Both were driven in a throwaway
+state directory on 2026-09-05 and both codes observed. The same commit stopped
+`ledger_close_line` inferring the round count from the step reached whenever
+`<state>/rounds/<name>.tsv` exists: `rounds_count` over that file is the count, and
+`rounds_completed` is only the fallback for a forge that recorded no rounds at all. An
+escalation buys a round without the forge necessarily reaching the two steps that would
+imply it, so the first forge to escalate twice closed with FOUR rounds on the tsv and
+`"rounds":3` on its `fail` row.
+
 **`--trigger` warns, it does not refuse.** Refusing does not produce a trigger, it
 produces no row at all: every caller written before the flag existed would exit non-zero,
 and the cheapest way past a CLI that refuses is to stop calling it. So the gap is recorded
