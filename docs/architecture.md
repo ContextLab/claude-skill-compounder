@@ -608,7 +608,10 @@ operation, so the tool name alone bound commands that had nothing to do with eac
 because a binding consumes its armed failure the wrong one also destroyed the right one.
 A same-tool binding for a shell now wants `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared
 tokens; an exact self-recovery binds regardless, and every other tool is untouched, since a
-name like `mcp__github__create_issue` carries its operation in itself. The measured counts
+name like `mcp__github__create_issue` carries its operation in itself. Since 2026-09-05 it is also earned by the same first-segment program plus one shared
+non-flag argument of any length (`REPEAT_RECOVERY_HEAD_ARG`), the shape `ls --bad-flag .`
+then `ls -la .` takes, which no three-letter token can bind; replayed on the live store the
+addition bound nothing the token rule had not. The measured counts
 behind the change, and what it gives up, are in [DESIGN.md](DESIGN.md).
 
 **The first time, it says it.** When a recover row is written, the `PostToolUse` arm emits

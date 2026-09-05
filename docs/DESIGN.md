@@ -1446,7 +1446,9 @@ what it measured.
 
 So a shell's same-tool binding now asks what the cross-tool one asks:
 `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS` shared content tokens, same definition, same
-comparison. The floor is 2 for a plain reason and not a calibrated one — nothing establishes
+comparison. One more door was added on 2026-09-05 without lowering that floor: the same program at the
+head of both commands plus one shared argument of any length, because a two-letter program
+name is never a token and `ls` fixed by `ls` was invisible. The floor is 2 for a plain reason and not a calibrated one — nothing establishes
 that `Bash` following `Bash` is better evidence than one tool following another, and for a
 universal shell it is worse — and the knob exists to say the number is a floor rather than a
 measurement. A capped variant that would let a very short failed command still bind,
