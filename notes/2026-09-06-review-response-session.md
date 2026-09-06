@@ -38,3 +38,17 @@ each agent reports as made false.
 - Tag a release after the new mission + lightweight-skill code, pin installer, protect main.
 - Demo/screencast recentred on the cheap path.
 - Diet .claude/CLAUDE.md (history out of always-loaded instructions).
+
+## Landed
+
+Commit 9c0e7f0, pushed to `resume/after-v0.3.1` and fast-forwarded to `main` (the two
+were equal at cb110a9 before it). Full suite green locally (`./run_tests.sh`, ALL TESTS
+PASSED, the two standing skips), shellcheck 0.11.0 and 0.9.0 clean on the five changed
+scripts, the reviewer's probes re-run against the tree: the mission correction is quoted,
+the Stop arm emits once history arrives, the skills view lists the note-built skill, the
+force backup is outside `<skills>/*/SKILL.md`, and the future nudge shows ACTED ON 0.
+Still by design after this wave: probe 2 (fresh session gets nothing) and probe 4 (three
+copies of an attached script). Both are in `notes/OPEN-THREADS.md` under the review section.
+
+Recorded as a project note: a default-view block in `bin/skillreport` printed after an
+early exit goes missing on the exit path (second occurrence, n559137653x332).
