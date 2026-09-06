@@ -183,3 +183,8 @@ forged skill; issue comments.
   fix wave, both from `;` chains that ran on after a failure (a broken `bin/skillnote` was
   moved into place for about a minute and restored from HEAD; a docs commit landed with two
   sentences missing, fixed in f38f9a2); recorded as global note n3586731267x318.
+- Wave 5 prep that needs no yes: the product sentence is in the README (101b4c6); update and
+  rollback proven between the real tags v0.3.0 and v0.3.1 from a copy of install.sh outside
+  the checkout (a2aa2d4 -> b7f6a47 -> a2aa2d4, exit 0 each, install-ref records current and
+  previous). Running install.sh FROM the checkout treats the checkout as the app and refuses
+  to move it, which is documented behaviour and the first attempt's "rc=2".

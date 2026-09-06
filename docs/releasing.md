@@ -102,9 +102,12 @@ bash uninstall.sh $DIRS
 ```
 
 Step 3 is the one worth doing carefully, because it is the only step that exercises the
-rollback record end to end, and the first release has no earlier tag to move between. Until
-there is a second tag, use two branches for it and say in the release notes that rollback
-was proven that way rather than between tags.
+rollback record end to end. It was run between the two real tags on 2026-09-05, from a copy
+of `install.sh` outside any checkout into temp directories with `SKILL_COMPOUNDER_NO_SURFER=1`:
+`--ref v0.3.0` installed `a2aa2d4`, `--update --ref v0.3.1` moved the managed checkout to
+`b7f6a47` and wrote `previous v0.3.0` into `install-ref`, and `--rollback` returned it to
+`a2aa2d4` with the record inverted, each step exit 0. Before the second tag existed the same
+proof used two branches; do it between tags now.
 
 Two failure shapes to expect rather than debug from scratch. A clone made with
 `--depth 1 --branch <ref>` is **single-branch**: its configured refspec names one branch,
