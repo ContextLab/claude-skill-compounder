@@ -645,6 +645,24 @@ rounds found the verdict-selection subsystem, and round 4 showed that `gh run li
 this commit", which `gh api repos/O/R/commits/<sha>/check-runs` answers directly. The
 artifact must not be installed from the quarantine.
 
+## Open: a headless session cannot apply an edit under `.claude/skills`, so skill-authoring stops at the draft
+
+Observed 2026-09-05 while driving `skill-authoring` with a real `claude -p --model sonnet
+--permission-mode acceptEdits` session in a scratch project: Gate A ran and failed on the
+planted unquoted colon, the prior-art sweep ran, the corrected description was drafted
+(double-quoted, 439 characters, both halves), and the `Edit` into
+`<project>/.claude/skills/pdf-extract/SKILL.md` was refused twice with "requested
+permissions to write to ...", including after a scratch `settings.local.json` granted the
+path. So Gate A was never re-run on the written file, and the skill's "do not report done
+until the gate passes" sentence cannot be satisfied headlessly. Nothing in this repo is
+wrong; the limit is the platform's permission layer treating `.claude/skills/**` as
+protected in headless mode, the same layer that refused `claude --version` inside a
+dispatched forge (the stage-2 thread above). It belongs in `docs/CLAUDE-CODE-BEHAVIOR.md`
+once it is measured on purpose: n=1 skill, one CLI version (2.1.260), one permission mode;
+the measurement is a `claude -p` with `--allowedTools 'Edit(<path>)'` spelled three ways and
+the transcript read for the refusal text. The e2e journey sidesteps it by having `skillforge`
+write the skill from the CLI rather than the model editing under `.claude/skills`.
+
 ## Closed
 
 Kept as one line each so a returning session does not reopen them.
