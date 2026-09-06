@@ -188,3 +188,15 @@ forged skill; issue comments.
   the checkout (a2aa2d4 -> b7f6a47 -> a2aa2d4, exit 0 each, install-ref records current and
   previous). Running install.sh FROM the checkout treats the checkout as the app and refuses
   to move it, which is documented behaviour and the first attempt's "rc=2".
+- Wave 2 (seven seed skills, 9 sonnet sessions, $3.01): all fired; dead-guard-detection,
+  no-silent-stub, skill-compounder (with a named referent), contribute-skill correct;
+  skill-authoring correct in draft (the Edit into `.claude/skills/**` was refused headless
+  even with a scratch settings.local.json grant, an operational limit to record);
+  stale-artifact-check partial (right answer by inference, no canary planted; a row added to
+  its rationalizations table); finish-task partial (stopped at the red test and the unnoted
+  change, correctly, and did not reach docs/commit in one shot). Neutral keep/fix/retire
+  from seven fresh agents: five keep, two fix (stale-artifact-check, session-handoff, the
+  latter already fixed in fab3940), ZERO retire. So wave 3 has no seed-skill retirements to
+  put to the maintainer; it is down to the repeat refusal arm, review stage 2, and the
+  prompt-arm trigger. A scratch-test note the review left in the global CLAUDE.md
+  (n2126670529x430) was removed.

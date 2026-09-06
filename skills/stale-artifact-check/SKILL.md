@@ -245,6 +245,7 @@ Each of these means stop and go to Phase 1:
 |"The venv is inside the repo, so the path is under my project."|So is `site-packages`. That is why the check asks `sysconfig`, not the path prefix.|
 |"The canary file has the token in it, so it ran."|Not if you did not delete the file first. That token may be from the run before.|
 |"git diff came back clean, so the canary is gone."|Not if it was staged, in a new file, or outside a repo. Search the tree.|
+|"I read the build script and it obviously caches the artifact."|Reading the script says what it does with the file it finds today. Only the canary says which bytes the run you already did contained. A session reached the right answer this way once and had no evidence for it.|
 
 ## Trigger precision
 
