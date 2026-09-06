@@ -208,3 +208,11 @@ forged skill; issue comments.
   `skillnote skill` fact (7916e2a); in the live run the model read the first-time statement
   as injected content and ignored it, which is the case the deny exists for. Docs pass for
   the four-tier doctrine dispatched (four mirrors plus the installer's stanza).
+- Doctrine now four tiers (a87bb7d): note, reminder, skill (`skillnote skill`, one command),
+  forge (owed only upstream or when a real session showed the steps wrong); all four mirrors
+  and the installer's stanza moved together, the `tier-before-forge` pin gained its second
+  sentence with the ledger evidence (12 joined forges, median 3.28 h, 7 of 12 fail, 73 note
+  rows). Installer re-run refreshed the global stanza; doctor 11 pass. Waiting on the
+  maintainer for waves 3 to 5: retire the repeat refusal arm and review stage 2, narrow the
+  prompt-arm trigger, a fork for a real `skillcontrib propose`, tag v0.4.0 and pin the
+  installer, branch protection, a token for the fresh-config journey.
