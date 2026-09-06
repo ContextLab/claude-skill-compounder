@@ -6,9 +6,13 @@
 #                     [--project <dir>] [--remind]
 #                     [--keyword <k>]... [--path <glob>]... [--command "<literal cmd>"]...
 #                     [--lesson <sig>] [--attach <path>]... [--candidate <id>]
+#   skillnote skill   <note id> --name <slug> [--scope project|global]
+#                     [--use-when "<clause>"] [--not-for "<clause>"]
+#                     [--project <dir>] [--force] [--dry-run]
 #   skillnote promote <id> --to global [--project <dir>]
 #   skillnote list    [--scope project|global|memory|remind] [--json]
-#   skillnote where   [--scope project|global|memory|remind] [--project <dir>]
+#   skillnote where   [--scope project|global|memory|remind|skill|skill-global]
+#                     [--project <dir>]
 #   skillnote remove  <id> [--keep-reminder] [--project <dir>]
 #   skillnote --help
 #
@@ -206,7 +210,7 @@ esac
 now() { if [ -n "${SKILLNOTE_NOW:-}" ]; then printf '%s' "$SKILLNOTE_NOW"; else date +%s; fi; }
 
 usage() {
-  sed -n '2,13p' "$0" | sed -e 's/^# \{0,1\}//'
+  sed -n '2,17p' "$0" | sed -e 's/^# \{0,1\}//'
   echo
   echo "State:     $STATE_ROOT"
   echo "Ledger:    $LEDGER"
@@ -237,6 +241,21 @@ usage() {
   echo "so hooks/remind.sh carries it into every delivery and bin/skillreport can count"
   echo "the funnel as a join instead of an estimate. Nothing derives it: a note added by"
   echo "hand has no lineage and is reported as UNATTRIBUTED rather than guessed at."
+  echo
+  echo "skill <note id> --name <slug> is the fourth tier and the only one a ROUTER"
+  echo "can see. It writes <scope skills dir>/<slug>/SKILL.md from the note: the sentence"
+  echo "verbatim as the body, a double-quoted description in the shape skill-authoring"
+  echo "measured ('Use when ... Do NOT use for ...'), the attachments COPIED into"
+  echo "<slug>/scripts/ and listed with the comment each opens with, and a Provenance"
+  echo "section naming the note id, the lesson signature and the candidate. --use-when"
+  echo "and --not-for override the derived clauses; a description over $SKILL_DESC_MAX"
+  echo "characters is REFUSED with the count rather than truncated, because a truncated"
+  echo "trigger ships green and never fires. Gate A runs on what was written, and a"
+  echo "failure removes the directory. --dry-run prints the file and writes nothing."
+  echo "One ledger row, event 'skill', carries from, candidate, lesson_sig and the"
+  echo "scripts. The skill is callable in the session that wrote it: Claude Code loads"
+  echo "skills with no restart (docs/CLAUDE-CODE-BEHAVIOR.md, measured on 2.1.246, with"
+  echo "a lag of up to one tool call)."
   echo
   echo "promote <id> --to global MOVES a project note up a level -- the same line, the"
   echo "same id, the same date -- along with its attachments directory and its reminder,"
@@ -1548,6 +1567,497 @@ cmd_list() {
   return 0
 }
 
+# --------------------------------------------------------------------------- the skill
+#
+# THE FOURTH TIER, AND THE ONLY ONE A ROUTER CAN SEE. A note waits to be read; a reminder
+# arrives when its match rule fires; neither is a TOOL. The requirement this answers is
+# that a write-down be "a combination of notes and code that is searchable, findable as a
+# tool in the appropriate future contexts, and callable by agents", and the only artifact
+# Claude Code routes on is a SKILL.md. Until this subcommand the sole path to one was a
+# forge: a median 3.3 hours and eight agents, against a 30-minute target it has never met.
+# So `skillnote skill` promotes a note that already exists -- its sentence, its scripts,
+# its lesson signature and its lineage -- into a routable skill directory, with no model
+# call at all. The forge is not replaced; it becomes the HARDENING step a skill earns when
+# it goes upstream, and this is what a lesson gets on the way there.
+#
+# WHAT IT WRITES, and why each part is there:
+#
+#   <scope skills dir>/<slug>/SKILL.md      frontmatter, then the note verbatim
+#   <scope skills dir>/<slug>/scripts/*     the note's attachments, COPIED
+#
+# The attachments are COPIED and not moved, and the note line is NOT rewritten. `promote`
+# moves, because a note at two scopes is two records that disagree the first time one is
+# edited; this does not, because the note and the skill are two DIFFERENT artifacts read
+# by two different readers -- a person opening CLAUDE.md, and a router choosing a tool.
+# Moving the scripts out from under the note would break the line that points at them.
+#
+# THE DESCRIPTION IS THE WHOLE PRODUCT. A body nothing routes to is a file on disk. So the
+# two clauses are built in the shape skills/skill-authoring/SKILL.md measured -- "Use when
+# <situation>. Do NOT use for <situation>." -- always DOUBLE-QUOTED, and REFUSED when over
+# the cap that file states rather than truncated. A truncated trigger is the bare-`#`
+# defect from that skill's table: it ships green and never fires.
+#
+# THE TWO CAPS ARE COPIED FROM skills/skill-authoring/SKILL.md ("Description at most 500
+# characters; the whole frontmatter block at most 1024") and are the same two numbers
+# tests/test_doctrine_sync.py::SkillBudgetTest derives from that file for every skill this
+# repo ships. They are hardcoded here because this CLI is installed on its own and cannot
+# read a repository it is not in; tests/test_skillnote.py::SkillBudgetsAgreeTest reads both
+# out of that file and fails the moment the two drift.
+SKILL_DESC_MAX=500
+SKILL_FRONT_MAX=1024
+
+# Where a skill of each scope is written. `where --scope skill` prints these, for the same
+# reason it prints the other four: nothing else may resolve a scope for itself.
+skills_dir() { # <project|global> -> the directory, or fails
+  case "$1" in
+    project) printf '%s/.claude/skills' "$(project_root)" ;;
+    global)  printf '%s/skills' "$(claude_dir)" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The note, wherever it is. `parse_file` is the ONE reader of a block line in this script,
+# so this asks it rather than re-reading the markdown: a second parser of that line would
+# drift from the first, and both halves would still print something.
+#
+# A PROMOTED NOTE IS IN BOTH FILES, and only one of the two is the note. `promote` leaves
+# a one-line tombstone in the project block carrying the same id, so a search that stopped
+# at the first hit would build a skill whose body says "moved to global: ..." and nothing
+# else. The tombstone is recognised by the text `promote` writes into it.
+find_note() { # <id> -> sets NOTE_SCOPE, NOTE_TARGET, NOTE_JSON; fails when not found
+  NOTE_SCOPE=""; NOTE_TARGET=""; NOTE_JSON=""
+  for fn_s in project global; do
+    case "$fn_s" in
+      project) fn_t="$(project_root)/.claude/CLAUDE.md" ;;
+      *)       fn_t="$(claude_dir)/CLAUDE.md" ;;
+    esac
+    fn_j="$(parse_file "$fn_s" "$fn_t" \
+              | jq -c --arg id "$1" '
+                  (map(select(.id == $id)
+                       | select(((.text // "") | tostring | startswith("moved to global:")) | not))
+                   | .[0]) // empty' 2>/dev/null)"
+    if [ -n "$fn_j" ]; then
+      NOTE_SCOPE="$fn_s"; NOTE_TARGET="$fn_t"; NOTE_JSON="$fn_j"; return 0
+    fi
+  done
+  return 1
+}
+
+# The LAST note row carrying a non-empty value for this field. Not simply the last row:
+# `promote` writes a row of its own and it carries no `candidate`, so reading the newest
+# row would lose the lineage of every note that has ever been promoted.
+ledger_field_of() { # <note id> <field> -> the value, or nothing
+  [ -f "$LEDGER" ] && [ -r "$LEDGER" ] || return 0
+  jq -s -R -r --arg id "$1" --arg f "$2" '
+    [ split("\n")[] | select(length > 0) | (fromjson? // empty) | select(type == "object")
+      | select((.event // "") == "note") | select((.id // "") == $id)
+      | select(((.[$f] // "") | tostring) != "") ]
+    | sort_by(.ts // 0) | (last // {}) | ((.[$f] // "") | tostring)' "$LEDGER" 2>/dev/null
+}
+
+# The first sentence, with the `(attached: ...)` suffixes taken off: those name a path, and
+# a path in a trigger clause describes no situation. A sentence ends at ". " or at the end
+# of the line -- `: ` and `; ` do not end one, and neither does the `.` in `run_tests.sh`.
+first_sentence() { # <text>
+  fs_t="$(printf '%s' "$1" | sed 's/ *(attached: [^)]*)//g')"
+  fs_t="$(printf '%s' "$fs_t" | awk '{ p = index($0, ". ")
+                                       if (p > 0) print substr($0, 1, p - 1); else print }')"
+  printf '%s' "$fs_t" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.*$//'
+}
+
+# "The dev server refuses ..." has to become "the dev server refuses ...", or the
+# assembled clause reads "Use when The dev server". The FIRST character only, and only
+# when the first word carries a single capital: `CI`, `GitHub` and `README` each carry a
+# capital that is part of the word, and lowercasing it renames the thing the trigger is
+# about. A clause the caller passed with --use-when is never touched -- that is their
+# sentence, not a derived one.
+#
+# THE CHARACTER SETS ARE WRITTEN OUT, AND THAT IS NOT STYLE. A `case` range is matched in
+# COLLATION order, and under `LANG=en_US.UTF-8` with `LC_ALL` unset that order interleaves
+# the two cases -- so `case "The" in *[A-Z]*[A-Z]*` MATCHES, on the `h`. Measured here on
+# 2026-09-05: this function shipped with ranges, returned "The dev server ..." unchanged,
+# and the first description it built read "Use when The dev server". Every range below is
+# an explicit set for that reason, and so is the `tr`, which reads its ranges the same way.
+lower_first() { # <text>
+  case "${1%% *}" in
+    *[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*[ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) printf '%s' "$1"; return 0 ;;
+  esac
+  case "$1" in
+    [ABCDEFGHIJKLMNOPQRSTUVWXYZ]*)
+      printf '%s%s' "$(printf '%s' "$1" | cut -c1 | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')" \
+                    "$(printf '%s' "$1" | cut -c2-)" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# The program the failing call ran, for the `Use when` half of a lesson note's default.
+#
+# IT IS READ PER SEGMENT, and the first word of the command is very often the WRONG
+# answer. `cd /tmp/forge && python3 setup.py install` fails at `python3`, and a trigger
+# saying "about to run `cd`" describes every command anyone has ever typed. So the command
+# is split the way hooks/repeat-gate.sh's split_segments() splits one, assignments are
+# stepped over the way its segment_head() steps over them, and a head that only ARRANGES
+# the call -- cd, pushd, sudo, env, time, exec -- gives up its segment to the next one.
+# Nothing is printed when every segment is one of those, and the caller then falls back to
+# the note's own sentence rather than naming a shell builtin as the situation.
+lesson_program() { # <sig> -> the program, or nothing
+  lp_row="$(lesson_fail_row "$1" 2>/dev/null)" || return 1
+  lp_cmd="$(printf '%s' "$lp_row" | jq -r '(.cmd // "") | tostring' 2>/dev/null)"
+  [ -n "$lp_cmd" ] || return 1
+  printf '%s' "$lp_cmd" | awk '
+    { gsub(/&&|\|\||[;|]/, "\n")
+      n = split($0, segs, "\n")
+      for (s = 1; s <= n; s++) {
+        m = split(segs[s], w, /[ \t]+/)
+        for (i = 1; i <= m; i++) {
+          if (w[i] == "") continue
+          if (w[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
+          if (w[i] == "cd" || w[i] == "pushd" || w[i] == "sudo" ||
+              w[i] == "env" || w[i] == "time" || w[i] == "exec") break
+          print w[i]; exit
+        }
+      }
+    }'
+}
+
+# The one-line comment a script opens with, which is the only description of it that
+# exists. The shebang is not it, a blank line before it is allowed, and the first line of
+# CODE ends the search -- so a comment buried at line 80 is never promoted to a title.
+script_comment() { # <path> -> one line, or nothing
+  awk 'NR == 1 && /^#!/ { next }
+       /^[ \t]*$/ { next }
+       /^[ \t]*(#|\/\/)/ { sub(/^[ \t]*(#+|\/\/)[ \t]*/, ""); if ($0 != "") { print; exit }; next }
+       { exit }' "$1" 2>/dev/null | head -1
+}
+
+# GATE A, RUN ON WHAT WAS WRITTEN AND NOT ON WHAT WAS INTENDED. skills/skill-authoring/
+# SKILL.md Phase 3 is the original; this is that gate with the same six defects in view,
+# in shell so it needs nothing installed, plus the real YAML parse when python3 has one.
+# It reads the file back OFF DISK on purpose: a check run against the variables that built
+# the file cannot see a quoting defect the write itself introduced.
+gate_a() { # <skill dir> -> 0 on pass; the reason goes to stdout on failure
+  ga_d="${1%/}"; ga_f="$ga_d/SKILL.md"; ga_name="$(basename "$ga_d")"
+  [ -f "$ga_f" ] || { printf 'no SKILL.md at %s' "$ga_f"; return 1; }
+  [ "$(head -1 "$ga_f")" = "---" ] || { printf 'no frontmatter block: the file does not open with ---'; return 1; }
+  ga_close="$(awk 'NR > 1 && $0 == "---" { print NR; exit }' "$ga_f")"
+  case "$ga_close" in ''|*[!0-9]*) printf 'the frontmatter block is never closed with ---'; return 1 ;; esac
+  ga_front="$(sed -n "2,$(( ga_close - 1 ))p" "$ga_f")"
+  ga_flen="$(printf '%s\n' "$ga_front" | wc -c | tr -cd '0-9')"
+  case "$ga_flen" in ''|*[!0-9]*) ga_flen=0 ;; esac
+  if [ "$ga_flen" -gt "$SKILL_FRONT_MAX" ]; then
+    printf 'frontmatter is %s bytes, over the %s cap' "$ga_flen" "$SKILL_FRONT_MAX"; return 1
+  fi
+  # Only the portable six, and only at the top level: an indented continuation is not a
+  # key. This writes exactly two of them, so anything else here arrived through the note
+  # text, which is the case worth catching.
+  ga_bad="$(printf '%s\n' "$ga_front" \
+             | awk -F: '/^[A-Za-z_-]+:/ { print $1 }' \
+             | grep -v -x -E 'name|description|license|compatibility|metadata|allowed-tools' \
+             | tr '\n' ' ' | sed 's/ *$//')"
+  [ -z "$ga_bad" ] || { printf 'non-portable frontmatter keys: %s' "$ga_bad"; return 1; }
+  ga_nm="$(printf '%s\n' "$ga_front" | sed -n 's/^name:[ ]*//p' | head -1)"
+  [ "$ga_nm" = "$ga_name" ] || { printf 'name %s does not match the directory %s' "${ga_nm:-<missing>}" "$ga_name"; return 1; }
+  # The value must be a COMPLETE double-quoted JSON string covering the rest of the line.
+  # That one test subsumes three of the six defects at once: a bare scalar fails it, a
+  # bare `#` inside a bare scalar fails it, and an unquoted `: ` fails it -- none of the
+  # three is a JSON string, and jq says so rather than parsing half of one.
+  ga_val="$(printf '%s\n' "$ga_front" | sed -n 's/^description:[ ]*//p' | head -1)"
+  [ -n "$ga_val" ] || { printf 'no description in the frontmatter, so the listing falls back to the H1'; return 1; }
+  case "$ga_val" in
+    '"'*'"') : ;;
+    *) printf 'description is a bare YAML scalar, so a bare # or an unquoted ": " truncates it with no error: %s' "$ga_val"; return 1 ;;
+  esac
+  ga_dec="$(printf '%s' "$ga_val" | jq -r 'if type == "string" then . else error("not a string") end' 2>/dev/null)"
+  [ -n "$ga_dec" ] || { printf 'description is not a well-formed double-quoted scalar: %s' "$ga_val"; return 1; }
+  ga_dlen="$(jq -n --arg d "$ga_dec" '$d | length' 2>/dev/null)"
+  case "$ga_dlen" in ''|*[!0-9]*) ga_dlen=0 ;; esac
+  if [ "$ga_dlen" -gt "$SKILL_DESC_MAX" ]; then
+    printf 'description is %s characters, over the %s cap' "$ga_dlen" "$SKILL_DESC_MAX"; return 1
+  fi
+  # And the real parser, when there is one. Additive: a machine with no PyYAML is not a
+  # machine where this refuses, it is one where the shell check above stands alone.
+  command -v python3 >/dev/null 2>&1 || return 0
+  if ! ga_py="$(python3 - "$ga_d" "$SKILL_DESC_MAX" "$SKILL_FRONT_MAX" 2>&1 <<'GATEAPY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1])
+raw = (d / "SKILL.md").read_text(encoding="utf-8")
+if not raw.startswith("---\n"):
+    print("no frontmatter block"); sys.exit(1)
+front = raw.split("---\n", 2)[1]
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+try:
+    meta = yaml.safe_load(front)
+except Exception as exc:
+    print("frontmatter does not parse: %s" % exc); sys.exit(1)
+if not isinstance(meta, dict):
+    print("frontmatter is not a mapping, it is %s" % type(meta).__name__); sys.exit(1)
+desc = meta.get("description")
+if not isinstance(desc, str) or not desc.strip():
+    print("description is %r, so the listing falls back to the H1" % (desc,)); sys.exit(1)
+if meta.get("name") != d.name:
+    print("name %r does not match the directory %r" % (meta.get("name"), d.name)); sys.exit(1)
+if len(desc) > int(sys.argv[2]) or len(front) > int(sys.argv[3]):
+    print("description %d chars, frontmatter %d chars" % (len(desc), len(front))); sys.exit(1)
+GATEAPY
+  )"; then
+    printf '%s' "${ga_py:-the YAML parse failed with nothing on stdout}"
+    return 1
+  fi
+  return 0
+}
+
+# ONE ROW, EVENT `skill`. Every reader in this package selects its events BY NAME -- see
+# .claude/CLAUDE.md, "never widen a selector to a negation" -- so a new event type is
+# invisible to the forge join, the funnel and `skillforge doctor` rather than miscounted
+# by them. Checked on this tree: bin/skillreport selects `note`, `start`, `use`, `apply`
+# and `verdict` by name in every block, and bin/skillforge selects `start`, `done`,
+# `fail`, `origin`, `use`, `verdict` and `apply` the same way.
+ledger_append_skill() { # <id> <name> <scope> <path> <from> <candidate> <lesson> <att json> <project>
+  mkdir -p "$STATE_ROOT" 2>/dev/null || return 0
+  las_line="$(jq -n -c \
+    --arg id "$1" --arg name "$2" --arg scope "$3" --arg path "$4" --arg from "$5" \
+    --arg cand "$6" --arg les "$7" --argjson att "$8" --arg project "$9" \
+    --arg session "${CLAUDE_CODE_SESSION_ID:-}" --argjson ts "$(now)" \
+    '{event:"skill", ts:$ts, id:$id, name:$name, scope:$scope, path:$path, from:$from,
+      project:$project, attachments:$att, confidence:"measured", backfilled:false}
+     + (if $cand    == "" then {} else {candidate:  $cand}    end)
+     + (if $les     == "" then {} else {lesson_sig: $les}     end)
+     + (if $session == "" then {} else {session:    $session} end)' 2>/dev/null)"
+  [ -n "$las_line" ] || return 0
+  ensure_horizon
+  printf '%s\n' "$las_line" 2>/dev/null >> "$LEDGER" || return 0
+  return 0
+}
+
+cmd_skill() {
+  sk_id="${1:-}"
+  [ -n "$sk_id" ] || die "skill needs a note id: skillnote skill <note id> --name <slug>  ('skillnote list' prints them)"
+  case "$sk_id" in -*) die "skill takes the note id first, then --name <slug>" ;; esac
+  shift
+  sk_name=""; sk_scope="project"; sk_use=""; sk_not=""; sk_dry=0; sk_force=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)       [ $# -ge 2 ] || die "--name needs a slug"; sk_name="$2"; shift 2 ;;
+      --name=*)     sk_name="${1#--name=}"; shift ;;
+      --scope)      [ $# -ge 2 ] || die "--scope needs project or global"; sk_scope="$2"; shift 2 ;;
+      --scope=*)    sk_scope="${1#--scope=}"; shift ;;
+      --use-when)   [ $# -ge 2 ] || die "--use-when needs a clause"; sk_use="$2"; shift 2 ;;
+      --use-when=*) sk_use="${1#--use-when=}"; shift ;;
+      --not-for)    [ $# -ge 2 ] || die "--not-for needs a clause"; sk_not="$2"; shift 2 ;;
+      --not-for=*)  sk_not="${1#--not-for=}"; shift ;;
+      --project)    [ $# -ge 2 ] || die "--project needs a directory"; PROJECT_OPT="$2"; shift 2 ;;
+      --project=*)  PROJECT_OPT="${1#--project=}"; shift ;;
+      --dry-run)    sk_dry=1; shift ;;
+      --force)      sk_force=1; shift ;;
+      -h|--help)    usage; exit 0 ;;
+      *) die "unknown option '$1' for skillnote skill (try: skillnote --help)" ;;
+    esac
+  done
+  case "$sk_scope" in
+    project|global) : ;;
+    *) die "unknown --scope '$sk_scope'. A skill is written at project or global scope; there is no skills directory under the memory scope." ;;
+  esac
+  # THE SLUG IS THE IDENTITY. skill-authoring measured it: the DIRECTORY name is what
+  # Claude Code lists, so a slug that is not a directory-safe name is a skill nothing can
+  # invoke. `.` and `..` are refused by name as well as by the pattern, because either
+  # would otherwise name the skills directory itself or its parent.
+  [ -n "$sk_name" ] || die "skill needs a name: skillnote skill $sk_id --name <slug>"
+  case "$sk_name" in
+    .|..) die "--name '$sk_name' names a directory, not a skill. Use a slug: lowercase letters, digits and hyphens." ;;
+  esac
+  # The sets are spelled out for the reason lower_first states: under LANG=en_US.UTF-8
+  # a `[a-z0-9]*` pattern MATCHES `Foo`, so a range here would have accepted exactly the
+  # uppercase directory name it is written to refuse. tests/test_skillnote.py drives it.
+  case "$sk_name" in
+    [abcdefghijklmnopqrstuvwxyz0123456789]*) : ;;
+    *) die "--name '$sk_name' must match [a-z0-9][a-z0-9-]*: it has to START with a lowercase letter or a digit. A skill's directory name IS its identity, and Claude Code lists it verbatim." ;;
+  esac
+  case "$sk_name" in
+    *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) die "--name '$sk_name' must match [a-z0-9][a-z0-9-]*: lowercase letters, digits and hyphens only. A skill's directory name IS its identity, and Claude Code lists it verbatim." ;;
+  esac
+
+  sk_root="$(project_root)"
+  if ! find_note "$sk_id"; then
+    sk_mem="$TRANSCRIPTS/$(slug_of "$sk_root")/memory"
+    if [ -n "$(memory_rows "$sk_mem" | jq -r --arg id "$sk_id" '.[] | select(.id == $id) | .id' 2>/dev/null)" ]; then
+      die "$sk_id is a memory note, and a memory note cannot become a skill: it is a file under $sk_mem read back only through MEMORY.md, with no marker block and no attachments directory. Add the lesson again at --scope project or --scope global, then run this against that id."
+    fi
+    die "no note with id '$sk_id' in $sk_root/.claude/CLAUDE.md or $(claude_dir)/CLAUDE.md. 'skillnote list' prints the ids it holds."
+  fi
+  sk_text="$(printf '%s' "$NOTE_JSON" | jq -r '(.text // "") | tostring' 2>/dev/null)"
+  sk_date="$(printf '%s' "$NOTE_JSON" | jq -r '(.date // "") | tostring' 2>/dev/null)"
+  [ -n "$sk_text" ] || die "the note $sk_id carries no text, so there is nothing for a skill to say."
+  [ -n "$sk_date" ] || sk_date="$(fmt_date "$(now)")"
+  sk_les="$(printf '%s' "$NOTE_JSON" | jq -r '(.lesson // "") | tostring' 2>/dev/null)"
+  [ -n "$sk_les" ] || sk_les="$(ledger_field_of "$sk_id" lesson_sig)"
+  sk_cand="$(ledger_field_of "$sk_id" candidate)"
+
+  # The attachments are read off DISK rather than off the ledger row. The row records what
+  # some past run copied; the directory is what is there now, and a file that has since
+  # gone cannot be copied into a skill however confidently a row names it.
+  attach_dirs "$NOTE_SCOPE" "$sk_root" "$sk_id" || die "the note $sk_id sits at a scope with no attachments directory."
+  sk_from_dir="$ATTACH_DIR"
+  sk_files=""
+  if [ -d "$sk_from_dir" ]; then
+    for sk_f in "$sk_from_dir"/*; do
+      [ -f "$sk_f" ] || continue
+      sk_files="${sk_files}${sk_f}
+"
+    done
+  fi
+
+  # ------------------------------------------------------------------ the description
+  #
+  # THE DEFAULTS ARE DERIVED, AND THE DERIVATION IS DIFFERENT FOR A LESSON. A lesson note
+  # knows the call that failed, so its trigger can name the PROGRAM a future session is
+  # about to run -- which is a situation, and a situation is what a router matches. A
+  # plain note knows only its own sentence, so that sentence is the trigger. Both halves
+  # are overridable, because a derived clause is a starting point and the person forging
+  # the skill is the one who knows what it is for.
+  sk_first="$(first_sentence "$sk_text")"
+  sk_prog=""
+  [ -n "$sk_les" ] && sk_prog="$(lesson_program "$sk_les" 2>/dev/null)"
+  if [ -z "$sk_use" ]; then
+    if [ -n "$sk_prog" ]; then
+      sk_use="about to run \`$sk_prog\` in this project, or a \`$sk_prog\` call has just failed: $(lower_first "$sk_first")"
+    else
+      # A note already opening with "when ..." would otherwise read "Use when when".
+      sk_use="$(lower_first "$(printf '%s' "$sk_first" | sed 's/^[Ww]hen[[:space:]]*//')")"
+    fi
+  fi
+  if [ -z "$sk_not" ]; then
+    if [ -n "$sk_prog" ]; then
+      sk_not="a command other than \`$sk_prog\`, or a \`$sk_prog\` run that is already working"
+    else
+      sk_not="unrelated work this note does not describe"
+    fi
+  fi
+  sk_use="$(printf '%s' "$sk_use" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.*$//')"
+  sk_not="$(printf '%s' "$sk_not" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/\.*$//')"
+  [ -n "$sk_use" ] || die "the 'Use when' clause came out empty. Pass --use-when \"<clause>\": a description with no trigger never fires."
+  [ -n "$sk_not" ] || die "the 'Do NOT use for' clause came out empty. Pass --not-for \"<clause>\"."
+  sk_desc="Use when $sk_use. Do NOT use for $sk_not."
+  sk_dlen="$(jq -n --arg d "$sk_desc" '$d | length' 2>/dev/null)"
+  case "$sk_dlen" in ''|*[!0-9]*) sk_dlen=0 ;; esac
+  if [ "$sk_dlen" -gt "$SKILL_DESC_MAX" ]; then
+    die "the description is $sk_dlen characters and the cap is $SKILL_DESC_MAX (skills/skill-authoring/SKILL.md). Nothing was written. Shorten it with --use-when and --not-for: a description over the cap is a trigger that gets truncated, and a truncated trigger ships green and never fires."
+  fi
+  # jq builds the quoted scalar, so the escaping is a library's and not a sed expression's.
+  # A JSON string IS a valid YAML double-quoted scalar and `yaml.safe_load` decodes it back
+  # to exactly this text -- which is what gate_a re-reads off disk to prove.
+  sk_dq="$(jq -n --arg d "$sk_desc" '$d' 2>/dev/null)"
+  [ -n "$sk_dq" ] || die "could not quote the description (is jq healthy?)"
+
+  # ------------------------------------------------------------------- stage it first
+  #
+  # BUILT IN A STAGING DIRECTORY AND MOVED IN, so a Gate A failure removes only what this
+  # run created and the destination is never half a skill. For a real write the staging
+  # sits inside the skills directory, so the `mv` is a rename(2) on one filesystem; for a
+  # --dry-run it sits in TMPDIR, because a dry run that creates the skills directory has
+  # written something.
+  sk_dir="$(skills_dir "$sk_scope")" || die "no skills directory for scope '$sk_scope'"
+  sk_dest="$sk_dir/$sk_name"
+  if [ "$sk_dry" = "1" ]; then
+    sk_stage="$(mktemp -d "${TMPDIR:-/tmp}/skillnote-skill.XXXXXX")" || die3 "cannot create a temp directory"
+  else
+    if [ -e "$sk_dest" ] && [ "$sk_force" != "1" ]; then
+      die "$sk_dest already exists. Nothing here overwrites: pass --force to move the existing directory aside first, or choose another --name."
+    fi
+    mkdir -p "$sk_dir" 2>/dev/null || die3 "cannot create $sk_dir"
+    sk_stage="$(mktemp -d "$sk_dir/.skillnote-skill.XXXXXX")" || die3 "cannot create a staging directory in $sk_dir"
+  fi
+  trap 'rm -rf "$sk_stage" 2>/dev/null' EXIT INT TERM HUP
+  sk_build="$sk_stage/$sk_name"
+  mkdir -p "$sk_build" 2>/dev/null || die3 "cannot create $sk_build"
+
+  # `cp -p`, so an executable stays executable: a lesson whose script arrives without its
+  # mode is a lesson whose one command does not run.
+  sk_json='[]'
+  sk_scripts=""
+  if [ -n "$sk_files" ]; then
+    mkdir -p "$sk_build/scripts" 2>/dev/null || die3 "cannot create $sk_build/scripts"
+    while IFS= read -r sk_s; do
+      [ -n "$sk_s" ] || continue
+      sk_b="$(basename "$sk_s")"
+      cp -p "$sk_s" "$sk_build/scripts/$sk_b" 2>/dev/null || die3 "cannot copy $sk_s into the skill"
+      sk_c="$(script_comment "$sk_s")"
+      [ -n "$sk_c" ] || sk_c="no description: the file opens with no comment line"
+      sk_scripts="${sk_scripts}- \`scripts/$sk_b\` -- $sk_c
+"
+      sk_json="$(printf '%s' "$sk_json" | jq -c --arg e "scripts/$sk_b" '. + [$e]' 2>/dev/null)"
+      [ -n "$sk_json" ] || die "could not build the script list (is jq healthy?)"
+    done <<SKFEOF
+$sk_files
+SKFEOF
+  fi
+
+  {
+    printf -- '---\n'
+    printf 'name: %s\n' "$sk_name"
+    printf 'description: %s\n' "$sk_dq"
+    printf -- '---\n\n'
+    printf '# %s\n\n' "$sk_name"
+    printf '## The lesson\n\n'
+    printf '%s\n\n' "$sk_text"
+    if [ -n "$sk_scripts" ]; then
+      printf '## Scripts\n\n'
+      printf '%s\n' "$sk_scripts"
+      printf 'They are copies, taken on %s. The note keeps its own in `%s`.\n\n' \
+             "$(fmt_date "$(now)")" "$sk_from_dir"
+    fi
+    printf '## Provenance\n\n'
+    printf -- '- Note `%s`, written %s, at %s scope in `%s`.\n' \
+              "$sk_id" "$sk_date" "$NOTE_SCOPE" "$NOTE_TARGET"
+    [ -n "$sk_les" ]  && printf -- '- Lesson signature `%s`: a call that failed and then worked, recorded by `hooks/repeat-gate.sh`.\n' "$sk_les"
+    [ -n "$sk_cand" ] && printf -- '- Candidate `%s`: the lineage this note descends from.\n' "$sk_cand"
+    printf -- '- Written by `skillnote skill` on %s. No forge and no red team: this is a note made routable, and it carries exactly what the note carried.\n' "$(fmt_date "$(now)")"
+  } > "$sk_build/SKILL.md" 2>/dev/null || die3 "cannot write $sk_build/SKILL.md"
+
+  if ! sk_why="$(gate_a "$sk_build")"; then
+    rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
+    die "GATE A FAIL: ${sk_why:-the gate failed with no reason}. Nothing was written."
+  fi
+
+  if [ "$sk_dry" = "1" ]; then
+    cat "$sk_build/SKILL.md"
+    rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
+    echo "skillnote: --dry-run, so nothing was written to $sk_dest" >&2
+    return 0
+  fi
+
+  # A directory is never removed. `--force` MOVES the existing skill aside under the same
+  # backup prefix every file this CLI replaces gets, so the previous version is still on
+  # disk beside the new one.
+  sk_bak=""
+  if [ -e "$sk_dest" ]; then
+    sk_bak="$sk_dest$BACKUP_PREFIX$(fmt_stamp "$(now)")"
+    sk_n=1
+    while [ -e "$sk_bak" ]; do
+      sk_n=$(( sk_n + 1 ))
+      sk_bak="$sk_dest$BACKUP_PREFIX$(fmt_stamp "$(now)")-$sk_n"
+    done
+    mv "$sk_dest" "$sk_bak" 2>/dev/null || die3 "cannot move $sk_dest aside to $sk_bak"
+  fi
+  if ! mv "$sk_build" "$sk_dest" 2>/dev/null; then
+    rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
+    die3 "cannot move the staged skill into $sk_dest"
+  fi
+  rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
+
+  sk_newid="$(idof "skill|$sk_scope|$sk_name")"
+  ledger_append_skill "$sk_newid" "$sk_name" "$sk_scope" "$sk_dest" "$sk_id" \
+                      "$sk_cand" "$sk_les" "$sk_json" "$sk_root"
+
+  echo "skillnote: skill $sk_name written to $sk_dest"
+  echo "skillnote: it is callable now in this session (Claude Code loads skills without a restart; measured on 2.1.246, the lag is up to one tool call, so a first 'Unknown skill' is not a failure); a Skill call on it writes a use row"
+  [ -n "$sk_scripts" ] && echo "skillnote: $(printf '%s' "$sk_json" | jq -r 'length') script(s) copied into $sk_dest/scripts"
+  [ -n "$sk_bak" ] && echo "skillnote: the previous $sk_name was moved to $sk_bak, never removed"
+  return 0
+}
+
 # WHERE A NOTE WOULD LAND, PRINTED AND NOT GUESSED AT. bin/skillinsight's `promote`
 # writes through this CLI and has to be able to say, before it writes, which file the
 # line is going into -- it promotes into the CANDIDATE's project, which is very often
@@ -1558,7 +2068,7 @@ cmd_where() {
   wh_scope="project"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --scope)   [ $# -ge 2 ] || die "--scope needs one of: project global memory remind"
+      --scope)   [ $# -ge 2 ] || die "--scope needs one of: project global memory remind skill skill-global"
                  wh_scope="$2"; shift 2 ;;
       --scope=*) wh_scope="${1#--scope=}"; shift ;;
       --project) [ $# -ge 2 ] || die "--project needs a directory"
@@ -1574,7 +2084,13 @@ cmd_where() {
     global)  printf '%s\n' "$(claude_dir)/CLAUDE.md" ;;
     memory)  printf '%s\n' "$TRANSCRIPTS/$(slug_of "$wh_root")/memory" ;;
     remind)  printf '%s\n' "$REMINDERS" ;;
-    *) die "unknown --scope '$wh_scope'. The four are: project, global, memory, remind." ;;
+    # The two skill scopes answer where `skillnote skill` writes, and they are asked
+    # for the same reason the other four are: nothing else may resolve a scope for
+    # itself. `skill` is the project directory, matching `project` being the default
+    # everywhere else in this CLI; `skill-global` is the one under the claude dir.
+    skill)        printf '%s\n' "$(skills_dir project)" ;;
+    skill-global) printf '%s\n' "$(skills_dir global)" ;;
+    *) die "unknown --scope '$wh_scope'. The six are: project, global, memory, remind, skill, skill-global." ;;
   esac
 }
 
@@ -1586,6 +2102,7 @@ case "$sub" in
   where)   cmd_where "$@" ;;
   remove)  cmd_remove "$@" ;;
   promote) cmd_promote "$@" ;;
+  skill)   cmd_skill "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "skillnote: unknown subcommand '$sub'" >&2; usage >&2; exit 2 ;;
 esac

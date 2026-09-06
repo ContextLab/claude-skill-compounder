@@ -2109,5 +2109,380 @@ class WhereTest(SkillnoteCase):
         self.assertEqual(r.returncode, 2, r.stdout)
 
 
+# ------------------------------------------------------------------- the fourth tier
+#
+# `skillnote skill` turns a note that already exists into a routable skill directory. It
+# is the tier the other three could not reach: a note waits to be read, a reminder arrives
+# when its rule matches, and NEITHER is a tool a router can choose. The requirement it
+# answers is that a write-down be "a combination of notes and code that is searchable,
+# findable as a tool in the appropriate future contexts, and callable by agents", and the
+# only artifact Claude Code routes on is a SKILL.md.
+#
+# WHAT THESE TESTS ARE PARTICULARLY FOR, each a defect that ships green:
+#
+# * The description is the whole product. A file whose frontmatter does not parse, or
+#   whose description is over the cap and gets truncated, is a skill that lists and never
+#   fires -- the six silent defects `skills/skill-authoring/SKILL.md` tabulates. So the
+#   description is read back with THIS REPOSITORY'S OWN parser (`routing_claims.
+#   _frontmatter_description`, the one `tests/test_routing_claims.py` judges every shipped
+#   skill with) rather than with a regex written here that could agree with the writer and
+#   disagree with the router.
+# * The scripts have to arrive EXECUTABLE. A lesson whose script comes without its mode is
+#   a lesson whose one command does not run.
+# * The caps are read out of `skills/skill-authoring/SKILL.md`, never typed here, so a
+#   budget changed there fails this file rather than silently outranking the CLI.
+
+def frontmatter_description(text):
+    """The description, read back by the parser this repository already judges skills
+    with. Importing it rather than re-deriving it is the point: a second reader would
+    drift from the first, and both halves would still print something."""
+    import sys as _sys
+    scripts = str(REPO / "scripts")
+    if scripts not in _sys.path:
+        _sys.path.insert(0, scripts)
+    from routing_claims import _frontmatter_description
+    return _frontmatter_description(text)
+
+
+def documented_budgets():
+    """(description cap, frontmatter cap) as `skill-authoring` states them."""
+    import re
+    text = (REPO / "skills" / "skill-authoring" / "SKILL.md").read_text(encoding="utf-8")
+    desc = re.search(r"[Dd]escription at most (\d+) characters", text)
+    front = re.search(r"frontmatter block at most (\d+)", text)
+    assert desc and front, ("skills/skill-authoring/SKILL.md no longer states its budgets "
+                            "in a parseable form, so nothing here knows the ceiling")
+    return int(desc.group(1)), int(front.group(1))
+
+
+class SkillCase(LessonCase):
+    """A note with a real attached script, and the two directories a skill can land in."""
+
+    NOTE = ("python3 setup.py install fails on a modern setuptools; install the package "
+            "editable with pip instead.")
+
+    def setUp(self):
+        super().setUp()
+        self.script = self.proj / "unwedge.sh"
+        self.script.write_text(
+            "#!/bin/sh\n"
+            "# Reinstall the package editable, which is what actually worked.\n"
+            "python3 -m pip install -e .\n", encoding="utf-8")
+        self.script.chmod(0o755)
+
+    def add_note(self, *extra, text=None, scope="project"):
+        r = self.ok("add", "--scope", scope, text or self.NOTE, *extra)
+        return r.stdout.split("(", 1)[1].split(")", 1)[0]
+
+    def lesson_note(self):
+        self.seed()
+        return self.add_note("--lesson", FAIL_SIG, "--attach", "unwedge.sh")
+
+    def skills(self, scope="project"):
+        if scope == "global":
+            return self.home / ".claude" / "skills"
+        return self.proj / ".claude" / "skills"
+
+
+class SkillFromALessonTest(SkillCase):
+
+    def setUp(self):
+        super().setUp()
+        self.nid = self.lesson_note()
+        self.r = self.ok("skill", self.nid, "--name", "editable-install")
+        self.dir = self.skills() / "editable-install"
+
+    def test_the_skill_md_parses_with_the_repositorys_own_reader(self):
+        text = (self.dir / "SKILL.md").read_text(encoding="utf-8")
+        desc = frontmatter_description(text)
+        self.assertTrue(desc.startswith("Use when "), desc)
+        self.assertIn(". Do NOT use for ", desc)
+        self.assertTrue(text.startswith("---\nname: editable-install\ndescription: \""),
+                        text[:120])
+
+    def test_the_description_is_inside_the_cap_skill_authoring_states(self):
+        desc_max, front_max = documented_budgets()
+        text = (self.dir / "SKILL.md").read_text(encoding="utf-8")
+        desc = frontmatter_description(text)
+        self.assertLessEqual(len(desc), desc_max, desc)
+        front = text.split("---\n", 2)[1]
+        self.assertLessEqual(len(front), front_max)
+
+    def test_the_trigger_names_the_program_that_failed_and_not_the_cd_in_front_of_it(self):
+        """`cd /tmp/forge && python3 setup.py install` fails at `python3`. A trigger
+        saying "about to run `cd`" describes every command anyone has ever typed."""
+        desc = frontmatter_description((self.dir / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertIn("python3", desc)
+        self.assertNotIn("`cd`", desc)
+
+    def test_the_note_is_the_body_verbatim_under_a_heading(self):
+        text = (self.dir / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("## The lesson", text)
+        self.assertIn(self.NOTE, text)
+
+    def test_the_provenance_names_the_note_the_signature_and_the_date(self):
+        text = (self.dir / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("## Provenance", text)
+        self.assertIn(self.nid, text)
+        self.assertIn(FAIL_SIG, text)
+        self.assertIn("2026-08-29", text)
+
+    def test_the_script_is_copied_beside_it_and_is_still_executable(self):
+        s = self.dir / "scripts" / "unwedge.sh"
+        self.assertTrue(s.is_file(), sorted(p.name for p in self.dir.iterdir()))
+        self.assertTrue(os.access(str(s), os.X_OK),
+                        "a lesson whose script arrives without its mode is a lesson whose "
+                        "one command does not run")
+        self.assertEqual(s.read_text(encoding="utf-8"),
+                         self.script.read_text(encoding="utf-8"))
+
+    def test_the_scripts_section_carries_each_ones_first_comment_line(self):
+        text = (self.dir / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("## Scripts", text)
+        self.assertIn("`scripts/unwedge.sh`", text)
+        self.assertIn("Reinstall the package editable, which is what actually worked.", text)
+
+    def test_the_note_keeps_its_own_copy_and_its_line_is_not_rewritten(self):
+        """A COPY, not a move: the note and the skill are two artifacts with two readers,
+        and moving the file would break the line that points at it."""
+        self.assertTrue((self.proj / ".claude" / "lessons" / self.nid / "unwedge.sh").is_file())
+        line = self.block_lines()[0]
+        self.assertIn("(attached: .claude/lessons/%s/unwedge.sh)" % self.nid, line)
+
+    def test_one_ledger_row_carries_from_and_the_lesson_signature(self):
+        rows = self.ledger_rows(event="skill")
+        self.assertEqual(len(rows), 1, rows)
+        row = rows[0]
+        self.assertEqual(row["from"], self.nid)
+        self.assertEqual(row["lesson_sig"], FAIL_SIG)
+        self.assertEqual(row["name"], "editable-install")
+        self.assertEqual(row["scope"], "project")
+        self.assertEqual(row["path"], str(self.dir))
+        self.assertEqual(row["attachments"], ["scripts/unwedge.sh"])
+        self.assertEqual(row["ts"], NOW)
+        self.assertTrue(row["id"].startswith("n"), row["id"])
+
+    def test_the_new_event_is_invisible_to_the_note_reader(self):
+        """Every reader here selects its events BY NAME, so a new type is invisible rather
+        than miscounted. `skillnote list` and the note rows must not see this one."""
+        self.assertEqual([r["event"] for r in self.ledger_rows(event="skill")], ["skill"])
+        for row in self.ledger_rows(event="note"):
+            self.assertNotEqual(row.get("action"), "skill")
+
+    def test_it_says_the_path_and_that_the_skill_is_callable_now(self):
+        self.assertIn("skillnote: skill editable-install written to %s" % self.dir,
+                      self.r.stdout)
+        self.assertIn("callable now in this session", self.r.stdout)
+        self.assertIn("without a restart", self.r.stdout)
+        self.assertIn("writes a use row", self.r.stdout)
+
+
+class SkillFromAPlainNoteTest(SkillCase):
+    """No lesson signature and no attachments: the note's own first sentence is the
+    trigger, and there is no `## Scripts` section to write."""
+
+    def setUp(self):
+        super().setUp()
+        self.nid = self.add_note(text="The dev server refuses to start while port 8080 is "
+                                      "held by a dead process; free the port first.")
+        self.ok("skill", self.nid, "--name", "free-the-port")
+        self.dir = self.skills() / "free-the-port"
+
+    def test_the_trigger_is_the_notes_own_sentence(self):
+        desc = frontmatter_description((self.dir / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertIn("dev server refuses to start", desc)
+        self.assertTrue(desc.startswith("Use when the dev server"), desc)
+
+    def test_there_is_no_scripts_section_and_no_scripts_directory(self):
+        text = (self.dir / "SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("## Scripts", text)
+        self.assertFalse((self.dir / "scripts").exists())
+
+    def test_the_row_carries_no_lesson_signature_and_an_empty_attachment_list(self):
+        row = self.ledger_rows(event="skill")[0]
+        self.assertNotIn("lesson_sig", row)
+        self.assertEqual(row["attachments"], [])
+
+
+class SkillScopeTest(SkillCase):
+
+    def test_global_scope_lands_under_the_claude_directory(self):
+        nid = self.add_note("--attach", "unwedge.sh", scope="global")
+        self.ok("skill", nid, "--name", "editable-install", "--scope", "global")
+        d = self.skills("global") / "editable-install"
+        self.assertTrue((d / "SKILL.md").is_file())
+        self.assertTrue((d / "scripts" / "unwedge.sh").is_file())
+        self.assertFalse(self.skills("project").exists(),
+                         "a global skill was written into the project as well")
+        self.assertEqual(self.ledger_rows(event="skill")[0]["scope"], "global")
+
+    def test_a_global_note_can_be_found_from_a_project_that_has_notes_of_its_own(self):
+        self.add_note(text="a project note")
+        nid = self.add_note(text="a global note about tar", scope="global")
+        self.ok("skill", nid, "--name", "tar-lesson")
+        self.assertIn("a global note about tar",
+                      (self.skills() / "tar-lesson" / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_a_memory_note_is_refused_with_the_reason(self):
+        (self.transcripts / str(self.proj).replace("/", "-")).mkdir(parents=True)
+        r = self.ok("add", "--scope", "memory", "a memory note about the runner")
+        nid = r.stdout.split("(", 1)[1].split(")", 1)[0]
+        r2 = self.note("skill", nid, "--name", "runner-lesson")
+        self.assertEqual(r2.returncode, 2, r2.stdout + r2.stderr)
+        self.assertIn("memory note", r2.stderr)
+        self.assertIn("MEMORY.md", r2.stderr)
+        self.assertFalse(self.skills().exists())
+
+
+class SkillRefusalTest(SkillCase):
+
+    def test_an_over_cap_description_refuses_with_the_count_and_leaves_no_directory(self):
+        nid = self.add_note()
+        long = "x" * 480
+        r = self.note("skill", nid, "--name", "too-long", "--use-when", long)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("the cap is %d" % documented_budgets()[0], r.stderr)
+        self.assertRegex(r.stderr, r"description is \d\d\d+ characters")
+        self.assertFalse((self.skills() / "too-long").exists())
+        self.assertEqual(self.ledger_rows(event="skill"), [])
+
+    def test_gate_a_fires_on_a_frontmatter_the_pre_check_cannot_see_and_removes_it(self):
+        """The pre-write check counts the DECODED description; the frontmatter cap is
+        measured on the line as written, and a description of quote characters is twice
+        its own length once jq has escaped it. So this is the one input that passes the
+        first check and fails the gate -- and the gate has to leave nothing behind."""
+        nid = self.add_note()
+        r = self.note("skill", nid, "--name", "q" * 200, "--use-when", '"' * 425)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("GATE A FAIL", r.stderr)
+        self.assertIn("frontmatter is", r.stderr)
+        self.assertIn("Nothing was written", r.stderr)
+        self.assertEqual(sorted(p.name for p in self.skills().iterdir()), [],
+                         "the staging directory survived a gate failure")
+
+    def test_an_uppercase_slug_is_refused(self):
+        """A `case` range is matched in COLLATION order, so under LANG=en_US.UTF-8 a
+        `[a-z0-9]*` pattern MATCHES `Foo`. The guard is written as an explicit character
+        set for that reason, and this is what says so."""
+        nid = self.add_note()
+        r = self.note("skill", nid, "--name", "FreePort",
+                      LANG="en_US.UTF-8")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("[a-z0-9][a-z0-9-]*", r.stderr)
+        self.assertFalse(self.skills().exists())
+
+    def test_dot_and_dotdot_are_refused_by_name(self):
+        nid = self.add_note()
+        for slug in (".", ".."):
+            r = self.note("skill", nid, "--name", slug)
+            self.assertEqual(r.returncode, 2, slug)
+            self.assertIn("names a directory, not a skill", r.stderr)
+
+    def test_a_slug_with_a_slash_or_a_space_is_refused(self):
+        nid = self.add_note()
+        for slug in ("a/b", "two words", "under_score"):
+            r = self.note("skill", nid, "--name", slug)
+            self.assertEqual(r.returncode, 2, slug)
+            self.assertFalse((self.skills() / slug).exists())
+
+    def test_an_unknown_note_id_is_refused_and_names_both_files_it_looked_in(self):
+        r = self.note("skill", "n0x0", "--name", "nowhere")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn(str(self.claude_md), r.stderr)
+        self.assertIn(str(self.home / ".claude" / "CLAUDE.md"), r.stderr)
+
+    def test_an_existing_directory_refuses_unless_force_and_force_never_deletes(self):
+        nid = self.add_note()
+        self.ok("skill", nid, "--name", "keeper")
+        first = (self.skills() / "keeper" / "SKILL.md").read_text(encoding="utf-8")
+        r = self.note("skill", nid, "--name", "keeper")
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("--force", r.stderr)
+        r2 = self.ok("skill", nid, "--name", "keeper", "--force",
+                     "--use-when", "the runner is wedged", now=LATER)
+        self.assertIn("moved to", r2.stdout)
+        kept = [p for p in self.skills().iterdir() if p.name.startswith("keeper.bak-")]
+        self.assertEqual(len(kept), 1, sorted(p.name for p in self.skills().iterdir()))
+        self.assertEqual((kept[0] / "SKILL.md").read_text(encoding="utf-8"), first,
+                         "--force removed the previous skill instead of moving it aside")
+        self.assertIn("the runner is wedged",
+                      (self.skills() / "keeper" / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_a_note_id_that_looks_like_a_flag_is_refused(self):
+        r = self.note("skill", "--name", "x")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+
+class SkillDryRunTest(SkillCase):
+
+    def test_it_prints_the_file_and_writes_nothing_at_all(self):
+        nid = self.lesson_note()
+        before = sorted(p.name for p in (self.proj / ".claude").iterdir())
+        r = self.ok("skill", nid, "--name", "editable-install", "--dry-run")
+        self.assertTrue(r.stdout.startswith("---\nname: editable-install\n"), r.stdout[:80])
+        self.assertIn("## Provenance", r.stdout)
+        self.assertIn("scripts/unwedge.sh", r.stdout)
+        self.assertFalse(self.skills().exists(),
+                         "--dry-run created the skills directory it only described")
+        self.assertEqual(sorted(p.name for p in (self.proj / ".claude").iterdir()), before)
+        self.assertEqual(self.ledger_rows(event="skill"), [])
+
+    def test_what_it_prints_is_what_a_real_run_writes(self):
+        nid = self.add_note()
+        shown = self.ok("skill", nid, "--name", "same-thing", "--dry-run").stdout
+        self.ok("skill", nid, "--name", "same-thing")
+        self.assertEqual((self.skills() / "same-thing" / "SKILL.md").read_text(encoding="utf-8"),
+                         shown)
+
+
+class SkillWhereTest(SkillCase):
+
+    def test_where_scope_skill_is_the_directory_a_skill_lands_in(self):
+        said = self.ok("where", "--scope", "skill").stdout.strip()
+        self.assertEqual(said, str(self.skills()))
+        nid = self.add_note()
+        self.ok("skill", nid, "--name", "somewhere")
+        self.assertTrue((Path(said) / "somewhere" / "SKILL.md").is_file(),
+                        "the skill landed somewhere other than the path `where` named")
+
+    def test_where_scope_skill_global_answers_the_claude_directory(self):
+        said = self.ok("where", "--scope", "skill-global").stdout.strip()
+        self.assertEqual(said, str(self.skills("global")))
+
+    def test_neither_skill_scope_creates_anything(self):
+        for scope in ("skill", "skill-global"):
+            self.ok("where", "--scope", scope)
+        self.assertFalse((self.proj / ".claude").exists())
+        self.assertFalse((self.home / ".claude").exists())
+
+
+class SkillBudgetsAgreeTest(unittest.TestCase):
+    """The two caps are hardcoded in `bin/skillnote` because that CLI is installed on its
+    own and cannot read a repository it is not in. This is the ratchet that stops the copy
+    drifting from `skills/skill-authoring/SKILL.md`, which is where the numbers come from
+    and which `tests/test_doctrine_sync.py::SkillBudgetTest` reads for every shipped
+    skill."""
+
+    def test_the_cli_hardcodes_the_numbers_skill_authoring_states(self):
+        import re
+        desc_max, front_max = documented_budgets()
+        text = NOTE.read_text(encoding="utf-8")
+        for name, want in (("SKILL_DESC_MAX", desc_max), ("SKILL_FRONT_MAX", front_max)):
+            m = re.search(r"^%s=(\d+)$" % name, text, re.M)
+            self.assertIsNotNone(m, "bin/skillnote no longer sets %s" % name)
+            self.assertEqual(int(m.group(1)), want,
+                             "%s is %s in bin/skillnote and %s in skills/skill-authoring/"
+                             "SKILL.md" % (name, m.group(1), want))
+
+
+class SkillHelpTest(SkillnoteCase):
+
+    def test_the_help_documents_the_subcommand_and_its_flags(self):
+        out = self.ok("--help").stdout
+        for token in ("skillnote skill", "--name <slug>", "--use-when", "--not-for",
+                      "--dry-run", "Use when ... Do NOT use for ...", "skill-global"):
+            self.assertIn(token, out, "the help must document %s" % token)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
