@@ -216,3 +216,8 @@ forged skill; issue comments.
   maintainer for waves 3 to 5: retire the repeat refusal arm and review stage 2, narrow the
   prompt-arm trigger, a fork for a real `skillcontrib propose`, tag v0.4.0 and pin the
   installer, branch protection, a token for the fresh-config journey.
+- Slip, third of the same kind: a commit chain checked `grep -E '^(OK|FAILED)'`, which
+  succeeds on FAILED, so 6320d77 pushed test_seed_stale red for a few minutes; fixed in the
+  next commit and the check now requires the OK line (`tail -1 | grep -qE '^OK'`). Cause of
+  the underlying failure: Apple's Xcode python3 writes no bytecode, so the bytecode
+  demonstrations now probe the interpreter and skip with the reason.

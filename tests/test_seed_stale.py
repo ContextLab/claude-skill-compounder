@@ -756,7 +756,7 @@ class BytecodeRemedyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        if not writes_bytecode(self.python):
+        if not writes_bytecode(sys.executable):
             self.skipTest("this interpreter writes no bytecode")
 
     def tearDown(self):
