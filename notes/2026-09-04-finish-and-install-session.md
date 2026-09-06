@@ -200,3 +200,11 @@ forged skill; issue comments.
   put to the maintainer; it is down to the repeat refusal arm, review stage 2, and the
   prompt-arm trigger. A scratch-test note the review left in the global CLAUDE.md
   (n2126670529x430) was removed.
+- Wave 1 landed: `skillnote skill <note id> --name <slug>` (ab4785b) turns a note and its
+  scripts into a routable SKILL.md at level A or B in one command, no forge; accepted live,
+  a fresh sonnet session invoked `dev-server-port-in-use` through the Skill tool on its
+  first call and `hooks/skill-use.sh` wrote the use row. The lesson statement and deny name
+  `--attach <path>` when the recovery ran a script, and the statement closes with the
+  `skillnote skill` fact (7916e2a); in the live run the model read the first-time statement
+  as injected content and ignored it, which is the case the deny exists for. Docs pass for
+  the four-tier doctrine dispatched (four mirrors plus the installer's stanza).
