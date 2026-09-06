@@ -483,6 +483,28 @@
 #   below). It is a statement and never an instruction, for the reason under PLATFORM
 #   FACTS 4, and it is emitted once per signature per session. Nothing is blocked.
 #
+#   AND WHEN THE RECOVERY WAS A SCRIPT, THE LINE CARRIES `--attach`. The requirement is to
+#   write the lesson down "including the relevant contextual information and any associated
+#   code or scripts", and on 2026-09-05 three of the 71 `note` rows ever written carried an
+#   attachment while this statement and the deny below named `skillnote add --lesson` with
+#   no argument but text. `script_attach` reads the RECOVERY's normalised command and
+#   answers with a path, a placeholder, or nothing. Its shape detection is
+#   hooks/compound-improvement.sh's `mutates_file()` NARROWED TO SCRIPTS and reimplemented
+#   rather than imported: that one answers "did this call write a file" for a checkpoint
+#   counter, this one answers "is there a file worth keeping beside the note", and the two
+#   want opposite things from a `> notes.md`. A `<P>` mask is a directory this script
+#   cannot reconstruct, so `<path to the script>` is printed rather than a path that would
+#   not open -- silence about WHICH file, never a wrong file. THE DENY GAINS THE SAME
+#   CLAUSE ON THE SAME ONE COMMAND and gains nothing else: ONE COMMAND is a measured rule
+#   (WHO MAY DISMISS), and an attachment is an argument to that command, not a second one.
+#
+#   THE CLOSING LINE OF THE STATEMENT NAMES `skillnote skill`, which is what a note becomes
+#   when it should be callable rather than read -- "a combination of notes and code that is
+#   searchable, findable as a tool in the appropriate future contexts, and callable by
+#   agents", in the maintainer's words. It is on the STATEMENT and not on the deny, for the
+#   reason `skillrepeat dismiss` is not on the deny either: the deny names one command, and
+#   the one it names is the one that lifts it.
+#
 #   THAT DELIVERY IS MEASURED, and it was measured by accident, which is the only reason
 #   it is not still an open question here. `additionalContext` was already established on
 #   `PreToolUse`, `UserPromptSubmit` and `SessionStart` (docs/CLAUDE-CODE-BEHAVIOR.md) and
@@ -1570,6 +1592,49 @@ fit_bytes() {   # $1 text, $2 byte budget -> stdout
   printf '%s' "$fb_s"
 }
 
+# DID THE RECOVERY WRITE OR RUN A SCRIPT, AND WHICH ONE. Answers with a path, with the
+# literal placeholder when a script is certain and its path is not, or with nothing at all.
+# See AND WHEN THE RECOVERY WAS A SCRIPT in the header for why the answer exists.
+#
+# IT READS THE NORMALISED COMMAND, not the raw one, and that is what makes the "outside
+# quotes" rule free: rule 3 of the normaliser has already collapsed every quoted literal to
+# `<S>`, so a `>` or a `fix.sh` inside an argument is gone before this function sees it.
+# What it concedes with the same stroke is a script written from inside a KEPT program
+# (`python3 -c "...open('f.sh','w')..."`, which normalises to `<C:...>`): those bytes
+# survive, but no rule below can fire on them, because `-c` is neither a bare `-` nor a
+# script path. Silence, which is the direction this whole gate errs in.
+#
+# FOUR SHAPES FIRE, and each is a narrowing of one alternative in `mutates_file()`:
+#   a. a redirect whose target ends in a script extension -- `cat > x.sh`, and a heredoc
+#      into a file is this shape with a `<<` in front of it.
+#   b. an interpreter handed a script path or a bare `-` (a heredoc or a pipe into stdin):
+#      `bash x.sh`, `python3 x.py`, `python3 - <<EOF`. NOT `python3 -m pytest`, which runs
+#      a module, and not `bash -c`, which is the concession above.
+#   c. a script path AT THE HEAD OF A SEGMENT, which is `./fix.sh` -- the commonest shape
+#      of all and the one this function missed in its first draft, because a file made
+#      executable is run by its own name and no interpreter appears anywhere in the line.
+#      THE HEAD IS LOAD-BEARING: `grep -n foo fix.sh` names the same file in an argument
+#      slot and reads it rather than running it, so a rule matching a script path ANYWHERE
+#      would report every `wc -l build.py` as a script the session ran.
+#   d. `chmod +x`, which is a file being made runnable and is never anything else.
+# A `> notes.md` fires NONE of them, on purpose: the sentence this decides is "the recovery
+# ran a script", and a heredoc into prose would make that sentence false.
+script_attach() {   # $1 normalised recovery command -> path, placeholder, or empty
+  printf '%s' "$1" | grep -qE \
+    '>[[:space:]]*[^[:space:];&|>]*\.(sh|py|js|rb|pl)([^A-Za-z0-9_.]|$)|(^|[[:space:];&|(])(bash|sh|zsh|python|python2|python3|node|ruby|perl)[[:space:]]+(-[[:space:]]|-$|[^[:space:];&|]*\.(sh|py|js|rb|pl)([^A-Za-z0-9_.]|$))|(^|[;&|(][[:space:]]*)[^[:space:];&|]*\.(sh|py|js|rb|pl)([^A-Za-z0-9_.]|$)|(^|[[:space:];&|(])chmod[[:space:]]+([^[:space:]]+[[:space:]]+)*\+x' \
+    || return 0
+  # THE PATH IS A WHOLE TOKEN OR IT IS NOTHING. `<P>/fix.sh` carries a real basename and a
+  # directory that was masked BECAUSE it varies between machines, so the tail alone
+  # (`/fix.sh`) is a path that would not open -- which is worse than saying nothing. A
+  # token holding `<`, `>` or `$` is a mask or an unexpanded variable and is skipped for
+  # the same reason; so is a flag, and so is anything over 80 characters, which is not a
+  # path a person is going to read back off one line.
+  sa_p="$(printf '%s' "$1" | tr ' ' '\n' \
+            | grep -E '^[^<>$-][^<>$]*\.(sh|py|js|rb|pl)$' | head -1)"
+  [ "${#sa_p}" -gt 80 ] && sa_p=""
+  if [ -n "$sa_p" ]; then printf '%s' "$sa_p"; else printf '%s' "<path to the script>"; fi
+}
+
 # THE FACTS the recovery arm emits and the lesson gate quotes back, built in one place and
 # stored ONCE in the marker file, so the two can never say different things about which
 # call failed or which one worked.
@@ -1578,6 +1643,14 @@ fit_bytes() {   # $1 text, $2 byte budget -> stdout
 # field budgets: `fit_bytes` weighs what was actually assembled, because `cut -c` counts
 # characters under a UTF-8 locale and bytes otherwise. tests/test_repeat_gate.py drives it
 # with input that saturates both normalisers rather than trusting this sentence.
+#
+# THE BUDGET IS 1200 MINUS THE TAIL, AND THE TAIL IS MEASURED TOO. It used to be the
+# constant 950, which held while the command block was a fixed six lines; it stopped
+# holding the day that block grew a conditional `--attach` clause and a closing line, and a
+# constant that is right for one of two shapes is a cap that is wrong for the other. The
+# tail is built and weighed by `facts_budget` before the facts are, so the assembled
+# statement is under 1200 whichever shape it took -- and the facts shrink rather than the
+# commands, because a truncated command is a command nobody can run.
 #
 # IT WAS 90 CHARACTERS A COMMAND AND 70 FOR THE ERROR UNTIL 2026-09-05, and two real
 # statements that day are why it is not. A statement is delivered ONCE per signature per
@@ -1604,7 +1677,7 @@ fit_bytes() {   # $1 text, $2 byte budget -> stdout
 # own session's transcript is entitled to know that `skillrepeat dismiss` exists. The DENY
 # names only the one a session can act on. What is quoted back byte for byte is the part
 # that could otherwise disagree, which was never the command list.
-lesson_facts() {   # $1 failed norm, $2 error head (RS-separated lines), $3 what worked
+lesson_facts() {   # $1 failed norm, $2 err (RS lines), $3 what worked, $4 byte budget
   ls_e="$(lesson_error "$2")"
   ls_f="$(cap "$1" 220)"
   ls_w="$(cap "$3" 220)"
@@ -1626,28 +1699,58 @@ lesson_facts() {   # $1 failed norm, $2 error head (RS-separated lines), $3 what
   error:   $ls_e
   worked:  $ls_w"
   fi
-  # 950 BYTES FOR THE FACTS, so that the STATEMENT this block is the body of stays under
-  # 1200: `lesson_statement` adds a fixed six lines plus the signature twice, and a
-  # signature is under 40 characters by construction. The number is enforced, not asserted
-  # -- see `fit_bytes` -- and tests/test_repeat_gate.py measures the assembled statement
-  # against saturating input rather than trusting this sentence.
+  # WHATEVER IS LEFT OF 1200 ONCE THE COMMAND BLOCK HAS BEEN WEIGHED -- `facts_budget`,
+  # above -- with 950 the ceiling and the default for a caller that passes nothing. The
+  # number is enforced, not asserted (see `fit_bytes`), and tests/test_repeat_gate.py
+  # measures the assembled statement against saturating input in both shapes rather than
+  # trusting this sentence.
   fit_bytes "A call that failed in this session has since succeeded a different way, and
 the store recorded that as its recovery.
 
 $ls_body
 
-No lesson references this signature yet." 950
+No lesson references this signature yet." "${4:-950}"
 }
 
-# THE STATEMENT: the facts, plus the two commands that exist, with the second one labelled
-# as what it is. FACT ONLY, and the label is a fact too: a model that runs `skillrepeat
-# dismiss` writes `actor:"model"` and lifts nothing (WHO MAY DISMISS in the header). An
-# imperative here is both ignored and misleading about who is asking (PLATFORM FACTS 4).
-lesson_statement() {   # $1 sig, $2 facts
-  printf '%s' "$2
+# EVERYTHING THE STATEMENT ADDS AFTER THE FACTS, in one function because two callers need
+# its LENGTH before either needs its text: `facts_budget` weighs it, and `lesson_statement`
+# prints it. Building it twice in two places is how the two would come to disagree about a
+# byte count nobody would ever see disagree.
+#
+# FACT ONLY, and every label is a fact too: a model that runs `skillrepeat dismiss` writes
+# `actor:"model"` and lifts nothing (WHO MAY DISMISS in the header); `--attach` copies a
+# file; `skillnote skill` makes a note callable. An imperative here is both ignored and
+# misleading about who is asking (PLATFORM FACTS 4).
+lesson_tail() {   # $1 sig, $2 attach (empty = the recovery ran no script)
+  lt_a=""
+  [ -n "$2" ] && lt_a=" --attach $2"
+  printf '%s' "
 A lesson lifts it:
-  skillnote add --lesson $1 \"<what was learned>\"
+  skillnote add --lesson $1 \"<what was learned>\"$lt_a
   skillrepeat dismiss $1 --why \"<why>\"  (a person at a terminal only)"
+  [ -n "$2" ] && printf '%s' "
+The recovery ran a script; --attach copies it beside the note so the next session can call it."
+  printf '%s' "
+A note that should be callable as a tool becomes one with: skillnote skill <note id> --name <slug>"
+}
+
+# THE BYTE BUDGET THE FACTS GET, which is 1200 less what the tail above will cost. 1190
+# rather than 1200 leaves the slack `fit_bytes` needs to land under rather than on the cap,
+# 950 is the ceiling the facts had when the tail was fixed, and 300 is the floor: below
+# that the facts stop naming both calls, and a statement that cannot say what worked is not
+# worth emitting at any length.
+facts_budget() {   # $1 sig, $2 attach -> a byte budget for lesson_facts
+  fb_t="$(lesson_tail "$1" "$2" | wc -c | tr -cd '0-9')"
+  case "$fb_t" in ''|*[!0-9]*) fb_t=500 ;; esac
+  fb_b=$(( 1190 - fb_t ))
+  [ "$fb_b" -gt 950 ] && fb_b=950
+  [ "$fb_b" -lt 300 ] && fb_b=300
+  printf '%s' "$fb_b"
+}
+
+# THE STATEMENT: the facts, then the tail.
+lesson_statement() {   # $1 sig, $2 facts, $3 attach
+  printf '%s' "$2$(lesson_tail "$1" "${3:-}")"
 }
 
 # CRC-32 plus byte length. BSD and GNU `cksum` agree on both fields for stdin, and both
@@ -1993,7 +2096,17 @@ if [ "$event" = "PostToolUse" ]; then
             bsig="$(printf '%s' "$psig" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96)"
             case "$bsig" in ''|.|..) bsig=_ ;; esac
             if mkdir -p "$ldir" 2>/dev/null && [ ! -f "$ldir/s-$bsig" ]; then
-              printf '%s' "$(lesson_facts "$pfnorm" "${pferr:-}" "$norm")" \
+              # THE ATTACHMENT IS DECIDED HERE, BESIDE THE FACTS, AND STORED IN ITS OWN
+              # MARKER. The gate quotes the facts back byte for byte and appends a
+              # DIFFERENT command block (THE FACTS ARE SHARED; THE COMMAND BLOCK IS NOT),
+              # so the one thing both blocks need -- which file, if any -- has to survive
+              # next to them. Recomputing it there is not an option: the gate runs on a
+              # later call and has no copy of the command that recovered anything. It
+              # follows the s- marker's first-binding-wins rule by sharing its guard.
+              batt="$(script_attach "$norm")"
+              [ -n "$batt" ] && printf '%s' "$batt" > "$ldir/a-$bsig" 2>/dev/null
+              printf '%s' "$(lesson_facts "$pfnorm" "${pferr:-}" "$norm" \
+                               "$(facts_budget "$psig" "$batt")")" \
                 > "$ldir/s-$bsig" 2>/dev/null || :
             fi
             [ -z "$bound_sig" ] && { bound_sig="$psig"; bound_bsig="$bsig"; }
@@ -2041,7 +2154,10 @@ if [ "$event" = "PostToolUse" ]; then
   # ARE SHARED; THE COMMAND BLOCK IS NOT.
   facts="$(cat "$ldir/s-$bsig" 2>/dev/null)"
   [ -z "$facts" ] && exit 0
-  stmt="$(lesson_statement "$bound_sig" "$facts")"
+  # READ BACK, NOT RECOMPUTED, for the reason the facts are: the marker written at the
+  # first binding is the single copy, so what this says and what the gate says later cannot
+  # drift. An absent a- marker is the ordinary case and means the recovery ran no script.
+  stmt="$(lesson_statement "$bound_sig" "$facts" "$(cat "$ldir/a-$bsig" 2>/dev/null)")"
   [ -z "$stmt" ] && exit 0
   ( jq -nc --arg c "$stmt" \
       '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}' \
@@ -2627,6 +2743,13 @@ fi
 # the ledger -- and the marker is REMOVED as soon as its signature is judged unable to
 # qualify, so that parse happens a bounded number of times per signature per session
 # rather than on every tool call for the rest of it.
+# A SIGNATURE THIS SESSION CAN NO LONGER BE REFUSED OVER, forgotten in ONE `rm` because
+# the marker is now a PAIR: the facts and, when the recovery ran a script, the path beside
+# them. Two removals in three places is two removals one of which will be forgotten.
+lg_forget() {   # $1 sanitised signature
+  rm -f "$lg_dir/s-$1" "$lg_dir/a-$1" 2>/dev/null || :
+}
+
 lesson_gate() {
   [ "$LESSON_GATE" = "1" ] || return 0
   if [ "$LESSON_UNLIMITED" != "1" ] && [ "$LESSON_MAX" -lt 1 ]; then return 0; fi
@@ -2767,11 +2890,10 @@ EOF
     # store parse on every remaining tool call is the trade, and the deny budget is two
     # either way.
     if [ "${lg_dis:-no}" = "yes" ] || [ "$lg_n" -lt "$MIN_SESSIONS" ]; then
-      rm -f "$lg_dir/s-$lg_safe" 2>/dev/null || :
+      lg_forget "$lg_safe"
       continue
     fi
-    case "$lg_noted" in *" $lg_sig "*) rm -f "$lg_dir/s-$lg_safe" 2>/dev/null || :
-                          continue ;; esac
+    case "$lg_noted" in *" $lg_sig "*) lg_forget "$lg_safe"; continue ;; esac
     # AND IT DOES NOT LET GO, unless somebody set a budget. Counted before it is claimed,
     # so the duplicate delivery cannot spend two of the budget on one event: the second
     # delivery finds the same tuid already claimed and leaves without emitting. The whole
@@ -2782,7 +2904,7 @@ EOF
                    | wc -l | tr -cd '0-9')"
       case "$lg_spent" in ''|*[!0-9]*) lg_spent=0 ;; esac
       if [ "$lg_spent" -ge "$LESSON_MAX" ]; then
-        rm -f "$lg_dir/s-$lg_safe" 2>/dev/null || :
+        lg_forget "$lg_safe"
         continue
       fi
     fi
@@ -2790,6 +2912,15 @@ EOF
     mkdir "$lg_dir/deny/$lg_safe/$tuid" 2>/dev/null || return 0
     lg_stmt="$(cat "$lg_dir/s-$lg_safe" 2>/dev/null)"
     [ -z "$lg_stmt" ] && return 0
+    # THE ATTACHMENT RIDES ON THE ONE COMMAND AND ADDS NO SECOND ONE. See AND WHEN THE
+    # RECOVERY WAS A SCRIPT in the header: the requirement is that the write-down carry the
+    # script, and the rule that this text names exactly one command is measured. An
+    # argument to that command satisfies both; a line saying "and also run X" satisfies
+    # neither.
+    lg_att=""
+    [ -f "$lg_dir/a-$lg_safe" ] \
+      && lg_att="$(cat "$lg_dir/a-$lg_safe" 2>/dev/null)"
+    [ -n "$lg_att" ] && lg_att=" --attach $lg_att"
     # ONE COMMAND, AND BOTH OMISSIONS ARE THE POINT. `skillrepeat dismiss` is not named
     # here: measured 2026-09-04, two of two refused sessions ran it with an invented
     # reason and carried on, so naming it made the refusal free. A dismissal a model
@@ -2807,7 +2938,7 @@ Nothing ran and nothing was written. Fail rows for this signature come from $lg_
 EARLIER sessions, and the recovery above was bound in this one. Writing the lesson down is
 what lifts this, and in this session it is the only thing that does:
 
-  skillnote add --lesson $lg_sig \"<what was learned>\"
+  skillnote add --lesson $lg_sig \"<what was learned>\"$lg_att
 
   skillrepeat show $lg_sig
 

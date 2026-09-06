@@ -3769,6 +3769,236 @@ class LessonStatementTest(GateCase):
             self.run_hook(self.success("echo hello", "s1"))))
 
 
+# ====================================================== the script the recovery ran
+class ScriptAttachmentTest(GateCase):
+    """THE WRITE-DOWN CARRIES THE SCRIPT, or it says it cannot name one.
+
+    The requirement is to write the lesson down "including the relevant contextual
+    information and any associated code or scripts". `bin/skillnote` has had `--attach`
+    since the tier landed and 3 of the 71 `note` rows ever written used it, because
+    nothing that speaks to a session ever named it. The statement and the deny now do,
+    on the ONE command each of them already named, and only where the recovery really
+    ran a script.
+
+    THE SAME-TOOL TOKEN RULE IS SWITCHED OFF IN SOME OF THESE and left at its default in
+    others, and which is which is deliberate. `make check` recovered by `bash fix.sh`
+    shares no content token with its failure, so at the shipped default that pair binds
+    NOTHING and there would be no statement to assert on -- the knob makes the fixture
+    the plain one the reader expects. `test_the_shipped_binding_rules_reach_the_same_clause`
+    is the non-vacuity for that: a pair that binds at the DEFAULT reaches the identical
+    clause, so nothing here is an artefact of the knob."""
+
+    ERR = "Exit code 2\nmake: *** No rule to make target 'check'."
+    FAIL = "make check"
+    SCRIPT_FIX = "bash fix.sh"
+    # Shares `make` and `check` with the failure, so it binds with every knob at its
+    # shipped default.
+    BOUND_FIX = "bash scripts/fix-make-check.sh"
+    HEREDOC_FIX = "python3 - <<'EOF'\nimport sys\nprint('ok')\nEOF"
+    PLAIN_FIX = "grep -n foo file"
+    PLACEHOLDER = "--attach <path to the script>"
+    SENTENCE = ("The recovery ran a script; --attach copies it beside the note so the "
+                "next session can call it.")
+    SKILL_LINE = ("A note that should be callable as a tool becomes one with: "
+                  "skillnote skill <note id> --name <slug>")
+
+    def env(self, **extra):
+        """The shipped configuration: the repeat arm off, the lesson gate on."""
+        extra.setdefault("REPEAT_GATE_REFUSE", None)
+        return GateCase.env(self, **extra)
+
+    def loose(self, **extra):
+        """The same, with the same-tool token rule off. See the class docstring."""
+        extra.setdefault("REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS", 0)
+        return extra
+
+    def sig(self):
+        return [r for r in self.rows() if r["t"] == "fail"][0]["sig"]
+
+    def recover(self, session="s1", fix=SCRIPT_FIX, **env_extra):
+        self.tick()
+        self.run_hook(self.failure(self.FAIL, session, error=self.ERR), **env_extra)
+        self.tick()
+        r = self.run_hook(self.success(fix, session), **env_extra)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if not r.stdout.strip():
+            return None
+        hso = json.loads(r.stdout)["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PostToolUse")
+        return hso["additionalContext"]
+
+    def lesson_line(self, text):
+        lines = [l for l in text.split("\n") if "skillnote add --lesson" in l]
+        self.assertEqual(len(lines), 1,
+                         "expected exactly one lesson line in:\n%s" % text)
+        return lines[0]
+
+    def deny_reason(self, fix, sessions=("s1", "s2", "s3"), **env_extra):
+        for s in sessions:
+            self.tick()
+            self.run_hook(self.failure(self.FAIL, s, error=self.ERR), **env_extra)
+            self.tick()
+            self.run_hook(self.success(fix, s), **env_extra)
+        self.tick()
+        r = self.run_hook(self.attempt("npm install left-pad", sessions[-1]), **env_extra)
+        reason = self.assert_denied(r)
+        self.assertIn("No lesson references this signature yet", reason)
+        return reason
+
+    # ------------------------------------------------------------- the statement
+    def test_a_script_recovery_puts_the_script_on_the_lesson_line(self):
+        ctx = self.recover(**self.loose())
+        self.assertIsNotNone(ctx, "the recovery arm said nothing at all")
+        line = self.lesson_line(ctx)
+        self.assertIn("skillnote add --lesson %s" % self.sig(), line)
+        self.assertTrue(line.endswith(" --attach fix.sh"),
+                        "the lesson line does not carry the script:\n%s" % line)
+        self.assertIn(self.SENTENCE, ctx)
+
+    def test_the_shipped_binding_rules_reach_the_same_clause(self):
+        """NON-VACUITY for the knob the fixtures above turn off: a pair that binds at
+        every shipped default reaches the identical clause, so the clause is a property
+        of the gate and not of the fixture."""
+        ctx = self.recover(fix=self.BOUND_FIX)
+        self.assertIsNotNone(ctx, "the default binding rules bound nothing")
+        self.assertTrue(self.lesson_line(ctx).endswith(
+            " --attach scripts/fix-make-check.sh"), ctx)
+
+    def test_a_script_with_no_literal_path_names_the_placeholder(self):
+        """A heredoc into an interpreter IS a script and has no path to attach. The
+        normaliser masks the quoted delimiter, so there is nothing to name -- and a
+        placeholder is the honest answer where a guess would be a path that will not
+        open."""
+        ctx = self.recover(fix=self.HEREDOC_FIX, **self.loose())
+        self.assertIsNotNone(ctx)
+        line = self.lesson_line(ctx)
+        self.assertTrue(line.endswith(" " + self.PLACEHOLDER),
+                        "expected the placeholder, got:\n%s" % line)
+        self.assertIn(self.SENTENCE, ctx)
+
+    def test_a_masked_directory_is_never_offered_as_a_path(self):
+        """`cat > /tmp/build/fix.sh` normalises to `<P>/fix.sh`: the basename survived and
+        the directory did not, so `/fix.sh` is a path to a file that is not there. The
+        clause says so rather than naming it."""
+        ctx = self.recover(fix="cat > /tmp/build/fix.sh <<'EOF'\necho hi\nEOF",
+                           **self.loose())
+        self.assertIsNotNone(ctx)
+        line = self.lesson_line(ctx)
+        self.assertTrue(line.endswith(" " + self.PLACEHOLDER),
+                        "a masked path was offered:\n%s" % line)
+        self.assertNotIn("--attach /fix.sh", ctx)
+        self.assertNotIn("--attach <P>", ctx)
+
+    def test_a_script_run_by_its_own_name_is_a_script(self):
+        """`./fix.sh` names no interpreter and redirects nothing, and it is the commonest
+        recovery shape there is. The rule is anchored at a SEGMENT HEAD, which is what
+        `test_a_script_named_in_an_argument_is_not_one` holds it to."""
+        ctx = self.recover(fix="./fix.sh", **self.loose())
+        self.assertIsNotNone(ctx)
+        self.assertTrue(self.lesson_line(ctx).endswith(" --attach ./fix.sh"), ctx)
+
+    def test_a_script_named_in_an_argument_is_not_one(self):
+        """NON-VACUITY for the head anchor above: the identical filename in an argument
+        slot is being READ, and a rule that fired on it would report every `wc -l
+        build.py` as a script the session ran."""
+        ctx = self.recover(fix="wc -l fix.sh", **self.loose())
+        self.assertIsNotNone(ctx)
+        self.assertNotIn("--attach", ctx, ctx)
+
+    def test_a_recovery_that_ran_no_script_carries_no_attach(self):
+        ctx = self.recover(fix=self.PLAIN_FIX, **self.loose())
+        self.assertIsNotNone(ctx)
+        self.assertNotIn("--attach", ctx,
+                         "a `grep` recovery was reported as a script:\n%s" % ctx)
+        self.assertNotIn(self.SENTENCE, ctx)
+
+    def test_the_statement_closes_by_naming_skillnote_skill(self):
+        """The tier a note becomes when it should be callable rather than read. Pinned on
+        the exact text because `bin/skillnote skill` and this line land together, and a
+        line naming a command that does not exist is worse than no line."""
+        for session, fix in (("s1", self.SCRIPT_FIX), ("s2", self.PLAIN_FIX)):
+            # A DIFFERENT SESSION EACH TIME. The statement is emitted once per signature
+            # per session and both fixtures share a signature, so a second pass under one
+            # session is silence rather than a second statement.
+            with self.subTest(fix=fix):
+                ctx = self.recover(session=session, fix=fix, **self.loose())
+                self.assertIsNotNone(ctx)
+                self.assertIn(self.SKILL_LINE, ctx)
+
+    def test_the_closing_line_is_the_last_line_and_follows_both_commands(self):
+        ctx = self.recover(**self.loose())
+        lines = [l for l in ctx.split("\n") if l.strip()]
+        self.assertEqual(lines[-1], self.SKILL_LINE, ctx)
+        self.assertLess(ctx.index("skillrepeat dismiss"), ctx.index(self.SKILL_LINE), ctx)
+
+    def test_the_new_lines_carry_no_imperative_either(self):
+        """The same rule the rest of the statement is written under (PLATFORM FACTS 4):
+        text arriving through a hook is untrusted, so an imperative in it is both ignored
+        and misleading about who is asking."""
+        ctx = self.recover(**self.loose())
+        first_words = [ln.strip().split(" ")[0].lower()
+                       for ln in ctx.split("\n") if ln.strip()]
+        for bad in ("run", "write", "record", "please", "you", "do", "call", "use"):
+            self.assertNotIn(bad, first_words, "imperative opener %r in:\n%s" % (bad, ctx))
+
+    def test_a_statement_with_an_attachment_still_fits_the_byte_cap(self):
+        """The cap was a constant 950 for the facts plus a fixed tail; the tail is no
+        longer fixed. `facts_budget` weighs it, so the assembled statement is under 1200
+        in the widest shape the gate can produce -- saturating input AND an attachment."""
+        long_fix = ("bash scripts/" + "a" * 60 + ".sh")
+        ctx = self.recover(fix=long_fix, **self.loose())
+        self.assertIsNotNone(ctx)
+        self.assertLess(len(ctx.encode("utf-8")), 1200,
+                        "the statement is %d bytes:\n%s" % (len(ctx.encode("utf-8")), ctx))
+        self.assertIn("--attach scripts/", ctx)
+
+    def test_a_saturating_command_with_an_attachment_fits_too(self):
+        self.tick()
+        self.run_hook(self.failure(SATURATING_CMD, "s1", error=SATURATING_ERR),
+                      **self.loose())
+        self.tick()
+        r = self.run_hook(self.success(SATURATING_CMD.replace("gh ", "bash repro.sh "),
+                                       "s1"), **self.loose())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.strip(), "nothing was said at all")
+        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertLess(len(ctx.encode("utf-8")), 1200,
+                        "the statement is %d bytes:\n%s" % (len(ctx.encode("utf-8")), ctx))
+        self.assertIn("skillnote add --lesson", ctx)
+        self.assertIn("--attach repro.sh", ctx)
+
+    # ------------------------------------------------------------------ the deny
+    def test_the_deny_carries_the_clause_on_its_one_command(self):
+        reason = self.deny_reason(self.SCRIPT_FIX, **self.loose())
+        line = self.lesson_line(reason)
+        self.assertTrue(line.endswith(" --attach fix.sh"),
+                        "the deny's one command does not carry the script:\n%s" % line)
+        self.assertEqual(reason.count("--attach"), 1,
+                         "the clause is on more than one line:\n%s" % reason)
+
+    def test_the_deny_carries_no_clause_where_no_script_ran(self):
+        reason = self.deny_reason(self.PLAIN_FIX, **self.loose())
+        self.assertNotIn("--attach", reason, reason)
+
+    def test_the_deny_still_names_exactly_one_way_out(self):
+        """The measured rule (2026-09-04): naming a second command made the refusal free.
+        An attachment is an ARGUMENT to the one command, so it changes nothing here --
+        which is what this asserts, in the shape that would break if the closing line or
+        the dismissal ever leaked across."""
+        reason = self.deny_reason(self.SCRIPT_FIX, **self.loose())
+        self.assertNotIn("dismiss", reason, reason)
+        self.assertNotIn(self.SKILL_LINE, reason, reason)
+        self.assertNotIn("skillnote skill", reason, reason)
+        self.assertIn("skillnote add --lesson", reason)
+
+    def test_the_sentence_about_the_script_stays_off_the_deny(self):
+        """The deny is a refusal and quotes the facts back; the explanation of what
+        `--attach` does belongs to the statement, which a person reads in their own
+        transcript. What the deny gains is the argument and nothing else."""
+        reason = self.deny_reason(self.SCRIPT_FIX, **self.loose())
+        self.assertNotIn(self.SENTENCE, reason, reason)
+
+
 # ============================================================== the lesson gate
 class LessonGateTest(GateCase):
     """THE SECOND TIME: REFUSE UNTIL IT IS WRITTEN.
