@@ -44,13 +44,14 @@ down before deciding; if either is hard to write, that is the answer.
 Three things override a yes, in order: an existing skill already handles it (section 1); a single sentence of
 documentation covers it; the procedure is specific to work finishing now.
 
-**Then pick the tier. Only tier 2 is a skill; the last row is the two cheap ones in one command.**
+**Then pick the tier. Tiers 2 and 3 are both skills; the last row is the two cheap ones in one command.**
 
 |Tier|What it is|How|
 |-|-|-|
 |**0 — note**|one dated line of fact, in a marker block of the project's or your `CLAUDE.md`|`skillnote add --scope project "<the line>"`|
 |**1 — reminder**|short prose keyed on words, paths or a command signature, injected when a matching prompt or call appears|`skillnote add --remind --keyword <k> "<the line>"`|
-|**2 — skill**|a `SKILL.md`, plus scripts where a command is worth shipping, reached by its description|the forging protocol below|
+|**2 — skill**|a `SKILL.md` plus the note's scripts, routable by its description and callable as a tool, at project or user level|`skillnote skill <note id> --name <slug>`|
+|**3 — forged skill**|the same file hardened by a builder and cold red-team rounds, for a skill going upstream or one shown wrong|the forging protocol below|
 |**0 and 1 — lesson**|a fail-then-fix as one record: the dated line, and a reminder keyed on the call that failed|`skillnote add --lesson <sig> "<text>" [--attach <path>]`|
 
 <!-- doctrine: cheap-branch -->
@@ -76,11 +77,14 @@ and `skillforge doctor` is what reports which of the two you have.
 
 <!-- doctrine: tier-before-forge -->
 **A procedure earns a skill only when it has steps a model gets wrong without them AND a trigger a description
-can route; otherwise it is a note or a reminder.** Both are checkable before anything is dispatched. *Steps a
-model gets wrong*: name the step and the wrong turn taken without it — a fact has no steps, and forging "the
-suite is `./run_tests.sh`" wraps one sentence in eight hundred. *A trigger a description can route*: write the
-sentence a user would type. If the moment is internal and no utterance marks it, nothing routes it, and a
-reminder keyed on the tool call or the path fires where a skill would not.
+can route; otherwise it is a note or a reminder. A skill is one command by default, and a forge is owed only
+when it goes upstream or a real session has shown its steps wrong.** *Steps a model gets wrong*: name the step
+and the wrong turn taken without it — a fact has no steps, and forging "the suite is `./run_tests.sh`" wraps
+one sentence in eight hundred. *A trigger a description can route*: write the sentence a user would type; if
+the moment is internal with no utterance to match, a reminder keyed on the tool call or the path fires where a
+skill would not. A lesson you want a later session to CALL rather than read is tier 2: `skillnote skill <note
+id> --name <slug>` writes the SKILL.md from that note, copies its attachments into `scripts/`, runs Gate A on
+what it wrote, and the skill is callable in the session that ran the command.
 
 ### Forging protocol: A → C → (D → C)² → A
 
@@ -114,11 +118,10 @@ question nothing can recover afterwards. Paste it; do not summarise. `--trigger-
 (`references/forge-animation.md`).
 
 <!-- doctrine: concurrent-forges -->
-**Just start it.** Concurrent forges are fine — each gets its own record and its own slot in the status
-line, and starting one never disturbs another. `skillforge start` exits 2 when the name is held by a live
-forge. Close a dead one with `skillforge fail
---name <forge> <reason>` or `skillforge clear --name <forge>`, never `done`. With several live, `step`, `done`
-and `fail` refuse to guess: pass `--name <forge>`.
+**Just start it.** Concurrent forges are fine — each gets its own record and its own slot in the status line,
+and starting one never disturbs another. `skillforge start` exits 2 when the name is held by a live forge.
+Close a dead one with `skillforge fail --name <forge> <reason>` or `skillforge clear --name <forge>`, never
+`done`. With several live, `step`, `done` and `fail` refuse to guess: pass `--name <forge>`.
 
 **Decide the round cap here**, because `<total-steps>` encodes it and cannot be changed later: budget `2 + 2
 × (planned D rounds)`, **6** at the default cap and **10** at the escalated 4. `skillforge escalate` is the
@@ -128,28 +131,27 @@ only way to raise it (step 4); what each step number means is in `references/for
 impossible. Before dispatching anyone, write to a file:
 
 - the **verbatim original trigger**: the text passed to `--trigger`, copied, not summarised.
-- **A's framing**: the general procedure in one paragraph, with the project taken out of it —
-  all C is allowed to see — and, adjacent to the trigger, **one sentence saying what the framing
-  generalises and what it drops.** That is the framing check, made here rather than audited
-  later: a misframing has every later check certifying the wrong thing, and the judge that used
-  to catch it found two meta findings in ten forges and never a skill defect.
+- **A's framing**: the general procedure in one paragraph, with the project taken out of it — all C is allowed
+  to see — and, adjacent to the trigger, **one sentence saying what the framing generalises and what it
+  drops.** That is the framing check, made here rather than audited later: a misframing has every later check
+  certifying the wrong thing, and the judge that used to catch it found two meta findings in ten forges and
+  never a skill defect.
 - **the level, and what is deferred to `CLAUDE.md`.** The hierarchy is general > user > project.
   <!-- doctrine: highest-applicable-level -->
   **A skill belongs at the highest level of the hierarchy to which it applies, and must be
   written generally enough to apply beyond the case that prompted it.**
   <!-- doctrine: specialisation-not-baked-in -->
-  **The specialisation comes from the project's or the user's `CLAUDE.md` and the constraints
-  already recorded there — never from text baked into the skill.** A skill that hardcodes one
-  repository's test command has made a project's particulars everyone's. Record here how routing
-  will be verified: where a skill installs decides which router sees it.
-- the **success criteria**: what the finished skill must let a session do, stated so a
-  stranger can score each one yes or no. One is standing, on every forge:
+  **The specialisation comes from the project's or the user's `CLAUDE.md` and the constraints already
+  recorded there — never from text baked into the skill.** A skill that hardcodes one repository's test
+  command has made a project's particulars everyone's. Record here how routing will be verified: where a
+  skill installs decides which router sees it.
+- the **success criteria**: what the finished skill must let a session do, stated so a stranger can score each
+  one yes or no. One is standing, on every forge:
   <!-- doctrine: state-the-cost-bound -->
-  **The skill must state when it is not worth its own cost.** The reader who already suspects
-  they do not need it is the one who abandons it halfway and does not say so, and the exit ramp
-  is one sentence.
-- the **acceptance test**: the original triggering problem, written out to attempt again
-  with the finished skill at step 5.
+  **The skill must state when it is not worth its own cost.** The reader who already suspects they do not
+  need it is the one who abandons it halfway and does not say so, and the exit ramp is one sentence.
+- the **acceptance test**: the original triggering problem, written out to attempt again with the finished
+  skill at step 5.
 
 **On disk, not in context** — `~/.claude/skill-compounder/briefs/<name>.md`. A run can outlive a compaction
 of this thread, and criteria held only in context are gone at that moment. Re-read at step 5.
@@ -285,12 +287,11 @@ routing gate *and* dispatches one fresh cold reader against the narrowed trigger
 the project and the finished skill, so this is the only place "did it actually solve the thing that started
 this" can be asked. Re-read the step-1 file, not your memory, and:
 
-- **move the clean draft into place first**: `done` looks in the repo or at `--skill-dir` from `start`, and
-  C reports its scratch path but never learns the destination, so the copy is yours;
+- **move the clean draft into place first**: `done` looks in the repo or at `--skill-dir` from `start`, and C
+  reports its scratch path but never learns the destination, so the copy is yours;
 - **attempt the original triggering problem again, with the skill**, and say what happened;
-- score each success criterion as written — one that now looks wrong is a finding to record, never a
-  criterion to edit;
-- keep this verification in your notes and out of the SKILL.md: it is evidence about this forge, not
+- score each success criterion as written — one that now looks wrong is a finding to record, never a criterion
+  to edit; keep this verification in your notes and out of the SKILL.md: it is evidence about this forge, not
   instruction for a stranger.
 
 <!-- doctrine: routing-gate-on-completion -->
@@ -425,8 +426,7 @@ Escalate in order:
    explicit "Do NOT use this when…" note naming the exact wrong turn taken.
 2. **Substantive issue** (procedure wrong or outdated): fix it, then **re-run the full pipeline** on
    the fix — A re-registers criteria for the repair, and D is cold as ever.
-3. **Retirement** (obsolete, superseded, or unfixable): write the case, then get **independent
-   concurrence**.
+3. **Retirement** (obsolete, superseded, or unfixable): write the case, then get **independent concurrence**.
    <!-- doctrine: neutral-retirement-question -->
    **Ask a second fresh agent the neutral question, *"should this be kept, fixed, or retired?"*,
    never "confirm this deletion".** A leading prompt defeats the check: it tells the reviewer what

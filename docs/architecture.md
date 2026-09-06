@@ -9,11 +9,13 @@ are evidence for, [`development.md`](development.md) for working on the reposito
 [`CLAUDE-CODE-BEHAVIOR.md`](CLAUDE-CODE-BEHAVIOR.md) records the Claude Code behaviour
 those decisions rest on.
 
-The organising idea is three tiers of durable lesson. A **note** is a dated line in a
+The organising idea is four tiers of durable lesson. A **note** is a dated line in a
 `CLAUDE.md` or a memory file. A **reminder** is a match rule that a hook states back at
-the moment it applies. A **skill** is the expensive tier, forged adversarially and
-installed into `~/.claude/skills/`. `bin/skillnote` writes the first two in one command
-each, `bin/skillforge` drives the third, and every one of them appends a row to the same
+the moment it applies. A **skill** is a `SKILL.md` plus its scripts, which a router can
+see and an agent can call, written from a note in one command. A **forged skill** is that
+same file hardened by a builder and a cold red-teamer, which is what a skill going
+upstream is owed. `bin/skillnote` writes the first three in one command each,
+`bin/skillforge` drives the fourth, and every one of them appends a row to the same
 ledger, so how often each tier is taken is a query rather than a guess.
 
 ## What gets installed
@@ -36,7 +38,7 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature PER SEGMENT or a path glob. Nothing is normalised at all unless the store holds a command-keyed reminder, which makes the ordinary `Bash` call cheaper than it was; the whole command stays candidate 1, so nothing that matched before can stop matching, and at most `MAX_CANDIDATES` (6) texts are normalised. The splitter is copied byte for byte out of `hooks/repeat-gate.sh`, which exposes no door onto it, and `tests/test_remind.py::SplitterSyncTest` fails on any difference between the two copies. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
 |`hooks/session-review.sh`|**Calls the Anthropic API, and is off until you switch it on** with `SKILL_COMPOUNDER_REVIEW=1`. After a long session ends, one detached `claude -p` reviews that session for a repeatable procedure. Costs and how to enable it: [What runs against the API](../README.md#what-runs-against-the-api). Not a hook entry — `insight-capture.sh` starts it, so nothing wires it into your settings|
 |`bin/skillforge`|Tiny CLI the session drives to report forging progress. Also writes the forge ledger, records the *use* that closes a forge (`skillforge apply`) and what happened when it was used (`skillforge verdict`), checks the install (`skillforge doctor`) and closes out forges nothing has stepped in six hours (`skillforge reap`). `skillforge round` records one red-team round against the forge's budget and refuses the round past it; `skillforge escalate` is the only way past that refusal, and buys exactly one more round on a falling blocking count or on a skill the forge narrowed; `skillforge horizon` writes the ledger's horizon row on its own, which is how `bin/skillnote` gets one without a second copy of that logic. `start --from <id>` and `origin --from <id>` record which candidate a forge descends from, and `start --session` the session it began in|
-|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver. `--lesson <sig>` writes both tiers as one record keyed to a failure the repeat gate learned, `--attach <path>` puts the script beside the note and links it from the line, and `promote <id> --to global` moves a project note up a level: [The lesson](#the-lesson). `--candidate <id>` carries the lineage the note descends from onto the reminder and the ledger row|
+|`bin/skillnote`|Writes the lesson down where something will read it, in one command and with no model call: a dated line in a project or global `CLAUDE.md`, or a Claude Code memory file with the `MEMORY.md` index line that gets it read back. With `--remind` it writes a match rule to the reminder store instead, for `hooks/remind.sh` to deliver. `--lesson <sig>` writes both tiers as one record keyed to a failure the repeat gate learned, `--attach <path>` puts the script beside the note and links it from the line, and `promote <id> --to global` moves a project note up a level: [The lesson](#the-lesson). `--candidate <id>` carries the lineage the note descends from onto the reminder and the ledger row. `skillnote skill <note id> --name <slug>` is the third tier: it writes a `SKILL.md` and the note's scripts into a project or global skills directory, runs Gate A on what it wrote, and appends the ledger's `skill` row, with no forge anywhere in it|
 |`bin/skillreport`|Joins the ledger against your transcripts: what got forged, and whether it got used again. Its `FUNNEL` block joins the two delivery logs to the ledger on the lineage id, and its conversion figure is counted from those rows instead of estimated from an edit counter|
 |`bin/skillinsight`|Reads and prunes the candidate queue. `promote` prints the `lineage <id>` it stamps on the note and reminder it writes, derived from the queue record's own hash rather than minted|
 |`bin/skillcontrib`|The reconnaissance behind `contribute-skill` (duplicate check, push-access check, preflight), plus `propose`, the one subcommand that writes: it forks, pushes and opens the pull request, and running it without `--dry-run` is the consent: [Level C](#three-levels-project-user-general)|
@@ -192,16 +194,17 @@ mission](#the-mission) asks nothing: it restates what the user said, which is a 
 session cannot decline. [The lesson](#the-lesson) says it once and then stops the next
 call until it is recorded. The claim gate refuses on evidence.
 
-## Three ways to compound: note, reminder, skill
+## Four ways to compound: note, reminder, skill, forge
 
 A forge is the expensive answer, and for most of what a session learns it is the wrong one.
-Three tiers ship, and the first two cost one command each:
+Four tiers ship, and the first three cost one command each:
 
 |Tier|What it costs|Where it lives|What reads it back|When to pick it|
 |-|-|-|-|-|
 |**note**|one command|a marker block in a project or global `CLAUDE.md`, or a Claude Code memory file|Claude Code, on every session that loads that file|the lesson is a fact with no steps: a path, a version, a command that works|
 |**reminder**|one command|`reminders.jsonl` in the state directory|`hooks/remind.sh`, when a prompt, a path or a command signature matches|the lesson applies at a moment you can name, and only then|
-|**skill**|a builder subagent, a cold reviewer, two rounds|`~/.claude/skills/<name>/` or a project's `.claude/skills/`|the router, when a prompt matches the description|the procedure has steps, and a description can route to it|
+|**skill**|one command, no model call|`<project>/.claude/skills/<slug>/` or `~/.claude/skills/<slug>/`, written from a note|the router, when a prompt matches the description, and the `Skill` tool when a session calls it|the procedure has steps, and a later session should be able to call it rather than read it|
+|**forged skill**|a builder subagent, a cold reviewer, two rounds|the same two directories, plus a brief, a round record and the ledger rows|the same router|the skill is going upstream, or a real session has shown its steps wrong|
 
 The first two tiers are separate rows and one command. `skillnote add --lesson <sig>` takes
 both at once for a failure the repeat gate learned: the dated line goes in the `CLAUDE.md`,
@@ -222,11 +225,33 @@ skillnote list --scope remind
 
 <!-- doctrine: tier-before-forge -->
 **A procedure earns a skill only when it has steps a model gets wrong without them AND a
-trigger a description can route; otherwise it is a note or a reminder.** Both halves are
-checkable before anything is dispatched. A fact has no steps, so forging "the suite is
-`./run_tests.sh`" wraps one sentence in eight hundred; and if the moment the procedure
-applies is internal to the assistant, with no utterance to match on, no description will
-route to it, while a reminder keyed on the tool call or the path will fire.
+trigger a description can route; otherwise it is a note or a reminder. A skill is one
+command by default, and a forge is owed only when it goes upstream or a real session has
+shown its steps wrong.** Both halves of the first sentence are checkable before anything is
+dispatched. A fact has no steps, so forging "the suite is `./run_tests.sh`" wraps one
+sentence in eight hundred; and if the moment the procedure applies is internal to the
+assistant, with no utterance to match on, no description will route to it, while a reminder
+keyed on the tool call or the path will fire.
+
+```bash
+skillnote skill <note id> --name <slug> [--scope project|global] [--dry-run]
+```
+
+That is the third tier, and it is the one a router can see. It writes
+`<scope skills dir>/<slug>/SKILL.md` from a note already recorded: the sentence verbatim as
+the body, a double-quoted description in the `Use when ... Do NOT use for ...` shape
+`skills/skill-authoring/SKILL.md` measured, the note's attachments copied into
+`<slug>/scripts/` and listed with the comment each opens with, and a Provenance section
+naming the note id, the lesson signature and the candidate. Gate A runs on the file that
+was written rather than on the variables that built it, and a failure removes the directory,
+so a skill that ships is a skill that parses. One ledger row, event `skill`, carries `from`,
+`candidate`, `lesson_sig` and the scripts. `--use-when` and `--not-for` override the derived
+clauses; a description over the cap is refused with the count rather than truncated, because
+a truncated trigger ships green and never fires.
+
+Why that tier exists at all is the cost of the one below it: over the twelve forges the live
+ledger has joined, the median is 3.28 hours and 7 ended in `fail`
+([`DESIGN.md`](DESIGN.md#the-cheap-skill-exists-because-the-forge-is-the-wrong-default)).
 
 The tiers promote rather than compete. A note that keeps getting rewritten is a recurrence,
 which is half the forging threshold, and both cheap tiers write a `note` row to the same
@@ -293,8 +318,10 @@ skillnote add --remind --scope project "<the lesson>" --keyword <k> --command "<
 ```
 
 When both conditions hold *and* the procedure has steps a description can route to, the
-session runs the **forging protocol**. Every stage is denied something the stage before it
-had, and the denials are the mechanism:
+session writes the skill with `skillnote skill <note id> --name <slug>`, which is one
+command and no dispatch. It runs the **forging protocol** instead where the skill is going
+upstream, or where a real session has already shown its steps wrong. Every stage of that
+protocol is denied something the stage before it had, and the denials are the mechanism:
 
 ```
 skillforge start <name> <total-steps> "<one-line summary>" \
@@ -615,10 +642,17 @@ addition bound nothing the token rule had not. The measured counts
 behind the change, and what it gives up, are in [DESIGN.md](DESIGN.md).
 
 **The first time, it says it.** When a recover row is written, the `PostToolUse` arm emits
-`additionalContext`: the call that failed, the call that worked, and the two commands that
-record the outcome. Once per signature per session, and it blocks nothing. A statement at
-the moment the fix happened is worth more than the same statement in a queue, because the
-context it needs is still in the window.
+`additionalContext`: the call that failed, the call that worked, the two commands that
+record the outcome, and, when the recovery ran a script, `--attach <path>` on the first of
+them so the script is kept beside the note rather than named in prose. It closes on the
+fact that a note which should be callable becomes a skill with `skillnote skill`. Once per
+signature per session, and it blocks nothing. A statement at the moment the fix happened is
+worth more than the same statement in a queue, because the context it needs is still in the
+window. `script_attach()` decides that clause from the recovery's own normalised command,
+on four shapes: a redirect into a script, an interpreter handed a script path or a bare
+`-`, a script at the head of a segment, and `chmod +x`. A masked path prints
+`<path to the script>` rather than a path that would not open, and 3 of the 73 `note` rows
+on the live ledger carry an attachment, which is the gap the clause is for.
 
 **The second time, it declines the next call.** The `PreToolUse` lesson gate refuses while
 three things hold at once: this session bound a recovery for the signature, the signature's
@@ -744,7 +778,7 @@ would do; `skillcontrib recon` is that same dry run under an older name. This us
 reconnaissance and a procedure a human walked by hand, and it produced 47 reconnaissance runs
 and zero pull requests. A consent gate somebody has to walk seven times is a gate nobody
 reaches the far side of. An unmeasured routing pin is still refused, because
-[a probe that could not run is never a pass](#three-ways-to-compound-note-reminder-skill).
+[a probe that could not run is never a pass](#four-ways-to-compound-note-reminder-skill-forge).
 
 ## The claim gate
 
@@ -814,8 +848,9 @@ second.
 
 ## What the ledger records
 
-`ledger.jsonl` is built to answer seven questions — the five `skillforge --help` names about
-a forge, plus the two the cheap tiers and the round cap added — and to say so when it cannot:
+`ledger.jsonl` is built to answer eight questions — the five `skillforge --help` names about
+a forge, plus the three the cheap tiers, the one-command skill and the round cap added — and
+to say so when it cannot:
 
 |Question|Row|
 |-|-|
@@ -825,6 +860,7 @@ a forge, plus the two the cheap tiers and the round cap added — and to say so 
 |Used since|`use`: one row per invocation, written live by the `Skill` hook|
 |Did it work|`verdict`: `WORKED`, `NO-OP`, `MISFIRED` or `UNKNOWN`, with the quote behind it, written at step 6 after the apply — and refused before it, twice over: exit 5 when the newest close row for that name is a `fail` (`--force` does **not** lift it, because no skill was produced for a verdict to be about), exit 2 when no `apply` row exists (`--force` does lift that one, for a use recorded some other way)|
 |What was written down instead of forged|`note`: one row per `skillnote` entry, with its scope, its target file and its id. A second `add` of the same text writes no row|
+|What became callable without a forge|`skill`: one row per `skillnote skill`, with the slug, the scope, the note it came from and the scripts copied beside it|
 |What an extra red-team round cost|`escalate`: one row per round bought past a forge's budget, carrying the blocking counts that bought it and the round budget before and after|
 
 `note`, `apply` and `escalate` were invisible to every reader written before them, and that

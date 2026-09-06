@@ -106,18 +106,24 @@ joined against transcript invocations), `skillinsight` (the candidate queue), `s
 when the acting account is not a maintainer, pushes a branch and opens the pull request --
 bare `skillcontrib` and `recon` stay read-only, and `recon` is `propose --dry-run` byte for
 byte), `skillrepeat` (the repeat gate's store of learned
-failure signatures), `skillnote` (notes into a `CLAUDE.md` or a memory file, and reminders
-into the store `hooks/remind.sh` reads).
+failure signatures), `skillnote` (notes into a `CLAUDE.md` or a memory file, reminders
+into the store `hooks/remind.sh` reads, and a routable skill written from either).
 
-**There are three tiers of output, and each writes somewhere different.** Tier 0 is a note:
+**There are FOUR tiers of output, and each writes somewhere different.** Tier 0 is a note:
 `bin/skillnote add` puts one dated line under a `<!-- skillnote:begin -->` marker block in a
 project `.claude/CLAUDE.md` or a global `CLAUDE.md`, or writes a memory file plus the
 `MEMORY.md` index line that gets it read back. Tier 1 is a reminder: `skillnote add
 --remind` appends a match rule to `<state>/reminders.jsonl` and no `CLAUDE.md` at all, and
 `hooks/remind.sh` states it back when a prompt, a path or a command signature matches. Tier
-2 is the forge, which writes a skill directory and the ledger rows around it. A note waits
-to be read; a reminder arrives; only the forge costs hours. Both cheap tiers write a `note`
-ledger row, so the two of them are counted rather than assumed. **`skillnote add --lesson
+2 is a skill and costs ONE COMMAND: `skillnote skill <note id> --name <slug>` writes
+`<scope skills dir>/<slug>/SKILL.md` from a note already recorded, copies its attachments
+into `<slug>/scripts/`, runs Gate A on what it wrote and removes the directory on a failure,
+and appends one `skill` ledger row. Tier 3 is the forge, which writes the same kind of
+directory with a builder and cold red-team rounds behind it, and is owed only where a skill
+goes upstream or a real session has shown its steps wrong. A note waits to be read; a
+reminder arrives; a tier-2 skill is CALLABLE, which is the thing the first two are not; only
+the forge costs hours. Both cheap tiers write a `note` ledger row, so the two of them are
+counted rather than assumed. **`skillnote add --lesson
 <sig>` writes both cheap tiers in ONE command**, which is what a fail-then-fix costs if it
 is to cost anything at all: the dated line in the scoped `CLAUDE.md`, a reminder keyed
 `--command` on the failing call's normalised signature taken verbatim from that signature's
@@ -153,8 +159,11 @@ goes onto the `remove` ledger row as `reminder_id`, and one line of output says 
 `--keep-reminder` leaves it live and says that too.
 
 **`skillnote where` exists so that nothing else has to resolve a scope for itself.** It
-prints the absolute path a note or a reminder of a given `--scope` (`project`, `global`,
-`memory`, `remind`) would be written to, and nothing else. `skillinsight promote` is its
+prints the absolute path a note, a reminder or a skill of a given `--scope` (`project`,
+`global`, `memory`, `remind`, `skill`, `skill-global`) would be written to, and nothing
+else. The last two are the skills directories `skillnote skill` writes into, and they are
+two names rather than one because `skill` is under the project the caller is in and
+`skill-global` is under the claude directory. `skillinsight promote` is its
 first caller and the reason it exists: that command writes into the CANDIDATE's own project
 rather than the caller's cwd -- which is where the finding applies and is deliberate -- so a
 promote run from a scratch directory used to write a note into a repository the caller was
@@ -163,7 +172,7 @@ writes anything, and refuses outright when the project directory that path sits 
 not exist, since `skillnote` creates `.claude/` but not the project above it and would
 otherwise conjure a whole tree for a candidate whose repository has been moved or deleted
 (`--project <dir>` is the way out). The path is ASKED of `bin/skillnote` rather than
-recomputed: a second copy of the four scope resolutions is exactly the drift this file warns
+recomputed: a second copy of the six scope resolutions is exactly the drift this file warns
 about elsewhere, and it would be invisible, because both halves would still print something.
 
 ## Architecture
@@ -518,7 +527,19 @@ THE FIRST TIME, IT SAYS IT: when a `recover` row is written, the `PostToolUse` a
 `additionalContext` built by `lesson_statement` -- the failed call, the error head, the call
 that worked, and the two commands `skillnote add --lesson <sig> "<text>"` and `skillrepeat
 dismiss <sig> --why "<why>"`, the second annotated `(a person at a terminal only)` -- once
-per signature per session, as fact and not as an instruction. **One row per (signature, `tool_use_id`), and the statement names the call the
+per signature per session, as fact and not as an instruction. **The first of those two
+commands gains ` --attach <path>` when the recovery ran a script**, which `script_attach`
+decides from the recovery's own normalised command on four shapes: a redirect into a
+`.sh|.py|.js|.rb|.pl` target, an interpreter handed a script path or a bare `-`, a script at
+a SEGMENT HEAD (`./fix.sh`, which no interpreter appears in front of), and `chmod +x`. A
+path the normaliser masked prints the placeholder `<path to the script>` rather than a tail
+that would not open, and a `> notes.md` fires none of the four, because the sentence being
+decided is "the recovery ran a script". The requirement it answers is the write-down
+carrying "any associated code or scripts", and it was not being met: 3 of the 73 `note` rows
+on the live ledger carry an attachment, because nothing named the flag. **The statement then
+closes on `skillnote skill <note id> --name <slug>`**, the fact that a note which should be
+callable becomes a skill; the closing line is on the STATEMENT and never on the deny, for
+the reason `skillrepeat dismiss` is not on the deny either. **One row per (signature, `tool_use_id`), and the statement names the call the
 row records.** N failures of one signature arm N separate pending lines and one success used
 to bind every one of them, writing N byte-identical `recover` rows -- four under a single
 `tool_use_id` on the live store -- while the `s-<sig>` marker was written after the loop for
@@ -537,8 +558,10 @@ failed in ONE earlier session plus this one was refused, a session earlier than 
 doctrine's "second occurrence".
 
 **The deny reason names ONE command, and the omission is deliberate.** It says
-`skillnote add --lesson <sig> "<what was learned>"` and does not mention `skillrepeat
-dismiss`, even though the first-time statement names both. A live red-team round settled
+`skillnote add --lesson <sig> "<what was learned>"` -- carrying the same ` --attach <path>`
+clause the statement carries, since an attachment is an ARGUMENT to that one command and not
+a second one -- and does not mention `skillrepeat dismiss`, even though the first-time
+statement names both. A live red-team round settled
 that: 2 of 2 haiku sessions denied by the gate ran the dismiss command the refusal printed,
 with a reason they invented, and carried on. So `skillrepeat dismiss` now records WHO ran
 it. Every `dismiss` row carries `actor` -- `model` when `CLAUDECODE` or
@@ -780,8 +803,8 @@ they cover.
 
 **The ledger is append-only, and every reader selects its events BY NAME.** `start` and
 its matching `done` or `fail` are joined into forges; `origin`, `use`, `verdict`,
-`horizon`, `note` (written by `bin/skillnote`) and `escalate` (written by `skillforge
-escalate`) are invisible to that join. A reader that classified by exclusion -- "anything
+`horizon`, `note` and `skill` (both written by `bin/skillnote`, the second by `skillnote
+skill`) and `escalate` (written by `skillforge escalate`) are invisible to that join. A reader that classified by exclusion -- "anything
 that is not a start is an outcome" -- would have folded every `use` row into the forge
 count the day ledger v2 landed, so `tests/test_ledger_v2.py` pins both readers against a
 mixed ledger. Add an event type freely; never widen a selector to a negation. Rows carry
@@ -824,11 +847,15 @@ or the user's own work, and nothing on disk can tell -- and nothing at all for a
 that proves nothing is reported, not adopted.
 
 **`skills/skill-compounder/SKILL.md` is prose, but it is the primary deliverable**: it
-carries the three-tier decision, the builder/red-team forging protocol and the retirement
+carries the four-tier decision, the builder/red-team forging protocol and the retirement
 protocol. The tier rule comes first and it is a gate, not advice: a procedure earns a skill
 only when it has steps a model gets wrong without them AND a trigger a description can route,
-and otherwise it gets a note or a reminder from `bin/skillnote`. Ten days with one output path
-produced zero notes, which is what a missing cheap branch looks like.
+and otherwise it gets a note or a reminder from `bin/skillnote`. Since 2026-09-05 that rule
+carries a second sentence, and it is the one that moved: a skill is ONE COMMAND by default
+(`skillnote skill`), and a forge is owed only where the skill goes upstream or a real session
+has shown its steps wrong. Ten days with one output path
+produced zero notes, which is what a missing cheap branch looks like; the live ledger since
+then reads 73 `note` rows against 12 forges, 7 of which ended in `fail`.
 Its doctrine is mirrored in `docs/architecture.md` and in the global `~/.claude/CLAUDE.md`
 stanza, which
 `skill_compounder/installer.py` now writes from `DOCTRINE_TEXT` — so the third mirror is a

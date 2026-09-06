@@ -1599,6 +1599,43 @@ The scale is the opposite of the repair above and is worth stating for that reas
 both versions of that door over the 429 distinct `fail` commands in the live store on
 2026-09-05, **0** verdicts change. The hole was real, and nothing had ever walked through it.
 
+## The cheap skill exists because the forge is the wrong default
+
+The tiers were note, reminder, forge, and the maintainer's own description of what he had
+been asking for all along fits none of the three: *"the 'writing it down' piece is what
+i've been calling a 'skill' -- a combination of notes and code that is searchable, findable
+as a tool in the appropriate future contexts, and callable by agents"*. A note is a line in
+a `CLAUDE.md`, read passively. A reminder is injected text. `--attach` gives a file path
+inside a sentence. None of the three is a tool, and none is callable. The one artifact in
+this package a router could see was a forged skill.
+
+That is the tier the second quote is about: *"i'm a little surprised that the skills take
+SO long to build"*. The ledger says the same thing without the surprise. Joining each
+`start` to the first `done` or `fail` after it under the same name gives twelve forges, a
+median of **3.28 hours**, and **7 of the 12** ending in `fail`; the two started on
+2026-09-05, `watch-ci-run` and `wait-for-ci`, are both in that seven. A path that costs
+hours and fails more often than it lands is not a path a session will take for a lesson it
+learned twenty minutes ago, and the numbers say nobody did: **73** `note` rows against
+**12** forges.
+
+So the third tier is one command with no model call in it. `skillnote skill <note id>
+--name <slug>` writes the SKILL.md from a note that is already on disk, which is what makes
+it cheap: the sentence has already been judged worth keeping by whoever ran `skillnote
+add`, its attachments are already beside it, and the lesson signature and the candidate id
+are already recorded, so the command is a rendering rather than an authoring step. What it
+does not have is a cold reader, and that is the honest limit: nothing here checks that the
+steps are right for a stranger. What it does have is Gate A, run on the file it wrote
+rather than on the variables that wrote it, so the failure mode that ships silently -- a
+skill that is installed, named, and unable to fire -- cannot get out of the command. A
+skill it produces is live where any other skill is (`CLAUDE-CODE-BEHAVIOR.md`).
+
+The forge did not become optional; it became conditional. It is what a skill is owed when
+it goes upstream to a repository other people install, or when a real session has shown its
+steps wrong, and both are events someone can point at rather than judgements made in
+advance. Everything the forge is for still holds at that moment: a cold reviewer catches
+what the author cannot see, and the routing gate is the only thing that has ever caught a
+description that reads well and does not fire.
+
 ## `skillnote promote` moves a note and never copies one
 
 A lesson recorded against one project turns out not to be about that project. The cheap

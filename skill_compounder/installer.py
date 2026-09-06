@@ -415,10 +415,13 @@ Compounding: keep what a session learned at the cheapest tier that holds it.
 
     note:     skillnote add --scope project "<line>"
     reminder: skillnote add --remind --keyword <k> "<line>"
-    skill:    forge it, per the protocol below.
+    skill:    skillnote skill <note id> --name <slug>
+    forge:    per the protocol below, and only where a forge is owed.
 
 A procedure earns a skill only when it has steps a model gets wrong without them AND a
-trigger a description can route; otherwise it is a note or a reminder.
+trigger a description can route; otherwise it is a note or a reminder. A skill is one
+command by default, and a forge is owed only when it goes upstream or a real session has
+shown its steps wrong.
 
 When any of these fires, invoke `skill-compounder` and follow it exactly. It carries the
 builder/red-team loop, the `skillforge` progress animation, and the retirement protocol.

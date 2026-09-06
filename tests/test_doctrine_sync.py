@@ -225,11 +225,19 @@ DOCTRINE = (
 
     ("tier-before-forge",
      "A procedure earns a skill only when it has steps a model gets wrong without them AND "
-     "a trigger a description can route; otherwise it is a note or a reminder.",
+     "a trigger a description can route; otherwise it is a note or a reminder. A skill is "
+     "one command by default, and a forge is owed only when it goes upstream or a real "
+     "session has shown its steps wrong.",
      (SKILL_PATH, PROTOCOL_DOC, STANZA_PATH),
      "The threshold said only costly-and-recurring, which a note also passes. Ten days of "
      "the cheap branch being taken zero times is what a missing rule looks like: with one "
-     "output path, everything that cleared the bar got a forge."),
+     "output path, everything that cleared the bar got a forge. The second sentence was "
+     "added on 2026-09-05 with `skillnote skill`, which writes a routable SKILL.md from a "
+     "note in one command: until then the only thing a router could see was a forged "
+     "skill, and the forge is a median 3.28 hours over the twelve forges the live ledger "
+     "has joined, 7 of which ended in `fail`. A rule that made the expensive path the "
+     "only path to a skill was the rule the maintainer read as 'the skills take SO long "
+     "to build'."),
 
     ("cheap-branch",
      "The cheap branch is a command, not an intention: `skillnote add` records the note or "

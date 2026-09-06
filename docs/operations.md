@@ -152,12 +152,14 @@ a note nobody will ever load. Promote exits non-zero naming the missing director
 `--project <dir>` is the way out — it overrides the recorded project for that run.
 
 ```bash
-skillnote where [--scope project|global|memory|remind] [--project <dir>]
+skillnote where [--scope project|global|memory|remind|skill|skill-global] [--project <dir>]
 ```
 
-`skillnote where` is the read-only half of that: it prints the one path a note or reminder at
-that scope would land in and creates nothing. It exists so the two CLIs answer the question
-once, in the CLI that does the writing.
+`skillnote where` is the read-only half of that: it prints the one path a note, a reminder or
+a skill at that scope would land in and creates nothing. It exists so the two CLIs answer the
+question once, in the CLI that does the writing. `skill` is the project's skills directory
+and `skill-global` the one under the claude directory, which is why they are two scope names
+rather than one with a flag.
 
 Nothing here auto-forges. The queue feeds the same threshold as everything else.
 
@@ -376,6 +378,16 @@ else, because a refusal advertising an escape that no longer works is worse than
 omits it; the statement the recovery emits still names both, with the dismissal labelled for
 a person at a terminal.
 
+**Both texts write `--attach <path>` onto that one command when the recovery ran a script**,
+which is the "and any associated code or scripts" half arriving where the write-down is
+actually asked for: 3 of the 73 `note` rows on the live ledger carry an attachment, because
+until 2026-09-05 nothing named the flag. The path is read from the recovery's own normalised
+command on four shapes: a redirect into a script, an interpreter given a script path or a
+bare `-`, a script at the head of a segment, and `chmod +x`. A path the normaliser masked
+prints as `<path to the script>` rather than as a tail that would not open. The
+statement, and never the deny, closes by naming `skillnote skill <note id> --name <slug>`:
+the deny names exactly one command, and the one it names is the one that lifts it.
+
 `skillnote add --lesson` writes one record in three places: the dated line in the scoped
 `CLAUDE.md`, a reminder in `<state>/reminders.jsonl` keyed on the failing call's signature
 so the fix arrives *before* that command runs again, and one ledger `note` row carrying
@@ -395,6 +407,42 @@ so the note, the ledger row and a promoted line cannot spell one location three 
 refusals, both exit 2 and both
 before a byte is copied: a source outside the working tree or `$HOME`, and a destination
 that already exists.
+
+`skillnote skill <note id> --name <slug>` turns a note that should be *called* into a skill,
+in one command and with no forge behind it:
+
+```bash
+skillnote skill <note id> --name <slug> [--scope project|global]     # where it lands
+      [--use-when "<clause>"] [--not-for "<clause>"]                 # override the derived description
+      [--project <dir>] [--dry-run] [--force]
+skillnote where --scope skill        # the directory a project-scope skill lands in
+```
+
+It writes `<scope skills dir>/<slug>/SKILL.md`: the note's sentence verbatim as the body, a
+double-quoted description in the `Use when … Do NOT use for …` shape, the note's attachments
+copied into `<slug>/scripts/` and listed with the one-line comment each script opens with,
+and a Provenance section naming the note id, the lesson signature and the candidate. The
+slug is the identity, so it must match `[a-z0-9][a-z0-9-]*` and is refused otherwise: the
+directory name is what Claude Code lists.
+
+**Gate A runs on the file that was written, and a failure writes nothing.** The skill is
+built in a staging directory and moved into place only once the gate passes, so a bad draft
+leaves no half-skill behind: the frontmatter has to open and close, carry only portable keys,
+name the directory it sits in, and hold a complete double-quoted description. A description
+over the 500-character cap `skills/skill-authoring/SKILL.md` documents is refused **with the
+count** before anything is written, rather than truncated, because a truncated trigger ships
+green and never fires; `--use-when` and `--not-for` are how you shorten it. `--dry-run`
+prints the file and writes nothing. `--force` moves an existing skill of that name aside to a
+timestamped directory and says where, and removes nothing. Two exits worth knowing: a note id
+that is not in either `CLAUDE.md` exits 2 naming `skillnote list`, and a memory note exits 2
+saying to record the lesson at project or global scope first, because a memory file has no
+marker block and no attachments directory to build from.
+
+The command prints the path, that the skill is callable in this session (Claude Code loads
+skills with no restart; the measured lag is up to one tool call, so a first `Unknown skill`
+is not a failure), and how many scripts were copied. One ledger row, event `skill`, carries
+the slug, the scope, the path, `from` (the note), `candidate`, `lesson_sig` and the scripts,
+so how often the third tier is taken is a query rather than a guess.
 
 `skillnote promote <id> --to global` moves a project lesson up a level once it turns out
 not to be about that project. The line, the attachments and the reminder's scope all

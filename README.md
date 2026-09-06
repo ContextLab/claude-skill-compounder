@@ -152,7 +152,7 @@ without installing anything but not the forge animation:
 
 ### Five-minute quickstart
 
-Nothing has to be forged for any of this to pay for itself. The two cheap tiers cost one
+Nothing has to be forged for any of this to pay for itself. The three cheap tiers cost one
 command each, and one more command says whether the install took.
 
 Write a lesson down where a later session will read it:
@@ -208,6 +208,20 @@ skillnote promote <id> --to global
 That takes the line, its attachments and its reminder to `~/.claude/CLAUDE.md` and leaves a
 one-line tombstone behind. It is a move, never a copy, so there is still exactly one of it.
 
+A lesson a later session should be able to *call* rather than read becomes a skill, still in
+one command and still with no forge:
+
+```bash
+skillnote skill <note id> --name check-port-before-starting-a-dev-server
+```
+
+That writes `.claude/skills/<slug>/SKILL.md` from the note, copies the attached scripts into
+`<slug>/scripts/`, checks the file it wrote parses and that its description is inside the
+cap, and prints the path. `--scope global` writes it under `~/.claude/skills/` instead, and
+`--dry-run` prints the file without writing it. The skill is callable in the session that
+ran the command, through the `Skill` tool, and a `skill` ledger row records which note it
+came from.
+
 Then check the wiring:
 
 ```bash
@@ -222,9 +236,10 @@ seems not to be firing. The `surfer` row is the one that turns a silent mission 
 `FAIL`: wired against a store that is not there, all five moments deliver nothing and
 nothing else says so.
 
-Forging is the expensive tier and it comes later, once a note has been rewritten often
-enough to count as a recurrence:
-[Three ways to compound](docs/architecture.md#three-ways-to-compound-note-reminder-skill).
+Forging is the expensive tier and it is no longer the way to get a skill. It is the
+hardening a skill is owed when it goes upstream, or when a real session has shown its steps
+wrong:
+[Four ways to compound](docs/architecture.md#four-ways-to-compound-note-reminder-skill-forge).
 
 ### Supported versions
 
@@ -406,11 +421,13 @@ Install is the other thing that reaches the network, to clone this repository an
 
 ## How it fits together
 
-Three tiers of durable lesson, and the machinery that feeds them. A **note** is a dated
+Four tiers of durable lesson, and the machinery that feeds them. A **note** is a dated
 line in a `CLAUDE.md` or a memory file. A **reminder** is a match rule that a hook states
-back at the moment it applies. A **skill** is the expensive tier, forged through a
-builder/red-team loop and installed into `~/.claude/skills/`. `skillnote` writes the first
-two in one command each, or both at once with `--lesson`; `skillforge` drives the third.
+back at the moment it applies. A **skill** is a `SKILL.md` plus its scripts, written from a
+note in one command, which a router can see and a session can call. A **forged skill** is
+that same file put through the builder/red-team loop, which is what a skill going upstream
+is owed. `skillnote` writes the first three in one command each, the first two at once with
+`--lesson` and the third with `skillnote skill`; `skillforge` drives the fourth.
 Nine seed skills ship, so a fresh install is useful before you have forged anything. A
 lesson moves up a level with `skillnote promote`, and a skill goes the last level with
 `skillcontrib propose`, which opens the pull request.
