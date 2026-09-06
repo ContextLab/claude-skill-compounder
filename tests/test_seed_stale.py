@@ -351,6 +351,22 @@ class SkillDocumentTest(unittest.TestCase):
                           "the suite runs %r; keep the text and the test in step" % command)
 
 
+
+def writes_bytecode(python):
+    """Whether this interpreter caches bytecode at all. Apple's Xcode python3 (3.9.6 on
+    macOS 25.6) writes no __pycache__ even under compileall, so a test that demonstrates
+    stale bytecode has no bytecode to demonstrate with; it skips with the reason rather
+    than failing on a premise the skill never made about that interpreter."""
+    d = tempfile.mkdtemp()
+    try:
+        Path(d, "probe.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run([str(python), "-m", "compileall", "-q", "probe.py"], cwd=d,
+                       check=False, capture_output=True)
+        return any(Path(d, "__pycache__").glob("probe.*.pyc")) if Path(d, "__pycache__").is_dir() else False
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 class PythonProvenanceTest(unittest.TestCase):
     """Block 1, against real venvs and real installs."""
 
@@ -471,6 +487,8 @@ class PythonProvenanceTest(unittest.TestCase):
         """Round 2 cut a stray-.pyc detector to a prose line. Round 3 showed the cut
         was the wrong half: with `mypkg/__init__.pyc` present and no `.py`, the runtime
         serves the compiled copy and the check printed CURRENT, exit 0."""
+        if not writes_bytecode(self.python):
+            self.skipTest("this interpreter writes no bytecode")
         project = Path(tempfile.mkdtemp(dir=str(self.root)))
         pkg = project / "mypkg"
         pkg.mkdir()
@@ -738,6 +756,8 @@ class BytecodeRemedyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
+        if not writes_bytecode(self.python):
+            self.skipTest("this interpreter writes no bytecode")
 
     def tearDown(self):
         self.tmp.cleanup()
