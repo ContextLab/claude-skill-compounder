@@ -1489,10 +1489,15 @@ consequence, which is what ten days of one output path already produced.
 Two things stop it becoming a trap, and a third used to. Its escape is a command, and a
 `Bash` call whose every segment head is `skillnote`, `skillrepeat` or `cd` is exempt from
 this arm by name (`lesson_cli_head`), so the refusal can never block the thing that lifts
-it. And the refusal counts EARLIER sessions only, on both arms:
-until 2026-09-04 this one counted the current session too, so at the default of 2 a single
-earlier failure was enough, and the code was one session stricter than every document
-describing it.
+it. And the refusal counts this session ONCE, however often it fails: the current session
+is unioned into the distinct sessions of the `fail` rows rather than counted from them, so a
+signature that has failed only here stands at 1 and never reaches the default of 2 on its
+own, while the repeat arm excludes the current session entirely, because its refusal is an
+inference from history where this one is a fact about the session at hand. Until 2026-09-04
+this arm counted the current session by accident; from 2026-09-04 to 2026-09-06 it excluded
+it on both arms and the first refusal landed in the third session, one later than the
+doctrine reads; on 2026-09-06 the code moved to the doctrine with the inclusion made
+deliberate.
 
 **The third was a deny budget, and it was withdrawn on evidence.** It shipped at 2 per
 signature per session, silently: a deny text that named the budget was read as a timetable

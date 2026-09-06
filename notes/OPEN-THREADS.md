@@ -1,18 +1,42 @@
 # Open threads
 
-What is actually open, as of the **2026-09-03** completion wave for issue #43 (the clock
-crossed to 2026-09-04 during it), on `resume/after-v0.3.1` after `adf8a65` (tags
-`v0.3.0` = `a2aa2d4`, `v0.3.1` = `b7f6a47`), with that wave's code and docs on the working
-tree and not yet committed. CI is green on both platforms from `cfb2bc6`
-onward, the end-to-end journey passed 17/17 on 2026-09-03 (thirteen `claude -p` calls,
-150.9 s, against CLI 2.1.259; it was 12/12 on `a2aa2d4` before the mission and lesson steps
-existed), and the paid review is opt-in.
+What is actually open, as of **2026-09-06**, on `resume/after-v0.3.1` at HEAD `cb110a9`
+with this session's wave -- the response to the external review of that commit, in
+`2026-09-06-review-response-session.md` -- on the working tree and not yet committed. Tags
+are `v0.3.0` = `a2aa2d4` and `v0.3.1` = `b7f6a47`. CI is green on `cb110a9` (run
+34005231297, all five jobs), the end-to-end journey passed 17/17 on 2026-09-03 (thirteen
+`claude -p` calls, 150.9 s, against CLI 2.1.259; it was 12/12 on `a2aa2d4` before the
+mission and lesson steps existed), and the paid review is opt-in.
 Issue #31 carries the status table; this file carries the threads behind it.
 
 The GitHub issues are the other half of this picture and they do not duplicate it:
 `gh issue list --repo ContextLab/claude-skill-compounder --state open` is the authority on
 what is scoped as work. This file is for what is known and unresolved, including the parts
 nobody has opened an issue for.
+
+## Open: the review of 2026-09-06
+
+An external review of `cb110a9` (pasted into the session, not on GitHub) found ten things;
+`2026-09-06-review-response-session.md` lists them and which were fixed on the working tree
+that day. What it left for the maintainer, being outward-facing or a matter of direction:
+
+- Rewrite #31; retitle #19, #30 and #34; reopen the behavioural parts of #43 (GitHub edits).
+- Tag a release after the new mission and lightweight-skill code, pin the installer to it,
+  and protect `main`.
+- A demo or screencast recentred on the cheap path (failure, lesson, callable skill, reuse).
+- Put `.claude/CLAUDE.md` on a diet: the history in it is loaded into every session.
+
+Two design questions it raised are open rather than fixed:
+
+- **Cross-session mission continuity.** `hooks/mission.sh` filters the prompt store on
+  `session_id`, so a fresh session's "continue" gets no mission from the one before it.
+  That is the design (one session, its own requests), and whether the mission should reach
+  across sessions or projects is a decision, not a defect.
+- **One canonical lesson artifact, or the copies `skillnote skill` leaves.** A skill built
+  from a note with an attachment leaves three copies of the script: the original in the
+  project, the copy under `.claude/lessons/<id>/`, and the copy under `<slug>/scripts/`.
+  Which one is the artifact of record, and whether the others should be links or
+  tombstones, is undecided.
 
 ## Open: `finish-task` shipped narrowed, and what was cut is not covered
 

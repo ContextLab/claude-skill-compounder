@@ -562,15 +562,111 @@ class ARowBelongsToOneLineageOnly(AttributionCase):
         """A tie-break nobody can read is a number nobody can check."""
         digest = self.capture()
         self.promote(digest, "note")
-        # The report exits before this block when the ledger holds no `start` row at all,
-        # so the fixture needs a forge for the funnel to be reached.
+        # A forge, so this is the ORDINARY path printing the rule; the two early exits
+        # print the same function, and ADeliveryCannotBeActedOnBeforeItArrives below
+        # reads the block on the no-`start` path.
         self.forge("start", "anything", "4", "s", "--trigger", "t",
                    "--trigger-kind", "agent-decision", "--session", "sess-r",
                    SKILLFORGE_NOW=NOW + 40)
         out = self.report()
         self.assertIn("attributed to AT MOST ONE lineage", out, out)
         self.assertIn("delivered FIRST to the session", out, out)
+        self.assertIn("AT OR BEFORE the row", out, out)
         self.assertIn("floor rather than a total", out, out)
+
+
+class ADeliveryCannotBeActedOnBeforeItArrives(AttributionCase):
+    """DEFECT 3, reproduced on HEAD cb110a9 by a reviewer. The session clause attributed a
+    row to the lineage delivered FIRST to its session with no regard to WHEN: a `note` row
+    at ts 100 in session S and a nudge at ts 200 in S printed the nudge as ACTED ON 1,
+    and CHECK passed because it verifies the partition and not the order. The clause now
+    admits only a delivery stamped at or before the row -- the earliest such delivery,
+    ties by id -- and a row older than every delivery to its session is UNATTRIBUTED.
+
+    The ledger here holds NO `start` row, so these also pin DEFECT 2: the funnel prints
+    on the "no forges recorded yet" path rather than being exited past.
+    """
+
+    def write_ledger(self, *rows):
+        self.ledger.write_text("".join(json.dumps(r) + "\n" for r in rows),
+                               encoding="utf-8")
+
+    def write_nudges(self, *rows):
+        d = self.state / "reminders"
+        d.mkdir(exist_ok=True)
+        (d / "nudges.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows),
+                                        encoding="utf-8")
+
+    def test_the_reviewers_reproduction_a_row_before_the_only_delivery_is_unattributed(self):
+        self.write_ledger({"event": "note", "id": "note-before", "session": "S",
+                           "ts": 100, "action": "add"})
+        self.write_nudges({"id": "future-nudge", "session": "S", "ts": 200})
+        out = self.report()
+        self.assertIn("no forges recorded yet", out, out)
+        self.assertEqual(self.funnel_row(out, "future-nudge")[1:4], ["1", "0", "0"],
+                         "a delivery made AFTER the row was credited with it:\n" + out)
+        self.assertEqual(self.unattributed(out), 1, out)
+        self.assertEqual(self.assert_every_row_lands_once(out), (0, 1, 1))
+
+    def test_a_row_stamped_at_the_delivery_is_attributed_and_one_second_earlier_is_not(self):
+        self.write_ledger(
+            {"event": "note", "id": "at-the-stamp", "session": "S", "ts": 200, "action": "add"},
+            {"event": "note", "id": "one-earlier", "session": "S", "ts": 199, "action": "add"})
+        self.write_nudges({"id": "nudge-s", "session": "S", "ts": 200})
+        out = self.report()
+        self.assertEqual(self.funnel_row(out, "nudge-s")[1:4], ["1", "1", "0"], out)
+        self.assertEqual(self.assert_every_row_lands_once(out), (1, 1, 2))
+
+    def test_the_earliest_delivery_at_or_before_the_row_wins_whatever_the_log_order(self):
+        """Two lineages into one session, logged newest first; the row sits between
+        them in time. The one that had arrived wins, and the tie-break is by id only
+        among deliveries that had arrived."""
+        self.write_ledger(
+            {"event": "note", "id": "between", "session": "S", "ts": 250, "action": "add"},
+            {"event": "note", "id": "before-both", "session": "S", "ts": 50, "action": "add"})
+        self.write_nudges({"id": "aaa-late", "session": "S", "ts": 300},
+                          {"id": "zzz-early", "session": "S", "ts": 100})
+        out = self.report()
+        self.assertEqual(self.funnel_row(out, "zzz-early")[1:4], ["1", "1", "0"], out)
+        self.assertEqual(self.funnel_row(out, "aaa-late")[1:4], ["1", "0", "0"], out)
+        self.assertEqual(self.assert_every_row_lands_once(out), (1, 1, 2))
+
+    def test_a_row_with_no_timestamp_postdates_nothing(self):
+        self.write_ledger({"event": "note", "id": "undated", "session": "S", "action": "add"})
+        self.write_nudges({"id": "nudge-s", "session": "S", "ts": 200})
+        out = self.report()
+        self.assertEqual(self.funnel_row(out, "nudge-s")[1:4], ["1", "0", "0"], out)
+        self.assertEqual(self.assert_every_row_lands_once(out), (0, 1, 1))
+
+    def test_the_same_with_the_real_writers(self):
+        """The real checkpoint hook stamps the delivery, the real skillnote stamps the
+        note, both under one $CLAUDE_CODE_SESSION_ID -- the namespace `note` rows carry."""
+        def nudge(clock):
+            for i in range(12):
+                payload = {"session_id": "payload-sid", "tool_name": "Edit",
+                           "tool_use_id": "toolu-%d-%d" % (clock, i),
+                           "tool_input": {"file_path": "/p/f%d.py" % i}}
+                r = self.sh(["bash", CI_HOOK, "edit"], stdin=json.dumps(payload),
+                            CI_NOW=clock, CLAUDE_CODE_SESSION_ID="cc-late")
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+        def note(clock, text):
+            r = self.sh([REPO / "bin" / "skillnote", "add", "--scope", "project", text],
+                        SKILLNOTE_NOW=clock, CLAUDE_CODE_SESSION_ID="cc-late")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        note(NOW + 10, "written before the checkpoint fired")
+        nudge(NOW + 50)
+        note(NOW + 90, "written after the checkpoint fired")
+        rows = self.jsonl(self.state / "reminders" / "nudges.jsonl")
+        self.assertEqual([(r["id"], r["ts"], r["cc_session"]) for r in rows],
+                         [("ci-checkpoint", NOW + 50, "cc-late")], rows)
+        notes = self.ledger_rows("note")
+        self.assertEqual([(n["ts"], n["session"]) for n in notes],
+                         [(NOW + 10, "cc-late"), (NOW + 90, "cc-late")], notes)
+        out = self.report()
+        self.assertEqual(self.funnel_row(out, "ci-checkpoint")[1:4], ["1", "1", "0"], out)
+        self.assertEqual(self.assert_every_row_lands_once(out), (1, 1, 2))
 
 
 class TheConversionIsCountedNotEstimated(AttributionCase):
@@ -632,6 +728,27 @@ class TheConversionIsCountedNotEstimated(AttributionCase):
         self.edits("nudged", 12, cc_session="cc-early")
         out = self.report()
         self.assertIn("nudge deliveries logged:    1 in 1 session(s)", out, out)
+        self.assertIn("of those sessions, forged:  0", out, out)
+
+    def test_a_start_at_the_delivery_stamp_converts_and_one_second_earlier_does_not(self):
+        """Asked, on the day the funnel's session clause was found looking forward,
+        whether this join has the same hole. It does not: `select($st.ts >= $g.first)`
+        in bin/skillreport admits a start at or after the session's FIRST delivery and
+        nothing earlier. Pinned at the boundary so the answer is a test and not a reading."""
+        self.edits("cc-edge", 12, cc_session="cc-edge")            # delivered at NOW
+        self.forge("start", "at-the-stamp", "4", "s", "--trigger", "t",
+                   "--trigger-kind", "agent-decision", "--session", "cc-edge",
+                   SKILLFORGE_NOW=NOW)
+        out = self.report()
+        self.assertIn("nudge deliveries logged:    1 in 1 session(s)", out, out)
+        self.assertIn("of those sessions, forged:  1", out, out)
+
+    def test_a_start_one_second_before_the_first_delivery_is_not_a_conversion(self):
+        self.edits("cc-edge", 12, cc_session="cc-edge")            # delivered at NOW
+        self.forge("start", "one-early", "4", "s", "--trigger", "t",
+                   "--trigger-kind", "agent-decision", "--session", "cc-edge",
+                   SKILLFORGE_NOW=NOW - 1)
+        out = self.report()
         self.assertIn("of those sessions, forged:  0", out, out)
 
     def test_one_delivery_recorded_under_two_session_ids_is_one_session(self):

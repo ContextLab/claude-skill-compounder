@@ -48,7 +48,9 @@ Waves are dependency-ordered. Each has an acceptance test that is a real run, no
 - `skillnote skill <note id> --name <slug> [--scope project|global]`: from a note (its line,
   its attachments, its lesson signature) write `<scope>/skills/<slug>/SKILL.md` with a
   double-quoted description in the `Use when ... Do NOT use for ...` shape, the note text as
-  the body, attached scripts moved beside it and referenced by relative path, a `skill`
+  the body, attached scripts moved beside it and referenced by relative path (as shipped
+  on 2026-09-05 they are COPIED into `<slug>/scripts/`, the lesson directory keeps its
+  copy, and the SKILL.md says so; see `notes/2026-09-06-review-response-session.md`), a `skill`
   ledger row carrying `from`/`candidate`, and a printed line saying the skill is callable
   now (R55). No forge. Gate A from `skill-authoring` (frontmatter parses, description under
   the cap) runs as part of the command. Accept: a lesson from a real session becomes a skill

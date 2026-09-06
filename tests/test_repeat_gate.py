@@ -4038,18 +4038,34 @@ class LessonGateTest(GateCase):
         self.fail_then_fix("s1")
         self.assert_allowed(self.probe("s1"))
 
-    def test_the_session_after_two_earlier_ones_is_refused(self):
-        """REPEAT_MIN_SESSIONS counts EARLIER sessions, so s1 and s2 are the two the
-        default wants and s3 is the one that binds a recovery and gets refused."""
+    def test_the_second_occurrence_is_refused(self):
+        """THE DOCTRINE'S RULE, and the one README.md states: "the second time that same
+        signature comes round, it declines the next call until the lesson is written
+        down". s1 is the first occurrence and s2, which fails the same way, binds a
+        recovery and is refused, is the second. The count is distinct sessions with a
+        fail row INCLUDING this one, so at the default of 2 it is this session plus one
+        earlier -- and the deny says so in those words."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.fail_then_fix("s3")
-        reason = self.assert_lesson_deny(self.probe("s3"))
+        reason = self.assert_lesson_deny(self.probe("s2"))
         self.assertIn("gh pr list --limit <N>", reason)
         self.assertIn("gh: command not found", reason)
         self.assertIn("--repo ContextLab/claude-skill-compounder", reason)
         self.assertIn("skillnote add --lesson %s" % self.sig(), reason)
-        self.assertIn("EARLIER sessions", reason)
+        self.assertIn("2 distinct\nsessions, this one among them", reason)
+        self.assertNotIn("EARLIER", reason)
+
+    def test_the_third_session_is_still_refused(self):
+        """The shape the gate refused between 2026-09-04 and 2026-09-06, when its count
+        excluded the current session: two EARLIER sessions plus a recovery bound in this
+        one. Moving the refusal forward to the second occurrence must not lose it on the
+        third, and the count the deny prints is now three."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.fail_then_fix("s3")
+        reason = self.assert_lesson_deny(self.probe("s3"))
+        self.assertIn("skillnote add --lesson %s" % self.sig(), reason)
+        self.assertIn("3 distinct\nsessions, this one among them", reason)
 
     def test_the_deny_names_no_way_out_but_the_lesson(self):
         """MEASURED, 2026-09-04: both of two fresh sessions this gate refused answered by
@@ -4059,41 +4075,53 @@ class LessonGateTest(GateCase):
         transcript, and the assertion below is what keeps the two apart."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.fail_then_fix("s3")
-        reason = self.assert_lesson_deny(self.probe("s3"))
+        reason = self.assert_lesson_deny(self.probe("s2"))
         self.assertNotIn("dismiss", reason,
                          "the deny still advertises a dismissal:\n" + reason)
         self.assertIn("skillnote add --lesson", reason)
 
-    # ---------------------------------------------------- THIS session never counts
-    def test_one_earlier_session_plus_this_one_is_not_enough(self):
-        """BOOTSTRAP DEADLOCK guard 1, which this arm did not honour until 2026-09-04:
-        its count included the current session, so at the default of 2 a signature that
-        had failed in ONE earlier session was refused. s1 is that one earlier session and
-        s2 is the session in front of the gate."""
+    # ------------------------------------------------ THIS session counts exactly once
+    def test_a_signature_that_failed_only_in_this_session_is_not_refused(self):
+        """BOOTSTRAP DEADLOCK guard 1 in the substance the lesson arm keeps: a session
+        contributes at most ONE to the count whatever it does to itself. One session,
+        one fail, one recovery: the count is 1, the default is 2, nothing is refused."""
         self.fail_then_fix("s1")
-        self.fail_then_fix("s2")
-        self.assert_allowed(self.probe("s2"))
+        self.assert_allowed(self.probe("s1"))
 
-    def test_two_earlier_sessions_are(self):
-        """NON-VACUITY for the test above: the identical fixture with one more earlier
-        session IS refused, so what the previous test asserts is the threshold and not a
-        gate that never fires."""
+    def test_this_session_counts_once_however_many_times_it_fails(self):
+        """Sharper than the test above: s1 fails and recovers THREE times, so the store
+        holds three fail rows and every one of them is this session's. A count of rows
+        would refuse at the default; a count of sessions unioned with this one stands at
+        1. Then s2 fails once, and the identical probe is refused -- NON-VACUITY for the
+        first half, and the second occurrence for the rule."""
         self.fail_then_fix("s1")
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s1")
+        fails = [r for r in self.rows() if r["t"] == "fail"]
+        self.assertEqual(len(fails), 3, "the fixture did not record three fail rows")
+        self.assertEqual({r["session"] for r in fails}, {"s1"})
+        self.assert_allowed(self.probe("s1"))
         self.fail_then_fix("s2")
-        self.fail_then_fix("s3")
-        self.assert_lesson_deny(self.probe("s3"))
+        reason = self.assert_lesson_deny(self.probe("s2"))
+        self.assertIn("2 distinct\nsessions, this one among them", reason)
 
-    def test_the_fail_rows_this_session_wrote_are_the_ones_dropped(self):
-        """Sharper than the pair above: s1 and s2 both fail, and the session in front of
-        the gate is s2 -- which has TWO distinct sessions in the store and one of them is
-        its own. Counting rows rather than EARLIER sessions would refuse here."""
-        self.fail_then_fix("s1")
-        self.fail_then_fix("s2")
-        sessions = {r["session"] for r in self.rows() if r["t"] == "fail"}
-        self.assertEqual(sessions, {"s1", "s2"},
-                         "the fixture did not record two sessions: %r" % sessions)
-        self.assert_allowed(self.probe("s2"))
+    def test_the_repeat_arm_still_excludes_this_session(self):
+        """THE TWO ARMS COUNT THE CURRENT SESSION DIFFERENTLY, and only the lesson arm
+        moved. With the repeat arm switched on, s1 failing three times is still one
+        session short of ITS threshold, because its count is an inference from history
+        and a session's own failures never feed it. RefusalTest pins the same fact under
+        the harness baseline; this one pins it beside the lesson arm's opposite rule so
+        the two cannot be read as one count."""
+        self.teach("gh pr list --limit 5", ["s1", "s1", "s1"])
+        self.tick()
+        self.assert_allowed(self.run_hook(self.attempt("gh pr list --limit 5", "s1"),
+                                          REPEAT_GATE_REFUSE="1"))
+        self.teach("gh pr list --limit 5", ["s2"])
+        self.tick()
+        reason = self.assert_denied(self.run_hook(self.attempt("gh pr list --limit 5",
+                                                               "s3"),
+                                                  REPEAT_GATE_REFUSE="1"))
+        self.assertIn("2 earlier sessions", reason)
 
     def test_a_session_that_recovered_nothing_is_never_refused(self):
         """The gate is keyed on a recovery bound in THIS session, so a session that only
@@ -4105,21 +4133,20 @@ class LessonGateTest(GateCase):
         self.assert_allowed(self.probe("s3"))
 
     def test_the_threshold_is_REPEAT_MIN_SESSIONS(self):
-        """At 3 the gate wants three EARLIER sessions, so s3 -- which has only s1 and s2
-        behind it -- is still allowed and s4 is the first one refused."""
+        """At 3 the gate wants three distinct sessions counting this one, so s2 -- which
+        has only s1 behind it -- is still allowed and s3 is the first one refused."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
+        self.assert_allowed(self.probe("s2", REPEAT_MIN_SESSIONS=3))
         self.fail_then_fix("s3")
-        self.assert_allowed(self.probe("s3", REPEAT_MIN_SESSIONS=3))
-        self.fail_then_fix("s4")
-        self.assert_lesson_deny(self.probe("s4", REPEAT_MIN_SESSIONS=3))
+        self.assert_lesson_deny(self.probe("s3", REPEAT_MIN_SESSIONS=3))
 
-    def test_REPEAT_MIN_SESSIONS_1_refuses_on_the_second_occurrence(self):
-        """The spelling of "refuse on the second occurrence" after the current session
-        stopped counting itself: one earlier session, one recovery bound here."""
+    def test_REPEAT_MIN_SESSIONS_1_refuses_on_the_first_occurrence(self):
+        """With the current session in the union, 1 is "this session alone": a session
+        that fails, recovers and is refused on its own evidence. Not a default, and not
+        a trap, since `lesson_cli_head` can never refuse the command that ends it."""
         self.fail_then_fix("s1")
-        self.fail_then_fix("s2")
-        self.assert_lesson_deny(self.probe("s2", REPEAT_MIN_SESSIONS=1))
+        self.assert_lesson_deny(self.probe("s1", REPEAT_MIN_SESSIONS=1))
 
     # ------------------------------------------------------------------ what lifts it
     def write_lesson_row(self, sig, note_id="n1x1"):
@@ -4154,6 +4181,15 @@ class LessonGateTest(GateCase):
         self.fail_then_fix("s3")
         self.write_lesson_row(self.sig())
         self.assert_allowed(self.probe("s3"))
+
+    def test_a_standing_lesson_lifts_the_second_occurrence(self):
+        """The same lift at the shape the gate now refuses first: one earlier session,
+        this one, and a lesson already on the ledger. Written after the fixture that
+        `test_the_second_occurrence_is_refused` shows IS refused without it."""
+        self.fail_then_fix("s1")
+        self.fail_then_fix("s2")
+        self.write_lesson_row(self.sig())
+        self.assert_allowed(self.probe("s2"))
 
     def test_a_ledger_row_for_another_signature_does_not_lift_it(self):
         """NON-VACUITY: the reader matches on the signature and not on the presence of a

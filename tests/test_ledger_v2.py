@@ -824,6 +824,42 @@ class BackCompatTest(LedgerV2Case):
                          "the funnel did not count the new note row exactly once:\n"
                          + after_report)
 
+    def test_a_skill_row_is_invisible_to_the_forge_readers(self):
+        """`skill` is the row `skillnote skill` writes: a skill built from a note WITHOUT
+        a forge. `skillreport skills` now selects it by name (NoteBuiltSkillTest below);
+        the forge readers must not, because it is not a forge. Written by the REAL CLI,
+        so the row under test has whatever fields the writer actually emits."""
+        self.a_mixed_ledger()
+        before_forge = self.forge("ledger").stdout
+        before_report = self.report().stdout
+        proj = self.root / "noted"
+        (proj / ".claude").mkdir(parents=True)
+        run = lambda *a, now: subprocess.run(
+            [str(REPO / "bin" / "skillnote"), *a], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, cwd=str(proj), env=self.env(SKILLNOTE_NOW=now))
+        r = run("add", "--scope", "project", "a lesson worth one line", now=T0 + 3000)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        nid = r.stdout.split("(", 1)[1].split(")", 1)[0]
+        r = run("skill", nid, "--name", "one-liner", now=T0 + 3100)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.rows("skill")), 1, "the CLI wrote no skill row")
+
+        self.assertEqual(self.forge("ledger").stdout, before_forge,
+                         "a skill row moved `skillforge ledger`")
+        after_report = self.report().stdout
+        head = lambda o: o[:o.index("\nFUNNEL (")]
+        self.assertEqual(head(after_report), head(before_report),
+                         "a skill row moved a count outside the funnel")
+        # The funnel names five events and `skill` is not one of them: only the NOTE the
+        # CLI wrote on the way moves it, by exactly one unattributed row.
+        def unattributed(out):
+            line = [l for l in out.splitlines() if "UNATTRIBUTED:" in l][0]
+            return int(line.split("UNATTRIBUTED:")[1].split()[0])
+        self.assertEqual(unattributed(after_report), unattributed(before_report) + 1,
+                         after_report)
+        check = [l for l in after_report.splitlines() if "CHECK:" in l]
+        self.assertTrue(check and "CHECK FAILED" not in after_report, after_report)
+
     def test_an_event_from_the_future_is_ignored_rather_than_miscounted(self):
         """Forward compatibility, stated as a test: a row this build has never heard of
         must not become a forge, an outcome or a use."""
@@ -915,6 +951,108 @@ class SkillsViewTest(LedgerV2Case):
         out = self.report("skills").stdout
         self.assertIn("reconstructed", out)
         self.assertIn("transcript 2026-08-24", out)
+
+
+# ------------------------------------------------------- the note-built skill
+#
+# DEFECT, reproduced on HEAD cb110a9: `skillnote skill` wrote a `skill` ledger row and
+# `skillreport skills` answered "No skills recorded yet", because that view selected
+# `origin`, `use`, `verdict` and the apply join by name and `skill` was not among them --
+# so the default product path, note then `skillnote skill`, produced a callable skill the
+# instrument could not see. The row is now selected BY NAME, never by negation, and the
+# forge readers still cannot see it (BackCompatTest above).
+#
+# EVERY ROW HERE IS WRITTEN BY THE REAL WRITER. The `skill` row's field names are whatever
+# `ledger_append_skill` in bin/skillnote emits, read back off disk; a fixture typed here
+# would pin whichever side its author was looking at (.claude/CLAUDE.md, n2647857843x309).
+
+NOTE_CLI = REPO / "bin" / "skillnote"
+
+
+class NoteBuiltSkillTest(LedgerV2Case):
+
+    TEXT = ("python3 setup.py install fails on a modern setuptools; install the package "
+            "editable with pip instead.")
+
+    def skillnote(self, *args, now):
+        proj = self.root / "noted"
+        (proj / ".claude").mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([str(NOTE_CLI), *args], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, cwd=str(proj),
+                           env=self.env(SKILLNOTE_NOW=now))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def note_built_skill(self, name="editable-install"):
+        out = self.skillnote("add", "--scope", "project", self.TEXT, now=T0 + 100)
+        nid = out.split("(", 1)[1].split(")", 1)[0]
+        self.skillnote("skill", nid, "--name", name, now=T0 + 200)
+        rows = self.rows("skill")
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["name"], name)
+        self.assertEqual(rows[0]["from"], nid, "the writer's own field naming the note")
+        return nid, rows[0]
+
+    def test_the_skill_is_listed_with_the_note_as_its_origin_and_trigger(self):
+        nid, row = self.note_built_skill()
+        out = self.report("skills").stdout
+        self.assertNotIn("No skills recorded yet", out, out)
+        self.assertIn("\neditable-install\n", out, out)
+        self.assertIn("origin    note — built by `skillnote skill` from note %s, no forge" % nid,
+                      out, out)
+        self.assertIn("trigger   [note] %s" % nid, out, out)
+        self.assertIn("where     %s" % row["path"], out, out)
+        self.assertNotIn("NO ORIGIN ROW", out, out)
+        self.assertIn("skills from a note, no forge:   1", out, out)
+        # It is not counted as a forged skill anywhere in COVERAGE.
+        self.assertIn("skills with an origin row:      0", out, out)
+        self.assertIn("forges closed, never applied:   0 of 0", out, out)
+
+    def test_its_apply_use_and_verdict_rows_join_like_a_forged_skills(self):
+        """Same joins, same names: a use row from the real Skill hook, an apply row from
+        the real `skillforge apply --force` (no forge opened a marker for it), and a real
+        verdict on top of that apply."""
+        nid, row = self.note_built_skill()
+        t = self.root / "t.jsonl"
+        t.write_text(json.dumps({"type": "attachment", "entrypoint": "cli",
+                                 "cwd": "/Users/me/proj"}) + "\n", encoding="utf-8")
+        self.hook("ok", use_payload(skill="editable-install", session="sess-9",
+                                    tool_id="toolu_09", transcript=t))
+        r = self.forge("apply", "--name", "editable-install", "--outcome", "used",
+                       "--evidence", "pip install -e . unwedged the build",
+                       "--session", "sess-9", "--force", now=T0 + 300)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.forge("verdict", "--name", "editable-install", "--verdict", "WORKED",
+                       "--evidence", "the editable install went through",
+                       "--use-session", "sess-9", "--judged-by", "session review",
+                       now=T0 + 400)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = self.report("skills").stdout
+        block = out[out.index("\neditable-install\n"):out.index("\nCOVERAGE")]
+        self.assertIn("uses      1 genuine", block, block)
+        self.assertIn("applied   used", block, block)
+        self.assertIn("pip install -e . unwedged the build", block, block)
+        self.assertIn("verdict   1 WORKED", block, block)
+        self.assertNotIn("no apply row", block, block)
+        self.assertIn("skills with a recorded use:     1", out, out)
+        self.assertIn("skills with an apply row:       1", out, out)
+        self.assertIn("skills with a verdict:          1", out, out)
+
+    def test_without_an_apply_row_it_says_no_forge_opened_a_debt(self):
+        """A forged skill with no apply row is a loop that never closed; a note-built
+        skill opened no forge, so the line must not read like a debt and must name the
+        command that records a use on a problem anyway."""
+        self.note_built_skill()
+        out = self.report("skills").stdout
+        self.assertIn("applied   no apply row — built from a note without a forge", out, out)
+        self.assertIn("skillforge apply --force --name editable-install", out, out)
+        self.assertNotIn("NOT APPLIED", out, out)
+
+    def test_the_default_view_does_not_count_it_as_a_forge(self):
+        self.note_built_skill()
+        out = self.report().stdout
+        self.assertIn("no forges recorded yet", out, out)
+        self.assertNotIn("editable-install", out[:out.index("\nFUNNEL (")], out)
 
 
 # ------------------------------------------------------------------- adoption

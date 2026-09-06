@@ -530,25 +530,42 @@
 #
 #   SECOND TIME -- the lesson gate DECLINES the next call, while three things hold at
 #   once: this session bound a recovery for the signature, the signature's fail rows come
-#   from at least REPEAT_MIN_SESSIONS distinct EARLIER sessions, and no lesson references
-#   it.
+#   from at least REPEAT_MIN_SESSIONS distinct sessions COUNTING THIS ONE, and no lesson
+#   references it. At the default of 2 that is this session plus one earlier: the second
+#   occurrence, which is the one the doctrine names ("the second time that same signature
+#   comes round, it declines the next call until the lesson is written down").
 #
-# EARLIER MEANS EARLIER ON BOTH ARMS, AND THIS ONE USED TO CHEAT. The count below drops
-# every fail row carrying THIS session's id, exactly as the repeat arm's does
-# (`.session != $sid` there, `.session != $cur` here), so BOOTSTRAP DEADLOCK guard 1 --
-# "failures recorded by THIS session never count" -- is a property of the whole file
-# rather than of one arm of it. It was not. Until 2026-09-04 this count included the
-# current session, so at the default REPEAT_MIN_SESSIONS of 2 a signature that had failed
-# in ONE earlier session was refused, while this header, `bin/skillrepeat` and
-# .claude/CLAUDE.md all described a threshold the code did not have. A red-team session
-# found it by counting the sessions in the store against the sessions in the deny.
+# THE TWO ARMS COUNT THE CURRENT SESSION DIFFERENTLY, AND THE DIFFERENCE IS THE POINT.
+# The repeat arm's count drops every fail row carrying THIS session's id (`.session !=
+# $sid` there): its refusal is an INFERENCE FROM HISTORY -- "this call is broken here,
+# because it has died in N sessions that were not this one" -- and a session's own
+# failures feeding that inference is what BOOTSTRAP DEADLOCK guard 1 exists to stop. The
+# lesson arm's count takes the distinct sessions of the fail rows UNIONED with the
+# current session (`+ [$cur]` in `lesson_gate`): its refusal is not an inference at all
+# but a fact about the session in front of it -- it failed this way, then got it working,
+# and wrote nothing down -- plus the one earlier observation that makes the failure
+# recurring rather than a fluke. This session IS the second occurrence, so this session
+# counts, ONCE. The union rather than a plain count is what keeps guard 1 in substance: a
+# session contributes exactly one whatever it does to itself, so a signature that has
+# failed only here stands at 1, never reaches the default of 2, and nothing a session
+# does to itself can build its own refusal.
 #
-# WHAT THAT COSTS, STATED RATHER THAN GLOSSED: at the default the refusal now arrives one
-# session later than the doctrine's "second occurrence" reads. Two EARLIER sessions plus
-# the recovery bound in this one is the third occurrence. `REPEAT_MIN_SESSIONS=1` is the
-# spelling of "refuse on the second" and is one export rather than a hidden off-by-one;
-# the default stays at 2, because a threshold that fires on a single earlier observation
-# is one observation away from firing on a fluke.
+# WHAT IT DID BEFORE, TWICE OVER, AND WHY NEITHER WAS RIGHT. Until 2026-09-04 this count
+# was a plain count of distinct sessions and included the current one by accident, so it
+# fired on this session plus one earlier -- the rule stated here, reached by an arm whose
+# header, `bin/skillrepeat` and .claude/CLAUDE.md all described the other one; a red-team
+# session found it by counting the sessions in the store against the sessions in the
+# deny. The 2026-09-04 repair made the header true by excluding the current session on
+# both arms, and at the default that put the first refusal in the THIRD session -- two
+# EARLIER sessions plus the recovery bound in this one -- one session later than
+# README.md, the doctrine in skills/skill-compounder/SKILL.md and the maintainer's request
+# of 2026-09-03 all read. The 2026-09-06 repair moved the CODE toward the doctrine rather
+# than the doctrine toward the code, on the lesson arm only, and made the inclusion
+# deliberate (the union) where it had been incidental (a row). The default of 2 did not
+# move and no knob was added: 2 is "this session and one other". `REPEAT_MIN_SESSIONS=1`
+# on this arm now means the FIRST occurrence -- a session that fails, recovers and is
+# refused on its own evidence -- which is not a trap, since the escape is one command and
+# `lesson_cli_head` can never refuse it, and is not a default either.
 #
 # WHAT LIFTS IT, AND WHO MAY DISMISS. Two things lift it and neither is a deletion:
 # `skillnote add --lesson <sig> "<text>"` writes a `note` row carrying `lesson_sig` into
@@ -648,12 +665,15 @@
 # learn to refuse the commands needed to inspect or undo it, and then the session is
 # trapped with no way out that does not involve editing settings.json. Four independent
 # guards, any one of which is enough:
-#   1. Failures recorded by THIS session never count. The refusal needs
-#      REPEAT_MIN_SESSIONS distinct EARLIER sessions, so nothing a session does to itself
-#      can lock it out mid-flight.
+#   1. Failures recorded by THIS session never count on the repeat arm, and count ONCE
+#      on the lesson arm. The repeat refusal needs REPEAT_MIN_SESSIONS distinct EARLIER
+#      sessions, so nothing a session does to itself can lock it out mid-flight; the
+#      lesson refusal needs REPEAT_MIN_SESSIONS distinct sessions with this one in the
+#      union, so a session is one observation however many times it fails, and on its own
+#      it never reaches the default.
 #   2. Deny-once-per-session-per-signature, above. Every refusal has a next attempt.
-# THREE OF THE FOUR BELOW BELONG TO THE REPEAT ARM ONLY. The lesson gate keeps 1 -- this
-# session's own failures never count -- and replaces 2, 3 and 4 with a single exemption
+# THREE OF THE FOUR BELOW BELONG TO THE REPEAT ARM ONLY. The lesson gate keeps 1 in
+# substance -- this session is one observation, never more -- and replaces 2, 3 and 4 with a single exemption
 # for the command that ENDS it (`lesson_cli_head`). It has to: the thing it refuses is
 # continuing, and `cat`, `git` and `ls` are continuing. What stops it being a trap is that
 # the escape is one command, is printed in the refusal, and can never itself be refused.
@@ -790,14 +810,16 @@
 #                                     it whichever way it is set.
 #   REPEAT_GATE_NOW               ()  this script's clock, epoch seconds. Its own, not
 #                                     borrowed: pinning another script's does nothing here.
-#   REPEAT_MIN_SESSIONS           (2) distinct EARLIER sessions needed before a refusal,
-#                                     and read the SAME WAY BY BOTH ARMS: neither counts
-#                                     a fail row carrying the current session's id
-#                                     (BOOTSTRAP DEADLOCK guard 1). The lesson gate
-#                                     counted this session too until 2026-09-04, which
-#                                     made it fire a session early against every
-#                                     description of it; EARLIER MEANS EARLIER ON BOTH
-#                                     ARMS, above, has the repair and what it costs.
+#   REPEAT_MIN_SESSIONS           (2) distinct sessions with a fail row before a refusal,
+#                                     and the two arms count the current session
+#                                     differently ON PURPOSE. The repeat arm never counts
+#                                     it (BOOTSTRAP DEADLOCK guard 1: its refusal is an
+#                                     inference from history). The lesson arm counts it
+#                                     exactly once, so at 2 the refusal lands on this
+#                                     session plus one earlier -- the doctrine's second
+#                                     occurrence. THE TWO ARMS COUNT THE CURRENT SESSION
+#                                     DIFFERENTLY, above, has the reasoning and the
+#                                     history.
 #   REPEAT_RECOVERY_MIN_TOKENS    (2) content tokens two normalised calls must share
 #                                     before a success of a DIFFERENT tool is bound as a
 #                                     recovery. 0 disables cross-tool binding entirely
@@ -2801,11 +2823,15 @@ EOF
   [ -z "$lg_want" ] && return 0
 
   # ONE pass, and it answers both halves of clause (a) and half of clause (b): how many
-  # distinct EARLIER sessions have failed this way, and whether a dismissal a person wrote
-  # has been recorded.
-  # THE CURRENT SESSION IS EXCLUDED, `$cur`, exactly as the repeat arm excludes it. See
-  # EARLIER MEANS EARLIER ON BOTH ARMS in the header for what this cost and why the
-  # default did not move with it.
+  # distinct sessions have failed this way, THIS ONE COUNTED ONCE, and whether a dismissal
+  # a person wrote has been recorded.
+  # THE CURRENT SESSION IS UNIONED IN, `+ [$cur]`, where the repeat arm excludes it. It
+  # has a fail row by construction -- a marker under lessons/<sid>/ means a recovery was
+  # bound here -- and the union rather than the row is what makes "once" a property of
+  # the query instead of the store: a `forget` cutting this session's own row out, or a
+  # session that failed five times, both leave it at exactly one. A row with no session
+  # is nobody's observation and is dropped. See THE TWO ARMS COUNT THE CURRENT SESSION
+  # DIFFERENTLY in the header.
   # ONLY A HUMAN'S DISMISSAL COUNTS. `.actor` is `human`, `model`, or absent on a row
   # written before the field existed -- and absent reads as human, because those rows
   # predate the model path and there is nothing in them to tell apart.
@@ -2820,8 +2846,8 @@ EOF
     | $want[] as $s
     | (([ $rows[] | select(.t=="forget" and .sig==$s) | (.ts // 0) ] | max) // -1) as $cut
     | [ $s,
-        ([ $rows[] | select(.t=="fail" and .sig==$s and ((.ts // 0) > $cut))
-                   | select((.session // "") != $cur) | .session ]
+        (([ $rows[] | select(.t=="fail" and .sig==$s and ((.ts // 0) > $cut))
+                    | (.session // "") | select(. != "") ] + [$cur])
           | unique | length | tostring),
         (if ([ $rows[] | select(.t=="dismiss" and .sig==$s)
                        | select((.actor // "human") == "human") ] | length) > 0
@@ -2935,8 +2961,8 @@ EOF
     lg_reason="$lg_stmt
 
 Nothing ran and nothing was written. Fail rows for this signature come from $lg_n distinct
-EARLIER sessions, and the recovery above was bound in this one. Writing the lesson down is
-what lifts this, and in this session it is the only thing that does:
+sessions, this one among them, and the recovery above was bound here. Writing the lesson
+down is what lifts this, and in this session it is the only thing that does:
 
   skillnote add --lesson $lg_sig \"<what was learned>\"$lg_att
 

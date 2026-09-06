@@ -219,9 +219,17 @@ DELIVERED counts rows in the two delivery logs. ACTED ON and OUTCOME PARTITION t
 ledger: every note/start/use/apply/verdict row is attributed to AT MOST ONE lineage,
 by the first of these that holds — its own `from`, its own `candidate`, a note row
 whose own id is a delivered lineage, or the lineage delivered FIRST to the session it
-was written in (ties by id). ACTED ON counts the note/start/use/apply rows so
-attributed; OUTCOME counts the verdict rows.
+was written in, counting only a delivery stamped AT OR BEFORE the row's own timestamp
+(ties by id). A row written before every delivery to its session is unattributed,
+because a nudge cannot have been acted on before it arrived. ACTED ON counts the
+note/start/use/apply rows so attributed; OUTCOME counts the verdict rows. A row
+attributed by its session alone is a sequence and never a cause, and a session that
+received two lineages gives its rows to one of them, so that half of ACTED ON is a
+floor rather than a total.
 ```
+
+The timestamp clause is from 2026-09-06: until then the fourth test read no timestamp and
+credited a note written at ts 100 to a nudge delivered at ts 200.
 
 **A partition is a checkable claim, so the block checks it and prints the arithmetic.** The
 last line is a `CHECK:` reading `<n> row(s) in the table + <n> unattributed = <n>
@@ -240,7 +248,11 @@ fixes the second. The table shows the first 25 lineages and folds the rest into 
 The session clause is the weak one and is labelled where it prints: a session that was
 reminded and then forged is evidence of a sequence, not of a cause, and a session that
 received two lineages gives its rows to whichever was delivered there first, which makes that
-half of `ACTED ON` a floor for the other lineage. **REMINDER CONVERSION** is
+half of `ACTED ON` a floor for the other lineage. Both blocks are functions,
+`print_funnel` and `print_reminder_conversion`, and since 2026-09-06 the default view
+prints them on every exit path, a ledger with no `start` row included; until then both sat
+past the `no forges recorded yet` exit, so a machine that had only ever taken the cheap
+tiers was told nothing about them. **REMINDER CONVERSION** is
 counted now instead of reconstructed: `hooks/compound-improvement.sh` writes every nudge it
 delivers to `<state>/reminders/nudges.jsonl`, and one converts when a `start` row exists in
 the same session at or after that delivery. The old edit-counter estimate is still printed
@@ -348,14 +360,17 @@ was learned. Once per signature per session, as a record of what happened rather
 instruction.
 
 **The second time, it is required.** The `PreToolUse` arm declines the next call of any
-tool when a signature recovered in *this* session also has `fail` rows from
-`REPEAT_MIN_SESSIONS` distinct **earlier** sessions and no lesson has been written down
-about it. Earlier means earlier: rows carrying this session's own id are dropped from that
-count, on both refusing arms. Until 2026-09-04 this arm counted the current session too, so
-at the default of 2 one earlier failure was enough and the code was a session stricter than
-every document describing it. What the fix costs is stated rather than glossed — at the
-default the refusal now arrives on the third occurrence, and `REPEAT_MIN_SESSIONS=1` is the
-one export that spells "refuse on the second".
+tool when a signature recovered in *this* session has `fail` rows from `REPEAT_MIN_SESSIONS`
+distinct sessions **counting this one** and no lesson has been written down about it. At the
+default of 2 that is this session plus one earlier — the second occurrence. This arm counts
+the current session once, by unioning it in rather than by counting its rows, so a session
+that fails five times is still one observation and on its own never reaches the default;
+the repeat arm above still drops the current session's rows entirely, because its refusal
+is an inference from other sessions' history where this one is a fact about the session at
+hand. From 2026-09-04 to 2026-09-06 the current session was excluded on both arms and the
+first refusal landed on the third occurrence, one later than the doctrine reads; the
+2026-09-06 change moved the code toward the doctrine rather than the doctrine toward the
+code. `REPEAT_MIN_SESSIONS=1` on this arm means the first occurrence.
 
 ```bash
 skillrepeat list      # LESSON: open, recorded, dismissed, dismissed-by-model, -
@@ -432,8 +447,15 @@ name the directory it sits in, and hold a complete double-quoted description. A 
 over the 500-character cap `skills/skill-authoring/SKILL.md` documents is refused **with the
 count** before anything is written, rather than truncated, because a truncated trigger ships
 green and never fires; `--use-when` and `--not-for` are how you shorten it. `--dry-run`
-prints the file and writes nothing. `--force` moves an existing skill of that name aside to a
-timestamped directory and says where, and removes nothing. Two exits worth knowing: a note id
+prints the file and writes nothing. `--force` moves an existing skill of that name into
+`<parent of the skills dir>/skills-archive/<slug>.bak-skill-compounder-<ts>/` — at global
+scope `~/.claude/skills-archive/`, the same archive a retired skill goes to — says where,
+and removes nothing. Until 2026-09-06 it went to `<skills dir>/<slug>.bak-...`, which Claude
+Code lists like any other `<skills dir>/*/SKILL.md`, so the backup was a second routable copy
+of the same skill under another name. A directory that appears at the slug between the
+check and the write is refused (exit 2 without `--force`, exit 3 when the rename would have
+landed inside it) and is neither nested into nor overwritten, and a replacement that fails
+after the previous skill has moved puts it back. Two exits worth knowing: a note id
 that is not in either `CLAUDE.md` exits 2 naming `skillnote list`, and a memory note exits 2
 saying to record the lesson at project or global scope first, because a memory file has no
 marker block and no attachments directory to build from.
@@ -742,7 +764,7 @@ place in `~/.claude/settings.json`:
 |`CLAIM_GATE_MAX_SESSION`|`10`|the hook entries|Blocks plus denials the gate may spend in one session|
 |`SKILL_COMPOUNDER_REPEAT_GATE`|`1`|the hook entries|Set to `0` to switch the repeat gate off entirely — it denies nothing and learns nothing|
 |`REPEAT_GATE_REFUSE`|`0`|the top-level `env` block|Set to `1` to arm the refusal. Off by default: across 81 recorded sessions it refused nothing, and every signature that reached the threshold was one the gate's own head rules exempt anyway ([#27](https://github.com/ContextLab/claude-skill-compounder/issues/27)) — re-derived after those rules were narrowed to a per-segment test on 2026-09-04, when 13 signatures stood at the threshold and all 13 were still exempt. Learning and recovery are unaffected either way. **Two components read it** — the gate, and `bin/skillrepeat`, which says on its own output whether the arm is armed|
-|`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Distinct **earlier** sessions a call must have failed in, the same way, before an attempt is denied. Both refusing arms drop rows carrying the current session's id, so nothing a session does to itself can lock it out; the lesson arm counted this session too until 2026-09-04, which made it one session stricter than its own documentation. At the default the lesson refusal therefore lands on the third occurrence, and `1` is the spelling of "refuse on the second". **Three components read it** — set it anywhere narrower and they disagree|
+|`REPEAT_MIN_SESSIONS`|`2`|the top-level `env` block|Distinct sessions a call must have failed in, the same way, before an attempt is denied, and the two refusing arms count the current session differently on purpose. The repeat arm drops rows carrying this session's id, so nothing a session does to itself can lock it out. The lesson arm counts this session exactly once, unioned in, so at the default its refusal lands on this session plus one earlier — the second occurrence — and `1` means the first; from 2026-09-04 to 2026-09-06 it excluded the current session too and landed on the third. **Three components read it** — set it anywhere narrower and they disagree|
 |`REPEAT_RECOVERY_WINDOW`|`5`|the hook entries|Successful calls of a tool this hook is wired for, in the same agent, after which an armed failure stops looking for the call that fixed it, by either the same-tool rule or the cross-tool one|
 |`REPEAT_RECOVERY_MIN_TOKENS`|`2`|the hook entries|Content tokens two normalised calls must share before a success of a **different** tool binds as the recovery. `0` disables cross-tool binding and leaves the same-tool rule untouched. A floor, not a calibration|
 |`REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`|`2`|the hook entries|The same floor for a success of the **same** tool, applied only where that tool is a general-purpose shell (`Bash`), which names no operation of its own. `0` restores the unconditional same-tool binding this script shipped until 2026-09-03. A success whose normalised call equals the failed one binds whatever this is set to, and no other tool is affected|
@@ -767,11 +789,11 @@ place in `~/.claude/settings.json`:
 |`MISSION_ENABLED`|`1`|the hook entries|Set to `0` to switch the mission off entirely: no moment fires and nothing is recorded|
 |`MISSION_SURFER_ROOT`|unset; the hook then reads `CLAUDE_HISTORY_SURFER_DIR`, and failing that `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer`|the hook entries|Where claude-history-surfer keeps its per-project prompt store. Rung 1 of three, and the only one this package owns. Rung 2 is history-surfer's own override, read by its `data_dir()`, so setting it moves the writer and this reader together. Rung 3 is where the two DIVERGE, and the hook's header says so: history-surfer's `claude_dir()` keys on `CLAUDE_HISTORY_SURFER_CLAUDE_DIR` and reads `CLAUDE_CONFIG_DIR` nowhere, while this hook reads `CLAUDE_CONFIG_DIR`, which is what the rest of this package falls back to and what Claude Code itself honours. They agree whenever neither variable is set, which is every default machine; export one of them and rung 1 is what settles it. The hook reads that store and writes nothing to it|
 |`MISSION_FIRST_CHARS`|`1200`|the hook entries|Characters of the session's first substantive request quoted in full|
-|`MISSION_RECENT`|`3`|the hook entries|Most recent requests quoted alongside it|
+|`MISSION_RECENT`|`3`|the hook entries|Most recent *substantive* requests quoted alongside it; a prompt under `MISSION_SHORT_WORDS` words is counted in `N recorded` and not quoted, unless no other substantive request exists|
 |`MISSION_EACH_CHARS`|`400`|the hook entries|Characters of each of those|
 |`MISSION_MAX_CHARS`|`2400`|the hook entries|Characters of the whole rendered mission, clamped to 60000 so the emit stays clear of Linux's 131072-byte cap on one argument|
 |`MISSION_INTERVAL`|`1200`|the hook entries|Seconds between periodic deliveries in one session. The knob to raise first if the mission is too loud|
-|`MISSION_SHORT_WORDS`|`6`|the hook entries|A prompt under this many words is the ambiguity proxy, and this is also what "substantive" means when the first request is chosen|
+|`MISSION_SHORT_WORDS`|`6`|the hook entries|A prompt under this many words is the ambiguity proxy, and this is also what "substantive" means when the first request is chosen and, since 2026-09-06, when the recent block is filled|
 |`MISSION_STOP_MIN_TOOLS`|`8`|the hook entries|Tool calls the turn must have made before the `Stop` arm may block a completion claim|
 |`MISSION_MAX_ROWS`|`2000`|the hook entries|Store lines read for one session, and the length `hits.jsonl` is trimmed back to on write|
 |`MISSION_MAX_BYTES`|`33554432`|the hook entries|Bytes read from the tail of the prompt store. A larger store loses its oldest rows, so a very old session in a very large project can lose its first request|

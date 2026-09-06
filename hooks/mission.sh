@@ -212,7 +212,10 @@
 #                                     ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer.
 #                                     See "THE STORE ROOT IS DERIVED" above.
 #   MISSION_FIRST_CHARS    (1200)     characters of the first substantive request quoted.
-#   MISSION_RECENT         (3)        most recent requests quoted alongside it.
+#   MISSION_RECENT         (3)        most recent SUBSTANTIVE requests quoted alongside
+#                                     it; a prompt under MISSION_SHORT_WORDS words is
+#                                     counted in "N recorded" and not quoted, unless no
+#                                     other substantive request exists at all.
 #   MISSION_EACH_CHARS     (400)      characters of each of those.
 #   MISSION_MAX_CHARS      (2400)     characters of the whole rendered mission; clamped to
 #                                     60000 so the emit cannot approach Linux's 131072
@@ -612,13 +615,8 @@ if [ "$event" = "Stop" ]; then
   [ -n "$msg" ] || exit 0
   STOP_RE='(^|[^A-Za-z])(done|complete|completed|finished|implemented|landed|all tests pass|all tests passed|all tests passing|ready to merge)([^A-Za-z]|$)'
   printf '%s\n' "$msg" | grep -qiE "$STOP_RE" 2>/dev/null || exit 0
-
-  # One block per prompt_id, ever. `stop_hook_active` is the platform's own loop flag and
-  # is checked above; this is the belt, and it fails CLOSED like hooks/claim-gate.sh's:
-  # a reminder that goes missing costs a nudge, a block that fires twice from two racing
-  # processes costs the user their turn twice.
-  mkdir -p "$SDIR/stop" 2>/dev/null || exit 0
-  mkdir "$SDIR/stop/$pid" 2>/dev/null || exit 0
+  # The once-per-prompt_id claim is NOT taken here. It is taken under "claim, stamp,
+  # emit" below, once the rendered mission is in hand -- see the note there.
 fi
 
 # ------------------------------------------------------------------- read the store
@@ -655,6 +653,17 @@ fi
 # then with one recent request, then two, up to MISSION_RECENT -- and taking the longest
 # that fits inside MISSION_MAX_CHARS. Dropping the OLDEST of the recent block first keeps
 # the two things a session most needs: what was originally asked, and what was asked last.
+#
+# THE RECENT BLOCK IS THE LAST MISSION_RECENT *SUBSTANTIVE* REQUESTS, not the last
+# MISSION_RECENT rows. "Substantive" is the ambiguity arm's own notion -- at least
+# MISSION_SHORT_WORDS words -- and it is what "last substantive request" already means on
+# that arm. Measured 2026-09-06: a session whose rows were a long first request, a long
+# change of direction, then "continue", "keep going" and "yes proceed" rendered requests
+# 1, 3, 4 and 5 and ELIDED the change of direction, because the recent slot was the last
+# three rows and all three were the prompts that rely on memory. A short prompt still
+# counts in "N recorded" and is still charged to the elision marker; it is just not
+# quoted. When no row but the first is substantive the recent block falls back to the
+# last MISSION_RECENT rows, so a session of one request and three "yes"es reads as it did.
 # THE PREFIX IS A CONSTANT AND IT IS ASCII, not a knob. Markdown's quotation marker
 # is what a reader already takes to mean "this text is quoted, not addressed to
 # you"; a box-drawing bar would read as well and would put a multibyte glyph into a
@@ -728,8 +737,12 @@ def quoted($t; $cap):
         | "\($N) \($OUT | length)\n" + $OUT
       else
         (if ($subs | length) > 0 then $subs[0] else 0 end) as $fi
-        | ([ range(0; $N) ] | (if $N > $R then .[($N - $R):] else . end)
-           | map(select(. != $fi))) as $ri
+        | ([ $subs[] | select(. != $fi) ]) as $sx
+        | (if ($sx | length) > 0
+           then ($sx | (if length > $R then .[(length - $R):] else . end))
+           else ([ range(0; $N) ] | (if $N > $R then .[($N - $R):] else . end)
+                 | map(select(. != $fi)))
+           end) as $ri
         | ([ $P[] | (.t | length) ] | add // 0) as $TOT
         | ([ range(0; ($ri | length) + 1)
              | . as $k
@@ -822,6 +835,20 @@ fi
 # otherwise have burned its claim, so the second delivery -- the one that might have matched
 # after a concurrent write -- could never fire. That placement is the bug
 # hooks/session-review.sh shipped first.
+#
+# The Stop arm's once-per-prompt_id belt is taken here too, and for the same reason. It
+# used to be claimed beside the completion regex, BEFORE the store was read: a Stop whose
+# session had no rows yet -- history-surfer's row for the prompt not landed, or a store
+# holding only other sessions -- burned the marker on an empty render, and a later Stop
+# for the same turn, after the rows had arrived, emitted nothing (measured 2026-09-06).
+# It stays a claim of its own rather than folding into `claim_once`, because that one is
+# keyed per EVENT for the double delivery and this one is per TURN, and it still fails
+# CLOSED like hooks/claim-gate.sh's: a reminder that goes missing costs a nudge, a block
+# that fires twice from two racing processes costs the user their turn twice.
+if [ "$moment" = "completion" ]; then
+  mkdir -p "$SDIR/stop" 2>/dev/null || exit 0
+  mkdir "$SDIR/stop/$pid" 2>/dev/null || exit 0
+fi
 claim_once "$moment" "$eid" || exit 0
 
 mkdir -p "$SDIR" 2>/dev/null || exit 0

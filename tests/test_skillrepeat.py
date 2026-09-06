@@ -582,6 +582,19 @@ class ShowTest(RepeatCliCase):
         out = self.cli("show", self.sig_of("gh pr list --limit 5")).stdout
         self.assertIn("lesson:    none written", out)
 
+    def test_it_states_the_lesson_arms_threshold_the_way_the_hook_counts(self):
+        """The sentence under `none written` describes hooks/repeat-gate.sh's LESSON arm,
+        whose count includes the session that recovered the signature -- so at the
+        default of 2 the refusal is this session plus one earlier, the doctrine's second
+        occurrence. Until 2026-09-06 it said "distinct EARLIER sessions", which was the
+        repeat arm's rule and one session late for this one."""
+        self.fail_then_fix("s1")
+        out = self.cli("show", self.sig_of("gh pr list --limit 5")).stdout
+        self.assertIn(">= 2 distinct sessions counting", out)
+        self.assertIn("this session plus one", out)
+        self.assertIn("the second occurrence", out)
+        self.assertNotIn("EARLIER sessions", out)
+
     def test_it_says_nothing_about_a_lesson_where_none_is_owed(self):
         self.only_fail("s1")
         out = self.cli("show", self.sig_of("gh issue view 4")).stdout
@@ -701,14 +714,13 @@ class LiveSkillnoteTest(RepeatCliCase):
         """The whole point of the contract: the refusal lifts because a lesson exists,
         and nothing in this test writes that fact by hand.
 
-        THREE sessions, because REPEAT_MIN_SESSIONS counts EARLIER ones: s1 and s2 are
-        the two the default threshold wants, and s3 is the session that binds the
-        recovery and gets refused."""
+        TWO sessions, because the lesson arm's REPEAT_MIN_SESSIONS counts the session that
+        recovered the signature: s1 is the first occurrence and s2, which binds the
+        recovery, is the second and the one refused."""
         self.fail_then_fix("s1")
         self.fail_then_fix("s2")
-        self.fail_then_fix("s3")
         sig = self.sig_of("gh pr list --limit 5")
-        attempt = {"hook_event_name": "PreToolUse", "session_id": "s3",
+        attempt = {"hook_event_name": "PreToolUse", "session_id": "s2",
                    "tool_name": "Bash", "tool_use_id": "toolu_probe_1",
                    "tool_input": {"command": "npm install left-pad"}}
         self.tick()

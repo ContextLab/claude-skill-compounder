@@ -118,7 +118,15 @@ project `.claude/CLAUDE.md` or a global `CLAUDE.md`, or writes a memory file plu
 2 is a skill and costs ONE COMMAND: `skillnote skill <note id> --name <slug>` writes
 `<scope skills dir>/<slug>/SKILL.md` from a note already recorded, copies its attachments
 into `<slug>/scripts/`, runs Gate A on what it wrote and removes the directory on a failure,
-and appends one `skill` ledger row. Tier 3 is the forge, which writes the same kind of
+and appends one `skill` ledger row. `--force` moves an existing skill of that slug into
+`<parent of the skills dir>/skills-archive/<slug>.bak-skill-compounder-<ts>/` -- at global
+scope `~/.claude/skills-archive/`, the retirement archive -- and never into the skills
+directory itself, because Claude Code lists every `<skills dir>/*/SKILL.md` and a backup
+left there was a second routable copy of the same skill under another name (measured
+2026-09-06, the day it moved). A directory that appears at the slug between the check and
+the write is refused, exit 2 without `--force` and exit 3 when the rename would have landed
+inside it, and is neither nested into nor overwritten; a replacement that fails after the
+previous skill has moved puts it back. Tier 3 is the forge, which writes the same kind of
 directory with a builder and cold red-team rounds behind it, and is owed only where a skill
 goes upstream or a real session has shown its steps wrong. A note waits to be read; a
 reminder arrives; a tier-2 skill is CALLABLE, which is the thing the first two are not; only
@@ -274,8 +282,15 @@ user typed them, read from claude-history-surfer's store
 order history-surfer itself resolves)
 filtered on `session_id`, with commands and empty prompts dropped, under a fixed budget:
 the first substantive request up to `MISSION_FIRST_CHARS` (1200), the most recent
-`MISSION_RECENT` (3) up to `MISSION_EACH_CHARS` (400) each, the whole capped at
-`MISSION_MAX_CHARS` (2400). **Each request is rendered as a prefixed block, never inside
+`MISSION_RECENT` (3) SUBSTANTIVE requests up to `MISSION_EACH_CHARS` (400) each, the whole
+capped at `MISSION_MAX_CHARS` (2400). Substantive is the ambiguity arm's own notion, at
+least `MISSION_SHORT_WORDS` words: a shorter prompt ("continue", "yes proceed") is counted
+in `N recorded` and charged to the elision marker but not quoted, and the recent block
+falls back to the last `MISSION_RECENT` rows only when no row but the first is
+substantive. Until 2026-09-06 the recent block was the last `MISSION_RECENT` ROWS, so a
+session whose rows were a long first request, a long change of direction and then three
+short prompts quoted the first request and the three short ones and elided the change of
+direction. **Each request is rendered as a prefixed block, never inside
 double quotes**: a header line `(request N of M, T chars)` and then every line of the text,
 the blank ones included, carrying the fixed `> ` prefix -- `PREFIX_LINE` in
 `hooks/mission.sh`, an ASCII constant and deliberately not a knob -- with `> [... N more
@@ -312,10 +327,16 @@ subagent, which got the whole mission at `SubagentStart` (`moment="periodic"`).
 `UserPromptSubmit` on a prompt of fewer than `MISSION_SHORT_WORDS` (6) words -- "continue",
 "yes", "ok do it", the prompt that relies on memory -- delivers the last substantive request
 instead (`moment="ambiguity"`). And `Stop`, guarded by `stop_hook_active`, blocks ONCE per
-`prompt_id` with the mission as the reason (`moment="completion"`, claimed by the
-`mkdir -p "$SDIR/stop"` then `mkdir "$SDIR/stop/$pid"` pair), when `last_assistant_message`
-matches a short completion regex and the turn made at least `MISSION_STOP_MIN_TOOLS` (8)
-tool calls.
+`prompt_id` with the mission as the reason (`moment="completion"`), when
+`last_assistant_message` matches a short completion regex and the turn made at least
+`MISSION_STOP_MIN_TOOLS` (8) tool calls. Its once-per-`prompt_id` claim is the
+`mkdir -p "$SDIR/stop"` then `mkdir "$SDIR/stop/$pid"` pair, and since 2026-09-06 that pair
+sits under the "claim, stamp, emit" section, AFTER the mission has rendered non-empty,
+rather than beside the completion regex: taken before the store was read, a `Stop` whose
+session had no rows yet burned the marker on an empty render, and a later `Stop` for the
+same turn, after the rows had arrived, emitted nothing. It stays a claim of its own rather
+than folding into `claim_once`, which is keyed per event for the double delivery where this
+one is per turn.
 
 Each event is claimed once under `<state>/mission/<sid>/`, because both wirings deliver it
 twice: an atomic `mkdir` under `seen/`, keyed on `tool_use_id`, `agent_id` or `prompt_id`
@@ -550,12 +571,20 @@ rewritten to `cat notes/OPEN-THREADS.md`. First binding wins now. `claim_once`
 covers only the duplicate the two wirings deliver; no claim can see a duplicate inside one
 event, so the de-duplication is the row's own. THE SECOND TIME, IT REFUSES: `lesson_gate` denies the next call of ANY tool when a
 signature recovered in THIS session has fail rows from `REPEAT_MIN_SESSIONS` or more
-distinct EARLIER sessions, no dismissal a person wrote, and no standing lesson. EARLIER
-means earlier: the count drops rows whose `.session` is this one, on the lesson arm as well
-as the repeat arm, so nothing a session does to itself can build its own refusal. It used
-to cheat there -- the repeat arm excluded them and this one did not, so a signature that had
-failed in ONE earlier session plus this one was refused, a session earlier than the
-doctrine's "second occurrence".
+distinct sessions COUNTING THIS ONE, no dismissal a person wrote, and no standing lesson.
+At the default of 2 that is this session plus one earlier, the doctrine's second
+occurrence. The two arms count the current session differently ON PURPOSE: the repeat
+arm's refusal is an inference from history and drops every fail row carrying this
+session's id, while the lesson arm's is a fact about the session in front of it plus one
+earlier observation, so it takes the distinct sessions of the fail rows UNIONED with the
+current one (`+ [$cur]` in `lesson_gate`). A session contributes exactly one however often
+it fails, so a signature that has failed only here stands at 1 and nothing a session does
+to itself can build its own refusal; `REPEAT_MIN_SESSIONS=1` on this arm means the first
+occurrence. The threshold has been reached three ways: until 2026-09-04 the count included
+the current session by accident, so it fired on the second occurrence while every
+description of it said the third; the 2026-09-04 repair excluded it on both arms and put
+the first refusal in the THIRD session; and on 2026-09-06 the code moved toward the
+doctrine, with the inclusion made deliberate. The default did not move.
 
 **The deny reason names ONE command, and the omission is deliberate.** It says
 `skillnote add --lesson <sig> "<what was learned>"` -- carrying the same ` --attach <path>`
@@ -804,7 +833,11 @@ they cover.
 **The ledger is append-only, and every reader selects its events BY NAME.** `start` and
 its matching `done` or `fail` are joined into forges; `origin`, `use`, `verdict`,
 `horizon`, `note` and `skill` (both written by `bin/skillnote`, the second by `skillnote
-skill`) and `escalate` (written by `skillforge escalate`) are invisible to that join. A reader that classified by exclusion -- "anything
+skill`) and `escalate` (written by `skillforge escalate`) are invisible to that join. The
+forge join still ignores `skill`; since 2026-09-06 `bin/skillreport`'s skills view selects
+it by name, so a skill built from a note without a forge is listed with the note id as its
+trigger and `COVERAGE` carries a `skills from a note, no forge` line. Until then that view
+answered `No skills recorded yet` over a ledger holding a `skill` row. A reader that classified by exclusion -- "anything
 that is not a start is an outcome" -- would have folded every `use` row into the forge
 count the day ledger v2 landed, so `tests/test_ledger_v2.py` pins both readers against a
 mixed ledger. Add an event type freely; never widen a selector to a negation. Rows carry
@@ -1044,13 +1077,20 @@ The two hook constants (12 edits, 20 minutes) are unvalidated. `bin/skillreport`
 instrument that would settle them, and since #37 it counts rather than estimates: its
 `REMINDER CONVERSION` block is a join on session and order, and its `FUNNEL` block reports
 each lineage id as delivered, acted on and outcome, with rows carrying no id reported
-UNATTRIBUTED rather than dropped. **`ACTED ON`, `OUTCOME` and `UNATTRIBUTED` are a
+UNATTRIBUTED rather than dropped. Both blocks are functions, `print_funnel` and
+`print_reminder_conversion`, and since 2026-09-06 the default view prints them on every
+exit path, a ledger with no `start` row included; until then both sat past the `no forges
+recorded yet` exit, so a machine that had only taken the cheap tiers was told nothing about
+them. **`ACTED ON`, `OUTCOME` and `UNATTRIBUTED` are a
 PARTITION of the ledger, and the block prints its own arithmetic on a `CHECK:` line rather
 than asserting the property in prose** -- every `note`/`start`/`use`/`apply`/`verdict` row
 is attributed to AT MOST ONE lineage, by the first of four tests that holds (its own `from`,
 its own `candidate`, a `note` row whose own id is a delivered lineage, or the lineage
-delivered FIRST to the session it was written in, ties by id). It was not a partition
-twice over and both halves showed on the live store: a row whose `from` named a lineage no
+delivered FIRST to the session it was written in, counting only a delivery stamped AT OR
+BEFORE the row's own `ts`, ties by id). A row earlier than every delivery to its session is
+UNATTRIBUTED, because a nudge cannot have been acted on before it arrived; until 2026-09-06
+the fourth clause read no timestamp and credited a note at ts 100 to a nudge delivered at
+ts 200. It was not a partition twice over and both halves showed on the live store: a row whose `from` named a lineage no
 delivery log knew was counted NOWHERE, and a row was counted once for EVERY lineage
 delivered to its session, so `ACTED ON` summed to 104 against 69 DELIVERED and no reader
 could say what the column totalled. `ACTED ON` is now also BOUNDED rather than open: a row
@@ -1083,4 +1123,5 @@ there is nothing there to tune.
 - **2026-09-04** Every file:NNN citation in a doc moves with the next code wave: the cold review found seven off by 60-345 lines the same day they were written. Cite a function name, a moment= anchor or a grep, and reserve file:NNN for the script header that lives beside the line. <!-- id:n1788641960x272 -->
 - **2026-09-05** Adding a row to the tuning table in docs/operations.md means moving the spelled-out count phrase ('All sixty-one are environment variables') beside it, because tests/test_doctrine_sync.py::TuningTableTest pins that phrase to the row count; second time a row landed without it on 2026-09-05. <!-- id:n2661101721x298 -->
 - **2026-09-05** Four command-matching rules in hooks were wrong in the same way on 2026-09-05 and every one was caught by a live session, none by a test: remind.sh matched the whole command byte-for-byte (compound forms silent), claim-gate's CI-runner regex missed gh api .../check-runs, compound-improvement read the > in a "<file>" placeholder as a redirect, and the head allowlist exempted env/command as programs. A rule that matches command text ships only after a real claude -p session has been driven through the shape it is meant to catch and one it is meant to miss. <!-- id:n2151519607x568 -->
+- **2026-09-06** A block on skillreport's default view that is printed inline after an early exit goes missing on the exit path (APPLIED headline before #37, FUNNEL and REMINDER CONVERSION on a ledger with no start rows, 2026-09-06); a default-view block is a function called on every exit path, and its test drives the no-start-rows ledger. <!-- id:n559137653x332 -->
 <!-- skillnote:end -->

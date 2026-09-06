@@ -165,11 +165,13 @@ show and the first still does not. That bar governs proposing to strangers rathe
 shipping to yourself, and the difference is deliberate, but the gap is recorded here rather
 than left for a reader to discover.
 
-**A defect this exposed:** the forge was named `dead-guard-check` and the skill it produced
-is `dead-guard-detection`. `skillreport` joins uses to forges BY NAME, so it reports that
-forge as having produced a skill invoked 0 times, and would do so however often the skill
-were used. A skill renamed between forging and installing is invisible to the reuse half of
-the ledger, silently.
+**A defect this exposed, since fixed:** the forge was named `dead-guard-check` and the skill
+it produced is `dead-guard-detection`. `skillreport` joined uses to forges BY NAME, so it
+reported that forge as having produced a skill invoked 0 times, however often the skill was
+used. Since `de17783` (2026-09-01) `skillforge done` writes an `origin` row naming the
+installed directory and `skillreport` attributes uses of the installed name to the forge;
+`tests/test_skillreport_rename.py` pins both halves. A rename recorded on the ledger is no
+longer invisible; a rename made by hand after installing, with no `origin` row, still is.
 
 The loudest complaint in the corpus is deliberately **not** here:
 `superpowers:verification-before-completion` occupies that trigger, and two skills racing
@@ -567,8 +569,12 @@ closing sentences on the subagent and completion arms. That is not a stylistic p
 an imperative in an injected reminder was read as prompt injection and refused, and on
 `Stop` the model quotes the block reason and declines any instruction inside it. Under a
 fixed budget, the first substantive request goes in whole up to `MISSION_FIRST_CHARS`, the
-most recent `MISSION_RECENT` requests up to `MISSION_EACH_CHARS` each, and the whole text is
-capped at `MISSION_MAX_CHARS`. Defaults and every other knob are in
+most recent `MISSION_RECENT` *substantive* requests — at least `MISSION_SHORT_WORDS` words,
+the ambiguity arm's own boundary — up to `MISSION_EACH_CHARS` each, and the whole text is
+capped at `MISSION_MAX_CHARS`. A shorter prompt is counted in `N recorded` and not quoted,
+and the recent block falls back to the last `MISSION_RECENT` rows only when no row but the
+first is substantive. Until 2026-09-06 that block was the last `MISSION_RECENT` rows, so a
+long change of direction followed by three "continue"s was elided from the mission. Defaults and every other knob are in
 [Tuning](operations.md#tuning).
 
 |Moment|Event|What is delivered|
@@ -656,17 +662,26 @@ on the live ledger carry an attachment, which is the gap the clause is for.
 
 **The second time, it declines the next call.** The `PreToolUse` lesson gate refuses while
 three things hold at once: this session bound a recovery for the signature, the signature's
-`fail` rows come from at least `REPEAT_MIN_SESSIONS` distinct sessions, and neither a lesson
-nor a dismissal a person wrote references it. **Both arms count EARLIER sessions only**, and
-this one did not until 2026-09-04. Its count included the current session, so at the default
-`REPEAT_MIN_SESSIONS` of 2 a signature that had failed in ONE earlier session was refused —
-while this document, the script's own header and `bin/skillrepeat` all described a threshold
-the code did not have. A red-team session found it by counting the sessions in the store
-against the sessions named in a deny. What the fix costs, stated rather than glossed: at the
-default the refusal now arrives one session later than the doctrine's "second occurrence"
-reads, because two earlier sessions plus the recovery bound in this one is the third.
-`REPEAT_MIN_SESSIONS=1` is the spelling of "refuse on the second" and is one export rather
-than a hidden off-by-one.
+`fail` rows come from at least `REPEAT_MIN_SESSIONS` distinct sessions counting this one, and
+neither a lesson nor a dismissal a person wrote references it. At the default of 2 that is
+this session plus one earlier: the second occurrence, the one the doctrine names. **The two
+arms count the current session differently, and the difference is the point.** The repeat
+arm's refusal is an inference from history — the call has died in N sessions that were not
+this one — so its count drops every `fail` row carrying this session's id. The lesson arm's
+is a fact about the session in front of it plus the one earlier observation that makes the
+failure recurring rather than a fluke, so it takes the distinct sessions of the `fail` rows
+unioned with the current one (`+ [$cur]` in `lesson_gate`): a session contributes exactly one
+however often it fails, a signature that has failed only here stands at 1, and nothing a
+session does to itself builds its own refusal. `REPEAT_MIN_SESSIONS=1` on this arm means the
+first occurrence, which is not a trap, since the escape is one command `lesson_cli_head` can
+never refuse, and is not the default. The threshold has been reached three ways. Until
+2026-09-04 the count included the current session by accident, so it fired on the second
+occurrence while this document, the script's own header and `bin/skillrepeat` described the
+third; a red-team session found it by counting the sessions in the store against the
+sessions named in a deny. The 2026-09-04 repair excluded the current session on both arms,
+which put the first refusal in the third session, one later than the doctrine reads. On
+2026-09-06 the code moved toward the doctrine on this arm only, with the inclusion made
+deliberate; the default did not move and no knob was added.
 
 **And it no longer lets go.** `REPEAT_LESSON_MAX_DENIES` defaults to `unlimited`: the
 refusal has no expiry, and exactly two things end it — a standing lesson on the ledger, and

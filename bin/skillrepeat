@@ -88,7 +88,11 @@
 #   SKILL_COMPOUNDER_STATE   state root ($HOME/.claude/skill-compounder).
 #   REPEAT_MIN_SESSIONS (2)  the gate's refusal threshold, used here only to report which
 #                            signatures are over it. Read from the same variable the gate
-#                            reads so the two cannot disagree.
+#                            reads so the two cannot disagree. The GATE column counts it
+#                            the repeat arm's way (distinct sessions, this one excluded);
+#                            the `show` sentence about the lesson arm states that arm's
+#                            way (distinct sessions, this one counted once), which is why
+#                            the two sentences below spell the same number differently.
 #   REPEAT_GATE_REFUSE  (0)  the gate's refusal switch, read here ONLY to say on the
 #                            output whether the arm this CLI reports on is even armed.
 #                            The GATE column answers "would this signature refuse if the
@@ -678,7 +682,9 @@ cmd_show() {
       echo "           lesson is written (\`skillnote add --lesson $sig\`)."
     elif [ "$(printf '%s' "$one" | jq -r '.recovered' 2>/dev/null)" = "true" ]; then
       echo "lesson:    none written. hooks/repeat-gate.sh declines a call over this once"
-      echo "           the fail rows come from >= $MIN_SESSIONS distinct EARLIER sessions."
+      echo "           the fail rows come from >= $MIN_SESSIONS distinct sessions counting"
+      echo "           the one that recovered it -- at the default, this session plus one"
+      echo "           earlier: the second occurrence."
     fi
     # A self-recovery is why the gate is silent about a signature that otherwise looks
     # well over the threshold, so `show` has to say it or the count reads as a bug.

@@ -88,7 +88,12 @@ your own ledger; the shape below is the instrument, not a result.
   `note`, `start`, `use`, `apply` or `verdict` row is attributed to at most one lineage, by
   the first of four tests that holds — its own `from`, its own `candidate`, a `note` row whose
   own id is a delivered lineage, or the lineage delivered *first* to the session the row was
-  written in, ties broken by id. `ACTED ON` counts the first four kinds so attributed,
+  written in, counting only a delivery stamped at or before the row's own timestamp, ties
+  broken by id. A row older than every delivery to its session is unattributed, because a
+  nudge cannot have been acted on before it arrived; until 2026-09-06 the fourth test read no
+  timestamp and credited a note at ts 100 to a nudge delivered at ts 200. The block, and
+  `REMINDER CONVERSION` with it, prints on every exit path of the default view since the same
+  day, a ledger with no `start` row included. `ACTED ON` counts the first four kinds so attributed,
   `OUTCOME` the verdict rows, and `UNATTRIBUTED` the rows that pass none of the four. They are
   reported rather than dropped or folded into a rate, on the same rule that records a forge
   with no `--trigger` as `trigger_kind:"unrecorded"`.

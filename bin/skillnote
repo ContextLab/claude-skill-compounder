@@ -1616,6 +1616,24 @@ skills_dir() { # <project|global> -> the directory, or fails
   esac
 }
 
+# WHERE A REPLACED SKILL GOES, AND WHY IT IS NOT THE SKILLS DIRECTORY. Claude Code lists
+# every `<skills dir>/*/SKILL.md`, so a backup left at `<skills dir>/<slug>.bak-...` is a
+# second routable copy of the same skill under a different name -- measured on 2026-09-06,
+# the `--force` of that day left one. The archive is the SIBLING of the skills directory,
+# which for the global scope is exactly the `~/.claude/skills-archive/` that
+# skills/skill-compounder/references/retirement.md prescribes for a retired skill, and for
+# the project scope is `<root>/.claude/skills-archive/`. Nothing lists a SKILL.md there.
+skills_archive_dir() { # <skills dir> -> its sibling archive directory
+  printf '%s/skills-archive' "$(dirname "$1")"
+}
+
+# The inode, because rename(2) keeps it. `mv A B` with B an existing directory moves A
+# INTO B rather than failing, so the one thing that says whether the staged directory
+# became the destination or landed inside something that appeared there is its inode.
+inode_of() { # <path> -> the inode number, or nothing
+  ls -di "$1" 2>/dev/null | awk '{ print $1; exit }'
+}
+
 # The note, wherever it is. `parse_file` is the ONE reader of a block line in this script,
 # so this asks it rather than re-reading the markdown: a second parser of that line would
 # drift from the first, and both halves would still print something.
@@ -1812,8 +1830,8 @@ GATEAPY
 # ONE ROW, EVENT `skill`. Every reader in this package selects its events BY NAME -- see
 # .claude/CLAUDE.md, "never widen a selector to a negation" -- so a new event type is
 # invisible to the forge join, the funnel and `skillforge doctor` rather than miscounted
-# by them. Checked on this tree: bin/skillreport selects `note`, `start`, `use`, `apply`
-# and `verdict` by name in every block, and bin/skillforge selects `start`, `done`,
+# by them. Checked on this tree: bin/skillreport selects `note`, `start`, `use`, `apply`,
+# `verdict` and (in its skills view) `skill` by name, and bin/skillforge selects `start`, `done`,
 # `fail`, `origin`, `use`, `verdict` and `apply` the same way.
 ledger_append_skill() { # <id> <name> <scope> <path> <from> <candidate> <lesson> <att json> <project>
   mkdir -p "$STATE_ROOT" 2>/dev/null || return 0
@@ -1829,6 +1847,19 @@ ledger_append_skill() { # <id> <name> <scope> <path> <from> <candidate> <lesson>
   [ -n "$las_line" ] || return 0
   ensure_horizon
   printf '%s\n' "$las_line" 2>/dev/null >> "$LEDGER" || return 0
+  return 0
+}
+
+# PUT THE PREVIOUS SKILL BACK when the replacement failed after it had been moved aside.
+# Sets SK_RESTORED to the clause the refusal carries: where it is now, either way.
+skill_restore() { # <backup dir or empty> <destination>
+  SK_RESTORED=""
+  [ -n "$1" ] || return 0
+  if [ ! -e "$2" ] && mv "$1" "$2" 2>/dev/null; then
+    SK_RESTORED="; the previous skill was put back at $2"
+  else
+    SK_RESTORED="; the previous skill is at $1, moved aside and never removed"
+  fi
   return 0
 }
 
@@ -2028,22 +2059,55 @@ SKFEOF
     return 0
   fi
 
-  # A directory is never removed. `--force` MOVES the existing skill aside under the same
-  # backup prefix every file this CLI replaces gets, so the previous version is still on
-  # disk beside the new one.
+  # ------------------------------------------------------------ replace it, in that order
+  #
+  # A directory is never removed. `--force` MOVES the existing skill into the archive
+  # directory beside the skills directory (skills_archive_dir), under the same backup
+  # prefix every file this CLI replaces gets, so the previous version is still on disk
+  # and OUTSIDE the tree Claude Code lists: left beside the new one it was a second
+  # routable copy of the same skill. Every step that can fail is tried BEFORE the
+  # previous skill moves -- the archive directory is created first, and a `mv` that
+  # fails leaves its source where it was -- and a failure after it has moved puts it
+  # back, so a failed replacement leaves the previous skill in place and routable.
+  #
+  # The existence check at the top was taken before the build and the gate, and a
+  # directory can appear in between. It is checked again here, and the rename after it
+  # is judged by inode: `mv` onto an existing directory moves INTO it rather than
+  # failing, which is a misplaced skill and a directory nobody chose to touch, so a
+  # rename whose result is not the staged directory itself is undone and refused.
   sk_bak=""
   if [ -e "$sk_dest" ]; then
-    sk_bak="$sk_dest$BACKUP_PREFIX$(fmt_stamp "$(now)")"
+    if [ "$sk_force" != "1" ]; then
+      rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
+      die "$sk_dest appeared while this skill was being built. Nothing here overwrites and nothing was written: pass --force to move it aside first, or choose another --name."
+    fi
+    sk_arch="$(skills_archive_dir "$sk_dir")"
+    mkdir -p "$sk_arch" 2>/dev/null || die3 "cannot create the archive directory $sk_arch, so $sk_dest was left exactly where it was"
+    [ -d "$sk_arch" ] && [ -w "$sk_arch" ] || die3 "$sk_arch is not a writable directory, so $sk_dest was left exactly where it was"
+    sk_bak="$sk_arch/$sk_name$BACKUP_PREFIX$(fmt_stamp "$(now)")"
     sk_n=1
     while [ -e "$sk_bak" ]; do
       sk_n=$(( sk_n + 1 ))
-      sk_bak="$sk_dest$BACKUP_PREFIX$(fmt_stamp "$(now)")-$sk_n"
+      sk_bak="$sk_arch/$sk_name$BACKUP_PREFIX$(fmt_stamp "$(now)")-$sk_n"
     done
-    mv "$sk_dest" "$sk_bak" 2>/dev/null || die3 "cannot move $sk_dest aside to $sk_bak"
+    mv "$sk_dest" "$sk_bak" 2>/dev/null || die3 "cannot move $sk_dest aside to $sk_bak, so it was left exactly where it was"
   fi
+  sk_ino="$(inode_of "$sk_build")"
   if ! mv "$sk_build" "$sk_dest" 2>/dev/null; then
+    skill_restore "$sk_bak" "$sk_dest"
     rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
-    die3 "cannot move the staged skill into $sk_dest"
+    die3 "cannot move the staged skill into $sk_dest$SK_RESTORED"
+  fi
+  if [ -z "$sk_ino" ] || [ "$(inode_of "$sk_dest")" != "$sk_ino" ]; then
+    # It went INTO a directory that appeared between the check above and the rename.
+    # Take the staged directory back out -- by inode, so a real skill's own `scripts/`
+    # or a directory that merely shares the slug is never mistaken for it -- and refuse.
+    if [ -n "$sk_ino" ] && [ "$(inode_of "$sk_dest/$sk_name")" = "$sk_ino" ]; then
+      mv "$sk_dest/$sk_name" "$sk_build" 2>/dev/null || :
+    fi
+    skill_restore "$sk_bak" "$sk_dest"
+    rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
+    die3 "$sk_dest appeared between the check and the write, so nothing was overwritten and the new skill was not written$SK_RESTORED"
   fi
   rm -rf "$sk_stage" 2>/dev/null; trap - EXIT INT TERM HUP
 
@@ -2054,7 +2118,7 @@ SKFEOF
   echo "skillnote: skill $sk_name written to $sk_dest"
   echo "skillnote: it is callable now in this session (Claude Code loads skills without a restart; measured on 2.1.246, the lag is up to one tool call, so a first 'Unknown skill' is not a failure); a Skill call on it writes a use row"
   [ -n "$sk_scripts" ] && echo "skillnote: $(printf '%s' "$sk_json" | jq -r 'length') script(s) copied into $sk_dest/scripts"
-  [ -n "$sk_bak" ] && echo "skillnote: the previous $sk_name was moved to $sk_bak, never removed"
+  [ -n "$sk_bak" ] && echo "skillnote: the previous $sk_name was moved to $sk_bak, outside the skills directory Claude Code lists, never removed"
   return 0
 }
 

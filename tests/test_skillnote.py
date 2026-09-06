@@ -2183,6 +2183,22 @@ class SkillCase(LessonCase):
             return self.home / ".claude" / "skills"
         return self.proj / ".claude" / "skills"
 
+    def archive(self, scope="project"):
+        """The sibling of the skills directory: where a replaced skill is moved to."""
+        return self.skills(scope).parent / "skills-archive"
+
+    def routable(self, scope="project"):
+        """What Claude Code would list: every <skills dir>/*/SKILL.md, by directory name."""
+        d = self.skills(scope)
+        if not d.is_dir():
+            return []
+        return sorted(p.parent.name for p in d.glob("*/SKILL.md"))
+
+    def printed_backup(self, stdout):
+        line = [l for l in stdout.splitlines() if "was moved to" in l]
+        self.assertEqual(len(line), 1, stdout)
+        return Path(line[0].split("was moved to ", 1)[1].split(",", 1)[0])
+
 
 class SkillFromALessonTest(SkillCase):
 
@@ -2401,8 +2417,8 @@ class SkillRefusalTest(SkillCase):
         r2 = self.ok("skill", nid, "--name", "keeper", "--force",
                      "--use-when", "the runner is wedged", now=LATER)
         self.assertIn("moved to", r2.stdout)
-        kept = [p for p in self.skills().iterdir() if p.name.startswith("keeper.bak-")]
-        self.assertEqual(len(kept), 1, sorted(p.name for p in self.skills().iterdir()))
+        kept = [p for p in self.archive().iterdir() if p.name.startswith("keeper.bak-")]
+        self.assertEqual(len(kept), 1, sorted(p.name for p in self.archive().iterdir()))
         self.assertEqual((kept[0] / "SKILL.md").read_text(encoding="utf-8"), first,
                          "--force removed the previous skill instead of moving it aside")
         self.assertIn("the runner is wedged",
@@ -2411,6 +2427,153 @@ class SkillRefusalTest(SkillCase):
     def test_a_note_id_that_looks_like_a_flag_is_refused(self):
         r = self.note("skill", "--name", "x")
         self.assertEqual(r.returncode, 2, r.stdout)
+
+
+# ---------------------------------------------------- replacing a skill under --force
+#
+# Claude Code lists every `<skills dir>/*/SKILL.md`, so where the previous skill goes
+# is not a tidiness question: on 2026-09-06 `--force` moved it to a sibling directory
+# INSIDE the skills directory and the old SKILL.md stayed routable under a second name.
+# Every test here drives the real CLI and reads the tree back with the same glob.
+
+PY3_RACE_SHIM = """#!/bin/sh
+# The OTHER writer: a skill directory that appears at the destination after skillnote
+# has checked for one and before it renames the staged build into place. Gate A runs
+# python3 in exactly that window, so this stands in front of the real interpreter,
+# plants the directory once, and hands over.
+if [ ! -e "%(dest)s" ]; then
+  mkdir -p "%(dest)s" && printf '%%s\\n' "intruder" > "%(dest)s/SKILL.md"
+fi
+[ -n "%(real)s" ] || exit 0
+exec "%(real)s" "$@"
+"""
+
+
+class SkillReplaceTest(SkillCase):
+
+    def setUp(self):
+        super().setUp()
+        self.nid = self.lesson_note()
+        self.ok("skill", self.nid, "--name", "keeper")
+        self.dest = self.skills() / "keeper"
+        self.first = (self.dest / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_force_leaves_exactly_one_routable_copy_and_archives_outside_the_tree(self):
+        r = self.ok("skill", self.nid, "--name", "keeper", "--force",
+                    "--use-when", "the runner is wedged", now=LATER)
+        self.assertEqual(self.routable(), ["keeper"],
+                         "the previous SKILL.md is still where Claude Code lists skills")
+        self.assertEqual(self.routable("global"), [])
+        bak = self.printed_backup(r.stdout)
+        self.assertTrue(bak.is_absolute(), bak)
+        self.assertTrue((bak / "SKILL.md").is_file(), "the printed path holds no SKILL.md")
+        self.assertNotIn(self.skills(), bak.parents, "the backup is inside the skills dir")
+        self.assertEqual(bak.parent, self.archive(), bak)
+        self.assertTrue(bak.name.startswith("keeper.bak-skill-compounder-"), bak.name)
+        self.assertEqual((bak / "SKILL.md").read_text(encoding="utf-8"), self.first)
+        # Contents intact, mode and all: the lesson's script travelled with it.
+        script = bak / "scripts" / "unwedge.sh"
+        self.assertTrue(script.is_file(), sorted(str(p) for p in bak.rglob("*")))
+        self.assertTrue(os.access(str(script), os.X_OK), "the script lost its mode")
+        self.assertIn("outside the skills directory", r.stdout)
+        self.assertIn("the runner is wedged", (self.dest / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertEqual(len(self.ledger_rows(event="skill")), 2)
+        self.assertEqual([p.name for p in self.skills().iterdir()], ["keeper"],
+                         "something other than the skill is left in the skills directory")
+
+    def test_the_global_archive_is_the_directory_retirement_md_prescribes(self):
+        """One rule for both scopes, and at global scope it lands in the same
+        `~/.claude/skills-archive/` a retired skill goes to -- read off the reference
+        rather than asserted from memory."""
+        ref = (REPO / "skills" / "skill-compounder" / "references" / "retirement.md")
+        self.assertIn("~/.claude/skills-archive", ref.read_text(encoding="utf-8"))
+        self.ok("skill", self.nid, "--name", "keeper", "--scope", "global")
+        r = self.ok("skill", self.nid, "--name", "keeper", "--scope", "global", "--force",
+                    now=LATER)
+        bak = self.printed_backup(r.stdout)
+        self.assertEqual(bak.parent, self.home / ".claude" / "skills-archive")
+        self.assertEqual(self.routable("global"), ["keeper"])
+        self.assertTrue((bak / "SKILL.md").is_file())
+
+    def test_two_replacements_in_one_second_get_two_archive_directories(self):
+        self.ok("skill", self.nid, "--name", "keeper", "--force", now=LATER)
+        self.ok("skill", self.nid, "--name", "keeper", "--force", now=LATER)
+        kept = sorted(p.name for p in self.archive().iterdir())
+        self.assertEqual(len(kept), 2, kept)
+        self.assertTrue(all((self.archive() / k / "SKILL.md").is_file() for k in kept), kept)
+        self.assertEqual(self.routable(), ["keeper"])
+
+    def test_an_unwritable_archive_refuses_before_the_previous_skill_moves(self):
+        """A regular file where the archive directory must go: `mkdir -p` fails, and it
+        has to fail BEFORE anything is moved, or the failure is the skill vanishing."""
+        self.archive().write_text("not a directory\n", encoding="utf-8")
+        r = self.note("skill", self.nid, "--name", "keeper", "--force",
+                      "--use-when", "the runner is wedged", now=LATER)
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn(str(self.archive()), r.stderr)
+        self.assertIn("left exactly where it was", r.stderr)
+        self.assertEqual(self.routable(), ["keeper"])
+        self.assertEqual((self.dest / "SKILL.md").read_text(encoding="utf-8"), self.first,
+                         "the previous skill was replaced by a run that reported failure")
+        self.assertEqual([p.name for p in self.skills().iterdir()], ["keeper"],
+                         "the staging directory survived the refusal")
+        self.assertEqual(len(self.ledger_rows(event="skill")), 1)
+
+    def test_a_gate_a_failure_under_force_leaves_the_previous_skill_routable(self):
+        """An input that passes the pre-write cap and fails the gate: the cap counts
+        CODEPOINTS and the gate measures the frontmatter in BYTES, so 250 four-byte
+        glyphs are a 351-character description in a 1,100-byte frontmatter. With
+        --force and an existing skill, the gate has to refuse while the previous skill
+        is still exactly where it was."""
+        r = self.note("skill", self.nid, "--name", "keeper", "--force",
+                      "--use-when", "\U0001F600" * 250, now=LATER)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("GATE A FAIL", r.stderr)
+        self.assertEqual(self.routable(), ["keeper"])
+        self.assertEqual((self.dest / "SKILL.md").read_text(encoding="utf-8"), self.first)
+        self.assertFalse(self.archive().exists(), "a gate failure moved the skill aside")
+        self.assertEqual([p.name for p in self.skills().iterdir()], ["keeper"])
+        self.assertEqual(len(self.ledger_rows(event="skill")), 1)
+
+    def test_a_directory_appearing_between_the_check_and_the_write_is_not_clobbered(self):
+        """`mv build dest` with dest an existing directory moves build INTO it, so the
+        naive rename misplaces the new skill under `dest/<slug>/` and reports success. A
+        python3 shim plants `dest` during Gate A, inside the window."""
+        real = shutil.which("python3", path=PATH) or ""
+        dest = self.skills() / "late-comer"
+        shimdir = self.root / "shim"
+        shimdir.mkdir()
+        shim = shimdir / "python3"
+        shim.write_text(PY3_RACE_SHIM % {"dest": dest, "real": real}, encoding="utf-8")
+        shim.chmod(0o755)
+        r = self.note("skill", self.nid, "--name", "late-comer",
+                      PATH="%s:%s" % (shimdir, PATH))
+        self.assertNotEqual(r.returncode, 0, "a directory that appeared was written over")
+        self.assertIn("appeared", r.stderr)
+        self.assertEqual((dest / "SKILL.md").read_text(encoding="utf-8"), "intruder\n",
+                         "the directory that appeared was overwritten")
+        self.assertFalse((dest / "late-comer").exists(),
+                         "the new skill was moved INTO the directory that appeared")
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ["SKILL.md"])
+        self.assertEqual(sorted(p.name for p in self.skills().iterdir()),
+                         ["keeper", "late-comer"], "the staging directory survived")
+        self.assertEqual(len(self.ledger_rows(event="skill")), 1,
+                         "a skill row was written for a skill that was not")
+        self.assertEqual(self.routable(), ["keeper", "late-comer"])
+
+    def test_the_race_shim_would_have_clobbered_under_a_plain_rename(self):
+        """The shim is real: without skillnote in the way, the same two operations --
+        plant, then `mv` -- put the build inside the planted directory. This is what the
+        inode check is for, and the test above is empty without it."""
+        dest = self.root / "dest"
+        build = self.root / "build"
+        build.mkdir()
+        (build / "SKILL.md").write_text("new\n", encoding="utf-8")
+        dest.mkdir()
+        subprocess.run(["mv", str(build), str(dest)], check=True, stdin=subprocess.DEVNULL,
+                       capture_output=True, env={"PATH": PATH}, timeout=30)
+        self.assertTrue((dest / "build" / "SKILL.md").is_file(),
+                         "mv onto an existing directory did not move into it on this platform")
 
 
 class SkillDryRunTest(SkillCase):

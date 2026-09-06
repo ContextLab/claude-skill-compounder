@@ -23,7 +23,9 @@ has most likely drifted from them: after a compaction or a resume, before it dis
 subagent or a workflow, once every twenty minutes of a long session, on a prompt too short
 to stand on its own ("continue", "yes, do that"), and on a completion claim the turn has
 not earned. It reaches the subagent as well as the thread that dispatched it, so an agent
-working three levels down knows what you actually asked for. The prompts are read from
+working three levels down is handed what you actually asked for. Handed is the measured
+claim: delivery is recorded on every moment, and whether the agent then acts on it is
+not, which `docs/measurement.md` says at more length. The prompts are read from
 [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which install
 sets up for you; this package keeps no second copy of them.
 

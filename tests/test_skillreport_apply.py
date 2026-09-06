@@ -1193,5 +1193,70 @@ class UnconditionalHeadlineTest(Base):
                          "APPLIED: 1 forges closed, 0 never applied.")
 
 
+class FunnelAndConversionOnEveryPathTest(Base):
+    """DEFECT 5, reproduced on HEAD cb110a9. The same two early exits, one wave later:
+    FUNNEL and REMINDER CONVERSION sat below the forge table, so a ledger with no `start`
+    row -- a `note` row and a logged nudge, which is what the two cheap tiers leave behind
+    on a machine that has never forged -- printed "no forges recorded yet" and neither
+    block, with every input to both on disk. They are functions now, called on all three
+    paths; the forge sentence still prints first.
+    """
+
+    def a_nudge(self, session="S", ts=T0 + 200):
+        d = self.state / "reminders"
+        d.mkdir(exist_ok=True)
+        with (d / "nudges.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": "ci-checkpoint", "kind": "checkpoint",
+                                 "session": session, "cc_session": "cc-" + session,
+                                 "ts": ts}) + "\n")
+
+    def blocks_in_order(self, out):
+        idx = [out.index(s) for s in ("no forges recorded yet", "\nAPPLIED:", "\nFUNNEL (",
+                                      "\nREMINDER CONVERSION (", "\nGATES ")]
+        self.assertEqual(idx, sorted(idx), "the blocks are out of order:\n" + out)
+
+    def test_both_blocks_print_when_the_ledger_holds_no_start_row(self):
+        self.ledger.write_text(json.dumps({"event": "note", "action": "add",
+                                           "id": "n1", "session": "S", "ts": T0 + 300,
+                                           "text": "one lesson"}) + "\n",
+                               encoding="utf-8")
+        self.a_nudge()
+        r = self.sh([str(REPORT)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "", r.stderr)
+        out = r.stdout
+        self.assertIn("has no 'start' records", out)
+        self.blocks_in_order(out)
+        self.assertIn("nudge deliveries logged:    1 in 1 session(s)", out, out)
+        self.assertIn("of those sessions, forged:  0", out, out)
+        self.assertIn("forges started, all time:   0", out, out)
+        self.assertRegex(out, r"(?m)^  ci-checkpoint +1 +1 +0$", out)
+        self.assertIn("CHECK: 1 row(s) in the table + 0 unattributed = 1 note/start/use/apply/verdict row(s).",
+                      out, out)
+
+    def test_both_blocks_print_with_no_ledger_at_all(self):
+        self.a_nudge()
+        self.assertFalse(self.ledger.exists())
+        r = self.sh([str(REPORT)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # The all-time start count used to read `< "$LEDGER"`, which on this path is a
+        # redirection error bash prints to the real stderr.
+        self.assertEqual(r.stderr, "", r.stderr)
+        out = r.stdout
+        self.blocks_in_order(out)
+        self.assertIn("nudge deliveries logged:    1 in 1 session(s)", out, out)
+        self.assertRegex(out, r"(?m)^  ci-checkpoint +1 +0 +0$", out)
+        self.assertIn("CHECK: 0 row(s) in the table + 0 unattributed = 0 note/start/use/apply/verdict row(s).",
+                      out, out)
+
+    def test_the_ordinary_path_prints_the_same_blocks_once_each(self):
+        self.forge("normal-gate", start=100, done=400)
+        self.a_nudge()
+        out = self.report()
+        for s in ("\nFUNNEL (", "\nREMINDER CONVERSION (", "\nGATES "):
+            self.assertEqual(out.count(s), 1, "%r printed %d times:\n%s" % (s, out.count(s), out))
+        self.assertIn("REUSE:", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

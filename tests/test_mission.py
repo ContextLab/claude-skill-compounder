@@ -589,6 +589,49 @@ class StopTest(MissionCase):
         self.block_of(self.run_hook(self.stop()))
 
 
+class StopClaimTest(MissionCase):
+    """The once-per-prompt_id claim is taken when the block is about to be emitted.
+
+    THE DEFECT, 2026-09-06. The claim was taken beside the completion regex, BEFORE the
+    store was read, so a Stop whose session had no rows yet burned the marker on an empty
+    render and a later Stop in the same turn, after the rows had arrived, emitted nothing.
+    The store here is non-empty on purpose: a missing store exits before the tool counter
+    runs, and the shape that burned the claim is a store that holds nothing for THIS session.
+    """
+
+    def stop_claim(self, pid="p1"):
+        return os.path.join(self.state, "mission", "S1", "stop", pid)
+
+    def test_a_stop_with_no_rows_for_this_session_yet_leaves_the_turn_unclaimed(self):
+        self.write_rows(self.row(LONG, session="S2"))
+        self.bump_tools(8)
+        self.assert_silent(self.run_hook(self.stop()))
+        self.assertFalse(os.path.exists(self.stop_claim()),
+                         "an empty render burned the once-per-turn claim")
+        self.assertEqual(self.hit_rows(), [])
+        self.write_rows(self.row(LONG), self.row(LONG2))
+        reason = self.block_of(self.run_hook(self.stop()))
+        self.assertIn(LONG, reason)
+        self.assertTrue(os.path.isdir(self.stop_claim()), "the block took no claim")
+        self.assert_silent(self.run_hook(self.stop()))
+
+    def test_a_stop_whose_rows_are_all_commands_leaves_the_turn_unclaimed(self):
+        self.write_rows(self.row("/clear", is_command=True), self.row("/compact", is_command=True))
+        self.bump_tools(8)
+        self.assert_silent(self.run_hook(self.stop()))
+        self.assertFalse(os.path.exists(self.stop_claim()))
+        self.write_rows(self.row(LONG))
+        self.assertIn(LONG, self.block_of(self.run_hook(self.stop())))
+
+    def test_the_claim_is_still_one_block_per_turn_once_taken(self):
+        self.default_store()
+        self.bump_tools(8)
+        self.block_of(self.run_hook(self.stop()))
+        self.assertTrue(os.path.isdir(self.stop_claim()))
+        self.assert_silent(self.run_hook(self.stop(message="All tests pass.")))
+        self.assertEqual(len(self.hit_rows()), 1)
+
+
 # ==================================================================== the budget
 class BudgetTest(MissionCase):
 
@@ -622,14 +665,16 @@ class BudgetTest(MissionCase):
 
     def test_the_elision_marker_states_how_many_characters_were_cut(self):
         """Both halves of the cut: a request dropped whole, and one quoted in part."""
+        # "D " * 450 is 900 characters AND 450 words, so it is substantive and sits in
+        # the recent block; "C" * 700 is one word, so it is not, and is charged whole.
         self.write_rows(self.row(LONG), self.row("C" * 700), self.row(LONG2),
-                        self.row(LONG3), self.row("D" * 900))
+                        self.row(LONG3), self.row("D " * 450))
         ctx = self.context_of(self.run_hook(self.session_start()), "SessionStart")
         m = re.search(r"\[\.\.\. (\d+) characters of this session's requests "
                       r"are not quoted here \.\.\.\]", ctx)
         self.assertIsNotNone(m, "no elision marker in:\n" + ctx)
-        # The 700-character request falls outside MISSION_RECENT and is dropped whole;
-        # the 900-character one is quoted to MISSION_EACH_CHARS, cutting 500 more.
+        # The 700-character request is not substantive and is dropped whole; the
+        # 900-character one is quoted to MISSION_EACH_CHARS, cutting 500 more.
         self.assertEqual(int(m.group(1)), 700 + 500)
 
     def test_truncation_counts_codepoints_and_never_splits_a_character(self):
@@ -668,6 +713,105 @@ class BudgetTest(MissionCase):
         self.assertIn("(request 1 of 1, 3000 chars)", ctx)
         self.assertIn("> [... 1800 more chars]", ctx)
         self.assertEqual(r.stderr, "")
+
+
+class RecentSelectionTest(MissionCase):
+    """The recent block is the last MISSION_RECENT SUBSTANTIVE requests.
+
+    THE DEFECT, 2026-09-06. The recent slot was the last MISSION_RECENT rows, so a change
+    of direction followed by three prompts that rely on memory -- "continue", "keep going",
+    "yes proceed" -- was the one request the block dropped. "Substantive" is the ambiguity
+    arm's own notion, at least MISSION_SHORT_WORDS words, and no new knob was added.
+    """
+
+    FIRST = ("Build every reusable lesson using an expensive multi agent forge and "
+             "adversarial review.")
+    TURN = ("Change the approach: now use a cheap one command skill by default and reserve "
+            "forging for upstream publication.")
+    MARK_RE = re.compile(r"\[\.\.\. (\d+) characters of this session's requests "
+                         r"are not quoted here \.\.\.\]")
+
+    def dispatch(self):
+        return self.context_of(self.run_hook(self.pretooluse(tool="Agent")), "PreToolUse")
+
+    def test_a_change_of_direction_before_a_short_tail_is_quoted(self):
+        self.write_rows(self.row(self.FIRST), self.row(self.TURN), self.row("continue"),
+                        self.row("keep going"), self.row("yes proceed"))
+        ctx = self.dispatch()
+        self.assertIn("5 recorded; 2 quoted below", ctx)
+        self.assertIn("(request 1 of 5, %d chars)\n> %s" % (len(self.FIRST), self.FIRST), ctx)
+        self.assertIn("(request 2 of 5, %d chars)\n> %s" % (len(self.TURN), self.TURN), ctx)
+        for n in (3, 4, 5):
+            self.assertNotIn("(request %d of 5" % n, ctx)
+        for short in ("continue", "keep going", "yes proceed"):
+            self.assertNotIn("> " + short, ctx)
+        m = self.MARK_RE.search(ctx)
+        self.assertIsNotNone(m, "the unquoted short prompts are not charged:\n" + ctx)
+        self.assertEqual(int(m.group(1)),
+                         len("continue") + len("keep going") + len("yes proceed"))
+
+    def test_the_stop_arm_renders_the_same_selection(self):
+        self.write_rows(self.row(self.FIRST), self.row(self.TURN), self.row("continue"),
+                        self.row("keep going"), self.row("yes proceed"))
+        self.bump_tools(8)
+        reason = self.block_of(self.run_hook(self.stop()))
+        self.assertIn("5 recorded; 2 quoted below", reason)
+        self.assertIn(self.TURN, reason)
+        self.assertNotIn("> continue", reason)
+
+    def test_fewer_substantive_requests_than_MISSION_RECENT_quotes_what_there_is(self):
+        self.write_rows(self.row(LONG), self.row("ok"), self.row(LONG2), self.row("yes"),
+                        self.row("go on"))
+        ctx = self.dispatch()
+        self.assertIn("5 recorded; 2 quoted below", ctx)
+        self.assertIn(LONG, ctx)
+        self.assertIn("(request 3 of 5, ", ctx)
+        self.assertIn(LONG2, ctx)
+        for short in ("ok", "yes", "go on"):
+            self.assertNotIn("> " + short, ctx)
+
+    def test_with_no_other_substantive_request_the_last_rows_are_quoted_as_before(self):
+        self.write_rows(self.row(LONG), self.row("ok"), self.row("yes"), self.row("go on"),
+                        self.row("sure"))
+        ctx = self.dispatch()
+        self.assertIn("5 recorded; 4 quoted below", ctx)
+        self.assertNotIn("> ok", ctx)
+        for short in ("yes", "go on", "sure"):
+            self.assertIn("> " + short, ctx)
+
+    def test_a_short_first_row_is_neither_the_first_request_nor_a_recent_one(self):
+        self.write_rows(self.row("hi"), self.row(LONG), self.row("ok"), self.row(LONG2))
+        ctx = self.dispatch()
+        self.assertIn("4 recorded; 2 quoted below", ctx)
+        self.assertIn("(request 2 of 4, ", ctx)
+        self.assertIn("(request 4 of 4, ", ctx)
+        self.assertNotIn("> hi", ctx)
+        self.assertNotIn("> ok", ctx)
+
+    def test_MISSION_RECENT_still_bounds_the_substantive_block(self):
+        for i in range(6):
+            self.write_rows(self.row("request number %d in this long session" % i))
+        self.write_rows(self.row("continue"), self.row("keep going"))
+        ctx = self.dispatch()
+        self.assertIn("8 recorded; 4 quoted below", ctx)
+        for i in (0, 3, 4, 5):
+            self.assertIn("request number %d" % i, ctx)
+        for i in (1, 2):
+            self.assertNotIn("request number %d" % i, ctx)
+        self.assertNotIn("> continue", ctx)
+
+    def test_the_boundary_is_MISSION_SHORT_WORDS_words_here_too(self):
+        five = "one two three four five"
+        six = "one two three four five six"
+        self.write_rows(self.row(LONG), self.row(five), self.row(six), self.row("ok"))
+        ctx = self.dispatch()
+        self.assertIn("4 recorded; 2 quoted below", ctx)
+        self.assertIn("> " + six, ctx)
+        self.assertNotIn("> " + five + "\n", ctx)
+        ctx = self.context_of(self.run_hook(self.pretooluse(tool="Agent", tuid="t2"),
+                                            MISSION_SHORT_WORDS=5), "PreToolUse")
+        self.assertIn("4 recorded; 3 quoted below", ctx)
+        self.assertIn("> " + five + "\n", ctx)
 
 
 # ==================================================================== the boundary
