@@ -9,9 +9,12 @@ Claude work out a debugging sequence, a deploy-and-verify loop, or a non-obvious
 dance; the context window closes; next week a fresh session makes the same mistakes in the
 same order.
 
-`claude-skill-compounder` closes that loop. It installs the forging protocol as a skill,
-a pool of seed skills that are useful on day one, hooks that keep asking the question, and
-a live status-line animation.
+`claude-skill-compounder` closes that loop. Stated plainly, it is **automatic capture and
+surfacing, human-approved promotion, and assisted skill construction**: hooks capture what a
+session learned and say it back at the moments it is needed, a person decides what is
+promoted, and the tooling helps build a skill rather than building one unattended. It
+installs the forging protocol as a skill, a pool of seed skills that are useful on day one,
+hooks that keep asking the question, and a live status-line animation.
 
 Two of those hooks carry back the content a session lost.
 
