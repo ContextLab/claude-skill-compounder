@@ -69,13 +69,19 @@ session trying Y first.
 |dispatch|`classic.PreToolUse` on `Agent`, `Task`, `Workflow`|the mission, to the parent|
 |subagent|`classic.SubagentStart`|the mission, to the subagent|
 |periodic|`classic.PreToolUse`, 1200 s after the last delivery|the mission|
-|completion|`classic.Stop`, after 8 tool calls and a completion claim|the mission, once per turn, as the reason the stop is declined|
+|completion|`classic.Stop`, after 8 tool calls since the user last typed and a completion claim|the mission, once per typed request, as the reason the stop is declined|
 
 The mission is the first substantive request and the three most recent substantive ones,
 each as a block of `> `-prefixed lines (`hooks/render.ts`). Prompts come from
 history-surfer's store when it has this session, and otherwise from the prompts the running
-process saw submitted, which do not survive a new process. A subagent's hand-back or a task
-notice that arrives on the prompt channel is not counted as a request.
+process saw submitted in that session, which do not survive a new process. Slash commands,
+harness frames that arrive on the prompt channel (a subagent's hand-back, a task notice),
+and a prompt the store recorded twice are not counted as requests.
+
+A completion claim is read from the last sentence of the closing message: one that
+negates, waits or asks is not a claim. A short prompt that arrives within ten seconds of
+another statement is not answered a second time. The block a subagent receives opens by
+saying it is context and not a task for that agent.
 
 ## Environment
 
@@ -135,11 +141,15 @@ files on disk:
 |D|the shell has `cd`'d into a subdirectory: the note is at the repository root|
 |G|a lesson removed by hand is not stated back, and the second project gets its own note|
 
-`journey_mission.py` labels each step. The subagent step is an outcome with a control: a
-subagent told nothing states a phrase that only the user's prompt held, and without the mod
-it cannot. The compaction step passes, but its control also passes: in a two-message session
-the phrase survives `/compact` without the mod, so that step shows delivery and not benefit.
-The ambiguity, dispatch, completion and periodic steps check delivery only.
+`journey_mission.py` labels each step as an outcome or as delivery only:
+
+|Step|Kind|What must be true|
+|-|-|-|
+|subagent|outcome, with a control|a subagent told nothing states a phrase only the user's prompt held; without the mod it cannot|
+|compact|outcome, control also passes|the phrase is quoted back after `/compact`. In a two-message session it survives without the mod too, so this step shows delivery and not benefit|
+|clear|outcome|after `/clear`, a short prompt is told nothing from the cleared session|
+|scope|outcome|in three sessions, a subagent given a small task does that task and dispatches nothing|
+|ambiguity, dispatch, completion, periodic|delivery|the moment is logged and the event happened; a resumed short prompt is told the request once|
 
 The judge is scored against labelled pairs from the store `hooks/repeat-gate.sh` kept:
 
@@ -171,20 +181,34 @@ One judge call took a median of 2.4 s in those two replays (80 calls, four at a 
 the slowest took 7.5 s). A failed call waits for one such call when lessons exist, and each
 of the next two successes waits for one.
 
-A cold reviewer red-teamed the lessons half on 2026-10-03 over 19 real sessions. It
-reproduced a secret being copied into `CLAUDE.md`, a removed lesson still being stated
-back, a note landing in a subdirectory, and comment markers hiding notes from
-`skillnote list`; steps X, G, D and the `skillnote` refusal answer those. It also found
-that injected instructions in error text were not recorded as advice in 3 of 3 attempts.
-The mission half has not been red-teamed.
+Two cold reviewers red-teamed the mod on 2026-10-03, one half each, in real sessions.
+
+The lessons half, 19 sessions: it reproduced a secret being copied into `CLAUDE.md`, a
+removed lesson still being stated back, a note landing in a subdirectory, and comment
+markers hiding notes from `skillnote list`. Steps X, G and D and the `skillnote` refusal
+answer those. Injected instructions in error text were not recorded as advice in 3 of 3
+attempts.
+
+The mission half, 15 sessions: it reproduced the cleared session's request being stated
+after `/clear`, and one subagent in five taking the mission block for its own task and
+redoing the user's whole request. It also reproduced a prompt quoted twice from the store,
+a request that begins with a path being dropped, and a completion statement firing on a
+negated or interim message. The `clear` and `scope` steps and the unit tests in
+`hooks/render.test.ts` answer those.
+
+Neither half has been reviewed again since its fixes.
 
 ## Not covered
 
-- The mod has run in ordinary work for less than a day. Whether lessons stop recurrences,
+- The mod has run in ordinary work for less than a day (enabled 2026-10-03). Whether lessons stop recurrences,
   and whether the mission changes what a session does, are not known yet;
   `tools/report.py` is the instrument.
 - The journeys use one contrived trap, a build script that needs a flag, and a `Bash`
   failure. No journey step fails a non-shell tool.
 - Two parallel tool calls in one agent loop share one held failure.
+- The scope step passed 3 of 3 after the subagent block was reworded; the defect it answers
+  appeared 1 time in 5 before, so three sessions do not show it is gone.
+- The compaction instruction and the default 1200 s interval have not been observed in a
+  long real session.
 - Identical lesson text gets the same note id in two projects, because `skillnote` derives
   the id from the text.

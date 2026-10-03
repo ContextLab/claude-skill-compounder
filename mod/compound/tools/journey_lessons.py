@@ -45,9 +45,10 @@ REPO = os.path.dirname(os.path.dirname(MOD))
 TASK = ("Build this project by running its build script, ./build.sh, and tell me the one line it prints on "
         "success. Do not read, print or inspect build.sh and do not list the directory: only invoke the script.")
 NO_READ = ("--disallowed-tools", "Read,Grep,Glob")
-SUBAGENT_TASK = ("Use the Agent tool to dispatch one general-purpose subagent. Its task: build this project by running "
-                 "./build.sh and report the one line it prints on success, without reading or inspecting build.sh: only "
-                 "invoking it. Do not run the build yourself.")
+SUBAGENT_TASK = ("Use the Agent tool to dispatch one general-purpose subagent. Its task: get this project's build to "
+                 "succeed by invoking ./build.sh, correcting the invocation if it fails, and report the one line it prints "
+                 "on success. It must not read or inspect build.sh, only invoke it. Do not run the build yourself. Wait "
+                 "for the subagent to finish, and only then reply with what it reported.")
 BUILD_SH = """#!/bin/sh
 # The build needs a profile; there is no default.
 if [ "$1" != "--profile" ] || [ -z "$2" ]; then
@@ -201,7 +202,17 @@ def main():
     os.makedirs(gdir_s)
     make_project(proj_s)
     env_s = dict(env, SKILL_COMPOUNDER_STATE=state_s, SKILLNOTE_CLAUDE_DIR=gdir_s)
-    calls, _ = session(proj_s, env_s, args.model, True, os.path.join(root, "S.stream"), task=SUBAGENT_TASK, tools=("Bash", "Agent"))
+    # The premise is the subagent's own fail-then-fix. A headless parent can launch the
+    # subagent in the background and end before it retries (seen once in three runs on
+    # 2026-10-03: one failure logged, no fix, so nothing to judge). That is this step not
+    # having happened, so it is tried once more before it is called a failure.
+    for attempt in (1, 2):
+        calls, _ = session(proj_s, env_s, args.model, True, os.path.join(root, "S%d.stream" % attempt),
+                           task=SUBAGENT_TASK, tools=("Bash", "Agent"))
+        if any(c[1] is False for c in builds(calls)):
+            break
+    check("S", "the subagent's build failed and was then fixed",
+          any(c[1] is True for c in builds(calls)) and any(c[1] is False for c in builds(calls)), "attempt %d" % attempt)
     fails = [e for e in events(state_s) if e["ev"] == "fail"]
     check("S", "the build failed inside a subagent", bool(fails) and all(e["agent"] for e in fails))
     sub_notes = notes(env_s, "project", proj_s)
