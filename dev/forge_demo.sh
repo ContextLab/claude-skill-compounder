@@ -11,12 +11,13 @@
 #
 # The transcript is REAL, and it is in two parts.
 #
-#   1. The lesson (tier 1). `gh run list --commit c05d01e` really does return `[]`
-#      while the headSha prefix filter really does return that run -- both re-run on
-#      2026-09-05 against this repository. The block the checkpoint prints is the
-#      literal output of hooks/repeat-gate.sh driven with that fail-then-fix pair,
-#      signature and all, and the two `skillnote` lines under it are what
-#      `bin/skillnote add --lesson` really printed, note id and reminder id included.
+#   1. The lesson. `gh pr edit 283 --body-file` really failed on the retired Projects
+#      field and `gh api -X PATCH .../pulls/283` really worked: the pair is one of the
+#      stored fail-then-fix pairs on this machine (2026-09-04, a hypertools session).
+#      The sentence under it is what mod/compound's judge really wrote for that pair,
+#      scored through COMPOUND_REPLAY on 2026-10-03, and the note id is what
+#      `bin/skillnote add` really returned for that text. Nothing in the scene is a
+#      command the session ran: the mod wrote the note.
 #
 #   2. The forge (tier 2) of `watch-ci-run`, as it really happened on this machine
 #      under the round diet: SIX steps, so 2 + 2 x rounds gives TWO red-team rounds.
@@ -111,40 +112,36 @@ paint
 # ------------------------------------------------------------------ 1. the lesson
 # Nobody asks for a skill here, and nobody asks for a note either. The user asked
 # for ordinary work; the fail-then-fix is what the session was going to do anyway,
-# and the PostToolUse arm of hooks/repeat-gate.sh is what notices. That is the whole
-# point, so the demo must not open with a "please make me a skill" prompt.
-say "${O}>${X} push it and tell me when CI goes green"
+# and the tool.call hook in mod/compound is what sees both halves, puts the pair to a
+# model, and writes the lesson itself. That is the whole point, so the demo must not
+# open with a "please make me a skill" prompt, and the session runs no skillnote command.
+say "${O}>${X} update the PR description: CI is green on the merged head"
 say ""
-say "${O}⏺${X} ${B}Bash${X}(until gh run list --commit c05d01e --json status | grep -q completed; do sleep 30; done)"
-say "  ${D}⎿  ${R}✗${D} Exit code 143 · Command timed out after 10m 0s${X}"
+say "${O}⏺${X} ${B}Bash${X}(gh pr edit 283 --body-file pr_body.md)"
+say "  ${D}⎿  ${R}✗${D} Exit code 1 · GraphQL: Projects (classic) is being deprecated … (repository.pullRequest.projectCards)${X}"
 hold 2
 say ""
-say "${O}⏺${X} ${D}--commit matched nothing for ten minutes. Filter on the headSha instead:${X}"
-say "${O}⏺${X} ${B}Bash${X}(gh run list --limit 30 --json headSha,status,conclusion | jq -c '…startswith(\"c05d01e\")')"
-say "  ${D}⎿  [{\"conclusion\":\"success\",\"headSha\":\"c05d01eb3eb18b3b8046…\",\"name\":\"tests\",\"status\":\"completed\"}]${X}"
+say "${O}⏺${X} ${D}gh pr edit trips on a field GitHub retired. Patch the body through the API instead:${X}"
+say "${O}⏺${X} ${B}Bash${X}(gh api -X PATCH repos/ContextLab/hypertools/pulls/283 --input patch.json -q .body | head -1)"
+say "  ${D}⎿  > ## CI green on the merged head and maintainer signed off (2026-09-04)${X}"
 hold 2
 say ""
-say "  ${D}${B}[skill-compounder]${X}${D} A call that failed in this session has since succeeded a different${X}"
-say "  ${D}                   way, and the store recorded that as its recovery.${X}"
-say "  ${D}                     failed:  until gh run list --commit c05d01e --json status | grep…${X}"
-say "  ${D}                     error:   Exit code 143 Command timed out after 10m 0s${X}"
-say "  ${D}                     worked:  gh run list --limit <N> --json headSha,status,conclusion…${X}"
-say "  ${D}                   No lesson references this signature yet.${X}"
-say "  ${D}                   A lesson lifts it:${X}"
-say "  ${D}                     skillnote add --lesson c2295913779x93-e2265733395x44 \"<what was learned>\"${X}"
-say "  ${D}                     skillrepeat dismiss c2295913779x93-e2265733395x44 --why \"<why>\"${X}"
-say "  ${D}                       (a person at a terminal only)${X}"
+say "  ${D}${B}[compound]${X}${D} This fail-then-fix has been written down as project note n4068529641x255:${X}"
+say "  ${D}           Edit a PR body with \`gh api -X PATCH repos/OWNER/REPO/pulls/N --input file.json\`${X}"
+say "  ${D}           (JSON {\"body\":...}) instead of \`gh pr edit --body-file\`, which fails with${X}"
+say "  ${D}           \`GraphQL: Projects (classic) is being deprecated ... (repository.pullRequest.projectCards)\`.${X}"
 hold 3
 say ""
-say "${O}⏺${X} ${B}Bash${X}(skillnote add --lesson c2295913779x93-e2265733395x44 \"Poll CI in a background…\")"
-say "  ${D}⎿  skillnote: recorded (n2691463010x166) in ~/my-project/.claude/CLAUDE.md${X}"
-say "  ${D}   skillnote: reminder (n341313959x237) keyed on the failing call for c2295913779x93-…${X}"
+say "${O}⏺${X} ${D}No command was run for that. The line is in ~/my-project/.claude/CLAUDE.md, where the${X}"
+say "  ${D}next session reads it before it reaches for gh pr edit.${X}"
 hold 2
 
 # ------------------------------------------------------------------- 2. the forge
 say ""
-say "${O}⏺${X} That is the cheap tier: the note is read next session, the reminder fires on"
-say "  the call. But this is the third time this week, and it is never one command."
+say "${O}>${X} push it and tell me when CI goes green"
+say ""
+say "${O}⏺${X} A note is the cheap tier. Watching CI is not one line: it has cost three dead"
+say "  ends this week, and it is never one command."
 say ""
 say "  ${D}${B}[skill-compounder]${X}${D} Checkpoint after 12 file edits. … Is the procedure you are${X}"
 say "  ${D}                   working through right now BOTH costly to have gotten right${X}"

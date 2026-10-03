@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Record the README animation. Requires `vhs` (brew install vhs).
 # The transcript it records is REAL, in two parts: dev/forge_demo.sh opens on a
-# fail-then-fix that the lesson arm of hooks/repeat-gate.sh really caught -- the
-# `gh run list --commit` dead end, the headSha filter that worked, the block the hook
-# prints and the two lines `skillnote add --lesson` printed back -- and then replays
+# fail-then-fix from this machine's own history -- `gh pr edit --body-file` failing on
+# the retired Projects field, the `gh api -X PATCH` call that worked, and the lesson
+# mod/compound's judge really wrote for that pair -- and then replays
 # the forge of `watch-ci-run` under the round diet: six steps, so TWO red-team rounds,
 # both of which returned `6 blocking of 13` -- read off that forge's own round record.
 # Blocking held rather than fell, so the recording ends on `skillforge escalate`

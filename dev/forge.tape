@@ -1,8 +1,8 @@
 # dev/forge.tape -- the README animation.
 # Records dev/forge_demo.sh: a simulated Claude Code session that first pays for a
-# lesson the cheap way -- a real `gh run list --commit` dead end, the headSha filter
-# that worked, and `skillnote add --lesson` writing the note and the reminder in one
-# command -- and then forges `watch-ci-run` under the round diet: two red-team rounds,
+# lesson the cheap way -- a real `gh pr edit` failure, the `gh api` call that worked, and
+# mod/compound writing the lesson down itself, with no command from the session -- and
+# then forges `watch-ci-run` under the round diet: two red-team rounds,
 # both returning 6 blocking of 13, so `--converging` is refused and only a narrowed
 # skill buys a third. The bottom block is painted by the real statusline/statusline.sh
 # from state written by the real bin/skillforge.
@@ -29,9 +29,10 @@ Show
 # Re-derive it by running the demo with its final hold zeroed and timing it:
 #   sed -E 's/^hold 20 .*$/hold 0/' dev/forge_demo.sh > dev/.t.sh
 #   time bash dev/.t.sh >/dev/null 2>&1 </dev/null ; rm dev/.t.sh
-# That printed 61.8s on 2026-09-05 (holds sum to 44s + a final 20s). Recording starts 2s
-# after Enter (the Hide block), so the last line lands at GIF t=59.8s and 64s leaves a few
+# That printed 63.0s on 2026-10-03, timed from Python because zsh's `time` prints no
+# `real` line (61.8s on 2026-09-05, before the lesson scene changed). Recording starts 2s
+# after Enter (the Hide block), so the last line lands at GIF t=61.0s and 65s leaves a few
 # seconds of the finished frame.
 # It must also stay UNDER the demo's final `hold 20`, or forge_demo.sh exits first and a
 # bare shell prompt is what the recording ends on.
-Sleep 64s
+Sleep 65s
