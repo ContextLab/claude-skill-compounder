@@ -1256,87 +1256,45 @@ class NormOfTest(GateCase):
 
 
 class WiringTest(unittest.TestCase):
-    """The matcher is a REGEX over the tool name, and it is TWO strings over three events
-    -- the same pair in BOTH install paths:
+    """NEITHER INSTALL PATH WIRES THIS SCRIPT, since 2026-10-03. It was on three events --
+    PostToolUseFailure and PostToolUse under `Bash|Skill|mcp__.*`, PreToolUse with no
+    matcher -- and the lesson it carried moved to the function hooks in
+    mod/compound-lessons, which see a call and its result in one place and write the note
+    themselves. The script stays: bin/skillrepeat and bin/skillreport ask it for its head
+    rules, and every other class in this file drives it directly.
 
-        PostToolUseFailure  `Bash|Skill|mcp__.*`   the two events that LEARN and RECOVER
-        PostToolUse         `Bash|Skill|mcp__.*`
-        PreToolUse          no matcher at all      the one event that REFUSES
-
-    Measured 2026-08-26 on 2.1.246 (docs/CLAUDE-CODE-BEHAVIOR.md, "A hook matcher is a
-    regex over the tool name, not a substring"): of eight matchers on one event, `Bash`,
-    `^Ba`, `Ba.*`, `Bash|mcp__.*`, `*` and `.*` all received a `Bash` call; `Ba` and `as`
-    received nothing. `Bash|mcp__.*` receiving its `Bash` call is the whole of the evidence
-    that a third alternative cannot cost the first two. That probe measured NOTHING about
-    whether `mcp__.*` reaches a real MCP tool, and none has been observed arriving here, so
-    the widening is unproven rather than proven -- which is a thing the header has to keep
-    saying, and which the prose assertions below pin.
-
-    The learning events are now NARROWER than the refusing one, which is the reverse of
-    what it was until 2026-09-05, and the two questions are different. To LEARN, the script
-    must compute a signature, and it has a normalising rule for three payload shapes. To
-    REFUSE, it needs no signature for the call in front of it -- the signature is the one
-    the armed marker already names -- so there is nothing about a `Read` it cannot judge,
-    and a `Read` is exactly what the red team walked around a Bash refusal with.
-
-    The cost bound moved into the script with it: the not-armed path is four program
-    starts, pinned by ProcessCountTest. An in-script ALLOWLIST for Read/Glob/Grep stays
-    forbidden, and now for the stronger reason -- those tools are meant to receive the
-    refusal, so a `case "$tool" in Read|Glob|Grep)` arm would be the hole rather than dead
-    code. (The shape test at the top of the payload read is not that arm. It names what
-    the script has a rule for instead of sparing a tool a refusal, it no longer applies to
-    PreToolUse at all, and MatcherDeliveryTest drives it rather than reading the source.)"""
+    What is pinned is both halves of "not wired". The plugin manifest names it nowhere and
+    the installer appends it nowhere; and the installer still STRIPS it, on the three events
+    an older install wrote it to, because an upgrade that left those entries would run the
+    old hook beside the mod."""
 
     EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
-    # `None` IS AN ABSENT KEY, NOT A NULL. The refusing event lost its matcher on
-    # 2026-09-05: the lesson gate refuses EVERY tool while a marker is armed, because a
-    # session it refused on a `Bash` call answered with `Read data/f2.txt` and finished
-    # the job. `g.get("matcher")` is what both sides are read with, so an entry that
-    # grew a `"matcher": null` would read the same here and is pinned separately below.
-    MATCHERS = {"PreToolUse": None,
-                "PostToolUse": "Bash|Skill|mcp__.*",
-                "PostToolUseFailure": "Bash|Skill|mcp__.*"}
 
-    def test_both_install_paths_wire_the_same_matcher_on_each_event(self):
-        """PER EVENT, and not one value asserted three times. The two learning events
-        widened and the refusing one did not, so a test carrying a single shared value
-        would have had to be loosened to something that also passes on the two being
-        swapped -- which is the drift this whole test exists to catch."""
-        seen = {}
+    def test_neither_install_path_wires_the_gate(self):
         with open(os.path.join(REPO, "hooks", "hooks.json"), encoding="utf-8") as fh:
             manifest = json.load(fh)
-        for event, groups in manifest["hooks"].items():
-            for group in groups:
-                for hook in group.get("hooks", []):
-                    if "repeat-gate.sh" in hook.get("command", ""):
-                        seen[event] = group.get("matcher")
-        self.assertEqual(sorted(seen), sorted(self.EVENTS), seen)
-        self.assertEqual(seen, self.MATCHERS, seen)
+        named = [event for event, groups in manifest["hooks"].items() for group in groups
+                 for hook in group.get("hooks", []) if "repeat-gate.sh" in hook.get("command", "")]
+        self.assertEqual(named, [], "hooks.json still wires repeat-gate.sh")
 
         with open(os.path.join(REPO, "skill_compounder", "installer.py"),
                   encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn('REPEAT_LEARN_MATCHER = "Bash|Skill|mcp__.*"', src,
-                      "the installer and the plugin manifest disagree about the matcher "
-                      "the two learning events carry")
-        self.assertIn("REPEAT_PRE_MATCHER = None", src,
-                      "the installer and the plugin manifest disagree about the matcher "
-                      "the refusing event carries")
-        # THE KEY IS ABSENT AND NOT NULL, on BOTH paths. `g.get("matcher")` cannot tell
-        # the two apart, and a `"matcher": null` is a value the harness would have to
-        # interpret -- nothing here has measured what it does with one.
-        for group in manifest["hooks"]["PreToolUse"]:
-            if any("repeat-gate.sh" in h.get("command", "")
-                   for h in group.get("hooks", [])):
-                self.assertNotIn("matcher", group,
-                                 "hooks.json writes a matcher key for the refusing event")
-        self.assertNotIn('"matcher": REPEAT_PRE_MATCHER', src,
-                         "the installer still writes the key unconditionally, so a None "
-                         "matcher would be serialised as a JSON null")
-        self.assertNotIn("REPEAT_MATCHER", src,
-                         "the single-matcher constant is gone; a surviving reference means "
-                         "one of its three uses was left pointing at a name that no longer "
-                         "exists, which is an ImportError at install time")
+        self.assertNotIn('_gate_cmd(app_home, "repeat-gate.sh")', src,
+                         "the installer still appends a repeat-gate.sh entry")
+        self.assertNotIn("REPEAT_LEARN_MATCHER", src,
+                         "a matcher constant for an entry nobody writes is a name the next "
+                         "reader will take for live wiring")
+        self.assertNotIn("REPEAT_PRE_MATCHER", src)
+
+    def test_the_installer_still_strips_it_from_the_three_events_it_was_on(self):
+        import sys
+        sys.path.insert(0, REPO)
+        from skill_compounder import installer
+        stripped = sorted(event for event, markers in installer.OUR_EVENT_MARKERS
+                          if installer.REPEAT_GATE_RETIRED in markers)
+        self.assertEqual(stripped, sorted(self.EVENTS),
+                         "an entry an older install wrote would survive an upgrade")
 
     def test_the_gate_carries_no_allowlist_for_a_tool_it_can_never_receive(self):
         """A `case "$tool" in Read|Glob|Grep) exit 0` arm is forbidden, and since

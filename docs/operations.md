@@ -327,6 +327,13 @@ is and the two commands that would remove it, and leaves it alone.
 
 ## The lesson
 
+**Since 2026-10-03 `hooks/repeat-gate.sh` is not wired**, by `install.sh` or by the plugin.
+The write-down is done by [mod/compound-lessons](../mod/compound-lessons/README.md), which is
+enabled by naming its folder in `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of
+`~/.claude/settings.json`. An install over an older one removes the old entries. The rest
+of this section, and the `REPEAT_*` rows of the tuning table, describe the script as it
+behaves when it is driven.
+
 A failure followed by a fix is the one thing a session knows that the next session does
 not. `hooks/repeat-gate.sh` already learned the failure; it now also binds the fix and
 asks for it in writing.

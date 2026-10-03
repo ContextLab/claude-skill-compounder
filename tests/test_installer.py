@@ -352,7 +352,7 @@ class InstallerTest(NoSurferMixin, unittest.TestCase):
         """Order is load-bearing: tests/test_plugin.py compares the two wirings'
         matcher lists POSITIONALLY, so a reordering here is a drift failure there.
 
-        Five entries now, and the shape of the list is the claim: the three that can DENY
+        Four entries now, and the shape of the list is the claim: the two that can DENY
         a tool call come first, and the two that only state a fact -- the reminder and the
         mission -- come after them. A gate that ran after a hook which had already emitted
         context would spend that context on a call it then refused.
@@ -360,8 +360,28 @@ class InstallerTest(NoSurferMixin, unittest.TestCase):
         self.do_install()
         pre = [h["command"] for g in self.read()["hooks"]["PreToolUse"] for h in g["hooks"]]
         names = [c.rsplit("/", 1)[-1].strip('"') for c in pre]
-        self.assertEqual(names, ["claim-gate.sh", "doc-gate.sh", "repeat-gate.sh",
-                                 "remind.sh", "mission.sh"])
+        self.assertEqual(names, ["claim-gate.sh", "doc-gate.sh", "remind.sh", "mission.sh"])
+
+    def test_the_repeat_gate_is_not_wired_and_an_older_install_s_entries_are_stripped(self):
+        """`repeat-gate.sh` left the wiring on 2026-10-03, when the lesson moved to the
+        function hooks in mod/compound-lessons. Not adding it is half of that; the other
+        half is an UPGRADE, where settings.json already holds the three entries an older
+        install wrote. Left there, the old hook would run beside the mod and announce
+        every fix twice, with nothing on any surface to say why."""
+        old = {"hooks": [{"type": "command", "timeout": 10,
+                          "command": '"%s/hooks/repeat-gate.sh"' % APP_HOME}]}
+        self.write_settings({"hooks": {
+            "PreToolUse": [old, FOREIGN_HOOK],
+            "PostToolUse": [dict(old, matcher="Bash|Skill|mcp__.*")],
+            "PostToolUseFailure": [dict(old, matcher="Bash|Skill|mcp__.*")]}})
+        self.do_install()
+        hooks = self.read()["hooks"]
+        wired = [(event, h["command"]) for event, groups in hooks.items()
+                 for g in groups for h in g.get("hooks", []) if "repeat-gate.sh" in h["command"]]
+        self.assertEqual(wired, [], "repeat-gate.sh is still wired after an install")
+        self.assertTrue(any("other/tool.py" in h["command"]
+                            for g in hooks["PreToolUse"] for h in g["hooks"]),
+                        "the strip took somebody else's PreToolUse hook with it")
 
     def test_installing_twice_leaves_one_reminder_entry_per_event(self):
         self.do_install()

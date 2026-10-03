@@ -62,9 +62,9 @@ COST. Aim: under 15 `claude -p` calls, all `--model sonnet` with a small `--max-
 The forge step drives the CLI half only -- no builder agents, no red-team agents -- which
 is what keeps step 7 to seconds rather than the median 3.3 hours a real forge takes.
 
-THE STEPS RUN IN THE ORDER OF `STEPS`, NOT IN NUMBER ORDER. 12-16 (the mission and the
-lesson) were added after 11 (uninstall) was numbered, and uninstall has to be last, so
-the run order is 0-10, 12-16, 11. See the comment on `STEPS`.
+THE STEPS RUN IN THE ORDER OF `STEPS`, NOT IN NUMBER ORDER. 12-14 (the mission)
+were added after 11 (uninstall) was numbered, and uninstall has to be last, so
+the run order is 0-10, 12-14, 11. See the comment on `STEPS`.
 
 `--no-model` runs every non-model step and records the rest SKIPPED. Use it to check the
 harness itself for free before spending anything.
@@ -405,7 +405,7 @@ class Journey:
             w("")
         w("## Summary")
         w("")
-        w("Steps are listed in the order they RAN, which is not number order: 12-16 were "
+        w("Steps are listed in the order they RAN, which is not number order: 12-14 were "
           "added after 11 was numbered, and 11 tears the install down, so it runs last.")
         w("")
         w("| step | what | result | evidence |")
@@ -1818,186 +1818,6 @@ def step14_mission_completion(j):
         s.finish()
 
 
-# ------------------------------------------------------------- the lesson (steps 15-16)
-#
-# `hooks/repeat-gate.sh`'s recovery arm says it the FIRST time: a call failed, a different
-# call succeeded, and the store bound the two. `bin/skillnote add --lesson` is the one
-# command that records it in three places at once, and `hooks/remind.sh` is what states
-# it back to the next session about to make the same call.
-
-LESSON_BAD_CMD = "ls --nonexistent-flag ."
-LESSON_GOOD_CMD = "ls -la ."
-LESSON_SCRIPT = "ls-portably.sh"
-
-
-def repeat_rows(j, kind=None, session=None):
-    rows = jsonl(j.state_dir / "repeats" / "index.jsonl")
-    if kind:
-        rows = [r for r in rows if r.get("t") == kind]
-    if session:
-        rows = [r for r in rows if r.get("session") == session]
-    return rows
-
-
-def _transcript_for(j, sid):
-    root = j.projects_root
-    if not sid or not root.exists():
-        return None
-    for p in root.glob("*/%s.jsonl" % sid):
-        return p
-    return None
-
-
-def step15_lesson_first_time(j):
-    s = j.step("15", "a failure and its recovery are bound, and the session is told so")
-    try:
-        if j.args.no_model:
-            s.verdict("SKIPPED", "--no-model: the recovery arm needs two real tool calls")
-            return
-        before = len(repeat_rows(j))
-        # ONE CALL AT A TIME, SAID OUT LOUD. Asked for both commands without this, the
-        # model issued them as PARALLEL tool calls in a single assistant message, and the
-        # SUCCESS came back before the FAILURE. The recovery arm binds forward in time
-        # only -- it arms on a failure and looks at later successes -- so nothing bound,
-        # and the store held a `fail` row with no `recover`. That is a real property of
-        # the arm rather than a defect of it, and it is recorded in the notes below.
-        prompt = ("Run this exact command with the Bash tool and WAIT for its result "
-                  "before doing anything else: %s\nIt will fail; that is expected and it "
-                  "is what I want to see. Only after you have seen that failure, run "
-                  "this one: %s\nDo not put both commands in the same message. Then tell "
-                  "me in one line what the difference was."
-                  % (LESSON_BAD_CMD, LESSON_GOOD_CMD))
-        s.cmd("claude -p --output-format stream-json --permission-mode "
-              "bypassPermissions  < 'run `%s`, then `%s`'"
-              % (LESSON_BAD_CMD, LESSON_GOOD_CMD))
-        res = j.claude(prompt, cwd=j.project, stream=True, max_turns=8,
-                       label="claude-lesson-first",
-                       extra=["--permission-mode", "bypassPermissions"])
-        sid = session_id_of(res)
-        s.observe("answer", final_text(res).strip()[:400])
-
-        new = repeat_rows(j)[before:]
-        s.observe("<state>/repeats/index.jsonl rows appended by this session",
-                  "\n".join(json.dumps(r)[:400] for r in new) or "(none)")
-        recovers = [r for r in new if r.get("t") == "recover"]
-        fails = [r for r in new if r.get("t") == "fail"]
-
-        # The statement the PostToolUse arm emits reaches the MODEL as
-        # additionalContext, which --output-format stream-json does not echo. Claude
-        # Code writes it into the session transcript, so that is where it is read from,
-        # with the stream checked too in case a later build echoes it.
-        transcript = _transcript_for(j, sid)
-        hay = res["out"]
-        if transcript is not None and transcript.exists():
-            hay += "\n" + transcript.read_text(errors="replace")
-        quoted = [ln for ln in hay.splitlines() if "skillnote add --lesson" in ln]
-        s.observe("the lesson statement, found in %s"
-                  % (transcript if transcript else "the stream only"),
-                  "\n".join(q.strip()[:600] for q in quoted[:2]) or "(not found)")
-
-        s.note("The two calls have to be SEQUENTIAL. Issued as parallel tool calls in "
-               "one assistant message, the success came back before the failure on this "
-               "machine and nothing bound: `hooks/repeat-gate.sh` arms on a failure and "
-               "binds a later success, so a recovery that arrives first is not one. The "
-               "prompt says so explicitly for that reason.")
-        if recovers:
-            j.lesson_sig = recovers[0].get("sig")
-            j.lesson_session = sid
-        if recovers and quoted:
-            s.verdict("PASS", "the store bound the recovery (%s) and the session was "
-                              "handed the statement naming `skillnote add --lesson %s`"
-                      % (json.dumps(recovers[0])[:220], j.lesson_sig))
-        elif recovers:
-            s.verdict("FAIL", "the store bound the recovery (%s) but no surface here "
-                              "carries the statement the PostToolUse arm emitted"
-                      % json.dumps(recovers[0])[:220])
-        else:
-            s.verdict("FAIL", "no recover row; %d fail row(s) seen: %r"
-                      % (len(fails), [r.get("norm") for r in fails][:3]))
-    finally:
-        s.finish()
-
-
-def step16_lesson_recorded(j):
-    s = j.step("16", "the lesson is recorded in three places and reaches the next "
-                     "session")
-    try:
-        sig = getattr(j, "lesson_sig", None)
-        if not sig:
-            s.verdict("SKIPPED", "step 15 bound no recovery, so there is no signature "
-                                 "to record a lesson against")
-            return
-        script = j.project / LESSON_SCRIPT
-        script.write_text("#!/bin/sh\n# what to run instead of `%s`\nexec ls -la \"$@\"\n"
-                          % LESSON_BAD_CMD)
-        os.chmod(script, 0o755)
-        text = ("BSD `ls` has no --nonexistent-flag and fails before listing anything; "
-                "use `%s` instead." % LESSON_GOOD_CMD)
-        s.cmd("<out>/bin/skillnote add --lesson %s --scope project --project "
-              "<out>/project --attach %s %r" % (sig, LESSON_SCRIPT, text))
-        rc, out, err = j.run([str(j.bin_dir / "skillnote"), "add", "--lesson", sig,
-                              "--scope", "project", "--project", str(j.project),
-                              "--attach", str(script), text],
-                             cwd=j.project, label="skillnote-lesson")
-        s.observe("skillnote add --lesson (rc=%d)" % rc, (out + err).strip())
-
-        md = j.project / ".claude" / "CLAUDE.md"
-        md_line = next((ln for ln in (md.read_text().splitlines() if md.exists() else [])
-                        if "lesson:%s" % sig in ln), "")
-        s.observe("1/3 the note line in <out>/project/.claude/CLAUDE.md",
-                  md_line or "(no line carrying lesson:%s)" % sig)
-        rem = [r for r in jsonl(j.state_dir / "reminders.jsonl")
-               if r.get("lesson_sig") == sig]
-        s.observe("2/3 the reminder row in <state>/reminders.jsonl",
-                  "\n".join(json.dumps(r) for r in rem) or "(none)")
-        led = [r for r in jsonl(j.state_dir / "ledger.jsonl")
-               if r.get("lesson_sig") == sig]
-        s.observe("3/3 the ledger note row",
-                  "\n".join(json.dumps(r)[:500] for r in led) or "(none)")
-        attached = sorted(str(p.relative_to(j.project))
-                          for p in (j.project / ".claude" / "lessons").rglob("*")
-                          if p.is_file()) if (
-            j.project / ".claude" / "lessons").exists() else []
-        s.observe("the attachment, copied into the project's own lessons directory",
-                  "\n".join(attached) or "(none)")
-        three = bool(md_line) and bool(rem) and bool(led)
-        if rc != 0 or not three:
-            s.verdict("FAIL", "rc=%d; CLAUDE.md line=%s, reminder rows=%d, ledger "
-                              "rows=%d" % (rc, bool(md_line), len(rem), len(led)))
-            return
-        if j.args.no_model:
-            s.verdict("SKIPPED", "--no-model: the readback needs a following session")
-            return
-
-        hits = j.state_dir / "remind" / "hits.jsonl"
-        before = len(jsonl(hits))
-        prompt = ("Run this exact command with the Bash tool, exactly as written, and "
-                  "then tell me what it printed: %s" % LESSON_BAD_CMD)
-        s.cmd("claude -p --setting-sources project --permission-mode bypassPermissions "
-              "  < 'run `%s`'" % LESSON_BAD_CMD)
-        res = j.claude(prompt, cwd=j.project, setting_sources="project", stream=True,
-                       max_turns=6, label="claude-lesson-readback",
-                       extra=["--permission-mode", "bypassPermissions"])
-        s.observe("answer", final_text(res).strip()[:400])
-        rows = jsonl(hits)[before:]
-        s.observe("<state>/remind/hits.jsonl rows appended by that session",
-                  "\n".join(json.dumps(r) for r in rows) or "(none)")
-        fired = [r for r in rows if r.get("id") == (rem[0].get("id") if rem else None)]
-        s.note("The reminder is keyed on the failing call's normalised signature, taken "
-               "verbatim from that signature's own `fail` row -- not on a keyword and "
-               "not on the command as the model happened to write it.")
-        if fired:
-            s.verdict("PASS", "one command reminder (%s) and one lesson line, one "
-                              "reminder row and one ledger row for %s: %s"
-                      % (rem[0].get("id"), sig, json.dumps(fired[0])))
-        else:
-            s.verdict("FAIL", "the lesson was recorded in all three places but the "
-                              "following session's `%s` fired no reminder; rows seen: %r"
-                      % (LESSON_BAD_CMD, [json.dumps(r) for r in rows][:3]))
-    finally:
-        s.finish()
-
-
 def step11_uninstall(j):
     s = j.step("11", "uninstall restores settings.json byte-for-byte and removes only "
                      "our links")
@@ -2089,15 +1909,15 @@ def step11_uninstall(j):
 
 
 # RUN ORDER, NOT NUMBER ORDER. Step 11 tears the install down, so everything that needs
-# the wiring has to run before it. Steps 12-16 were added after 11 was numbered and
+# the wiring has to run before it. Steps 12-14 were added after 11 was numbered and
 # docs/e2e.md cites the numbers, so the numbers stay where they are and this list says
-# what actually happens: ... 10, 12, 13, 14, 15, 16, 11. The report lists steps in the
+# what actually happens: ... 10, 12, 13, 14, 11. The lesson steps, 15 and 16, left with
+# the wiring they tested: mod/compound-lessons/tools/journey.py covers the lesson now. The report lists steps in the
 # order they ran, which is this order.
 STEPS = [step0_preflight, step1_install, step2_ordinary_session, step3_note,
          step4_reminders, step5_candidate, step6_promote, step7_forge, step8_routing,
          step9_apply_verdict, step10_report,
          step12_mission_compact, step13_mission_subagent, step14_mission_completion,
-         step15_lesson_first_time, step16_lesson_recorded,
          step11_uninstall]
 
 

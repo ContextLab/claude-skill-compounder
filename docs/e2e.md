@@ -201,15 +201,15 @@ stored one is out of bounds. What has been run is the harness around it: the ref
 exits 2 and builds nothing; `--config-dir fresh --no-model` reaches the same five
 non-model steps `PASS` that the default mode does; and a deliberately invalid
 `CLAUDE_CODE_OAUTH_TOKEN` makes step 0 `FAIL` with the CLI's answer quoted and records the
-other sixteen steps `SKIPPED` after one call, rather than spending twelve more to be told
+other fourteen steps `SKIPPED` after one call, rather than spending twelve more to be told
 the same thing. Whether the three consequences are gone is a question for the first run
 with a working token, and issue #42 stays open until then.
 
 ## What it does, step by step
 
-Seventeen steps, and they **run in the order `STEPS` lists, not in number order**. Steps
-12-16 were added after 11 was numbered and this page cites the numbers, so the numbers
-stayed where they were and the run order is 0-10, 12-16, 11: step 11 tears the install
+Fifteen steps, and they **run in the order `STEPS` lists, not in number order**. Steps
+12-14 were added after 11 was numbered and this page cites the numbers, so the numbers
+stayed where they were and the run order is 0-10, 12-14, 11: step 11 tears the install
 down, and everything that needs the wiring has to happen before it.
 
 | step | what it proves |
@@ -228,8 +228,6 @@ down, and everything that needs the wiring has to happen before it.
 | 12 | the mission survives a compaction: a session says a distinctive phrase, `/compact` replaces its context, and the resumed session quotes the phrase back with a `moment:"resume"` row in `<state>/mission/hits.jsonl` behind it |
 | 13 | the mission reaches a **subagent** that was told nothing: a `moment:"subagent"` row with a non-null `agent_id`, and the injection itself in the subagent's own transcript |
 | 14 | the mission is stated **once** at a completion claim: the session claims "done" after `MISSION_STOP_MIN_TOOLS` tool calls, the stream carries another assistant turn after it, and exactly one `moment:"completion"` row |
-| 15 | a failed `Bash` call and the corrected one are bound as a recovery, and the session is handed the statement naming `skillnote add --lesson` |
-| 16 | `skillnote add --lesson … --attach` writes the note line, the reminder row and the ledger row at once, and the next session's failing command gets the reminder |
 | 11 | uninstall restores `settings.json` **byte for byte** and leaves the runtime state intact |
 
 ## What it costs
@@ -239,7 +237,9 @@ steps 2, 3, 4, 5 and 8 one apiece, step 12 three (open, `/compact`, resume), and
 14, 15 and 16 one apiece — all `--model sonnet` with a small `--max-turns`. `--check-auth`
 is one call and no journey, which is what it is for: under `--config-dir fresh` a stale
 token would otherwise be found by step 0 and cost the twelve after it nothing but time. One run on 2026-09-03
-against CLI 2.1.259 took **150.9 s**, thirteen calls, seventeen steps PASS. The six-call,
+against CLI 2.1.259 took **150.9 s**, thirteen calls, seventeen steps PASS; that run still carried
+steps 15 and 16, the lesson, which left on 2026-10-03 with the wiring they tested
+(`mod/compound-lessons/tools/journey.py` covers the lesson now). The six-call,
 twelve-step shape this file described before is the same scenario without steps 12-16; two
 runs of it on 2026-09-02 took 38.5 s and 34.9 s.
 
@@ -261,8 +261,7 @@ quiet when they should be quiet and loud when they should be loud; that a note, 
 reminder, a candidate, a promotion, a forge, a routing, an apply, a verdict and a report
 are one continuous chain rather than a set of features that each work alone. Steps 12-14
 add that the mission arrives at three moments a session cannot fake — after a compaction,
-inside a subagent, at a completion claim — and 15-16 that a failure, its recovery, the
-lesson written from it and the reminder that states it back are one chain too.
+inside a subagent, at a completion claim.
 
 **It does not prove:**
 
@@ -286,11 +285,6 @@ lesson written from it and the reminder that states it back are one chain too.
   header records the same class of result from the other direction — imperative wording
   refused as prompt injection in 2 of 4 runs — and a statement of fact can be read and set
   aside just as easily.
-- **That the recovery arm binds a failure to its fix in general.** Step 15 tells the
-  session to run the two commands one at a time, and the prompt says so because it has to:
-  issued as parallel tool calls in one assistant message, the success came back before the
-  failure and nothing bound. `hooks/repeat-gate.sh` arms on a failure and binds a later
-  success, so a recovery that arrives first is not one.
 - **That the `Stop` block is free.** It costs one empty assistant turn: the blocked turn
   comes back carrying `Your previous response had no visible output`, and only then does the
   session act on the mission it was handed as the block's reason. Step 14 asserts that

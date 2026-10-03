@@ -32,7 +32,7 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`hooks/precompact.sh`|Fills the same weekly queue from the transcript a compaction is about to replace with a summary, so a session that compacts without a `Stop` capture does not lose the turn. No model call and a bounded read; rows carry `source: precompact`. Wired on `PreCompact` with no matcher, so both triggers reach it|
 |`hooks/skill-use.sh`|Records one ledger row per skill invocation, as it happens: wired on `PostToolUse` and `PostToolUseFailure`, matcher `Skill`|
 |`hooks/claim-gate.sh`|Refuses a turn — or a `git commit` — that ends on a figure the session never produced. Wired on `Stop` and on `PreToolUse`, matcher `Bash`: [The claim gate](#the-claim-gate)|
-|`hooks/repeat-gate.sh`|Learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure` and `PostToolUse` with matcher `Bash\|Skill\|mcp__.*`, and on `PreToolUse` with NO matcher at all, so the lesson arm is delivered every tool a session calls (`REPEAT_LEARN_MATCHER` and `REPEAT_PRE_MATCHER = None` in `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`). Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
+|`hooks/repeat-gate.sh`|**Not wired since 2026-10-03**; `mod/compound-lessons` does this job, and `bin/skillrepeat` and `bin/skillreport` still call the script for its head rules. When driven: learns the signature of a tool call that failed, and binds the success that fixed it: the same tool's, or a different tool's whose input shares content tokens. Where the same tool is a general-purpose shell it must share those tokens too, because `Bash` names no operation and the tool name alone bound unrelated commands together ([DESIGN.md](DESIGN.md); `REPEAT_RECOVERY_SAME_TOOL_MIN_TOKENS`). Two arms can refuse and they ship the opposite way round: the older repeat arm is off (`REPEAT_GATE_REFUSE=1` arms it), and the lesson gate is on (`REPEAT_LESSON_GATE=0` is the only off). Learning and recovery run whatever either switch says: [The lesson](#the-lesson). Wired on `PostToolUseFailure` and `PostToolUse` with matcher `Bash\|Skill\|mcp__.*`, and on `PreToolUse` with NO matcher at all, so the lesson arm is delivered every tool a session calls (`REPEAT_LEARN_MATCHER` and `REPEAT_PRE_MATCHER = None` in `skill_compounder/installer.py`, mirrored in `hooks/hooks.json`). Off switch `SKILL_COMPOUNDER_REPEAT_GATE=0`; the store is `bin/skillrepeat`|
 |`hooks/doc-gate.sh`|**Refuses.** Denies a `git push` whose commits carry code and no documentation, and names the `claim-provenance` skill. Wired on `PreToolUse`, matcher `Bash`. Off switch `SKILL_COMPOUNDER_DOC_GATE=0`; per-push escape hatch in the deny reason|
 |`hooks/apply-gate.sh`|**Refuses, once.** After a forge closes, blocks that session's turn to say the new skill has not yet been used on the problem that caused it — then names that skill at most once per session and lets go. A flag, not a wall. Wired on `Stop`. Off switch `SKILL_COMPOUNDER_APPLY_GATE=0`; the debt is answered with `skillforge apply`, and `--outcome declined` is a first-class answer|
 |`hooks/remind.sh`|Delivers a reminder recorded by `skillnote add --remind` at the moment it applies, and states it rather than instructing. Wired twice: on `UserPromptSubmit`, where it matches keywords against your prompt, and on `PreToolUse`, matcher `Bash\|Write\|Edit`, where it matches a normalised command signature PER SEGMENT or a path glob. Nothing is normalised at all unless the store holds a command-keyed reminder, which makes the ordinary `Bash` call cheaper than it was; the whole command stays candidate 1, so nothing that matched before can stop matching, and at most `MAX_CANDIDATES` (6) texts are normalised. The splitter is copied byte for byte out of `hooks/repeat-gate.sh`, which exposes no door onto it, and `tests/test_remind.py::SplitterSyncTest` fails on any difference between the two copies. It denies nothing. Off switch `SKILL_COMPOUNDER_REMIND=0`|
@@ -46,16 +46,17 @@ ledger, so how often each tier is taken is a query rather than a guess.
 |`statusline/`|Renders the live forge animation, wrapping any status line you already have|
 |`claude-history-surfer`|Not ours, and installed anyway. `hooks/mission.sh` reads its per-project prompt JSONL and keeps no copy, so it is a dependency: install clones it beside its own checkout and runs its installer, unless `surfer` is already on `PATH` or `SKILL_COMPOUNDER_NO_SURFER=1`. It never fails the install, it never clones twice, uninstall never removes it, and `skillforge doctor` has a row for it|
 
-Twenty hook entries over ten scripts and eight events, as of this writing. The count that
+Seventeen hook entries over nine scripts and eight events, as of this writing. The count that
 settles an argument is the one your own checkout gives:
 
 ```bash
-jq '[.hooks|to_entries[]|.value[].hooks[]]|length' hooks/hooks.json   # 20
+jq '[.hooks|to_entries[]|.value[].hooks[]]|length' hooks/hooks.json   # 17
 jq '.hooks|keys|length' hooks/hooks.json                             # 8
 ```
 
-The eleventh script, `hooks/session-review.sh`, is in neither wiring;
-`insight-capture.sh` launches it.
+Two of the eleven scripts in `hooks/` are in neither wiring: `hooks/session-review.sh`,
+which `insight-capture.sh` launches, and `hooks/repeat-gate.sh`, which was wired on three
+events until 2026-10-03.
 
 The hook changes are additive: hooks installed by other tools are left alone, and
 uninstall removes only ours. `statusLine` is the one entry that cannot be additive,
@@ -617,6 +618,12 @@ project then global, and `surfer search --all` is one command away. What would e
 keyword-overlap trigger with a measured false-positive rate, which nobody has measured.
 
 ## The lesson
+
+**Since 2026-10-03 this is done by [mod/compound-lessons](../mod/compound-lessons/README.md)**,
+a plugin of function hooks that sees a failed call and the call that fixed it in one place,
+asks a model whether the pair is a lesson, and writes the note itself. `hooks/repeat-gate.sh`
+is no longer wired by either install path. The rest of this section describes that script,
+which is still in the repository and still what `bin/skillrepeat` reads.
 
 The other half of the same idea, one event later. A session fails at something, works it
 out, and moves on; the working-out is gone when the context closes, and the next session

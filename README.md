@@ -51,11 +51,11 @@ the command that re-derives it, because every one of these answers moves.
 
 |Area|Where it stands|
 |-|-|
-|The package|Implemented and in use. There is no runtime service: what ships is the set of skills, hooks, CLIs and the status line that `install.sh` wires into `~/.claude/`. It wires **20 hook entries over 10 scripts and 8 events**; count them yourself with `jq '[.hooks\|to_entries[]\|.value[].hooks[]]\|length' hooks/hooks.json`|
+|The package|Implemented and in use. There is no runtime service: what ships is the set of skills, hooks, CLIs and the status line that `install.sh` wires into `~/.claude/`. It wires **17 hook entries over 9 scripts and 8 events**; count them yourself with `jq '[.hooks\|to_entries[]\|.value[].hooks[]]\|length' hooks/hooks.json`|
 |Releases|`v0.3.1` is the latest tag. The plain one-liner still takes `main`, so pin a ref to get the same code twice. `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists what exists right now|
 |CI|`.github/workflows/ci.yml` runs the suite on ubuntu and macos, `shellcheck` on both, and `claude plugin validate --strict`. All five jobs passed on run `34005231297` (2026-09-05), against `ac8d503`, the tree that carries the four-tier doctrine, `skillnote skill`, the day's production-run fixes and the re-recorded screencast. Read the current one rather than this line: `gh run list --repo ContextLab/claude-skill-compounder --limit 1`|
 |Dependencies|`jq` and `python3`, plus [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which the mission hook reads its prompts from. Install fetches and wires it when `surfer` is not already on your `PATH`, never fails the install if it cannot, and uninstall leaves it where it is: [Install](#install)|
-|End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report, three of the mission's five moments, the lesson's statement and the record that answers it, and uninstall against a throwaway config. Seventeen steps (`grep -c '^def step' tests/e2e/journey.py`); the run of 2026-09-05 against CLI 2.1.260 was thirteen `claude -p` calls in 130.5 s, every step PASS, on the tree that carries that day's hook changes. The six-call, twelve-step figure this row used to carry was the same scenario without the mission and lesson steps. Since 2026-09-05 it also takes `--config-dir fresh`, a throwaway `CLAUDE_CONFIG_DIR` that needs a token handed in through `CLAUDE_CODE_OAUTH_TOKEN`, and that mode has not yet been run with a real token. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
+|End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report, three of the mission's five moments, and uninstall against a throwaway config. Fifteen steps (`grep -c '^def step' tests/e2e/journey.py`). The run of 2026-09-05 against CLI 2.1.260 was thirteen `claude -p` calls in 130.5 s, every step PASS, and had seventeen steps: the two lesson steps left on 2026-10-03 with the hook they tested, and the fifteen-step journey has not been run. The six-call, twelve-step figure this row used to carry was the same scenario without the mission and lesson steps. Since 2026-09-05 it also takes `--config-dir fresh`, a throwaway `CLAUDE_CONFIG_DIR` that needs a token handed in through `CLAUDE_CODE_OAUTH_TOKEN`, and that mode has not yet been run with a real token. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
 |Automatic session review|Ships **off**, and switching it on spends your quota: [What runs against the API](#what-runs-against-the-api). Stage 1 has been paid for six times. Stage 2, which would forge from a `CANDIDATE` verdict, is off for a structural reason rather than a price: a dispatched forge cannot finish its own routing gate, because `claude --version` inside one came back "This command requires approval" at the permission layer|
 |Usage evidence|One machine. `skillreport` counts genuine reuse and reports probe and test traffic on a separate line, and on this repository that traffic is most of the total. What each figure is and is not evidence for: [docs/measurement.md](docs/measurement.md)|
 |The two hook thresholds|`CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` were picked by judgement, and `skillreport` needs usage across several repositories before either should move|
@@ -182,6 +182,12 @@ skillnote add --remind --scope project "run the migration before the seed script
 `skillnote list --scope remind` shows what is armed, and `skillnote remove <id>` disarms
 one. Removing a lesson note withdraws the reminder written beside it as well, so neither
 outlives the other; `--keep-reminder` leaves it armed.
+
+**Since 2026-10-03 the lesson gate is not wired.** `hooks/repeat-gate.sh` is still in the
+repository and `install.sh` no longer adds it; the write-down after a fail-then-fix is done
+by the function hooks in [mod/compound-lessons](mod/compound-lessons/README.md), which
+write the note themselves. What follows describes the gate as it behaves when the script
+is driven.
 
 When the lesson gate declines a call, it hands you the signature and the one command that
 answers it. That command writes both cheap tiers at once:
@@ -434,12 +440,12 @@ Nine seed skills ship, so a fresh install is useful before you have forged anyth
 lesson moves up a level with `skillnote promote`, and a skill goes the last level with
 `skillcontrib propose`, which opens the pull request.
 
-The ten wired scripts divide into three kinds. Three carry something into the session and
+The nine wired scripts divide into three kinds. Three carry something into the session and
 can be read past: the checkpoint that asks whether a skill already covers this, the
-reminder hook, and four of the mission's five moments. Five can refuse: the claim gate and
-the documentation gate outright, the apply gate once per session, the lesson gate on every
-tool until the lesson is written down, and the mission once per prompt on a completion claim. The repeat
-gate's older arm can too, and ships off. Three only record: a ledger row per skill
+reminder hook, and four of the mission's five moments. Four can refuse: the claim gate and
+the documentation gate outright, the apply gate once per session, and the mission once per
+prompt on a completion claim. The lesson gate and the repeat gate's older arm are in
+`hooks/repeat-gate.sh`, which is not wired. Three only record: a ledger row per skill
 invocation, and a queue row per candidate, written at the end of a session and again from
 whatever a compaction is about to discard.
 

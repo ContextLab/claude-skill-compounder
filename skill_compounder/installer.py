@@ -97,13 +97,17 @@ CLAIM_GATE_MARKER = "claim-gate.sh"
 USE_MARKER = "skill-use.sh"
 # THE THREE GATES ISSUE #19 ADDED, and each is wired to the events it can act on.
 #
-# `repeat-gate.sh` is the only entry of ours on THREE events at once, because the thing it
-# recognises is a sequence rather than a moment: a failure (PostToolUseFailure), the call
-# that worked instead (PostToolUse), and the next attempt at the failure (PreToolUse). Drop
-# any one wiring and it degrades silently -- without the failure arm it learns nothing,
-# without the success arm every deny is "this failed before" with no workaround to offer,
-# and without the PreToolUse arm it is a log nobody reads.
-REPEAT_GATE_MARKER = "repeat-gate.sh"
+# `repeat-gate.sh` is NO LONGER WIRED, since 2026-10-03. It was on three events at once
+# (PostToolUseFailure, PostToolUse, PreToolUse) and carried the lesson arm; that job moved
+# to the function hooks in mod/compound-lessons, which see a call and its result in one
+# place. The marker stays for ONE purpose: install and uninstall still strip an entry an
+# older install wrote, so an upgrade does not leave the old hook running beside the mod.
+# It is named `_RETIRED` and not `_MARKER` on purpose: `skillforge doctor` and
+# tests/test_doctor.py both read every `*_MARKER = "...sh"` line of this file as a script
+# that must be WIRED, and this one must not be.
+# The script itself stays in hooks/, because bin/skillrepeat and bin/skillreport ask it
+# for its head rules through `--eligible-of`.
+REPEAT_GATE_RETIRED = "repeat-gate.sh"
 # `doc-gate.sh` denies a `git push` carrying code changes and no documentation change. Same
 # event and same matcher as the claim gate's commit arm, and for the same reason: a matcher
 # selects a tool, never a command, so which Bash commands are pushes is decided in-script.
@@ -161,47 +165,6 @@ SKILL_MATCHER = "Skill"
 # for `Bash`. Which Bash commands are commits is decided inside the script, which exits 0
 # on everything else; a matcher cannot express it.
 COMMIT_MATCHER = "Bash"
-# The repeat gate runs on every delivery of three events, so its matcher is a COST BOUND as
-# much as a filter. It is TWO STRINGS since 2026-09-03, because the three events do two
-# different jobs. Both leave the high-frequency read tools (Read, Grep, Glob) out of the
-# stream entirely, which is the cost bound; what differs is how much they admit above that.
-#
-# THE TWO EVENTS THAT LEARN -- PostToolUseFailure and PostToolUse -- also take `mcp__.*`.
-# The failure issue #19 names by example is an MCP GitHub tool dying and the session
-# finishing the job with `gh`, and the gate's cross-tool recovery rule is written for
-# exactly that pair; under `Bash|Skill` the MCP half was never delivered, so the rule could
-# only ever be exercised by driving the hook by hand. A matcher is a REGEX over the tool
-# name -- alternation and `.*` both work, measured 2026-08-26 on 2.1.246, where
-# `Bash|mcp__.*` was one of eight matchers on one event and received its `Bash` call
-# (docs/CLAUDE-CODE-BEHAVIOR.md, "A hook matcher is a regex over the tool name, not a
-# substring"). That probe is why a third alternative cannot cost the first two. What it did
-# NOT establish is whether `mcp__.*` reaches a real MCP tool: no MCP tool failure has been
-# observed arriving at a hook here, so this widening is UNPROVEN rather than proven, and
-# the store is the only surface that can settle it.
-REPEAT_LEARN_MATCHER = "Bash|Skill|mcp__.*"
-# THE EVENT THAT REFUSES CARRIES NO MATCHER AT ALL since 2026-09-05, which is the same
-# shape as `mission.sh`'s PreToolUse entry below and the reverse of what this constant used
-# to say. It read `Bash|Skill` on the argument that nothing on that event reads a non-Bash
-# payload. That argument was answered by a measurement rather than an opinion: in a live red
-# team of the installed package, a session the lesson gate refused on a `Bash` call answered
-# with `Read data/f2.txt` and finished the job. Issue #43 asks for a session to be forced to
-# write a lesson down "before continuing", and continuing is ANY tool -- so the gate now
-# refuses every tool while a lesson marker is armed, and the one exemption
-# (`lesson_cli_head`, a command reaching for `skillnote` or `skillrepeat`) lives in the
-# script where a matcher could never express it.
-#
-# THE COST IS REAL AND IS BOUNDED IN THE SCRIPT, not here. This is now a fork per tool call,
-# twice over with both wirings active, so the path taken when no marker is armed was cut to
-# four program starts -- `cat`, `jq`, `tr`, `cut` -- and pinned by
-# tests/test_repeat_gate.py::ProcessCountTest, which fails on the fifth. The two LEARNING
-# events keep their matcher: those must compute a signature, and this script has a
-# normalising rule for three payload shapes and no more.
-#
-# `None` rather than `"*"`, and the entry below omits the key entirely. An absent matcher is
-# the shape already measured to reach every tool on this event; `*` was one of the eight
-# probed matchers and reached a `Bash` call, but nothing here has measured it against a tool
-# whose name it would have to match as a regex, and there is no reason to find out.
-REPEAT_PRE_MATCHER = None
 # The reminder hook's PreToolUse matcher. Deliberately NOT `EDIT_MATCHER`, which is the
 # same three tools in a different order: these are two independent decisions about two
 # different scripts, and sharing the constant would make a change to one silently rewire
@@ -805,10 +768,10 @@ OUR_EVENT_MARKERS = (("SessionStart", (MISSION_MARKER,)),
                      ("SubagentStart", (MISSION_MARKER,)),
                      ("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER, MISSION_MARKER)),
                      ("PreToolUse", (CLAIM_GATE_MARKER, DOC_GATE_MARKER,
-                                     REPEAT_GATE_MARKER, REMIND_MARKER,
+                                     REPEAT_GATE_RETIRED, REMIND_MARKER,
                                      MISSION_MARKER)),
-                     ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_MARKER)),
-                     ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_MARKER)),
+                     ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_RETIRED)),
+                     ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_RETIRED)),
                      ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER,
                                MISSION_MARKER)),
                      ("PreCompact", (PRECOMPACT_MARKER,)))
@@ -898,7 +861,7 @@ def merge_hooks(settings, app_home):
     # missing from this checkout has its stale entry removed rather than left orphaned
     # pointing at a file that is gone.
     pre = _event_groups(hooks, "PreToolUse", True)
-    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_MARKER, REMIND_MARKER,
+    for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_RETIRED, REMIND_MARKER,
                MISSION_MARKER):
         pre = _strip_marker(pre, _m)
     _pre_wired = False
@@ -914,22 +877,9 @@ def merge_hooks(settings, app_home):
                                "command": _gate_cmd(app_home, "doc-gate.sh"),
                                "timeout": 10}]})
         _pre_wired = True
-    if _has_gate(app_home, "repeat-gate.sh"):
-        # THE KEY IS OMITTED WHEN THE MATCHER IS `None`, never written as a null. A
-        # `"matcher": null` is a value the harness has to interpret and nothing here has
-        # measured what it does with one; an absent key is the shape `mission.sh` has
-        # shipped on this event since 2026-09-03. Written as a branch rather than a dict
-        # comprehension so that a future matcher for this entry is one word to restore.
-        _repeat_pre = {"hooks": [{"type": "command",
-                                  "command": _gate_cmd(app_home, "repeat-gate.sh"),
-                                  "timeout": 10}]}
-        if REPEAT_PRE_MATCHER is not None:
-            _repeat_pre = dict(matcher=REPEAT_PRE_MATCHER, **_repeat_pre)
-        pre.append(_repeat_pre)
-        _pre_wired = True
-    # FOURTH of the five, and the order is pinned by tests/test_plugin.py, which compares
+    # THIRD of the four, and the order is pinned by tests/test_plugin.py, which compares
     # the two wirings' matcher lists POSITIONALLY. It is also one of the two PreToolUse
-    # entries of ours that cannot deny: the three gates above decide, these two state a
+    # entries of ours that cannot deny: the two gates above decide, these two state a
     # fact.
     if _has_gate(app_home, "remind.sh"):
         pre.append({"matcher": REMIND_MATCHER,
@@ -937,9 +887,9 @@ def merge_hooks(settings, app_home):
                                "command": _gate_cmd(app_home, "remind.sh"),
                                "timeout": 10}]})
         _pre_wired = True
-    # LAST, and one of the TWO of the five with no matcher since 2026-09-05 -- the repeat
-    # gate is the other, for a different reason. This one is not looking for a call, it is
-    # counting them. See MISSION_MATCHER's absence above. It denies nothing either.
+    # LAST, and the only one of the four with no matcher. This one is not looking for a
+    # call, it is counting them. See MISSION_MATCHER's absence above. It denies nothing
+    # either.
     if _has_gate(app_home, "mission.sh"):
         pre.append({"hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "mission.sh"),
@@ -958,7 +908,7 @@ def merge_hooks(settings, app_home):
 
     ptu = _strip_marker(_event_groups(hooks, "PostToolUse", True), HOOK_MARKER)
     ptu = _strip_marker(ptu, USE_MARKER)
-    ptu = _strip_marker(ptu, REPEAT_GATE_MARKER)
+    ptu = _strip_marker(ptu, REPEAT_GATE_RETIRED)
     ptu.append({"matcher": EDIT_MATCHER,
                 "hooks": [{"type": "command",
                            "command": _hook_cmd(app_home, "edit"),
@@ -968,35 +918,17 @@ def merge_hooks(settings, app_home):
                     "hooks": [{"type": "command",
                                "command": _use_cmd(app_home, "ok"),
                                "timeout": 10}]})
-    # The repeat gate's recovery arm: the success that followed a failure is the only place
-    # the workaround can be observed, and observing it is what makes the deny useful rather
-    # than merely obstructive.
-    if _has_gate(app_home, "repeat-gate.sh"):
-        ptu.append({"matcher": REPEAT_LEARN_MATCHER,
-                    "hooks": [{"type": "command",
-                               "command": _gate_cmd(app_home, "repeat-gate.sh"),
-                               "timeout": 10}]})
     hooks["PostToolUse"] = ptu
 
     # The failure twin. Wiring only the success event does not merely miss failures, it
     # records each one as a success, which is a wrong number rather than a missing one.
     ptf = _strip_marker(_event_groups(hooks, "PostToolUseFailure", True), USE_MARKER)
-    ptf = _strip_marker(ptf, REPEAT_GATE_MARKER)
+    ptf = _strip_marker(ptf, REPEAT_GATE_RETIRED)
     _ptf_wired = False
     if _has_use_hook(app_home):
         ptf.append({"matcher": SKILL_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _use_cmd(app_home, "fail"),
-                               "timeout": 10}]})
-        _ptf_wired = True
-    # This is the arm the repeat gate learns from. It is also the ONLY event that carries
-    # both the failing command and the error text: measured 2026-08-26 on 2.1.246, the
-    # payload holds tool_input and an `error` field reading "Exit code 1\n<stderr>", and a
-    # failed Bash call fires no PostToolUse at all.
-    if _has_gate(app_home, "repeat-gate.sh"):
-        ptf.append({"matcher": REPEAT_LEARN_MATCHER,
-                    "hooks": [{"type": "command",
-                               "command": _gate_cmd(app_home, "repeat-gate.sh"),
                                "timeout": 10}]})
         _ptf_wired = True
     if _ptf_wired or ptf or "PostToolUseFailure" in hooks:

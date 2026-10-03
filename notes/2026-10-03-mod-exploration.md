@@ -83,10 +83,17 @@ Open:
   `settings.json.bak-compound-lessons-20261003-123510`. Verified with a plain `claude -p`
   (no --plugin-dir) under a scratch state: the mod logged the failure and no repeat store
   was created.
-- Consequences not yet dealt with: `skillforge doctor` reports 17 of 20 entries and FAILs
-  its settings row; `install.sh` or an update would wire `repeat-gate.sh` back, because the
-  installer and `hooks/hooks.json` still carry it; and the repeat store stops growing, so
-  new pairs for labelling come only from the mod's own `events.jsonl`.
+- Repo matched to that the same day (user: "yes"): `hooks/hooks.json` and the installer no
+  longer wire `repeat-gate.sh`; the installer constant is `REPEAT_GATE_RETIRED`, strip-only,
+  and deliberately not named `*_MARKER` because `skillforge doctor` reads every such line
+  as a script that must be wired. 17 entries over 9 scripts; doctor passes 17/17 live.
+  `tests/e2e/journey.py` lost steps 15 and 16 (fifteen steps now; `--no-model` run passes,
+  the model steps have not been run on this tree). The repeat store stops growing.
+- Not done: the long descriptions of the repeat gate in `.claude/CLAUDE.md`, `docs/DESIGN.md`,
+  `docs/architecture.md` and `docs/operations.md` are still there, each now under a line
+  saying the script is not wired. `bin/skillrepeat`, the `REPEAT_*` knobs and
+  `tests/test_repeat_gate.py` still exist for a script nothing wires; whether to retire
+  them is undecided.
 - Labels need the user's review.
 - Mission (scenario 1) as a mod is not started. `session.compact` and `prompt.compose`
   are the hooks to try; only read in the types so far.

@@ -96,7 +96,8 @@ session output was not kept, so the cause is unknown.
 ## Not covered
 
 - The mission reminders and the status line are still the shell hooks.
-- The old lesson arm in `hooks/repeat-gate.sh` is still wired; with both on, a fix is
-  announced twice.
+- `hooks/repeat-gate.sh`, which did this job before, is no longer wired by `install.sh`
+  or the plugin. Its store stops growing, so new pairs for the replay come from
+  `events.jsonl`, which holds failures and lessons but not every fail/fix pair.
 - Lessons are matched by a model call on each failure, so a failed call waits for that
   call when lessons exist. The wait has not been measured.

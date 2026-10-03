@@ -1016,6 +1016,10 @@ byte-identical rule exists to prevent, arriving one level up.
 
 ## Five hooks can refuse, and each refuses where its evidence is
 
+Four of the five are wired. `hooks/repeat-gate.sh` has not been since 2026-10-03, when the
+lesson moved to the function hooks in `mod/compound-lessons`; what this section says of it
+describes the script, which is still in the repository.
+
 `hooks/claim-gate.sh` was for a long time the one component here that refused anything, and
 its own header argued that a refusal is a different mechanism from a reminder rather than a
 louder one. Issue #19 supplied the measurement that turns that argument into a rule for the

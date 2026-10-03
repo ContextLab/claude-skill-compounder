@@ -5,11 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Claude Code *configuration* package. It installs every skill under `skills/`, six CLIs,
-a status-line wrapper, and twenty hook entries into `~/.claude/`. Those twenty span eight
+a status-line wrapper, and seventeen hook entries into `~/.claude/`. Those seventeen span eight
 events (`SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
 `PostToolUseFailure`, `Stop`, `PreCompact`) and
-name ten of the eleven scripts in `hooks/` -- every one but `session-review.sh`, which is
-launched rather than wired; derive them from
+name nine of the eleven scripts in `hooks/` -- every one but `session-review.sh`, which is
+launched rather than wired, and `repeat-gate.sh`, which was wired on three events until
+2026-10-03, when the lesson moved to the function hooks in `mod/compound-lessons/` (its
+own README has the commands; `OUR_EVENT_MARKERS` still lists the marker so that an install
+over an older one strips the old entries); derive them from
 `OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
 There is no runtime service: the "program" is the
 set of files the installer wires into someone else's Claude Code config.
@@ -401,8 +404,8 @@ covered set with `grep -n '???????????\*)' hooks/*.sh bin/*` rather than from th
 sentence; the remaining `CI_*` knobs carry a shape guard or none, which is a gap and not a
 claim of coverage.
 
-**Five hooks can refuse a turn; `hooks/claim-gate.sh` is the one whose evidence rule is
-an exclusion.** It dispatches on `.hook_event_name` and takes no argv: on `Stop` it judges
+**Five hooks can refuse a turn and four of them are wired; `hooks/claim-gate.sh` is the
+one whose evidence rule is an exclusion.** It dispatches on `.hook_event_name` and takes no argv: on `Stop` it judges
 `last_assistant_message`, on `PreToolUse` it judges a `git commit` message, and a figure of
 `CLAIM_GATE_MIN_DIGITS` digits or more is unsupported unless it appears in what this
 session's own tools printed. Tool results belonging to an `Agent` or `Task` call are cut out
@@ -440,6 +443,10 @@ tuned one was optimistic by roughly threefold, and the arm the tuned corpus reco
 never firing was the arm carrying the difference. A second independent draw of 88 under
 the same rule measured 5.7% before those fixes, so the pair agrees on the order of
 magnitude and nothing finer.
+
+**`hooks/repeat-gate.sh` IS NOT WIRED since 2026-10-03, and everything this file says of
+its arms describes the script when driven, not a session.** `mod/compound-lessons/` does
+the write-down now.
 
 **Of the other four, `hooks/repeat-gate.sh` carries two refusals that ship opposite ways
 round, and `hooks/doc-gate.sh` is configured differently in this repo.** The repeat refusal
@@ -746,10 +753,10 @@ on a scan that still skips every other one.
 **`hooks/session-review.sh` is the one shipped component that spends money, it is
 OPT-IN, and it is in neither wiring.** `settings.json` and `hooks/hooks.json` between
 them name
-`mission.sh` (five times), `repeat-gate.sh` (three times), `compound-improvement.sh`
+`mission.sh` (five times), `compound-improvement.sh`
 (twice), `claim-gate.sh` (twice), `skill-use.sh` (twice), `remind.sh` (twice),
 `apply-gate.sh`, `doc-gate.sh`,
-`insight-capture.sh` and `precompact.sh` -- twenty entries over ten scripts; grep either for
+`insight-capture.sh` and `precompact.sh` -- seventeen entries over nine scripts; grep either for
 `session-review` and you get nothing. It is launched by `insight-capture.sh` with `nohup`,
 detached, never waited on, and only when that turn's session audit actually wrote a
 record *and* `SKILL_COMPOUNDER_REVIEW` is exactly `1`. Look for it there, not in a hooks

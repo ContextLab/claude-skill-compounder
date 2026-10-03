@@ -74,15 +74,6 @@
         ]
       },
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/repeat-gate.sh\"",
-            "timeout": 10
-          }
-        ]
-      },
-      {
         "matcher": "Bash|Write|Edit",
         "hooks": [
           {
@@ -122,16 +113,6 @@
             "timeout": 10
           }
         ]
-      },
-      {
-        "matcher": "Bash|Skill|mcp__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/repeat-gate.sh\"",
-            "timeout": 10
-          }
-        ]
       }
     ],
     "PostToolUseFailure": [
@@ -141,16 +122,6 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/skill-use.sh\" fail",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "matcher": "Bash|Skill|mcp__.*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/repeat-gate.sh\"",
             "timeout": 10
           }
         ]
