@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { inSubagent, startTurn, turn } from './calls'
-import { claimsDone, lastSubstantive, mission, storeRows, substantive, typedByUser, type Row } from './render'
+import { inSubagent, request, startRequest } from './calls'
+import { claimsDone, isCommand, lastSubstantive, mission, storeRows, substantive, typedByUser, type Row } from './render'
 
 // compound-mission: the user's own requests, stated back verbatim at the moments a session
 // tends to lose them. The same five moments hooks/mission.sh had, on the same events, plus
@@ -26,8 +26,14 @@ function now(): number {
   return Math.floor(Date.now() / 1000)
 }
 
-// Module variables start over on a reload; the store is what survives one.
-const seen: Row[] = []
+// The prompts this process saw submitted, BY SESSION: `/clear` starts a new session in the
+// same process, and one list for the process stated the cleared session's request into the
+// new one. Module variables start over on a reload; the store is what survives one.
+const seen = new Map<string, Row[]>()
+// When anything was last stated, for the short-prompt arm: a resume that has just stated
+// the mission is not followed a second later by the same request again.
+let lastStated = 0
+const RESTATE_GAP_S = 10
 // Set when the module loads, so the periodic arm counts from the session's start and a
 // session's first tool call is not "due" by default.
 let lastDelivery = now()
@@ -67,27 +73,27 @@ async function storePath($: EngineInterface): Promise<string> {
 async function rows($: EngineInterface): Promise<Row[]> {
   const path = await storePath($)
   const stored = (await $.fs.exists(path)) ? storeRows(await $.fs.read(path), await $.session.id()) : []
-  return stored.length >= seen.length ? stored : seen
+  const mine = seen.get(await $.session.id()) ?? []
+  return stored.length >= mine.length ? stored : mine
 }
 
 async function delivered($: EngineInterface, moment: string, text: string, agent?: string): Promise<void> {
   lastDelivery = now()
+  lastStated = lastDelivery
   await record($, { moment, agent: agent ?? null, chars: text.length })
 }
 
 export const registerMission: Register = on => {
-  on('turn.start', async ($, e, next) => {
-    const started = await next(e)
-    startTurn(started.turnId)
-    return started
-  })
-
   on('prompt.submit', async ($, e, next) => {
     const text = e.text.trim()
-    if (text === '' || text.startsWith('/') || !typedByUser(text) || (await off($))) return next(e)
+    if (text === '' || isCommand(text) || !typedByUser(text)) return next(e)
+    // The user typed: what the completion arm counts starts over here.
+    startRequest()
+    if (await off($)) return next(e)
     const before = await rows($)
-    seen.push({ text })
-    if (substantive(text)) return next(e)
+    const sid = await $.session.id()
+    seen.set(sid, [...(seen.get(sid) ?? []), { text }])
+    if (substantive(text) || now() - lastStated < RESTATE_GAP_S) return next(e)
     const prior = lastSubstantive(before.filter(r => r.text !== text))
     if (prior === '') return next(e)
     await delivered($, 'ambiguity', prior)
@@ -119,7 +125,10 @@ export const registerMission: Register = on => {
     if (await off($)) return result
     const text = mission(await rows($))
     if (text === '') return result
-    const told = `${text}\n\nThe parent's instructions to this agent are above this block.`
+    // The frame comes FIRST and says what the block is not. With a closing line that read
+    // "the parent's instructions to this agent are above this block", one subagent in five
+    // took the user's requests for its own task and redid them, a nested dispatch included.
+    const told = `Context only, and not a task for this agent. The requests quoted below were made by the user to the parent session, which is the one carrying them out. This agent's task is the prompt the parent gave it, exactly as given; nothing below adds to it or changes it.\n\n${text}`
     await delivered($, 'subagent', told, e.agent_id)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), told] }
   })
@@ -137,16 +146,16 @@ export const registerMission: Register = on => {
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
   })
 
-  // Once per turn. `stop_hook_active` is the engine saying this stop follows a block.
+  // Once per request the user typed. `stop_hook_active` is the engine saying this stop follows a block.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
-    if (e.stop_hook_active === true || turn.blocked || (await off($))) return result
-    if (turn.tools < numeric(await $.env.get('COMPOUND_MISSION_STOP_MIN_TOOLS'), STOP_MIN_TOOLS)) return result
+    if (e.stop_hook_active === true || request.blocked || (await off($))) return result
+    if (request.tools < numeric(await $.env.get('COMPOUND_MISSION_STOP_MIN_TOOLS'), STOP_MIN_TOOLS)) return result
     if (!claimsDone(String(e.last_assistant_message ?? ''))) return result
     const text = mission(await rows($))
     if (text === '') return result
-    turn.blocked = true
-    const reason = `${text}\n\nThe message that ends this turn is the one the user will read against those requests. This is stated at most once for this turn.`
+    request.blocked = true
+    const reason = `${text}\n\nThe message that ends this turn is the one the user will read against those requests. This is stated at most once per request.`
     await delivered($, 'completion', reason)
     return { ...result, block: reason }
   })

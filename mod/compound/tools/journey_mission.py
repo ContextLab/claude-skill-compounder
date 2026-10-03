@@ -10,9 +10,12 @@ handed over at that moment.
                         held. Control: without the mod it cannot.
   compact     OUTCOME   after /compact, a resumed session with no tools quotes the phrase.
                         Control: reported, not required (a summary may keep it anyway).
-  ambiguity   DELIVERY  a resumed session given "continue" gets the earlier request.
+  ambiguity   DELIVERY  a short prompt gets the earlier request; a resumed one gets it once.
   completion  DELIVERY  a turn with many tool calls that ends on "done" is stated once.
   periodic    DELIVERY  with the interval at zero, a tool call gets the mission.
+  clear       OUTCOME   after /clear, a short prompt gets NOTHING from the cleared session.
+  scope       OUTCOME   a subagent given a small task does that task and does not redo the
+                        user's whole request; three sessions, because it failed 1 in 5.
 
 usage: journey.py [--model haiku] [--keep]
 
@@ -41,6 +44,11 @@ def make_project(path):
 
 
 def session(cwd, env, model, prompt, save, with_mod=True, extra=()):
+    """One headless session. PROMPT is text, or a list of texts fed as stream-json user turns."""
+    if isinstance(prompt, list):
+        extra = (*extra, "--input-format", "stream-json")
+        prompt = "".join(json.dumps({"type": "user", "message": {"role": "user", "content": t}}) + "\n"
+                         for t in prompt)
     argv = ["claude", "-p", "--model", model, "--setting-sources", "project",
             "--output-format", "stream-json", "--verbose", *extra]
     # Emptied so that a mod enabled in the user's own settings cannot load into a session
@@ -51,7 +59,7 @@ def session(cwd, env, model, prompt, save, with_mod=True, extra=()):
     done = subprocess.run(argv, input=prompt, cwd=cwd, env=env, capture_output=True, text=True, timeout=600)
     with open(save, "w") as fh:
         fh.write(done.stdout + "\n--- stderr ---\n" + done.stderr)
-    sid, final, assistants = None, "", 0
+    sid, final, assistants, sids = None, "", 0, []
     for line in done.stdout.splitlines():
         try:
             msg = json.loads(line)
@@ -60,11 +68,13 @@ def session(cwd, env, model, prompt, save, with_mod=True, extra=()):
         if not isinstance(msg, dict):
             continue
         sid = msg.get("session_id") or sid
+        if sid and sid not in sids:
+            sids.append(sid)
         if msg.get("type") == "assistant":
             assistants += 1
         if msg.get("type") == "result":
             final = msg.get("result") or ""
-    return {"sid": sid, "final": final, "assistants": assistants, "raw": done.stdout}
+    return {"sid": sid, "sids": sids, "final": final, "assistants": assistants, "raw": done.stdout}
 
 
 def hits(state, session_ids=None):
@@ -147,15 +157,20 @@ def main():
             print("INFO  compact    CONTROL  without the mod the phrase %s after /compact"
                   % ("ALSO survived" if kept else "did not survive"))
 
-    # ---- ambiguity: a short prompt in a resumed session
-    proj = project("ambiguity")
-    first = session(proj, env, args.model,
-                    "Please list three colours of the rainbow in one line, then stop.",
-                    stream("ambiguity-open"))
-    again = session(proj, env, args.model, "continue", stream("ambiguity-short"),
-                    extra=("--resume", first["sid"]))
+    # ---- ambiguity: a short prompt, in the same process and in a resumed one
+    got = session(project("ambiguity"), env, args.model,
+                  ["Please list three colours of the rainbow in one line, then stop.", "continue"],
+                  stream("ambiguity"))
+    mine = hits(state, set(got["sids"]))
     check("ambiguity", "DELIVERY", "a short prompt gets the last substantive request",
-          any(r["moment"] == "ambiguity" for r in hits(state, {first["sid"], again["sid"]})))
+          [r["moment"] for r in mine] == ["ambiguity"], ", ".join(r["moment"] for r in mine))
+    proj = project("ambiguity-resumed")
+    first = session(proj, env, args.model, "Please list three colours of the rainbow in one line, then stop.",
+                    stream("ambiguity-open"))
+    again = session(proj, env, args.model, "continue", stream("ambiguity-short"), extra=("--resume", first["sid"]))
+    mine = hits(state, {first["sid"], again["sid"]})
+    check("ambiguity", "DELIVERY", "a resumed short prompt is told the request once, not twice",
+          len(mine) == 1 and mine[0]["moment"] in ("resume", "ambiguity"), ", ".join(r["moment"] for r in mine))
 
     # ---- completion: a long turn ending on a claim
     proj = project("completion")
@@ -167,7 +182,7 @@ def main():
     check("completion", "DELIVERY", "stated exactly once at the completion claim", len(mine) == 1,
           "%d row(s)" % len(mine))
     check("completion", "DELIVERY", "the session took another turn after it",
-          "stated at most once for this turn" in got["raw"],
+          "stated at most once per request" in got["raw"],
           "%d assistant messages" % got["assistants"])
 
     # ---- periodic: interval zero, one tool call
@@ -177,6 +192,32 @@ def main():
                   stream("periodic"), extra=("--allowedTools", "Bash"))
     check("periodic", "DELIVERY", "a tool call past the interval gets the mission",
           any(r["moment"] == "periodic" for r in hits(state, {got["sid"]})))
+
+    # ---- clear: one process, two sessions
+    got = session(project("clear"), env, args.model,
+                  ["My private codename for this session is cobalt-marmot-58; reply with one word: noted.",
+                   "/clear", "continue"], stream("clear"))
+    after = [r for r in hits(state, set(got["sids"][1:]))]
+    check("clear", "OUTCOME", "/clear started a second session", len(got["sids"]) >= 2, ", ".join(x[:8] for x in got["sids"]))
+    check("clear", "OUTCOME", "nothing of the cleared session was stated into the new one", after == [],
+          json.dumps(after)[:160])
+
+    # ---- scope: the subagent does its own task
+    ask = ("Do these steps in order. Run `echo 1`, `echo 2`, `echo 3`, `echo 4` as four SEPARATE Bash tool calls. "
+           "Then use the Agent tool to dispatch one general-purpose subagent with the instruction \"Run `echo sub` "
+           "with Bash and reply with the output.\" When the subagent result has arrived, reply to me with exactly: "
+           "All done.")
+    nested, stated = [], []
+    for i in range(3):
+        got = session(project("scope-%d" % i), dict(env, COMPOUND_MISSION_STOP_MIN_TOOLS="3"), args.model, ask,
+                      stream("scope-%d" % i), extra=("--allowedTools", "Agent", "Bash"))
+        mine = hits(state, set(got["sids"]))
+        nested.append(sum(1 for r in mine if r["moment"] == "subagent"))
+        stated.append(sum(1 for r in mine if r["moment"] == "completion"))
+    check("scope", "OUTCOME", "each of three subagents ran its own task and dispatched nothing", nested == [1, 1, 1],
+          "subagent starts per session: %s" % nested)
+    check("scope", "DELIVERY", "the completion statement came at most once per request", all(n <= 1 for n in stated),
+          "completion rows per session: %s" % stated)
 
     print("\n%d of %d checks passed; root %s" % (sum(results), len(results), root))
     if not args.keep and all(results):

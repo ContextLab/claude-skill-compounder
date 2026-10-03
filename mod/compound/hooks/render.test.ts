@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { chosen, claimsDone, lastSubstantive, mission, storeRows, substantive, typedByUser } from './render'
+import { chosen, claimsDone, isCommand, lastSubstantive, mission, storeRows, substantive, typedByUser } from './render'
 
 const LONG = 'please refactor the parser so that it handles nested quotes correctly'
 const CHANGE = 'change of plan: keep the parser and rewrite only the tokenizer instead'
@@ -76,4 +76,62 @@ test('a subagent hand-back or a task notice stored as a prompt is not a request'
     { session_id: 's1', prompt: '<agent-message from="a7">a very long report that is not a request at all' },
   ].map(r => JSON.stringify(r)).join('\n')
   expect(storeRows(raw, 's1').map(r => r.text)).toEqual([LONG])
+})
+
+// ---- found by the red team of 2026-10-03
+
+test('the store holds a prompt once however many times history-surfer recorded it', async () => {
+  const raw = [
+    { session_id: 's1', seq: 1, source: 'stdin', prompt: LONG },
+    { session_id: 's1', seq: 2, source: 'stdin', prompt: CHANGE },
+    { session_id: 's1', seq: 3, source: 'transcript', prompt: CHANGE },
+  ].map(r => JSON.stringify(r)).join('\n')
+  expect(storeRows(raw, 's1').map(r => r.text)).toEqual([LONG, CHANGE])
+})
+
+test('a request that begins with a path is a request, and a slash command is not', async () => {
+  const path = '/Users/nobody/proj/parser.py is the file I care about: fix the nested quotes'
+  expect(isCommand(path)).toBe(false)
+  expect(isCommand('/compact')).toBe(true)
+  expect(isCommand('/compact focus on the parser')).toBe(true)
+  expect(isCommand('/code-review ultra')).toBe(true)
+  const raw = [{ session_id: 's1', prompt: path, is_command: true }, { session_id: 's1', prompt: '/clear' }]
+    .map(r => JSON.stringify(r)).join('\n')
+  expect(storeRows(raw, 's1').map(r => r.text)).toEqual([path])
+})
+
+test('a negated, interim or questioning message is not a completion claim', async () => {
+  for (const no of [
+    'I could not get this done.',
+    'not finished and nothing is fixed yet',
+    'Are you ready for me to start?',
+    'The suite is not passing.',
+    'Shall I mark it complete?',
+    "I've completed the four echo commands and dispatched the subagent. Waiting for the subagent to complete.",
+  ]) expect(claimsDone(no)).toBe(false)
+  for (const yes of ['All done.', 'The fix is implemented and the suite passes.', 'Everything is complete.']) {
+    expect(claimsDone(yes)).toBe(true)
+  }
+})
+
+test('the request a short prompt gets is cut with a marker, never silently', async () => {
+  const text = lastSubstantive([{ text: `${'word '.repeat(400)}DO NOT DELETE THE DATABASE` }])
+  expect(text.includes('more chars]')).toBe(true)
+})
+
+test('a cut never leaves half of a character behind', async () => {
+  const text = mission([{ text: `${'x'.repeat(1199)}\u{1F600}${' tail word'.repeat(20)}` }])
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(text)).toBe(false)
+})
+
+test('a request with no spaces between its words is still substantive', async () => {
+  expect(substantive('请把解析器重写成可以处理嵌套引号的版本并且补全所有测试')).toBe(true)
+  expect(substantive('fix-the-parser-so-nested-quotes-work-and-add-tests')).toBe(true)
+  expect(substantive('ok do it')).toBe(false)
+})
+
+test('every harness frame on the prompt channel is recognised, and typed markup is not', async () => {
+  for (const frame of ['<local-command-stdout>x', '<command-name>/clear</command-name>', '[Request interrupted by user]',
+    '<teammate-message from="b">hi']) expect(typedByUser(frame)).toBe(false)
+  expect(typedByUser('<div> is the element I mean; please restyle it')).toBe(true)
 })
