@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { chosen, claimsDone, lastSubstantive, mission, storeRows, substantive } from './render'
+import { chosen, claimsDone, lastSubstantive, mission, storeRows, substantive, typedByUser } from './render'
 
 const LONG = 'please refactor the parser so that it handles nested quotes correctly'
 const CHANGE = 'change of plan: keep the parser and rewrite only the tokenizer instead'
@@ -64,4 +64,16 @@ test('store rows are this session only, with commands and empty prompts dropped'
     { session_id: 's1', prompt: CHANGE },
   ].map(r => JSON.stringify(r)).join('\n')
   expect(storeRows(`${raw}\nnot json`, 's1').map(r => r.text)).toEqual([LONG, CHANGE])
+})
+
+test('a subagent hand-back or a task notice stored as a prompt is not a request', async () => {
+  expect(typedByUser('<agent-message from="a7">\n[Subagent hand-back] The text below')).toBe(false)
+  expect(typedByUser('<task-notification>\n<task-id>b1</task-id>')).toBe(false)
+  expect(typedByUser('[SYSTEM NOTIFICATION - NOT USER INPUT]')).toBe(false)
+  expect(typedByUser('ok, continue: build it!')).toBe(true)
+  const raw = [
+    { session_id: 's1', prompt: LONG },
+    { session_id: 's1', prompt: '<agent-message from="a7">a very long report that is not a request at all' },
+  ].map(r => JSON.stringify(r)).join('\n')
+  expect(storeRows(raw, 's1').map(r => r.text)).toEqual([LONG])
 })

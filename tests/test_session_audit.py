@@ -869,9 +869,19 @@ class InstallPathParityTest(unittest.TestCase):
         declared = sorted(re.findall(r'"([^"]+)"', m.group(1)))
         self.assertTrue(declared, "OUR_EVENTS parsed empty")
         wiring = json.loads((REPO / "hooks" / "hooks.json").read_text())
-        self.assertEqual(sorted(wiring["hooks"]), declared,
+        # NOT equality any more. `OUR_EVENTS` is every event the installer may hold an
+        # entry on, and since 2026-10-03 two of them are strip-only: `hooks/mission.sh`
+        # left the wiring, and an older install's entry on SessionStart or SubagentStart
+        # still has to come off. So hooks.json wires a SUBSET, and the difference is
+        # named, so a third event cannot go quiet by the same route unnoticed.
+        wired = sorted(wiring["hooks"])
+        self.assertEqual([e for e in wired if e not in declared], [],
                          "a new event here needs the installer changed in step, and "
                          "tests/test_plugin.py asserts the two agree")
+        self.assertEqual([e for e in declared if e not in wired],
+                         ["SessionStart", "SubagentStart"],
+                         "the only events the installer claims and hooks.json does not "
+                         "wire are the two the retired mission hook used")
 
     def test_the_audit_runs_on_the_event_that_is_already_wired(self):
         stop = json.loads((REPO / "hooks" / "hooks.json").read_text())["hooks"]["Stop"]

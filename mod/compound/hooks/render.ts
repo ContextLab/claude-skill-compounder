@@ -71,6 +71,16 @@ export function lastSubstantive(rows: readonly Row[]): string {
   return ''
 }
 
+// Not everything that arrives as a prompt was typed by the user. A subagent's hand-back, a
+// background task's notice and a harness reminder come in on the same channel, and
+// history-surfer stores them as prompts: on 2026-10-03 a 14,588-character subagent report
+// was being stated back as "request 11 of 11". Those are recognised by how the harness
+// frames them and are never part of the mission.
+export function typedByUser(text: string): boolean {
+  const head = text.trimStart().slice(0, 40)
+  return !/^(<agent-message|<task-notification|<system-reminder|\[SYSTEM NOTIFICATION|Another Claude session sent a message)/.test(head)
+}
+
 // Does a closing message claim the work is finished?
 export function claimsDone(message: string): boolean {
   return /\b(done|complete[d]?|finished|all set|implemented|fixed|ready|passes|passing)\b/i.test(message.slice(-600))
@@ -86,7 +96,7 @@ export function storeRows(raw: string, session: string): Row[] {
       const r = JSON.parse(line) as { session_id?: string; prompt?: string; is_command?: boolean }
       if (r.session_id !== session || r.is_command === true) continue
       const text = (r.prompt ?? '').trim()
-      if (text !== '' && !text.startsWith('/')) out.push({ text })
+      if (text !== '' && !text.startsWith('/') && typedByUser(text)) out.push({ text })
     } catch {
       continue
     }

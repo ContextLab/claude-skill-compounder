@@ -3,7 +3,7 @@
 # what worked instead.
 #
 # NOT WIRED SINCE 2026-10-03. Neither install path adds this script to an event any more:
-# the write-down after a fail-then-fix moved to the function hooks in mod/compound-lessons.
+# the write-down after a fail-then-fix moved to the function hooks in mod/compound.
 # Everything below that says how it is wired describes the three entries it had until
 # then. It is still run directly, by bin/skillrepeat and bin/skillreport through
 # --eligible-of and by tests/test_repeat_gate.py.

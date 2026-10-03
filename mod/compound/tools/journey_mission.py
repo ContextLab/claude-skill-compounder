@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The journey for compound-mission. Real `claude -p` sessions; run by hand, never in CI.
+"""The journey for the mission half of the compound mod. Real `claude -p` sessions; run by hand, never in CI.
 
 Each step names what kind of evidence it is. OUTCOME steps pass on what a session could
 do that it could not do without the mod, and carry a no-mod control. DELIVERY steps pass
@@ -43,6 +43,9 @@ def make_project(path):
 def session(cwd, env, model, prompt, save, with_mod=True, extra=()):
     argv = ["claude", "-p", "--model", model, "--setting-sources", "project",
             "--output-format", "stream-json", "--verbose", *extra]
+    # Emptied so that a mod enabled in the user's own settings cannot load into a session
+    # here, the control least of all; --setting-sources does not switch that variable off.
+    env = dict(env, CLAUDE_CODE_PLUGIN_DIRS="", COMPOUND_LESSONS="0")
     if with_mod:
         argv += ["--plugin-dir", MOD]
     done = subprocess.run(argv, input=prompt, cwd=cwd, env=env, capture_output=True, text=True, timeout=600)
@@ -53,6 +56,8 @@ def session(cwd, env, model, prompt, save, with_mod=True, extra=()):
         try:
             msg = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(msg, dict):
             continue
         sid = msg.get("session_id") or sid
         if msg.get("type") == "assistant":

@@ -352,19 +352,20 @@ class InstallerTest(NoSurferMixin, unittest.TestCase):
         """Order is load-bearing: tests/test_plugin.py compares the two wirings'
         matcher lists POSITIONALLY, so a reordering here is a drift failure there.
 
-        Four entries now, and the shape of the list is the claim: the two that can DENY
-        a tool call come first, and the two that only state a fact -- the reminder and the
-        mission -- come after them. A gate that ran after a hook which had already emitted
-        context would spend that context on a call it then refused.
+        Three entries now, and the shape of the list is the claim: the two that can DENY
+        a tool call come first, and the one that only states a fact -- the reminder --
+        comes after them. A gate that ran after a hook which had already emitted context
+        would spend that context on a call it then refused. The mission left this list on
+        2026-10-03, with the repeat gate; both are the mod's job.
         """
         self.do_install()
         pre = [h["command"] for g in self.read()["hooks"]["PreToolUse"] for h in g["hooks"]]
         names = [c.rsplit("/", 1)[-1].strip('"') for c in pre]
-        self.assertEqual(names, ["claim-gate.sh", "doc-gate.sh", "remind.sh", "mission.sh"])
+        self.assertEqual(names, ["claim-gate.sh", "doc-gate.sh", "remind.sh"])
 
     def test_the_repeat_gate_is_not_wired_and_an_older_install_s_entries_are_stripped(self):
         """`repeat-gate.sh` left the wiring on 2026-10-03, when the lesson moved to the
-        function hooks in mod/compound-lessons. Not adding it is half of that; the other
+        function hooks in mod/compound. Not adding it is half of that; the other
         half is an UPGRADE, where settings.json already holds the three entries an older
         install wrote. Left there, the old hook would run beside the mod and announce
         every fix twice, with nothing on any surface to say why."""
@@ -517,11 +518,17 @@ class InstallerTest(NoSurferMixin, unittest.TestCase):
         self.assertIn("Stop", s["hooks"])
 
     def test_unrelated_settings_keys_are_untouched(self):
+        """`env` is no longer a key install leaves alone -- it adds the mod's directory
+        to one path list there -- so what is pinned is that the user's own entry is the
+        same after install and that uninstall hands the object back exactly."""
         self.write_settings({"model": "opus", "env": {"FOO": "bar"}})
         self.do_install()
         s = self.read()
         self.assertEqual(s["model"], "opus")
-        self.assertEqual(s["env"], {"FOO": "bar"})
+        self.assertEqual(s["env"]["FOO"], "bar")
+        self.assertEqual(sorted(s["env"]), ["CLAUDE_CODE_PLUGIN_DIRS", "FOO"])
+        self.do_uninstall()
+        self.assertEqual(self.read()["env"], {"FOO": "bar"})
 
     # -------------------------------------------------------------- status line
 
@@ -850,31 +857,40 @@ class DoctrineTest(NoSurferMixin, unittest.TestCase):
         self.assertEqual(source.read_text(encoding="utf-8"), "# from dotfiles\n")
 
 
-# ------------------------------------------------------------------ the mission wiring
+# ---------------------------------------------------- the mission: unwired, and the mod
 
 MISSION = APP / "hooks" / "mission.sh"
-# The five moments hooks/mission.sh is wired to, and the matcher each one needs. Named
-# here rather than derived, because the drift check in tests/test_plugin.py only proves
-# the two wirings AGREE: two wirings that both forgot SubagentStart agree perfectly, and
-# the subagent moment is the one no other event can reach.
-MISSION_EVENTS = (("SessionStart", None),
-                  ("SubagentStart", None),
-                  ("UserPromptSubmit", None),
-                  ("PreToolUse", None),
-                  ("Stop", None))
+# The five events hooks/mission.sh WAS wired to until 2026-10-03. Named here rather than
+# derived, because what these tests pin is that an older install's entry comes off every
+# one of them, and a list derived from the installer would agree with an installer that
+# forgot one.
+MISSION_EVENTS = ("SessionStart", "SubagentStart", "UserPromptSubmit", "PreToolUse", "Stop")
+MOD_PATH = str(Path(APP_HOME) / "mod" / "compound")
+MOD_KEY = "CLAUDE_CODE_PLUGIN_DIRS"
+FOREIGN_PLUGIN = "/some/other/plugin-dir"
 
 
-@unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
-class MissionWiringTest(NoSurferMixin, unittest.TestCase):
-    """`hooks/mission.sh` is wired to five events, two of which this installer had never
-    written a key for.
+def old_install_entries():
+    """The hooks an install from before 2026-10-03 left in settings.json: five
+    `mission.sh` entries and three `repeat-gate.sh` entries, each beside a hook of the
+    user's own on the same event."""
+    def ours(script, matcher=None):
+        group = {"hooks": [{"type": "command", "timeout": 10,
+                            "command": '"%s/hooks/%s"' % (APP_HOME, script)}]}
+        if matcher is not None:
+            group["matcher"] = matcher
+        return group
+    learn = "Bash|Skill|mcp__.*"
+    return {"SessionStart": [FOREIGN_HOOK, ours("mission.sh")],
+            "SubagentStart": [FOREIGN_HOOK, ours("mission.sh")],
+            "UserPromptSubmit": [FOREIGN_HOOK, ours("mission.sh")],
+            "PreToolUse": [FOREIGN_HOOK, ours("repeat-gate.sh"), ours("mission.sh")],
+            "PostToolUse": [FOREIGN_HOOK, ours("repeat-gate.sh", learn)],
+            "PostToolUseFailure": [FOREIGN_HOOK, ours("repeat-gate.sh", learn)],
+            "Stop": [FOREIGN_HOOK, ours("mission.sh")]}
 
-    SessionStart and SubagentStart are new event KEYS, so everything that used to be true
-    of an event we share with the user -- the strip, the preexisting-key rule, uninstall
-    putting back exactly what it found -- has to be true of two keys nobody here had
-    exercised. That is what this class is for.
-    """
 
+class _ScratchInstall(NoSurferMixin):
     def setUp(self):
         self.pin_surfer_off()
         self.tmp = tempfile.TemporaryDirectory()
@@ -898,9 +914,11 @@ class MissionWiringTest(NoSurferMixin, unittest.TestCase):
     def do_install(self, home=APP_HOME):
         return installer.install(home, str(self.claude), str(self.bin), str(self.state))
 
-    def do_uninstall(self):
-        return installer.uninstall(APP_HOME, str(self.claude), str(self.bin),
-                                   str(self.state))
+    def do_uninstall(self, home=APP_HOME):
+        return installer.uninstall(home, str(self.claude), str(self.bin), str(self.state))
+
+    def manifest(self):
+        return json.loads((self.state / "install-manifest.json").read_text(encoding="utf-8"))
 
     def entries(self, event, marker="mission.sh"):
         s = self.read()
@@ -908,98 +926,96 @@ class MissionWiringTest(NoSurferMixin, unittest.TestCase):
                 for g in s.get("hooks", {}).get(event, []) for h in g["hooks"]
                 if marker in h["command"]]
 
-    def test_the_mission_is_wired_to_all_five_moments_with_the_right_matcher(self):
-        self.do_install()
-        for event, matcher in MISSION_EVENTS:
-            got = self.entries(event)
-            self.assertEqual(len(got), 1,
-                             "%s must carry the mission exactly once, got %r"
-                             % (event, got))
-            self.assertEqual(got[0][0], matcher,
-                             "%s matcher for the mission" % event)
+    def commands(self):
+        return [(event, h["command"]) for event, groups in self.read().get("hooks", {}).items()
+                for g in groups for h in g.get("hooks", [])]
 
-    def test_the_pretooluse_entry_carries_no_matcher_at_all(self):
-        """The only PreToolUse entry of ours that names no tools, and the reason is what
-        it does with them. Its periodic arm is a cooldown and its Stop arm counts the tool
-        calls a turn made; a matcher makes that counter undercount by exactly the calls it
-        excludes, which moves a threshold with nothing on any surface saying it moved. The
-        other four entries there each look for one particular call and name it."""
-        self.do_install()
-        matchers = [g.get("matcher") for g in self.read()["hooks"]["PreToolUse"]
-                    for h in g["hooks"] if "mission.sh" in h["command"]]
-        self.assertEqual(matchers, [None],
-                         "the mission's PreToolUse entry was narrowed: %r" % matchers)
 
-    def test_the_mission_is_wired_to_no_other_event(self):
-        """PostToolUse and PostToolUseFailure are after the fact: there is nothing left to
-        restate the request before. PreCompact cannot deliver context to the model at all
-        (measured: it honours `systemMessage` only), so a wiring there would look correct
-        and reach nobody."""
-        self.do_install()
-        for event in ("PostToolUse", "PostToolUseFailure", "PreCompact"):
-            self.assertEqual(self.entries(event), [],
-                             "the mission must not be wired to %s" % event)
+@unittest.skipUnless(MISSION.is_file(), "hooks/mission.sh is not in this checkout")
+class MissionRetiredTest(_ScratchInstall, unittest.TestCase):
+    """`hooks/mission.sh` left the wiring on 2026-10-03: the mission is the mod's job.
 
-    def test_installing_twice_leaves_one_mission_entry_per_event(self):
-        self.do_install()
-        self.do_install()
-        for event, _matcher in MISSION_EVENTS:
-            self.assertEqual(len(self.entries(event)), 1,
-                             "%s picked up a duplicate mission entry" % event)
+    Not adding it is half of that. The other half is an UPGRADE, where settings.json
+    already holds the five entries an older install wrote, on two event keys nothing of
+    ours uses any more. Left there, the shell hook would state the mission beside the mod
+    and every moment would land twice.
+    """
 
-    def test_uninstall_removes_the_two_event_keys_it_created(self):
-        """A key we created and then leave behind holding an empty list is litter in
-        someone's settings.json, and it is the exact failure `preexisting_events` was
-        written for -- caught on the SECOND install, when our own keys look like theirs."""
+    def test_the_mission_script_is_wired_to_no_event_at_all(self):
         self.do_install()
-        s = self.read()
+        self.assertEqual([(e, c) for e, c in self.commands() if "mission.sh" in c], [],
+                         "hooks/mission.sh is still wired by an install")
+
+    def test_a_fresh_install_writes_neither_of_the_two_keys_only_the_mission_used(self):
+        """SessionStart and SubagentStart carried the mission and nothing else of ours.
+        A key written holding an empty list is litter in someone's settings.json."""
+        self.do_install()
+        self.do_install()
+        hooks = self.read()["hooks"]
         for event in ("SessionStart", "SubagentStart"):
-            self.assertIn(event, s["hooks"], "install wrote no %s key" % event)
+            self.assertNotIn(event, hooks, "install wrote a %s key with nothing on it" % event)
+
+    def test_the_marker_is_named_retired_so_doctor_does_not_expect_it_wired(self):
+        """`skillforge doctor` reads every `*_MARKER = "x.sh"` line of the installer as a
+        script that must be wired. These two must not be on that list."""
+        text = (APP / "skill_compounder" / "installer.py").read_text(encoding="utf-8")
+        self.assertIn('MISSION_RETIRED = "mission.sh"', text)
+        self.assertIn('REPEAT_GATE_RETIRED = "repeat-gate.sh"', text)
+        self.assertNotRegex(text, r'(?m)^[A-Z_]*MARKER = "(mission|repeat-gate)\.sh"')
+
+    def test_an_older_install_s_eight_entries_are_stripped_and_foreign_hooks_survive(self):
+        """Five `mission.sh` entries and three `repeat-gate.sh` entries, each beside a
+        hook of the user's on the same event. All eight come off; all seven of the
+        user's stay, on every event including the two only the mission used."""
+        old = old_install_entries()
+        self.write_settings({"hooks": old})
+        before = [c for _e, c in self.commands()]
+        self.assertEqual(sum("mission.sh" in c for c in before), 5)
+        self.assertEqual(sum("repeat-gate.sh" in c for c in before), 3)
+        self.do_install()
+        after = self.commands()
+        self.assertEqual([(e, c) for e, c in after
+                          if "mission.sh" in c or "repeat-gate.sh" in c], [],
+                         "an older install's retired entries survived an upgrade")
+        for event in old:
+            self.assertEqual(len(self.entries(event, "other/tool.py")), 1,
+                             "the strip took the user's own %s hook with it" % event)
+
+    def test_uninstall_strips_an_older_install_s_entries_too(self):
+        """A user who never upgrades and simply uninstalls with a newer checkout must not
+        be left with eight entries pointing at this package."""
+        old = old_install_entries()
+        self.write_settings({"hooks": old})
         self.do_uninstall()
-        s = self.read()
-        for event in ("SessionStart", "SubagentStart"):
-            self.assertNotIn(event, s.get("hooks", {}),
-                             "uninstall left an empty %s key behind" % event)
+        self.assertEqual(sorted(c for _e, c in self.commands()),
+                         sorted([FOREIGN_HOOK["hooks"][0]["command"]] * len(old)),
+                         "uninstall left a retired entry, or took a foreign one")
 
-    def test_install_install_uninstall_still_removes_the_two_new_keys(self):
-        """The reinstall case, which is where the obvious rule ("was the key there before
-        we ran") gets it wrong: by the second install our own key is there too."""
+    def test_an_upgrade_deletes_a_key_that_held_only_the_old_mission_entry(self):
+        """The older install CREATED SessionStart and SubagentStart. Stripped of the one
+        entry they held, they are ours to remove rather than leave as empty lists."""
+        old = old_install_entries()
+        self.write_settings({"hooks": {"SessionStart": old["SessionStart"][1:],
+                                       "SubagentStart": old["SubagentStart"][1:]}})
         self.do_install()
-        self.do_install()
-        self.do_uninstall()
-        s = self.read()
+        hooks = self.read()["hooks"]
         for event in ("SessionStart", "SubagentStart"):
-            self.assertNotIn(event, s.get("hooks", {}),
-                             "%s survived install, install, uninstall" % event)
+            self.assertNotIn(event, hooks,
+                             "an upgrade left an empty %s key behind" % event)
 
     def test_a_users_own_session_start_hook_survives_both_directions(self):
-        """SessionStart is a normal event for other tools to use, and it is a key this
-        package had never touched, so nothing had ever proved we leave one alone."""
-        self.write_settings({"hooks": {"SessionStart": [FOREIGN_HOOK]}})
-        self.do_install()
-        cmds = [h["command"] for g in self.read()["hooks"]["SessionStart"]
-                for h in g["hooks"]]
-        self.assertTrue(any("other/tool.py" in c for c in cmds),
-                        "install dropped a SessionStart hook of the user's: %r" % cmds)
-        self.assertTrue(any("mission.sh" in c for c in cmds),
-                        "ours must land beside theirs: %r" % cmds)
-        self.do_uninstall()
-        cmds = [h["command"] for g in self.read()["hooks"]["SessionStart"]
-                for h in g["hooks"]]
-        self.assertEqual(cmds, [c for c in cmds if "other/tool.py" in c],
-                         "uninstall took something of the user's with it: %r" % cmds)
-
-    def test_a_users_own_subagent_start_hook_survives_both_directions(self):
-        self.write_settings({"hooks": {"SubagentStart": [FOREIGN_HOOK]}})
+        self.write_settings({"hooks": {"SessionStart": [FOREIGN_HOOK],
+                                       "SubagentStart": [FOREIGN_HOOK]}})
         self.do_install()
         self.do_uninstall()
-        cmds = [h["command"] for g in self.read()["hooks"]["SubagentStart"]
-                for h in g["hooks"]]
-        self.assertEqual(cmds, [c for c in cmds if "other/tool.py" in c],
-                         "uninstall took something of the user's with it: %r" % cmds)
+        hooks = self.read()["hooks"]
+        for event in ("SessionStart", "SubagentStart"):
+            self.assertEqual(hooks[event], [FOREIGN_HOOK],
+                             "the user's own %s hook did not survive" % event)
 
     def test_an_empty_event_key_the_user_put_there_stays_theirs(self):
         self.write_settings({"hooks": {"SessionStart": [], "SubagentStart": []}})
+        self.do_install()
         self.do_install()
         self.do_uninstall()
         hooks = self.read().get("hooks", {})
@@ -1008,40 +1024,186 @@ class MissionWiringTest(NoSurferMixin, unittest.TestCase):
                           "an empty %s list the user wrote was deleted" % event)
             self.assertEqual(hooks[event], [])
 
-    def test_a_checkout_without_the_mission_hook_still_installs(self):
-        """The package must stay installable from a checkout older than any one
-        component. Nothing of the mission is wired, and nothing else is lost."""
+    def test_a_key_the_manifest_records_as_the_users_is_kept_through_an_upgrade(self):
+        """The older install found an EMPTY SessionStart list of the user's, recorded the
+        key as theirs and added its entry. The upgrade strips that entry, and the key is
+        still theirs: emptied, never deleted."""
+        self.state.mkdir()
+        (self.state / "install-manifest.json").write_text(json.dumps(
+            {"preexisting_hook_events": ["SessionStart"]}), encoding="utf-8")
+        old = old_install_entries()
+        self.write_settings({"hooks": {"SessionStart": old["SessionStart"][1:],
+                                       "SubagentStart": old["SubagentStart"][1:]}})
+        self.do_install()
+        hooks = self.read()["hooks"]
+        self.assertEqual(hooks.get("SessionStart"), [])
+        self.assertNotIn("SubagentStart", hooks)
+
+
+@unittest.skipUnless(Path(MOD_PATH).is_dir(), "mod/compound is not in this checkout")
+class ModEnableTest(_ScratchInstall, unittest.TestCase):
+    """The settings.json install path enables the mod by adding ONE ELEMENT to a path
+    list that is not this package's: `env.CLAUDE_CODE_PLUGIN_DIRS`, separated by
+    `os.pathsep`. Every element it did not add stays, in order, in both directions."""
+
+    def dirs(self):
+        return self.read().get("env", {}).get(MOD_KEY, "").split(os.pathsep)
+
+    def test_install_adds_the_mod_directory_and_records_exactly_what_it_added(self):
+        rep = self.do_install()
+        self.assertEqual(self.read()["env"], {MOD_KEY: MOD_PATH})
+        self.assertEqual(self.manifest()["mod_plugin_dir"], MOD_PATH)
+        self.assertIn(MOD_PATH, rep["mod"])
+        self.assertTrue((Path(MOD_PATH) / "hooks" / "hooks.json").is_file(),
+                        "the directory install enables is not a plugin of hooks")
+
+    def test_the_suffix_is_the_constant_doctor_reads_and_is_not_a_marker(self):
+        self.assertEqual(installer.MOD_DIR, "mod/compound")
+        self.assertTrue(MOD_PATH.endswith("/" + installer.MOD_DIR))
+        text = (APP / "skill_compounder" / "installer.py").read_text(encoding="utf-8")
+        self.assertRegex(text, r'(?m)^MOD_DIR = "mod/compound"$',
+                         "bin/skillforge reads this line with sed; it must stay one line")
+
+    def test_it_lands_beside_a_foreign_element_and_leaves_with_only_itself(self):
+        # Written the way the installer writes -- two-space indent, trailing newline --
+        # so the byte comparison below is about content and not about a final "\n".
+        self.settings.write_text(json.dumps(
+            {"env": {"FOO": "bar", MOD_KEY: FOREIGN_PLUGIN}}, indent=2) + "\n",
+            encoding="utf-8")
+        original = self.settings.read_bytes()
+        self.do_install()
+        self.assertEqual(self.dirs(), [FOREIGN_PLUGIN, MOD_PATH])
+        self.assertEqual(self.read()["env"]["FOO"], "bar")
+        self.do_uninstall()
+        self.assertEqual(self.read()["env"], {"FOO": "bar", MOD_KEY: FOREIGN_PLUGIN})
+        self.assertEqual(self.settings.read_bytes(), original,
+                         "install then uninstall did not hand back the file it was given")
+
+    def test_two_foreign_elements_keep_their_order_around_ours(self):
+        both = os.pathsep.join([FOREIGN_PLUGIN, "/another/one"])
+        self.write_settings({"env": {MOD_KEY: both}})
+        self.do_install()
+        self.assertEqual(self.dirs(), [FOREIGN_PLUGIN, "/another/one", MOD_PATH])
+        self.do_uninstall()
+        self.assertEqual(self.read()["env"][MOD_KEY], both)
+
+    def test_installing_twice_is_byte_identical_and_never_duplicates_ours(self):
+        self.write_settings({"env": {MOD_KEY: FOREIGN_PLUGIN}})
+        self.do_install()
+        first = self.settings.read_bytes()
+        self.do_install()
+        self.assertEqual(self.settings.read_bytes(), first,
+                         "a second install changed settings.json")
+        self.assertEqual(self.dirs().count(MOD_PATH), 1)
+
+    def test_an_element_already_there_is_not_rewritten_even_to_tidy_it(self):
+        """Ours is present and the user's value carries an empty element. Nothing to add,
+        so nothing is written into that value at all."""
+        untidy = os.pathsep.join([FOREIGN_PLUGIN, "", MOD_PATH])
+        self.write_settings({"env": {MOD_KEY: untidy}})
+        self.do_install()
+        self.assertEqual(self.read()["env"][MOD_KEY], untidy)
+
+    def test_uninstall_drops_the_key_and_then_env_when_they_empty(self):
+        self.write_settings({"model": "opus"})
+        self.do_install()
+        self.assertIn("env", self.read())
+        self.do_uninstall()
+        self.assertEqual(self.read(), {"model": "opus"})
+
+    def test_uninstall_drops_the_key_and_keeps_an_env_that_holds_something_else(self):
+        self.write_settings({"env": {"FOO": "bar"}})
+        self.do_install()
+        self.do_uninstall()
+        self.assertEqual(self.read()["env"], {"FOO": "bar"})
+
+    def test_uninstall_removes_the_recorded_path_when_the_checkout_has_moved(self):
+        """The manifest records the exact string that was added, so a checkout that moved
+        can still take its own element out -- and still leaves the one beside it."""
+        self.do_install()
+        gone = "/where/the/checkout/used/to/be/mod/compound"
+        m = self.manifest()
+        m["mod_plugin_dir"] = gone
+        (self.state / "install-manifest.json").write_text(json.dumps(m), encoding="utf-8")
+        s = self.read()
+        s["env"][MOD_KEY] = os.pathsep.join([FOREIGN_PLUGIN, gone])
+        self.write_settings(s)
+        self.do_uninstall()
+        self.assertEqual(self.read()["env"], {MOD_KEY: FOREIGN_PLUGIN})
+        self.assertNotIn("mod_plugin_dir", self.manifest())
+
+    def test_a_reinstall_from_a_moved_checkout_replaces_the_recorded_path(self):
+        self.do_install()
+        gone = "/where/the/checkout/used/to/be/mod/compound"
+        m = self.manifest()
+        m["mod_plugin_dir"] = gone
+        (self.state / "install-manifest.json").write_text(json.dumps(m), encoding="utf-8")
+        s = self.read()
+        s["env"][MOD_KEY] = os.pathsep.join([gone, FOREIGN_PLUGIN])
+        self.write_settings(s)
+        self.do_install()
+        self.assertEqual(self.dirs(), [FOREIGN_PLUGIN, MOD_PATH])
+        self.assertEqual(self.manifest()["mod_plugin_dir"], MOD_PATH)
+
+    def test_a_path_that_merely_ends_like_ours_is_somebody_elses(self):
+        lookalike = "/elsewhere/mod/compound"
+        self.write_settings({"env": {MOD_KEY: lookalike}})
+        self.do_install()
+        self.assertEqual(self.dirs(), [lookalike, MOD_PATH])
+        self.do_uninstall()
+        self.assertEqual(self.read()["env"], {MOD_KEY: lookalike})
+
+    def test_a_checkout_without_the_mod_installs_and_touches_no_env(self):
         import shutil as _shutil
         dest = Path(self.tmp.name) / "checkout"
         _shutil.copytree(APP_HOME, dest, symlinks=True,
-                         ignore=_shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
-        (dest / "hooks" / "mission.sh").unlink()
-        self.do_install(home=str(dest))
-        s = self.read()
-        for event, _m in MISSION_EVENTS:
-            self.assertEqual([h["command"] for g in s.get("hooks", {}).get(event, [])
-                              for h in g["hooks"] if "mission.sh" in h["command"]], [],
-                             "%s wired a script this checkout does not carry" % event)
-        self.assertTrue(any("compound-improvement.sh" in h["command"]
-                            for g in s["hooks"]["UserPromptSubmit"] for h in g["hooks"]),
-                        "the rest of the wiring must still be installed")
+                         ignore=_shutil.ignore_patterns(".git", "__pycache__", "*.pyc",
+                                                        "mod", "node_modules"))
+        self.write_settings({"env": {MOD_KEY: FOREIGN_PLUGIN}})
+        rep = self.do_install(home=str(dest))
+        self.assertEqual(self.read()["env"], {MOD_KEY: FOREIGN_PLUGIN})
+        self.assertIn("not enabled", rep["mod"])
+        self.assertNotIn("mod_plugin_dir", self.manifest())
 
-    def test_a_stale_mission_entry_is_stripped_by_a_checkout_without_it(self):
-        """The strip runs before any append, so an entry a newer checkout left is removed
-        rather than left pointing at a file that is gone -- including on the two events
-        where the strip is the ONLY thing that happens."""
+    def test_a_malformed_env_makes_install_refuse_and_changes_nothing(self):
+        for bad in (["not", "an", "object"], "a string", 7):
+            self.write_settings({"model": "opus", "env": bad})
+            before = self.settings.read_bytes()
+            with self.assertRaises(installer.SettingsShapeError) as ctx:
+                self.do_install()
+            self.assertIn('"env"', str(ctx.exception))
+            self.assertEqual(self.settings.read_bytes(), before)
+            self.assertEqual(list((self.claude / "skills").glob("*"))
+                             if (self.claude / "skills").exists() else [], [],
+                             "install refused and linked skills anyway")
+
+    def test_a_plugin_dirs_value_that_is_not_a_string_makes_install_refuse(self):
+        self.write_settings({"env": {MOD_KEY: ["/a", "/b"]}})
+        before = self.settings.read_bytes()
+        with self.assertRaises(installer.SettingsShapeError) as ctx:
+            self.do_install()
+        self.assertIn(MOD_KEY, str(ctx.exception))
+        self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_uninstall_never_refuses_on_a_malformed_env(self):
+        """A settings.json the user broke by hand is exactly when they most need to be
+        able to take this package off. The hooks come off; the key we cannot read stays
+        as it was and the report says so."""
         self.do_install()
-        import shutil as _shutil
-        dest = Path(self.tmp.name) / "old"
-        _shutil.copytree(APP_HOME, dest, symlinks=True,
-                         ignore=_shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
-        (dest / "hooks" / "mission.sh").unlink()
-        self.do_install(home=str(dest))
-        s = self.read()
-        for event, _m in MISSION_EVENTS:
-            self.assertEqual([h["command"] for g in s.get("hooks", {}).get(event, [])
-                              for h in g["hooks"] if "mission.sh" in h["command"]], [],
-                             "a stale %s entry was left orphaned" % event)
+        for bad in (["not", "an", "object"], {MOD_KEY: 7}):
+            s = self.read()
+            s["env"] = bad
+            self.write_settings(s)
+            rep = self.do_uninstall()
+            self.assertIn("left alone", rep["mod"])
+            self.assertEqual(self.read()["env"], bad)
+            self.assertNotIn("hooks", self.read())
+            self.do_install_over(bad)
+
+    def do_install_over(self, bad):
+        """Put a clean install back so the loop above can break it a second way."""
+        self.write_settings({})
+        self.do_install()
 
 
 # --------------------------------------------------------------- the surfer dependency
@@ -1128,11 +1290,11 @@ class SurferTest(unittest.TestCase):
         self.assertTrue(any("flush.py" in c for c in cmds),
                         "history-surfer's flush hook is not wired: %r" % cmds)
         # And ours are still there beside them.
-        self.assertTrue(any("mission.sh" in c for c in cmds),
+        self.assertTrue(any("compound-improvement.sh" in c for c in cmds),
                         "our own wiring was lost: %r" % cmds)
 
         # The store it scaffolds is under the claude dir it was given, which is what makes
-        # `surfer` and `hooks/mission.sh` read one file rather than two.
+        # `surfer` and the mission read one file rather than two.
         self.assertTrue((self.claude / "history-surfer" / "projects").is_dir())
 
         record = self.manifest()["surfer"]
@@ -1187,7 +1349,7 @@ class SurferTest(unittest.TestCase):
             self.assertTrue(any(marker in c for c in cmds),
                             "history-surfer's %s is not wired into the target config: "
                             "%s -- %r" % (marker, rep["surfer"], cmds))
-        self.assertTrue(any("mission.sh" in c for c in cmds),
+        self.assertTrue(any("compound-improvement.sh" in c for c in cmds),
                         "our own wiring was lost: %r" % cmds)
         record = self.manifest()["surfer"]
         self.assertEqual(record["home"], str(SURFER_PATH_CHECKOUT))
@@ -1242,8 +1404,10 @@ class SurferTest(unittest.TestCase):
         for marker in installer.SURFER_HOOK_MARKERS:
             self.assertTrue(any(marker in c for c in cmds),
                             "%s did not reach the dotfiles file: %r" % (marker, cmds))
-        self.assertTrue(any("mission.sh" in c for c in cmds),
+        self.assertTrue(any("compound-improvement.sh" in c for c in cmds),
                         "our own wiring did not reach the dotfiles file: %r" % cmds)
+        self.assertIn(MOD_PATH, written["env"]["CLAUDE_CODE_PLUGIN_DIRS"].split(os.pathsep),
+                      "the mod's directory did not reach the dotfiles file")
 
     def test_a_half_wired_config_is_not_read_as_wired(self):
         """One of the two markers present is an interrupted install, not a finished one.

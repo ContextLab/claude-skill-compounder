@@ -239,7 +239,7 @@ is one call and no journey, which is what it is for: under `--config-dir fresh` 
 token would otherwise be found by step 0 and cost the twelve after it nothing but time. One run on 2026-09-03
 against CLI 2.1.259 took **150.9 s**, thirteen calls, seventeen steps PASS; that run still carried
 steps 15 and 16, the lesson, which left on 2026-10-03 with the wiring they tested
-(`mod/compound-lessons/tools/journey.py` covers the lesson now). The six-call,
+(`mod/compound/tools/journey.py` covers the lesson now). The six-call,
 twelve-step shape this file described before is the same scenario without steps 12-16; two
 runs of it on 2026-09-02 took 38.5 s and 34.9 s.
 

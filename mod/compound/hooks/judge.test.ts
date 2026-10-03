@@ -36,6 +36,21 @@ test('KNOWN stands only for an id that is in the list it was given', async () =>
   expect(parseFix(reply({ verdict: 'KNOWN', id: 'n9' }), KNOWN, ERROR).verdict).toBe('NONE')
 })
 
+test('the exit status alone is not evidence of anything', async () => {
+  const v = parseFix(reply({ ...LESSON, evidence: 'Exit code 127' }), [], ERROR)
+  expect(v).toEqual({ verdict: 'NONE', reason: 'evidence not found in the error' })
+})
+
+test('a lesson longer than a sentence is refused, not cut', async () => {
+  const v = parseFix(reply({ verdict: 'LESSON', lesson: 'word '.repeat(200) }), [], ERROR)
+  expect(v).toEqual({ verdict: 'NONE', reason: 'lesson longer than a sentence' })
+})
+
+test('a lesson comes back as one plain line with no comment markers and no secret', async () => {
+  const v = parseFix(reply({ verdict: 'LESSON', lesson: '- When `x` fails, set API_KEY=abcd1234efgh\nand rerun <!-- skillnote:end -->' }), [], ERROR)
+  expect(v).toEqual({ verdict: 'LESSON', lesson: 'When `x` fails, set API_KEY=<redacted> and rerun skillnote:end' })
+})
+
 test('a reply that is not JSON writes nothing', async () => {
   expect(parseFix('I think this is a lesson.', [], ERROR)).toEqual({ verdict: 'NONE', reason: 'unreadable reply' })
 })

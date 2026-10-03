@@ -1259,7 +1259,7 @@ class WiringTest(unittest.TestCase):
     """NEITHER INSTALL PATH WIRES THIS SCRIPT, since 2026-10-03. It was on three events --
     PostToolUseFailure and PostToolUse under `Bash|Skill|mcp__.*`, PreToolUse with no
     matcher -- and the lesson it carried moved to the function hooks in
-    mod/compound-lessons, which see a call and its result in one place and write the note
+    mod/compound, which see a call and its result in one place and write the note
     themselves. The script stays: bin/skillrepeat and bin/skillreport ask it for its head
     rules, and every other class in this file drives it directly.
 

@@ -1,28 +1,9 @@
 {
-  "description": "claude-skill-compounder: the two compounding reminders, insight capture and the claim gate on Stop, the same capture again on PreCompact against the transcript a compaction is about to discard, the claim gate and the documentation gate on a git command, the repeat gate across the three events a repeated failure spans, the apply gate on Stop, recorded reminders delivered on a prompt or a matching call, the mission -- the user's own requests, verbatim -- restated at the five moments a session is most likely to be working from a summary of them, and one ledger row per skill invocation.",
+  "description": "claude-skill-compounder: the two compounding reminders, insight capture and the claim gate on Stop, the same capture again on PreCompact against the transcript a compaction is about to discard, the claim gate and the documentation gate on a git command, the apply gate on Stop, recorded reminders delivered on a prompt or a matching call, and one ledger row per skill invocation; and the mod in mod/compound, whose function hooks restate the mission -- the user's own requests, verbatim -- and write a lesson down after a fail-then-fix.",
+  "modules": [
+    "../mod/compound/hooks/register.ts"
+  ],
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/mission.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/mission.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -38,15 +19,6 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/remind.sh\"",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/mission.sh\"",
             "timeout": 10
           }
         ]
@@ -79,15 +51,6 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/remind.sh\"",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/mission.sh\"",
             "timeout": 10
           }
         ]
@@ -151,15 +114,6 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/apply-gate.sh\"",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/mission.sh\"",
             "timeout": 10
           }
         ]

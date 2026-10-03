@@ -1,0 +1,25 @@
+// What the plugin's one tool.call hook observes on behalf of the mission half. A plugin
+// may register one unmatched tool.call hook, and ./lessons owns it; the mission needs two
+// facts from the same stream, kept here: how many tool calls the main loop has made this
+// turn, and which calls are running inside a subagent right now. No `$`, no I/O.
+
+export const turn = { id: '', tools: 0, blocked: false }
+
+// Calls now inside a subagent, by tool_use_id. `classic.PreToolUse` carries the call and
+// not the loop it runs in; the tool.call hook around it does, and runs first.
+export const inSubagent = new Set<string>()
+
+export function startTurn(id: string): void {
+  turn.id = id
+  turn.tools = 0
+  turn.blocked = false
+}
+
+export function enterCall(toolUseId: string, agentId: string | undefined): void {
+  if (agentId === undefined) turn.tools += 1
+  else inSubagent.add(toolUseId)
+}
+
+export function leaveCall(toolUseId: string): void {
+  inSubagent.delete(toolUseId)
+}

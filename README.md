@@ -185,7 +185,7 @@ outlives the other; `--keep-reminder` leaves it armed.
 
 **Since 2026-10-03 the lesson gate is not wired.** `hooks/repeat-gate.sh` is still in the
 repository and `install.sh` no longer adds it; the write-down after a fail-then-fix is done
-by the function hooks in [mod/compound-lessons](mod/compound-lessons/README.md), which
+by the function hooks in [mod/compound](mod/compound/README.md), which
 write the note themselves. What follows describes the gate as it behaves when the script
 is driven.
 

@@ -10,7 +10,7 @@ events (`SessionStart`, `SubagentStart`, `UserPromptSubmit`, `PreToolUse`, `Post
 `PostToolUseFailure`, `Stop`, `PreCompact`) and
 name nine of the eleven scripts in `hooks/` -- every one but `session-review.sh`, which is
 launched rather than wired, and `repeat-gate.sh`, which was wired on three events until
-2026-10-03, when the lesson moved to the function hooks in `mod/compound-lessons/` (its
+2026-10-03, when the lesson moved to the function hooks in `mod/compound/` (its
 own README has the commands; `OUR_EVENT_MARKERS` still lists the marker so that an install
 over an older one strips the old entries); derive them from
 `OUR_EVENT_MARKERS` in `skill_compounder/installer.py` rather than from this sentence.
@@ -445,7 +445,7 @@ the same rule measured 5.7% before those fixes, so the pair agrees on the order 
 magnitude and nothing finer.
 
 **`hooks/repeat-gate.sh` IS NOT WIRED since 2026-10-03, and everything this file says of
-its arms describes the script when driven, not a session.** `mod/compound-lessons/` does
+its arms describes the script when driven, not a session.** `mod/compound/` does
 the write-down now.
 
 **Of the other four, `hooks/repeat-gate.sh` carries two refusals that ship opposite ways
@@ -1131,5 +1131,5 @@ there is nothing there to tune.
 - **2026-09-05** Adding a row to the tuning table in docs/operations.md means moving the spelled-out count phrase ('All sixty-one are environment variables') beside it, because tests/test_doctrine_sync.py::TuningTableTest pins that phrase to the row count; second time a row landed without it on 2026-09-05. <!-- id:n2661101721x298 -->
 - **2026-09-05** Four command-matching rules in hooks were wrong in the same way on 2026-09-05 and every one was caught by a live session, none by a test: remind.sh matched the whole command byte-for-byte (compound forms silent), claim-gate's CI-runner regex missed gh api .../check-runs, compound-improvement read the > in a "<file>" placeholder as a redirect, and the head allowlist exempted env/command as programs. A rule that matches command text ships only after a real claude -p session has been driven through the shape it is meant to catch and one it is meant to miss. <!-- id:n2151519607x568 -->
 - **2026-09-06** A block on skillreport's default view that is printed inline after an early exit goes missing on the exit path (APPLIED headline before #37, FUNNEL and REMINDER CONVERSION on a ledger with no start rows, 2026-09-06); a default-view block is a function called on every exit path, and its test drives the no-start-rows ledger. <!-- id:n559137653x332 -->
-- **2026-10-03** claude -p with --allowedTools (variadic) swallows a trailing prompt argument and exits with 'Input must be provided'; pass the prompt on stdin: printf '%s' "<prompt>" | claude -p --allowedTools Bash. <!-- id:n445841543x207 source:session why:"2026-10-03: the first headless mod probe failed on it; mod/compound-lessons/tools/journey.py passes the task on stdin for this reason" -->
+- **2026-10-03** claude -p with --allowedTools (variadic) swallows a trailing prompt argument and exits with 'Input must be provided'; pass the prompt on stdin: printf '%s' "<prompt>" | claude -p --allowedTools Bash. <!-- id:n445841543x207 source:session why:"2026-10-03: the first headless mod probe failed on it; mod/compound/tools/journey.py passes the task on stdin for this reason" -->
 <!-- skillnote:end -->

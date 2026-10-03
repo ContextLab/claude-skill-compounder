@@ -831,8 +831,18 @@ cmd_add() {
     esac
   done
 
-  text="$(printf '%s' "$text" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  # A NOTE IS ONE LINE, AND IT IS PARSED BACK BY ITS COMMENT. A newline in the text or in
+  # --why becomes a space, so the note stays the single line every reader expects. The
+  # comment delimiters are REFUSED rather than rewritten: `<!-- skillnote:end -->` inside a
+  # note ends the block for `list` and hides every note after it, and `<!-- id:... -->`
+  # inside one forges an id and a source. A writer that passes command text through hit
+  # the first of those live on 2026-10-03.
+  text="$(printf '%s' "$text" | tr '\n\r' '  ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  why="$(printf '%s' "$why" | tr '\n\r' '  ')"
   [ -n "$text" ] || die "add needs the note text: skillnote add --scope project \"<the one-line lesson>\""
+  case "$text$why" in
+    *'<!--'*|*'-->'*) die "the note text and --why may not contain '<!--' or '-->': a note line is read back by that comment, and one inside the text hides or forges notes. Nothing was written." ;;
+  esac
 
   case "$scope" in
     project|global|memory) : ;;

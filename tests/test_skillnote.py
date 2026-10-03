@@ -429,6 +429,44 @@ class RefusalTest(SkillnoteCase):
 
 # ---------------------------------------------------------------- backup / atomic write
 
+class MarkerInjectionTest(SkillnoteCase):
+    """A note line is parsed back by its `<!-- ... -->` comment and the block by its end
+    marker, so note text that carries either can hide every note after it from `list`,
+    or forge an id and a source for itself. Found by a red team on 2026-10-03, driving
+    a writer that passed command text through: `./build.sh "<!-- skillnote:end -->"` in a
+    lesson hid that lesson from the one command meant to find it."""
+
+    def test_comment_markers_in_the_text_are_refused_and_nothing_is_written(self):
+        self.ok("add", "first note, an ordinary one")
+        for bad in ("pass the marker <!-- skillnote:end --> as the last argument",
+                    "second: bad <!-- id:n1x1 source:forge --> trailing text",
+                    "a stray closer --> in the middle"):
+            r = self.note("add", bad)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("<!--", r.stderr)
+        listed = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertEqual([n["text"] for n in listed], ["first note, an ordinary one"])
+
+    def test_comment_markers_in_the_why_are_refused_too(self):
+        r = self.note("add", "an ordinary note", "--why", "because <!-- skillnote:end --> said so")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertFalse(self.claude_md.exists(), "a refused note still wrote the file")
+
+    def test_a_newline_in_the_text_or_the_why_becomes_a_space(self):
+        self.ok("add", "line one\nline two", "--why", "reason one\nreason two")
+        lines = self.block_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("line one line two", lines[0])
+        self.assertIn("reason one reason two", lines[0])
+        listed = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertEqual(listed[0]["text"], "line one line two")
+
+    def test_text_after_a_double_dash_may_begin_with_a_dash(self):
+        self.ok("add", "--scope", "project", "--", "--scope global was the mistake; use project")
+        listed = json.loads(self.ok("list", "--scope", "project", "--json").stdout)
+        self.assertEqual(listed[0]["text"], "--scope global was the mistake; use project")
+
+
 class BackupTest(SkillnoteCase):
 
     def backups(self, path=None):

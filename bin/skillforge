@@ -177,7 +177,7 @@
 #                                 learns it, and where they are told how to turn it on.
 #   SKILLFORGE_SURFER_BIN         The `surfer` executable `doctor` probes, instead of
 #                                 asking PATH for it. claude-history-surfer is a real
-#                                 dependency of hooks/mission.sh, so the PASS branch can
+#                                 dependency of the mission, so the PASS branch can
 #                                 only be reached on a machine that has it; this points
 #                                 the check at a real checkout's bin/surfer rather than
 #                                 standing a fake one up, which would test nothing. For
@@ -1958,37 +1958,46 @@ doctor_review() {
 }
 
 # `surfer` IS A DEPENDENCY, NOT A FEATURE OF THIS PACKAGE, and that is why it gets a row.
-# hooks/mission.sh states the user's own requests back verbatim, and the only place those
-# exist as data is claude-history-surfer's per-project JSONL -- this package deliberately
-# keeps no second copy of them. So without `surfer` the mission hook still runs, still
-# exits 0, and delivers nothing at any of its five moments: quiet in exactly the way a
-# session with nothing to restate is quiet, which is the shape of failure `doctor` exists
-# for. FAIL rather than WARN, because five wirings are pointing at it.
+# The mission -- the user's own requests stated back verbatim -- is the mod's job since
+# 2026-10-03 (mod/compound; hooks/mission.sh is no longer wired), and the only place those
+# requests exist as DURABLE data is claude-history-surfer's per-project JSONL. This package
+# deliberately keeps no second copy of them.
 #
 # `surfer stats` and not `surfer --version`: the question is not whether the CLI runs but
 # whether it can READ ITS STORE, and a store that has moved, gone unreadable, or was never
 # scaffolded answers the second question and not the first.
 #
-# THE VERDICT FOR A MISSING SURFER IS NOT FIXED, and the reason is doctor's own definition
-# of FAIL: "this package is not doing something it says it does". A machine that wires the
-# mission hook and has no surfer has five entries pointing at a hook that can never speak,
-# which is exactly that. A machine that wires nothing -- a fresh checkout, a state
-# directory being driven by a test, a config this doctor is only reading -- is not silently
-# broken, it is simply not installed, and calling that a FAIL would put a non-fault on the
-# exit status of every run. WARN there, and say what would make it a fault.
+# A MISSING SURFER IS A WARN EITHER WAY NOW, and the two messages differ because the loss
+# does. The shell hook read that store and nothing else, so wired without surfer it
+# delivered nothing at all, and that was a FAIL. The mod falls back to the prompts the
+# running process saw submitted, so with the mod enabled and no surfer the mission still
+# lands inside one process and is lost across a resume or a compaction in a new one:
+# degraded, said out loud, and not "this package is not doing something it says it does".
+# With the mod not enabled nothing is delivered and nothing is silent either.
 #
 # THE INSTALL LINE NAMES A REPOSITORY AND NOT A PIPE-TO-SHELL ONE-LINER, deliberately:
 # this file and bin/skillreport are both held to containing no network call at all
 # (tests/test_ledger.py, which greps for the fetch commands by name), and such a line
 # sitting in a reporting CLI is the shape that guard exists to keep out -- quoted inside a
 # message or not, since a grep cannot tell those apart and should not have to.
-mission_wired() {   # 0 when settings.json wires hooks/mission.sh, 1 when it does not
+#
+# "ENABLED" IS ONE ELEMENT OF A PATH LIST: install adds <app home>/mod/compound to
+# settings.json's env.CLAUDE_CODE_PLUGIN_DIRS, a colon-separated list other plugins share.
+# The suffix is read from the installer (MOD_DIR), which is the only place it is spelled,
+# and matched as a whole trailing path, so `/x/notmod/compound` is not ours. A trailing
+# slash on the element is tolerated. Loaded as a plugin, hooks/hooks.json names the module
+# instead and this cannot see it; the messages below say so.
+mission_wired() {   # 0 when settings.json enables the mod, 1 when it does not
   mw_f="$(claude_dir)/settings.json"
   [ -f "$mw_f" ] || return 1
-  mw_m="$(installer_const MISSION_MARKER)"
+  mw_m="$(installer_const MOD_DIR)"
   [ -n "$mw_m" ] || return 1
-  jq -r '[(.hooks // {}) | to_entries[] | .value[]? | (.hooks // [])[]? | (.command // "")] | .[]' \
-     "$mw_f" 2>/dev/null | grep -q -F -- "$mw_m"
+  jq -e --arg m "$mw_m" '
+      (.env // {}) as $e
+      | (if ($e | type) == "object" then ($e.CLAUDE_CODE_PLUGIN_DIRS // "") else "" end) as $v
+      | (if ($v | type) == "string" then $v else "" end)
+      | split(":") | map(sub("/+$"; ""))
+      | any(.[]; . == $m or endswith("/" + $m))' "$mw_f" >/dev/null 2>&1
 }
 SURFER_INSTALL_HINT="Install claude-history-surfer (github.com/ContextLab/claude-history-surfer); this package's own install.sh does it for you."
 doctor_surfer() {
@@ -2001,14 +2010,12 @@ doctor_surfer() {
   else
     du_bin="$(command -v surfer 2>/dev/null || true)"
   fi
-  du_verdict=WARN
-  du_because=" Nothing wires hooks/mission.sh in $(claude_dir)/settings.json, so nothing is silent yet; this becomes a fault the moment install.sh wires it, and cannot be seen from here at all if this repo is loaded as a plugin."
+  du_because=" The mod (mod/compound) is not enabled in $(claude_dir)/settings.json, so nothing there states the mission and nothing is silent; this cannot be seen from here at all if this repo is loaded as a plugin."
   if mission_wired; then
-    du_verdict=FAIL
-    du_because=" hooks/mission.sh is wired in $(claude_dir)/settings.json and reads its prompt store and nothing else, so all five of those wirings deliver nothing, silently."
+    du_because=" The mod is enabled in $(claude_dir)/settings.json and falls back to the prompts the running process saw submitted, so the mission does not survive a resume or a compaction in a new process without history-surfer."
   fi
   if [ -z "$du_bin" ]; then
-    dr "$du_verdict" surfer "surfer is not on PATH.$du_because $SURFER_INSTALL_HINT"
+    dr WARN surfer "surfer is not on PATH.$du_because $SURFER_INSTALL_HINT"
     return 0
   fi
   # PYTHONDONTWRITEBYTECODE, because `doctor` promises it changes nothing but its own
@@ -2020,7 +2027,7 @@ doctor_surfer() {
   du_out="$(PYTHONDONTWRITEBYTECODE=1 "$du_bin" stats 2>&1)"; du_rc=$?
   if [ "$du_rc" -ne 0 ]; then
     du_tail="$(printf '%s\n' "$du_out" | tail -n 1)"
-    dr "$du_verdict" surfer "$du_bin is there but 'surfer stats' exited $du_rc: ${du_tail:-no output at all}. The mission hook reads that same store, so it has nothing to state either.$du_because"
+    dr WARN surfer "$du_bin is there but 'surfer stats' exited $du_rc: ${du_tail:-no output at all}. The mission reads that same store, so it is no better off than with no surfer at all.$du_because"
     return 0
   fi
   # The total is on STDERR ("N prompt(s) across current project."), which is why the call
@@ -2034,15 +2041,21 @@ doctor_surfer() {
   fi
 }
 
-# THE MISSION STORE IS WHERE DELIVERY BECOMES COUNTABLE. hooks/mission.sh claims each
-# event under <state>/mission/<session>/ so that the two wirings' duplicate delivery is a
-# no-op, and appends one row per delivery to <state>/mission/hits.jsonl. An unwritable
-# directory therefore does not stop the mission -- it stops the CLAIM, so every moment is
-# stated twice and nothing is recorded, which is the one failure here that looks like
-# working harder. An absent directory is not a fault: it is what a machine that has not
-# started a session since installing looks like, so it is a WARN that says which.
+# THE MOD'S LOG IS WHERE DELIVERY BECOMES COUNTABLE. The mod's mission hooks append one row
+# per delivery to <state>/mod/mission.jsonl -- `ts`, `session`, `moment`, `agent`, `chars`
+# -- and create <state>/mod on the first one. So this row answers three things in order:
+# is the mod enabled at all, can its directory take a write, and does what it wrote parse.
+#
+# NOT ENABLED IS A WARN AND IT IS CHECKED FIRST, because a log left by an earlier install
+# would otherwise read as a mission that is being delivered. An absent directory under an
+# enabled mod is a WARN too: it is what a machine that has not started a session since
+# installing looks like, so the message says which.
 doctor_mission() {
-  dm_dir="$STATE_ROOT/mission"
+  dm_dir="$STATE_ROOT/mod"
+  if ! mission_wired; then
+    dr WARN mission "the mod (mod/compound) is not enabled in $(claude_dir)/settings.json: env.CLAUDE_CODE_PLUGIN_DIRS has no element ending in $(installer_const MOD_DIR), so nothing there states the mission. install.sh adds it; this cannot be seen from here if this repo is loaded as a plugin."
+    return 0
+  fi
   if [ ! -d "$dm_dir" ]; then
     dr WARN mission "no $dm_dir, so the mission has never been delivered against this state. Expected before the first session after installing; a fault if sessions have run since."
     return 0
@@ -2053,10 +2066,10 @@ doctor_mission() {
   if ( : > "$dm_probe" ) 2>/dev/null; then
     rm -f "$dm_probe" 2>/dev/null
   else
-    dr FAIL mission "$dm_dir will not accept a write. The per-event claim lives there, so with both wirings active every moment is delivered twice and no delivery is recorded."
+    dr FAIL mission "$dm_dir will not accept a write. The mod appends every delivery there, so the mission is still stated and no delivery is recorded."
     return 0
   fi
-  dm_hits="$dm_dir/hits.jsonl"
+  dm_hits="$dm_dir/mission.jsonl"
   if [ ! -s "$dm_hits" ]; then
     dr PASS mission "$dm_dir is writable; 0 deliveries recorded"
     return 0
@@ -2066,14 +2079,15 @@ doctor_mission() {
   # the good ones with it.
   dm_pair="$(jq -r -R -n '[inputs | select(test("^[[:space:]]*$") | not)] as $l
                        | [$l[] | fromjson? | select(type == "object")] as $o
-                       | "\($o | length) \($l | length) \([$o[] | .moment // empty | if . == "subagent" then "dispatch" else . end] | unique | length)"' \
+                       | "\($o | length) \($l | length) \([$o[] | .moment // empty | if . == "subagent" then "dispatch" elif . == "compact" then "resume" else . end] | unique | length)"' \
              < "$dm_hits" 2>/dev/null)"
   dm_ok="$(int_or_zero "$(printf '%s' "$dm_pair" | cut -d" " -f1)")"
   dm_all="$(int_or_zero "$(printf '%s' "$dm_pair" | cut -d" " -f2)")"
   dm_moments="$(int_or_zero "$(printf '%s' "$dm_pair" | cut -d" " -f3)")"
-  # Six labels, five moments: `dispatch` (PreToolUse on Agent, to the parent) and
-  # `subagent` (SubagentStart, to the child) are the one moment "before an expensive task"
-  # reached from two events, so the jq above folds them before counting.
+  # Seven labels, five moments. `dispatch` (to the parent, before an Agent call) and
+  # `subagent` (to the child) are the one moment "before an expensive task" reached from
+  # two hooks; `compact` and `resume` are the one moment "the context was replaced",
+  # reached in the same process and in a new one. The jq above folds both pairs.
   if [ "$dm_all" -eq 0 ]; then
     dr PASS mission "$dm_dir is writable; 0 deliveries recorded"
   elif [ "$dm_ok" -lt "$dm_all" ]; then

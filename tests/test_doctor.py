@@ -47,7 +47,7 @@ ALL_CHECKS = ("jq", "state", "settings", "statusline", "skills", "surfer",
 def real_surfer():
     """A REAL `surfer` executable, or None.
 
-    claude-history-surfer is a dependency of hooks/mission.sh, and the doctor row that
+    claude-history-surfer is a dependency of the mission, and the doctor row that
     reports it can only come out PASS on a machine that has it. Standing a two-line stub
     up on PATH would satisfy `command -v` and prove nothing about `surfer stats`, which is
     the half of the check that matters, so this looks for the real thing and the tests
@@ -87,6 +87,11 @@ def installer_const(name):
         if m:
             return m.group(1)
     raise AssertionError("%s is not defined in %s" % (name, INSTALLER))
+
+
+# What install.sh writes into env.CLAUDE_CODE_PLUGIN_DIRS: this checkout's mod directory,
+# built from the constant doctor itself reads.
+MOD_ENABLED = "%s/%s" % (REPO, installer_const("MOD_DIR"))
 
 
 def hooks_json_entry_count():
@@ -156,12 +161,16 @@ class DoctorCase(unittest.TestCase):
 
     # ------------------------------------------------------------------ settings.json
 
-    def write_settings(self, drop_marker=None, statusline=True, malformed=False):
-        """A settings.json wired exactly as hooks/hooks.json wires the plugin.
+    def write_settings(self, drop_marker=None, statusline=True, malformed=False,
+                       plugin_dirs=MOD_ENABLED):
+        """A settings.json wired exactly as hooks/hooks.json wires the plugin, with the
+        mod enabled the way install.sh enables it.
 
         Built by TRANSFORMING hooks/hooks.json rather than by hand, so the fixture cannot
         drift from the file the doctor counts against; tests/test_plugin.py already pins
-        that file against what install.sh writes.
+        that file against what install.sh writes. ``plugin_dirs`` is the value of
+        env.CLAUDE_CODE_PLUGIN_DIRS: the installer's own element by default, ``None`` for
+        no `env` at all, or any string a test wants doctor to read.
         """
         d = self.state / ".claude"
         d.mkdir(parents=True, exist_ok=True)
@@ -186,6 +195,8 @@ class DoctorCase(unittest.TestCase):
             if keep:
                 hooks[event] = keep
         settings = {"hooks": hooks}
+        if plugin_dirs is not None:
+            settings["env"] = {"CLAUDE_CODE_PLUGIN_DIRS": plugin_dirs}
         if statusline:
             settings["statusLine"] = {
                 "type": "command",
@@ -686,14 +697,16 @@ class TheReviewCheck(DoctorCase):
 # --------------------------------------------------------------------------- surfer
 
 class TheSurferCheck(DoctorCase):
-    """`surfer` is a real dependency of hooks/mission.sh and of nothing else here.
+    """`surfer` is a real dependency of the mission and of nothing else here.
 
-    The mission hook states the user's own requests back verbatim, and the only place
-    those exist as data is claude-history-surfer's per-project JSONL -- this package keeps
-    no second copy of them on purpose. So without `surfer` the hook still runs, still
-    exits 0, and delivers nothing at any of its five wirings: quiet in exactly the way a
-    session with nothing to restate is quiet. That is the shape of failure doctor exists
-    for, which is why this is a FAIL and not a WARN.
+    The mission states the user's own requests back verbatim, and the only place those
+    exist as DURABLE data is claude-history-surfer's per-project JSONL -- this package
+    keeps no second copy of them on purpose. Until 2026-10-03 the mission was a shell hook
+    that read that store and nothing else, so wired without `surfer` it delivered nothing
+    and this row was a FAIL. It is the mod's job now, and the mod falls back to the
+    prompts the running process saw submitted: without `surfer` the mission still lands
+    inside one process and is lost across a resume or a compaction in a new one. That is
+    a degradation the row has to SAY, and it is a WARN.
 
     Nothing here stands a fake `surfer` up. A stub would satisfy `command -v` and prove
     nothing about `surfer stats`, which is the half that answers whether the STORE can be
@@ -704,53 +717,87 @@ class TheSurferCheck(DoctorCase):
         return self.doctor(SKILLFORGE_NOW=T0, SKILLFORGE_SURFER_BIN="",
                            PATH="/usr/bin:/bin", **extra)
 
-    def test_no_surfer_where_the_mission_is_wired_fails(self):
+    def test_no_surfer_where_the_mod_is_enabled_warns_and_no_longer_fails(self):
         self.write_settings()
         r = self.no_surfer()
-        self.assertEqual(verdict(r.stdout, "surfer"), "FAIL",
+        self.assertEqual(verdict(r.stdout, "surfer"), "WARN",
                          line_for(r.stdout, "surfer"))
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(verdict(r.stdout, "settings"), "PASS",
+                         "the fixture is meant to be a complete install")
+        self.assertEqual(r.returncode, 0, r.stdout)
 
-    def test_no_surfer_where_nothing_is_wired_warns_instead(self):
-        """doctor's own definition of FAIL is "this package is not doing something it says
-        it does". A config that wires no mission hook is not silently broken, it is not
-        installed, and putting that on the exit status would fail every run against a
-        state directory nobody has installed into -- which is most of this suite."""
+    def test_no_surfer_where_nothing_is_wired_warns(self):
+        """A config with no settings.json at all is not installed, and putting that on
+        the exit status would fail every run against a state directory nobody has
+        installed into -- which is most of this suite."""
         r = self.no_surfer()
         self.assertEqual(verdict(r.stdout, "surfer"), "WARN",
                          line_for(r.stdout, "surfer"))
         self.assertEqual(r.returncode, 0, r.stdout)
 
-    def test_the_warning_says_what_would_make_it_a_fault(self):
+    def test_the_warning_without_the_mod_says_nothing_is_silent_and_names_the_plugin_path(self):
         line = line_for(self.no_surfer().stdout, "surfer")
-        self.assertIn("Nothing wires", line)
+        self.assertIn("not enabled", line)
         self.assertIn("plugin", line,
-                      "a plugin install wires the mission where this cannot see it, and "
+                      "a plugin install enables the mod where this cannot see it, and "
                       "the line has to say so")
+        self.assertNotIn("falls back", line)
 
-    def test_the_failing_line_says_what_stops_working_and_how_to_fix_it(self):
-        """The reader of this line has no other surface that connects a missing CLI to
-        five silent hook wirings, so the line has to carry both halves."""
+    def test_the_warning_with_the_mod_says_what_is_lost_and_how_to_fix_it(self):
+        """The reader of this line has no other surface that connects a missing CLI to a
+        mission that vanishes on resume, so the line has to carry both halves."""
         self.write_settings()
         line = line_for(self.no_surfer().stdout, "surfer")
-        self.assertIn("mission.sh", line)
+        self.assertIn("falls back to the prompts the running process saw submitted", line)
+        self.assertIn("does not survive a resume or a compaction in a new process", line)
+        self.assertIn("without history-surfer", line)
         self.assertIn("claude-history-surfer", line)
+        self.assertNotIn("mission.sh", line,
+                         "the shell hook is not wired; the line must not blame it")
 
-    def test_the_verdict_follows_the_wiring_and_not_the_settings_file_existing(self):
-        """The distinction is the MISSION entry, not a settings.json. A config wiring
-        every other hook of ours and not this one is a config where a missing surfer
-        breaks nothing.
-
-        The exit status is not asserted here and could not be: the settings check calls
-        that same config a PARTIAL wiring and FAILs it, which is correct and is a
-        different fault. This test is about which verdict the surfer row reaches.
-        """
-        self.write_settings(drop_marker="mission.sh")
+    def test_the_message_follows_the_mod_and_not_the_settings_file_existing(self):
+        """The distinction is the mod's element in env.CLAUDE_CODE_PLUGIN_DIRS, not a
+        settings.json. A config wiring every hook of ours with no `env` at all has
+        nothing stating the mission, and the row must not say something falls back."""
+        self.write_settings(plugin_dirs=None)
         r = self.no_surfer()
-        self.assertEqual(verdict(r.stdout, "surfer"), "WARN",
-                         line_for(r.stdout, "surfer"))
-        self.assertEqual(verdict(r.stdout, "settings"), "FAIL",
-                         "the fixture is meant to be a partial wiring")
+        line = line_for(r.stdout, "surfer")
+        self.assertEqual(verdict(r.stdout, "surfer"), "WARN", line)
+        self.assertIn("not enabled", line)
+        self.assertNotIn("falls back", line)
+
+    def test_enabled_means_an_element_ending_in_the_installer_s_suffix(self):
+        """One element of a path list other plugins share. Ours is recognised wherever
+        the checkout lives, beside foreign elements, with a trailing slash; a directory
+        that merely ends in the same letters is somebody else's."""
+        self.assertEqual(installer_const("MOD_DIR"), "mod/compound")
+        enabled = ("/opt/app/mod/compound",
+                   "/some/other/plugin:/opt/app/mod/compound",
+                   "/opt/app/mod/compound:/some/other/plugin",
+                   "/opt/app/mod/compound/")
+        disabled = ("", "/some/other/plugin", "/opt/app/notmod/compound",
+                    "/opt/app/mod/compound-lessons", "/opt/app/mod/compound/hooks")
+        for value in enabled:
+            self.write_settings(plugin_dirs=value)
+            self.assertIn("falls back", line_for(self.no_surfer().stdout, "surfer"),
+                          "%r should read as the mod enabled" % value)
+        for value in disabled:
+            self.write_settings(plugin_dirs=value)
+            self.assertIn("not enabled", line_for(self.no_surfer().stdout, "surfer"),
+                          "%r should not read as the mod enabled" % value)
+
+    def test_the_old_shell_wiring_alone_is_not_the_mod_being_enabled(self):
+        """An install from before 2026-10-03 left `hooks/mission.sh` in settings.json and
+        no `env`. That is not the mod, and doctor must not read it as one."""
+        f = self.write_settings(plugin_dirs=None)
+        data = json.loads(f.read_text())
+        data["hooks"].setdefault("SessionStart", []).append(
+            {"hooks": [{"type": "command", "timeout": 10,
+                        "command": '"%s/hooks/mission.sh"' % REPO}]})
+        f.write_text(json.dumps(data, indent=2))
+        line = line_for(self.no_surfer().stdout, "surfer")
+        self.assertIn("not enabled", line)
+        self.assertEqual(verdict(self.no_surfer().stdout, "mission"), "WARN")
 
     def test_a_pin_that_is_not_executable_fails_rather_than_probing_something_else(self):
         """Never guess. Falling back to PATH when the pin is wrong would report on a
@@ -776,10 +823,12 @@ class TheSurferCheck(DoctorCase):
                          "the passing line must carry the count it read")
 
     @unittest.skipUnless(SURFER, "no real surfer on this machine")
-    def test_a_surfer_that_cannot_read_its_store_fails_even_though_it_is_on_path(self):
+    def test_a_surfer_that_cannot_read_its_store_warns_even_though_it_is_on_path(self):
         """`command -v` is not the question. A CLI that is present and cannot read its
-        store leaves the mission hook exactly as empty-handed as no CLI at all, and only
-        RUNNING it can tell the two apart.
+        store leaves the mission exactly as badly off as no CLI at all -- the mod's
+        fallback and nothing durable -- and only RUNNING it can tell the two apart. So it
+        gets the verdict a missing CLI gets, which is a WARN since 2026-10-03, and the
+        line names the command that failed.
 
         The fault is a real one: a prompt store whose directory the process cannot search
         -- a `chmod 000`, which is what a restored backup, a wrong `sudo` or an ACL leaves
@@ -794,28 +843,67 @@ class TheSurferCheck(DoctorCase):
             r = self.doctor(SKILLFORGE_NOW=T0, CLAUDE_HISTORY_SURFER_DIR=str(broken))
         finally:
             os.chmod(str(broken / "projects"), 0o755)
-        self.assertEqual(verdict(r.stdout, "surfer"), "FAIL",
+        self.assertEqual(verdict(r.stdout, "surfer"), "WARN",
                          line_for(r.stdout, "surfer"))
         self.assertIn("surfer stats", line_for(r.stdout, "surfer"))
-        self.assertEqual(r.returncode, 1)
+        self.assertIn("falls back", line_for(r.stdout, "surfer"))
+        self.assertEqual(r.returncode, 0, r.stdout)
 
 
 # -------------------------------------------------------------------------- mission
 
 class TheMissionStoreCheck(DoctorCase):
-    """<state>/mission/ is where the mission hook's per-event claim and its delivery log
-    live, and it is the only place either can be seen from.
+    """<state>/mod/mission.jsonl is the mod's delivery log -- one row per delivery, with
+    `ts`, `session`, `moment`, `agent` and `chars` -- and it is the only place a delivery
+    can be seen from.
 
-    The claim is what makes the two wirings' duplicate delivery a no-op, so an unwritable
-    directory does not stop the mission -- it stops the RECORD, and every moment is then
-    stated twice with nothing counting it. That is the one failure here that looks from
-    the outside like the hook working harder.
+    The row answers three questions in order: is the mod enabled in settings.json at
+    all, will its directory take a write, and does what it wrote parse. Not enabled comes
+    FIRST, because a log an earlier install left behind would otherwise read as a mission
+    that is being delivered.
     """
 
+    def setUp(self):
+        super().setUp()
+        self.write_settings()
+
     def mission_dir(self):
-        d = self.state / "mission"
+        d = self.state / "mod"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def rows(self, *moments):
+        return "".join(json.dumps({"ts": T0 + i, "session": "s1", "moment": m,
+                                   "agent": "", "chars": 600 + i}) + "\n"
+                       for i, m in enumerate(moments))
+
+    def test_a_mod_that_is_not_enabled_warns_and_says_where_it_looked(self):
+        self.write_settings(plugin_dirs=None)
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        line = line_for(r.stdout, "mission")
+        self.assertEqual(verdict(r.stdout, "mission"), "WARN", line)
+        self.assertIn("not enabled", line)
+        self.assertIn("CLAUDE_CODE_PLUGIN_DIRS", line)
+        self.assertIn("mod/compound", line)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_no_settings_file_at_all_is_the_mod_not_enabled(self):
+        (self.state / ".claude" / "settings.json").unlink()
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "mission"), "WARN",
+                         line_for(r.stdout, "mission"))
+        self.assertIn("not enabled", line_for(r.stdout, "mission"))
+
+    def test_a_log_left_behind_does_not_read_as_delivery_once_the_mod_is_off(self):
+        """Not enabled is checked before the log is read. Three good rows from an
+        earlier install are history, not a mission being delivered."""
+        (self.mission_dir() / "mission.jsonl").write_text(
+            self.rows("ambiguity", "dispatch", "completion"))
+        self.write_settings(plugin_dirs="/some/other/plugin")
+        r = self.doctor(SKILLFORGE_NOW=T0)
+        self.assertEqual(verdict(r.stdout, "mission"), "WARN",
+                         line_for(r.stdout, "mission"))
+        self.assertNotIn("deliver", line_for(r.stdout, "mission").replace("not enabled", ""))
 
     def test_no_store_at_all_warns_rather_than_fails(self):
         """A machine that has not started a session since installing looks exactly like
@@ -827,6 +915,7 @@ class TheMissionStoreCheck(DoctorCase):
 
     def test_the_warning_says_when_it_is_expected_and_when_it_is_not(self):
         line = line_for(self.doctor(SKILLFORGE_NOW=T0).stdout, "mission")
+        self.assertIn(str(self.state / "mod"), line)
         self.assertIn("Expected", line)
         self.assertIn("a fault if", line)
 
@@ -837,30 +926,50 @@ class TheMissionStoreCheck(DoctorCase):
                          line_for(r.stdout, "mission"))
         self.assertIn("0 deliveries", line_for(r.stdout, "mission"))
 
-    def test_an_empty_hits_file_is_zero_rows_and_still_passes(self):
-        (self.mission_dir() / "hits.jsonl").write_text("")
+    def test_an_empty_log_is_zero_rows_and_still_passes(self):
+        (self.mission_dir() / "mission.jsonl").write_text("")
         r = self.doctor(SKILLFORGE_NOW=T0)
         self.assertEqual(verdict(r.stdout, "mission"), "PASS",
                          line_for(r.stdout, "mission"))
 
+    def test_the_shell_hook_s_old_log_is_not_what_is_read(self):
+        """`<state>/mission/hits.jsonl` was hooks/mission.sh's log. A machine upgraded on
+        2026-10-03 still has one, and its rows are not the mod's deliveries."""
+        old = self.state / "mission"
+        old.mkdir()
+        (old / "hits.jsonl").write_text(self.rows("resume", "dispatch", "periodic"))
+        self.mission_dir()
+        line = line_for(self.doctor(SKILLFORGE_NOW=T0).stdout, "mission")
+        self.assertIn("0 deliveries", line)
+        self.assertIn(str(self.state / "mod"), line)
+
     def test_recorded_deliveries_pass_and_are_counted_by_moment(self):
-        rows = [{"moment": "compaction", "session": "s1", "chars": 900},
-                {"moment": "dispatch", "session": "s1", "agent_id": "a1", "chars": 610},
-                {"moment": "dispatch", "session": "s1", "agent_id": "a2", "chars": 610}]
-        (self.mission_dir() / "hits.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+        (self.mission_dir() / "mission.jsonl").write_text(
+            self.rows("compact", "dispatch", "dispatch"))
         r = self.doctor(SKILLFORGE_NOW=T0)
         line = line_for(r.stdout, "mission")
         self.assertEqual(verdict(r.stdout, "mission"), "PASS", line)
         self.assertIn("3 ", line)
+        self.assertIn("mission.jsonl", line)
         self.assertIn("2 of the five moments", line)
+
+    def test_seven_labels_are_five_moments(self):
+        """`dispatch` and `subagent` are one moment reached from two hooks, and so are
+        `compact` and `resume`. A log carrying all seven labels covers five moments, not
+        seven of five."""
+        (self.mission_dir() / "mission.jsonl").write_text(
+            self.rows("ambiguity", "compact", "resume", "dispatch", "subagent",
+                      "periodic", "completion"))
+        line = line_for(self.doctor(SKILLFORGE_NOW=T0).stdout, "mission")
+        self.assertIn("7 ", line)
+        self.assertIn("5 of the five moments", line)
 
     def test_a_line_that_does_not_parse_fails_and_says_how_many(self):
         """Every reader of a JSONL file here drops a bad line silently, so a delivery
         recorded on one is already missing from every count that would show whether any
         of this lands."""
-        (self.mission_dir() / "hits.jsonl").write_text(
-            json.dumps({"moment": "stop"}) + "\n" + "{truncated\n")
+        (self.mission_dir() / "mission.jsonl").write_text(
+            self.rows("completion") + "{truncated\n")
         r = self.doctor(SKILLFORGE_NOW=T0)
         self.assertEqual(verdict(r.stdout, "mission"), "FAIL",
                          line_for(r.stdout, "mission"))
@@ -876,7 +985,8 @@ class TheMissionStoreCheck(DoctorCase):
             os.chmod(str(d), 0o755)
         self.assertEqual(verdict(r.stdout, "mission"), "FAIL",
                          line_for(r.stdout, "mission"))
-        self.assertIn("delivered twice", line_for(r.stdout, "mission"))
+        self.assertIn("will not accept a write", line_for(r.stdout, "mission"))
+        self.assertIn("no delivery is recorded", line_for(r.stdout, "mission"))
         self.assertEqual(r.returncode, 1)
 
     def test_the_probe_file_is_never_left_behind(self):

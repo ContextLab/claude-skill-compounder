@@ -51,15 +51,25 @@ class ReviewOptInTest(unittest.TestCase):
 
     # ------------------------------------------------------------- default install
 
-    def test_default_install_does_not_touch_the_env_block(self):
+    # Install writes ONE key into `env` since 2026-10-03: the mod's directory, as an
+    # element of CLAUDE_CODE_PLUGIN_DIRS. So "the env block is untouched" is no longer the
+    # claim; the claim these tests exist for is that the PAID switch is never written by
+    # a default install, and that is pinned by naming every key that may be there.
+    MOD_KEY = "CLAUDE_CODE_PLUGIN_DIRS"
+
+    def test_default_install_does_not_write_the_review_switch(self):
         self.write_settings({"env": {"MY_OWN": "keep"}})
         self.install()
-        self.assertEqual(self.read()["env"], {"MY_OWN": "keep"})
+        env = self.read()["env"]
+        self.assertEqual(env["MY_OWN"], "keep")
+        self.assertEqual(sorted(env), sorted(["MY_OWN", self.MOD_KEY]))
+        self.assertNotIn("SKILL_COMPOUNDER_REVIEW", env)
         self.assertNotIn("review_env_set", self.manifest())
 
-    def test_install_with_no_settings_writes_no_env_block(self):
+    def test_install_with_no_settings_writes_no_review_switch(self):
         self.install()
-        self.assertNotIn("env", self.read())
+        self.assertEqual(list(self.read().get("env", {})), [self.MOD_KEY])
+        self.assertNotIn("review_env_set", self.manifest())
 
     # ------------------------------------------------------------------ set_env
 
@@ -158,9 +168,12 @@ class ReviewOptInTest(unittest.TestCase):
 
     def test_disable_review_on_a_key_never_set_is_a_no_op(self):
         self.install()
+        before = self.settings.read_bytes()
         result = installer.disable_review(str(self.claude), str(self.state))
         self.assertFalse(result["changed"])
-        self.assertNotIn("env", self.read())
+        self.assertEqual(self.settings.read_bytes(), before,
+                         "a no-op disable rewrote settings.json")
+        self.assertEqual(list(self.read()["env"]), [self.MOD_KEY])
 
     # ------------------------------------------------------------------ uninstall
 

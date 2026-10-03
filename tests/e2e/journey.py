@@ -55,16 +55,16 @@ external API key`, where no credential at all answers `Not logged in · Please r
 a real token has been made yet, is in docs/e2e.md.
 
 `--check-auth` spends ONE call answering whether the chosen mode can authenticate, and
-exits. The journey is thirteen calls; twelve of them are wasted discovering a stale token
+exits. The journey is seven calls; six of them are wasted discovering a stale token
 at step 2.
 
-COST. Aim: under 15 `claude -p` calls, all `--model sonnet` with a small `--max-turns`.
+COST. Seven `claude -p` calls, all `--model sonnet` with a small `--max-turns`.
 The forge step drives the CLI half only -- no builder agents, no red-team agents -- which
 is what keeps step 7 to seconds rather than the median 3.3 hours a real forge takes.
 
-THE STEPS RUN IN THE ORDER OF `STEPS`, NOT IN NUMBER ORDER. 12-14 (the mission)
-were added after 11 (uninstall) was numbered, and uninstall has to be last, so
-the run order is 0-10, 12-14, 11. See the comment on `STEPS`.
+THE STEPS RUN IN NUMBER ORDER AGAIN, 0-11, with uninstall last. Steps 12-14 (the shell
+mission hook's wiring) and 15-16 (the shell lesson's) left with the wiring they tested;
+the mod's own journeys cover both now. See the comment on `STEPS`.
 
 `--no-model` runs every non-model step and records the rest SKIPPED. Use it to check the
 harness itself for free before spending anything.
@@ -181,7 +181,7 @@ class Journey:
         # docstring and docs/e2e.md.
         self.config_mode = getattr(args, "config_dir", "ambient")
         # Set to a reason string to record every REMAINING step SKIPPED. The only thing
-        # that sets it is step 0 failing its authentication probe in fresh mode: twelve
+        # that sets it is step 0 failing its authentication probe in fresh mode: six
         # further calls cannot answer a question a bad token already answered.
         self.abort = None
 
@@ -231,17 +231,12 @@ class Journey:
     def surfer_store(self):
         """history-surfer's data directory, redirected INTO <out>.
 
-        ONE variable moves BOTH ends. `hooks/mission.sh` reads the user's own prompts out
-        of history-surfer's store and keeps no copy of them, and it derives the store the
-        way history-surfer does: `MISSION_SURFER_ROOT`, then `CLAUDE_HISTORY_SURFER_DIR`,
-        then `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer`. So setting
-        history-surfer's own override sends the writer and the reader to the same place,
-        and this run cannot reach the operator's real `~/.claude/history-surfer`.
-
-        It took two until 2026-09-03: the hook's root was the literal
-        `$HOME/.claude/history-surfer`, so `MISSION_SURFER_ROOT` had to be set here as
-        well or every mission step measured a gap rather than the hook. That was a
-        product defect, and this journey is what found it.
+        ONE variable moves BOTH ends. The mission reads the user's own prompts out of
+        history-surfer's store, and it derives the store the way history-surfer does:
+        `MISSION_SURFER_ROOT`, then `CLAUDE_HISTORY_SURFER_DIR`, then
+        `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/history-surfer`. So setting history-surfer's
+        own override sends the writer and the reader to the same place, and this run
+        cannot reach the operator's real `~/.claude/history-surfer`.
         """
         return self.out / "surfer-store"
 
@@ -259,8 +254,7 @@ class Journey:
         e["SKILLFORGE_SKILLS_DIR"] = str(self.claude_dir / "skills")
         # Both ends of the mission's one source of truth, pointed inside <out> by the ONE
         # variable history-surfer itself reads. Nothing this run does can reach the
-        # operator's real ~/.claude/history-surfer, and mission.sh's rung 2 is what makes
-        # the reader follow the writer without a second variable.
+        # operator's real ~/.claude/history-surfer.
         e["CLAUDE_HISTORY_SURFER_DIR"] = str(self.surfer_store)
         if self.config_mode == "fresh":
             # The isolation of issue #42. Every process this journey starts -- the
@@ -405,8 +399,8 @@ class Journey:
             w("")
         w("## Summary")
         w("")
-        w("Steps are listed in the order they RAN, which is not number order: 12-14 were "
-          "added after 11 was numbered, and 11 tears the install down, so it runs last.")
+        w("Steps are listed in the order they ran. 11 tears the install down, so it "
+          "runs last.")
         w("")
         w("| step | what | result | evidence |")
         w("|-|-|-|-|")
@@ -576,7 +570,7 @@ def auth_probe(j, config_dir=None, *, label="claude-auth-probe"):
 def check_auth_only(j):
     """`--check-auth`: spend ONE call on the question, print the CLI's own answer, stop.
 
-    The full journey is thirteen calls. Twelve of them are spent before anything would
+    The full journey is seven calls. Six of them are spent before anything would
     reveal a stale token, and a run that dies at step 2 has still spent step 0's call and
     built a report full of FAILs that all say the same thing. This is that one call, on
     its own, in whichever mode was asked for.
@@ -652,7 +646,7 @@ def step0_preflight(j):
             # will: a config directory with no stored login, authenticating on what the
             # environment handed it. If that failed there is nothing to fall back to --
             # falling back would silently restore the ambient identity the mode exists to
-            # remove -- so the run stops here rather than spending twelve more calls.
+            # remove -- so the run stops here rather than spending six more calls.
             if ok:
                 j.auth_mode = (
                     "PRIMARY: CLAUDE_CONFIG_DIR=<out>/claude, a self-contained config "
@@ -757,16 +751,15 @@ def step1_install(j):
             s.verdict("FAIL", "installer exited %d: %s" % (rc, err.strip()[:200]))
             return
 
-        # history-surfer is a DEPENDENCY as of wave 1: hooks/mission.sh reads the user's
-        # own prompts out of its store and keeps no copy, so without it the mission hook
-        # is inert. Steps 12-14 are the ones that fail if this did not happen; record
-        # here what the installer said and whether the capture hook actually landed.
+        # history-surfer is a DEPENDENCY: the mission reads the user's own prompts out of
+        # its store, and without it the mod has only what the running process saw
+        # submitted. Record here what the installer said and whether the capture hook
+        # actually landed.
         j.install_report = (out + err)
         j.surfer_line = next((ln.strip() for ln in (out + err).splitlines()
                               if ln.strip().startswith("surfer ")), "(no surfer line)")
         settings_text = j.settings.read_text()
-        j.surfer_wired = "history-surfer" in settings_text
-        s.observe("history-surfer, the mission hook's dependency",
+        s.observe("history-surfer, the mission's dependency",
                   "installer said: %s\n\ncapture hook in <out>/claude/settings.json: %s"
                   % (j.surfer_line,
                      "\n".join(ln.strip() for ln in settings_text.splitlines()
@@ -776,10 +769,7 @@ def step1_install(j):
                "TARGET settings.json, never whether the CLI is on PATH, and it wires an "
                "existing checkout rather than cloning a second one -- so what is asserted "
                "above is that a machine that already has history-surfer still gets the "
-               "capture hook in THIS config. Until 2026-09-03 the step returned on "
-               "`shutil.which(\"surfer\")` and this journey had to prune the PATH of that "
-               "one subprocess to measure the mission hook rather than a missing "
-               "dependency.")
+               "capture hook in THIS config.")
 
         settings = json.loads(j.settings.read_text())
         hooks = settings.get("hooks") or {}
@@ -795,6 +785,20 @@ def step1_install(j):
                           for e in entries if "hooks/" in e})
         s.observe("hook entries wired (%d entries over %d scripts)"
                   % (len(entries), len(scripts)), "\n".join(entries))
+
+        # The mod is what states the mission and writes the lesson down since
+        # 2026-10-03, and the settings.json path enables it with one element of a path
+        # list. mod/compound/tools/journey_mission.py is what drives it in a session;
+        # here the claim is only that install put it there and wired neither retired
+        # script.
+        mod_dirs = [d for d in str((settings.get("env") or {}).get(
+            "CLAUDE_CODE_PLUGIN_DIRS", "")).split(os.pathsep) if d]
+        mod_enabled = str(REPO / "mod" / "compound") in mod_dirs
+        retired = [e for e in entries if "mission.sh" in e or "repeat-gate.sh" in e]
+        s.observe("the mod, in env.CLAUDE_CODE_PLUGIN_DIRS",
+                  "%s\n\nenabled: %s\nretired shell hooks still wired: %s"
+                  % ("\n".join(d.replace(str(REPO), "<repo>") for d in mod_dirs)
+                     or "(empty)", mod_enabled, retired or "none"))
 
         skills = sorted(p.name for p in (j.claude_dir / "skills").iterdir()
                         if (p / "SKILL.md").exists()) if (
@@ -843,17 +847,19 @@ def step1_install(j):
                            "scripts**." % (claimed.group(0), len(entries), len(scripts)))
 
         ok = (len(entries) >= 12 and set(shipped) <= set(skills)
-              and set(shipped_clis) <= set(clis) and rc == 0)
+              and set(shipped_clis) <= set(clis) and rc == 0
+              and mod_enabled and not retired)
         if ok:
             s.verdict("PASS",
-                      "%d hook entries over %d scripts; all %d shipped skills and all "
-                      "%d CLIs linked; `skillforge doctor` exited 0."
+                      "%d hook entries over %d scripts; the mod enabled; all %d shipped "
+                      "skills and all %d CLIs linked; `skillforge doctor` exited 0."
                       % (len(entries), len(scripts), len(shipped), len(shipped_clis)))
         else:
             s.verdict("FAIL",
-                      "entries=%d skills=%d/%d clis=%d/%d doctor_rc=%d bad=%r"
-                      % (len(entries), len(skills), len(shipped), len(clis),
-                         len(shipped_clis), rc, doctor_bad[:3]))
+                      "entries=%d mod_enabled=%s retired=%r skills=%d/%d clis=%d/%d "
+                      "doctor_rc=%d bad=%r"
+                      % (len(entries), mod_enabled, retired, len(skills), len(shipped),
+                         len(clis), len(shipped_clis), rc, doctor_bad[:3]))
 
         # The scratch project the whole journey is about.
         j.run(["git", "init", "-q", str(j.project)], label="git-init")
@@ -1482,342 +1488,6 @@ def step10_report(j):
         s.finish()
 
 
-# ------------------------------------------------------------- the mission (steps 12-14)
-#
-# `hooks/mission.sh` states the user's own prompts, verbatim, at five moments. Three of
-# them are measured here, and they are the three a session cannot fake: after a
-# compaction has replaced the context, inside a subagent that never saw the prompt, and
-# at a completion claim. The other two (`dispatch`, `periodic`) fire on a clock or on an
-# expensive dispatch and are exercised incidentally by these same sessions.
-#
-# EVERY ONE DEPENDS ON history-surfer. The hook keeps no copy of the prompts; it reads
-# them out of history-surfer's store, so a run whose install could not put that
-# dependency into the throwaway config measures nothing. That case is a FAIL carrying the
-# installer's own sentence, never a silent pass.
-
-MISSION_PHRASE_12 = "the marmalade gantry audit"
-MISSION_PHRASE_13 = "the pemmican ledger rewrite"
-# The one word of it that nothing else on the machine says. A subagent answering with
-# THIS was told by the hook and by nothing else.
-MISSION_TOKEN_13 = "pemmican"
-MISSION_PHRASE_14 = "the sundial calibration sweep"
-
-# The first line hooks/mission.sh renders on its full-mission arms. A subagent quoting
-# THIS quoted nothing the parent typed: it is the hook's own framing.
-MISSION_PREAMBLE = "requests in this session, verbatim, oldest first"
-
-# `MISSION_STOP_MIN_TOOLS` is 8 by default. The Stop arm is worth one session, not eight
-# tool calls' worth of one, so the knob is turned down for that step's call ALONE -- the
-# hook reads it from the environment for exactly this purpose.
-STOP_MIN_TOOLS_FOR_STEP_14 = "2"
-
-STOP_CLAIM_RE = re.compile(
-    r"(^|[^A-Za-z])(done|complete|completed|finished|implemented|landed|"
-    r"all tests pass|all tests passed|all tests passing|ready to merge)([^A-Za-z]|$)",
-    re.I)
-
-
-def mission_hits(j, since=0):
-    """Rows hooks/mission.sh appended to <state>/mission/hits.jsonl."""
-    return jsonl(j.state_dir / "mission" / "hits.jsonl")[since:]
-
-
-def surfer_rows(j, sid=None):
-    """Prompt rows history-surfer captured for the scratch project."""
-    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(j.project)) or "unknown"
-    rows = jsonl(j.surfer_store / "projects" / slug / "prompts.jsonl")
-    if sid:
-        rows = [r for r in rows if r.get("session_id") == sid]
-    return rows
-
-
-def session_id_of(res):
-    """The session id of a call, from the stream's `init` event or any session_id."""
-    if res is None:
-        return ""
-    for ev in stream_events(res["out"]):
-        if ev.get("session_id"):
-            return ev["session_id"]
-    m = re.search(r'"session_id"\s*:\s*"([0-9a-f-]{8,})"', res["out"])
-    return m.group(1) if m else ""
-
-
-def assistant_turns(res):
-    """The assistant's text turns, in order, out of a stream-json transcript."""
-    turns = []
-    for ev in stream_events(res["out"] if res else ""):
-        if ev.get("type") == "assistant":
-            text = "".join(c.get("text", "")
-                           for c in ((ev.get("message") or {}).get("content") or [])
-                           if c.get("type") == "text")
-            if text.strip():
-                turns.append(text)
-    return turns
-
-
-def tool_results(res):
-    """Every tool_result body in a stream, as text."""
-    out = []
-    for ev in stream_events(res["out"] if res else ""):
-        if ev.get("type") != "user":
-            continue
-        for c in ((ev.get("message") or {}).get("content") or []):
-            if c.get("type") != "tool_result":
-                continue
-            body = c.get("content")
-            out.append(body if isinstance(body, str) else json.dumps(body))
-    return out
-
-
-def _mission_precondition(j, s):
-    """False (with the verdict already written) when the mission cannot be measured."""
-    if not getattr(j, "surfer_wired", False):
-        s.verdict("FAIL",
-                  "history-surfer is not wired into the throwaway config, so "
-                  "hooks/mission.sh has no store to read and cannot deliver anything. "
-                  "The installer said: %s" % getattr(j, "surfer_line", "(nothing)"))
-        return False
-    if j.args.no_model:
-        s.verdict("SKIPPED", "--no-model: every mission moment needs a real session")
-        return False
-    return True
-
-
-def step12_mission_compact(j):
-    s = j.step("12", "the mission survives a compaction (SessionStart source=compact)")
-    try:
-        if not _mission_precondition(j, s):
-            return
-        before = len(mission_hits(j))
-        prompt = ("I am working on %s for this project. Start by running `echo "
-                  "gantry-1` with the Bash tool, then reply with one short sentence "
-                  "saying you have started." % MISSION_PHRASE_12)
-        s.cmd("claude -p --output-format stream-json --permission-mode "
-              "bypassPermissions  < '... %s ...'" % MISSION_PHRASE_12)
-        res = j.claude(prompt, cwd=j.project, stream=True, max_turns=6,
-                       label="claude-mission-open",
-                       extra=["--permission-mode", "bypassPermissions"])
-        sid = session_id_of(res)
-        s.observe("session id, and the prompt history-surfer captured for it",
-                  "session_id=%s\n%s"
-                  % (sid or "(none)",
-                     "\n".join(json.dumps({k: v for k, v in r.items()
-                                           if k in ("seq", "prompt", "is_command",
-                                                    "text_final")})[:300]
-                               for r in surfer_rows(j, sid)) or
-                     "(NO ROWS: history-surfer captured nothing for this session)"))
-        if not sid:
-            s.verdict("FAIL", "no session id in the stream, so nothing can be resumed")
-            return
-
-        s.cmd("claude -p --resume %s  < '/compact'" % sid[:8])
-        res2 = j.claude("/compact", cwd=j.project, max_turns=2,
-                        label="claude-compact", extra=["--resume", sid])
-        s.observe("the /compact call", (final_text(res2) or res2["err"]).strip()[:400])
-        sid2 = session_id_of(res2) or sid
-
-        ask = ("Without using any tools, quote verbatim any text of the USER's own "
-               "requests that you can see in your context right now. If you can see "
-               "none, reply with exactly: NONE.")
-        s.cmd("claude -p --resume %s --output-format stream-json  < 'quote verbatim any "
-              "text of the USER's own requests you can see'" % sid2[:8])
-        res3 = j.claude(ask, cwd=j.project, stream=True, max_turns=2,
-                        label="claude-mission-after-compact",
-                        extra=["--resume", sid2, "--disallowed-tools",
-                               "Bash,Read,Grep,Glob,Write,Edit,WebFetch,WebSearch,Task"])
-        answer = final_text(res3).strip()
-        s.observe("what the resumed session could still see", answer[:800])
-
-        rows = [r for r in mission_hits(j, before)
-                if r.get("session") in (sid, sid2)]
-        s.observe("<state>/mission/hits.jsonl rows for this session",
-                  "\n".join(json.dumps(r) for r in rows) or "(none)")
-        s.observe("every hits.jsonl row this step appended (any session)",
-                  "\n".join(json.dumps(r) for r in mission_hits(j, before)) or "(none)")
-        resumed = [r for r in rows if r.get("moment") == "resume"]
-        said_it = MISSION_PHRASE_12.lower() in answer.lower()
-        s.note("`moment` is **resume**, not `compact`: hooks/mission.sh folds (`grep -n 'compact|resume) moment=\"resume\"' hooks/mission.sh`) "
-               "`SessionStart` sources `compact` and `resume` into one arm, because both "
-               "are a session that has lost what was said.")
-        s.note("The phrase coming back is evidence the REQUEST TEXT survived; the "
-               "hits.jsonl row is the evidence that mission.sh is what carried it. Both "
-               "are required here, and neither alone is read as the other.")
-        if resumed and said_it:
-            s.verdict("PASS", "the resumed session quoted %r back, and mission.sh "
-                              "recorded %s"
-                      % (MISSION_PHRASE_12, json.dumps(resumed[0])))
-        elif resumed:
-            s.verdict("FAIL", "mission.sh delivered (%s) but the phrase %r did not come "
-                              "back: %r"
-                      % (json.dumps(resumed[0]), MISSION_PHRASE_12, answer[:200]))
-        else:
-            s.verdict("FAIL", "no hits.jsonl row with moment=resume for %s/%s; rows "
-                              "seen: %r"
-                      % (sid[:8], sid2[:8],
-                         [r.get("moment") for r in mission_hits(j, before)]))
-    finally:
-        s.finish()
-
-
-def step13_mission_subagent(j):
-    s = j.step("13", "the mission reaches a subagent that never saw the prompt")
-    try:
-        if not _mission_precondition(j, s):
-            return
-        before = len(mission_hits(j))
-        # WHAT THE SUBAGENT IS ASKED, AND THE THREE WORDINGS THAT FAILED FIRST. Asked for
-        # "every user-request text you can see", a subagent quoted back its own task and
-        # nothing else: it read the injected mission as scenery rather than as a request.
-        # Asked for "text BEFORE this sentence" it answered NONE -- not an absence, but
-        # the hook's own layout, since the closing sentence mission.sh appends on this arm
-        # says the parent's instructions appear ABOVE the requests. Asked for "everything
-        # in your context that is not this sentence", the PARENT refused outright and
-        # named it a system-prompt extraction pattern, which is the correct call and a
-        # useful thing to have learnt: a probe shaped like an exfiltration is not a probe
-        # this package can run. So the question is now the one the hook exists to answer
-        # -- can an agent that was told nothing say what the user is working on -- and it
-        # asks for one line, not for a context dump.
-        prompt = (
-            "I am working on %s for this project, and I want to check whether a subagent "
-            "can tell what I am working on without being told. Use the Agent tool with "
-            "subagent_type general-purpose, and put ONLY this in that agent's prompt, "
-            "copied exactly: \"Without using any tools, answer in one short line: what "
-            "is the user of this session working on? If you cannot tell, reply with "
-            "exactly: UNKNOWN.\" Do not mention my project to the agent and do not "
-            "answer for it. Then paste the agent's answer back to me in full."
-            % MISSION_PHRASE_13)
-        s.cmd("claude -p --output-format stream-json --permission-mode "
-              "bypassPermissions  < '<dispatch a general-purpose subagent>'")
-        res = j.claude(prompt, cwd=j.project, stream=True, max_turns=10,
-                       label="claude-mission-subagent",
-                       extra=["--permission-mode", "bypassPermissions"])
-        agent_inputs = []
-        for ev in stream_events(res["out"]):
-            if ev.get("type") != "assistant":
-                continue
-            for c in ((ev.get("message") or {}).get("content") or []):
-                if c.get("type") == "tool_use" and c.get("name") in ("Agent", "Task"):
-                    agent_inputs.append(json.dumps(c.get("input"))[:600])
-        s.observe("what the parent actually told the subagent (so a reader can see "
-                  "what it was told, which is the other half of what its answer means)",
-                  "\n".join(agent_inputs) or "(no Agent/Task call in the stream)")
-        reports = tool_results(res)
-        s.observe("the subagent's report, as it came back to the parent",
-                  "\n---\n".join(r[:1200] for r in reports) or "(none)")
-        s.observe("the parent's closing message", final_text(res).strip()[:600])
-
-        rows = mission_hits(j, before)
-        s.observe("<state>/mission/hits.jsonl rows appended by this session",
-                  "\n".join(json.dumps(r) for r in rows) or "(none)")
-        sub_rows = [r for r in rows
-                    if r.get("moment") == "subagent" and r.get("agent_id")]
-
-        # WHERE THE EVIDENCE IS, AND WHY IT IS NOT THE SUBAGENT'S ANSWER. A row in
-        # hits.jsonl says the hook emitted; only the SUBAGENT'S OWN transcript says the
-        # emission arrived, and Claude Code writes one per agent at
-        # <project>/<sid>/subagents/agent-<agent_id>.jsonl with the injection recorded as
-        # an `attachment` of type `hook_additional_context` carrying `hookName`
-        # "SubagentStart". The subagent's ANSWER is a second question -- whether it acted
-        # on what it was handed -- and reading the two as one is how a run where the
-        # parent merely mentioned the token in its own prose reads as a delivery. That
-        # false pass happened here before this was split.
-        sid = session_id_of(res)
-        agent_id = sub_rows[0].get("agent_id") if sub_rows else None
-        sub_tx, injected = None, []
-        if sid and agent_id:
-            for p in j.projects_root.glob(
-                    "*/%s/subagents/agent-%s.jsonl" % (sid, agent_id)):
-                sub_tx = p
-                for r in jsonl(p):
-                    att = r.get("attachment") or {}
-                    if att.get("type") == "hook_additional_context" and \
-                            "SubagentStart" in str(att.get("hookName") or
-                                                   att.get("hookEvent") or ""):
-                        injected.append(json.dumps(att.get("content"))[:900])
-        s.observe("the subagent's OWN transcript (%s)" % (sub_tx or "not found"),
-                  "\n".join(injected) or
-                  "(no SubagentStart hook_additional_context attachment in it)")
-
-        delivered = any(MISSION_TOKEN_13 in i.lower() or
-                        MISSION_PREAMBLE.lower() in i.lower() for i in injected)
-        acted = MISSION_TOKEN_13 in ("\n".join(reports)).lower()
-        s.note("`agent_id` is non-null only on the SubagentStart arm: it is the "
-               "subagent's own id, and it is what tells a delivery to the child apart "
-               "from the `dispatch` delivery the parent gets on the same tool call.")
-        s.note("Delivery and use are reported separately. On this run the subagent %s"
-               % ("answered with the token, so it used what it was handed." if acted else
-                  "was handed the mission and still answered that it could not tell what "
-                  "the user was working on. That is a limit of the ARM, not of the "
-                  "wiring: the hook's own header records that imperative wording was "
-                  "refused as prompt injection in 2 of 4 measured runs, and a statement "
-                  "of fact can be read and set aside just as easily. This step measures "
-                  "arrival, which is the part the package controls."))
-        if sub_rows and delivered:
-            s.verdict("PASS", "mission.sh recorded %s and the subagent's own transcript "
-                              "carries the injection: %s"
-                      % (json.dumps(sub_rows[0]), (injected[0] if injected else "")[:220]))
-        elif sub_rows:
-            s.verdict("FAIL", "mission.sh recorded a subagent delivery (%s) but the "
-                              "subagent's own transcript carries no SubagentStart "
-                              "injection (%s)"
-                      % (json.dumps(sub_rows[0]), sub_tx or "no transcript found"))
-        else:
-            s.verdict("FAIL", "no hits.jsonl row with moment=subagent and a non-null "
-                              "agent_id; rows seen: %r"
-                      % [(r.get("moment"), r.get("agent_id")) for r in rows])
-    finally:
-        s.finish()
-
-
-def step14_mission_completion(j):
-    s = j.step("14", "the mission is stated once at a completion claim (Stop)")
-    try:
-        if not _mission_precondition(j, s):
-            return
-        before = len(mission_hits(j))
-        prompt = ("Do exactly this and nothing more, as part of %s: run `echo "
-                  "sundial-a` with the Bash tool, then run `echo sundial-b` with the "
-                  "Bash tool, then reply with exactly the word: done"
-                  % MISSION_PHRASE_14)
-        s.cmd("MISSION_STOP_MIN_TOOLS=%s claude -p --output-format stream-json "
-              "--permission-mode bypassPermissions  < 'two echoes, then \"done\"'"
-              % STOP_MIN_TOOLS_FOR_STEP_14)
-        res = j.claude(prompt, cwd=j.project, stream=True, max_turns=10,
-                       label="claude-mission-stop",
-                       extra=["--permission-mode", "bypassPermissions"],
-                       env=j.env(MISSION_STOP_MIN_TOOLS=STOP_MIN_TOOLS_FOR_STEP_14))
-        turns = assistant_turns(res)
-        s.observe("the assistant's text turns, in order",
-                  "\n---\n".join("[%d] %s" % (i, t.strip()[:400])
-                                 for i, t in enumerate(turns)) or "(none)")
-        claim_at = next((i for i, t in enumerate(turns) if STOP_CLAIM_RE.search(t)), None)
-        after_claim = turns[claim_at + 1:] if claim_at is not None else []
-        rows = mission_hits(j, before)
-        s.observe("<state>/mission/hits.jsonl rows appended by this session",
-                  "\n".join(json.dumps(r) for r in rows) or "(none)")
-        completions = [r for r in rows if r.get("moment") == "completion"]
-        s.note("The Stop arm blocks at most ONCE per prompt_id, so \"exactly one\" is "
-               "the claim being checked, not \"at least one\": a second block would "
-               "spend the operator's turn twice for one completion claim.")
-        s.note("`MISSION_STOP_MIN_TOOLS` was %s for this call only. The shipped default "
-               "is 8; the arm being measured is the same one either way, and the knob is "
-               "read from the environment for exactly this." % STOP_MIN_TOOLS_FOR_STEP_14)
-        if len(completions) == 1 and after_claim:
-            s.verdict("PASS", "the turn claimed completion at turn %d and the Stop hook "
-                              "put another turn after it (%r); one completion row: %s"
-                      % (claim_at, after_claim[0].strip()[:120],
-                         json.dumps(completions[0])))
-        elif len(completions) == 1:
-            s.verdict("FAIL", "one completion row (%s) but no assistant turn after the "
-                              "claim; turns seen: %d"
-                      % (json.dumps(completions[0]), len(turns)))
-        else:
-            s.verdict("FAIL", "expected exactly one completion row; got %d: %r"
-                      % (len(completions), [json.dumps(r) for r in completions][:3]))
-    finally:
-        s.finish()
-
-
 def step11_uninstall(j):
     s = j.step("11", "uninstall restores settings.json byte-for-byte and removes only "
                      "our links")
@@ -1908,17 +1578,13 @@ def step11_uninstall(j):
 # --------------------------------------------------------------------------- main
 
 
-# RUN ORDER, NOT NUMBER ORDER. Step 11 tears the install down, so everything that needs
-# the wiring has to run before it. Steps 12-14 were added after 11 was numbered and
-# docs/e2e.md cites the numbers, so the numbers stay where they are and this list says
-# what actually happens: ... 10, 12, 13, 14, 11. The lesson steps, 15 and 16, left with
-# the wiring they tested: mod/compound-lessons/tools/journey.py covers the lesson now. The report lists steps in the
-# order they ran, which is this order.
+# Step 11 tears the install down, so it is last. The numbers 12-16 are retired and not
+# reused, because docs/e2e.md and older reports cite them: the mission steps (12-14) and
+# the lesson steps (15-16) left with the shell wiring they tested, on 2026-10-03.
+# mod/compound/tools/journey_mission.py and journey_lessons.py cover both now.
 STEPS = [step0_preflight, step1_install, step2_ordinary_session, step3_note,
          step4_reminders, step5_candidate, step6_promote, step7_forge, step8_routing,
-         step9_apply_verdict, step10_report,
-         step12_mission_compact, step13_mission_subagent, step14_mission_completion,
-         step11_uninstall]
+         step9_apply_verdict, step10_report, step11_uninstall]
 
 
 def main(argv=None):
@@ -1941,8 +1607,8 @@ def main(argv=None):
                     help="spend ONE claude -p call answering whether the chosen "
                          "--config-dir can authenticate, print the CLI's own answer, "
                          "and exit (0 authenticated, 3 not). Run it before a real "
-                         "journey: the journey is thirteen calls and none of the other "
-                         "twelve would tell you anything new about a stale token.")
+                         "journey: the journey is seven calls and none of the other "
+                         "six would tell you anything new about a stale token.")
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--timeout", type=float, default=180.0,
                     help="seconds for an ordinary command")
@@ -1959,7 +1625,7 @@ def main(argv=None):
 
     # THE REFUSAL, BEFORE ANYTHING IS BUILT OR SPENT. `--config-dir fresh` has no stored
     # login to fall back on, so without a credential in the environment every one of the
-    # thirteen calls would be answered `Not logged in · Please run /login`. --check-auth
+    # seven calls would be answered `Not logged in · Please run /login`. --check-auth
     # is exempt on purpose: "have I got a token?" is exactly what an operator without one
     # runs, and it answers in one call with the CLI's own words. --no-model spends none.
     if args.config_dir == "fresh" and not args.no_model and not args.check_auth \

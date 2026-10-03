@@ -25,32 +25,24 @@ What gets wired:
                                                                     just before a
                                                                     compaction discards
                                                                     it)
-* ``hooks.SessionStart``         -> mission.sh                     (the user's own prompts,
-                                                                    verbatim, after a
-                                                                    compaction or a resume)
-* ``hooks.SubagentStart``        -> mission.sh                     (the same, addressed to
-                                                                    a subagent that never
-                                                                    saw them)
-* ``hooks.UserPromptSubmit``     -> mission.sh                     (the same, when the new
-                                                                    prompt is short enough
-                                                                    to be leaning on
-                                                                    memory)
-* ``hooks.PreToolUse``           -> mission.sh                     (the same, periodically
-                                                                    and before an
-                                                                    expensive dispatch)
-* ``hooks.Stop``                 -> mission.sh                     (the same, once, against
-                                                                    a completion claim)
 * ``statusLine``              -> statusline.sh                    (forge animation)
 * ``CLAUDE.md``               -> the doctrine stanza              (inside a marker block,
                                                                     so the habits the
                                                                     hooks name are
                                                                     written where the
                                                                     model reads them)
+* ``env.CLAUDE_CODE_PLUGIN_DIRS`` -> ``<app home>/mod/compound``   (the mod: the mission and
+                                                                    the lesson, as function
+                                                                    hooks; one element
+                                                                    added to a path list)
 * ``skills/<name>``           -> one symlink per skill in the repo's ``skills/``
 * ``~/.local/bin/<name>``     -> one symlink per executable in the repo's ``bin/``
 
 Both the skills and the CLIs are discovered from the filesystem rather than listed
 here, so adding a seed skill or a new command needs no installer change.
+
+``hooks/mission.sh`` and ``hooks/repeat-gate.sh`` are NOT wired: both jobs moved to the mod
+on 2026-10-03. Install and uninstall still strip the entries an older install wrote.
 
 Existing hooks from other tools are preserved; an existing status line is preserved
 by saving its command into the state directory and calling it from our wrapper.
@@ -99,7 +91,7 @@ USE_MARKER = "skill-use.sh"
 #
 # `repeat-gate.sh` is NO LONGER WIRED, since 2026-10-03. It was on three events at once
 # (PostToolUseFailure, PostToolUse, PreToolUse) and carried the lesson arm; that job moved
-# to the function hooks in mod/compound-lessons, which see a call and its result in one
+# to the function hooks in mod/compound, which see a call and its result in one
 # place. The marker stays for ONE purpose: install and uninstall still strip an entry an
 # older install wrote, so an upgrade does not leave the old hook running beside the mod.
 # It is named `_RETIRED` and not `_MARKER` on purpose: `skillforge doctor` and
@@ -129,22 +121,26 @@ REMIND_MARKER = "remind.sh"
 # `last_assistant_message`, which is why it reads the transcript and why it is bounded.
 # Issue #8. Its wiring below deliberately carries NO matcher.
 PRECOMPACT_MARKER = "precompact.sh"
-# `mission.sh` states the user's own prompts back, verbatim, at the five moments the
-# session is most likely to be working from a summary of them instead. It is the only
-# entry of ours wired to FIVE events, and each one is a different moment rather than a
-# different arm of one mechanism: `SessionStart` after a compaction or a resume,
-# `SubagentStart` for a subagent that never saw the request at all, `UserPromptSubmit`
-# for a prompt short enough to be leaning on memory ("continue", "yes, do it"),
-# `PreToolUse` before an expensive dispatch and periodically, and `Stop` against a
-# completion claim. Drop any one and that moment goes quiet with nothing saying so.
-#
-# TWO OF THOSE EVENTS ARE NEW KEYS FOR THIS INSTALLER, and that is the substance of the
-# wiring rather than a detail: `SessionStart` and `SubagentStart` were in neither wiring
-# before, so nothing this package shipped could speak to a freshly-compacted context or
-# to a subagent. Measured on 2.1.259: `SessionStart`'s `additionalContext` reaches the
-# parent in all three `source` cases, and `SubagentStart`'s reaches the SUBAGENT ONLY --
-# which is why the subagent moment cannot be served by any of the other four.
-MISSION_MARKER = "mission.sh"
+# `mission.sh` is NO LONGER WIRED, since 2026-10-03. It was on five events (SessionStart,
+# SubagentStart, UserPromptSubmit, PreToolUse, Stop) and stated the user's own prompts
+# back, verbatim; that job moved to the function hooks in mod/compound, which both install
+# paths now enable instead (MOD_DIR below). The marker stays for ONE purpose, the same one
+# REPEAT_GATE_RETIRED has: install and uninstall still strip an entry an older install
+# wrote, on all five events, so an upgrade does not leave the old hook stating the mission
+# beside the mod. `_RETIRED` and not `_MARKER`, for the reason given there: `skillforge
+# doctor` and tests/test_doctor.py read every `*_MARKER = "...sh"` line as a script that
+# must be WIRED. The script stays in hooks/ and tests/test_mission.py still drives it.
+MISSION_RETIRED = "mission.sh"
+# THE MOD, and how the settings.json install path enables it. A mod is a plugin of function
+# hooks; Claude Code loads every directory named in `CLAUDE_CODE_PLUGIN_DIRS`, a path list
+# separated by `os.pathsep`, and settings.json's top-level `env` block is where a value
+# reaches every session. So install adds ONE ELEMENT to that list -- `<app home>/mod/compound`
+# -- keeps every element that is not ours, never adds ours twice, and records the exact
+# string it added in the manifest so uninstall removes that string and nothing else.
+# `MOD_DIR` is a path suffix and deliberately not named `*_MARKER`: `skillforge doctor`
+# reads it by this name to answer "is the mod enabled".
+MOD_DIR = "mod/compound"
+MOD_ENV_KEY = "CLAUDE_CODE_PLUGIN_DIRS"
 # Substring matching against the user's status line command was wrong twice. A bare
 # "statusline.sh" matched their ~/bin/git-statusline.sh; adding the directory component
 # still matched "$HOME/dotfiles/statusline/statusline.sh", a pipeline mentioning our path,
@@ -170,15 +166,6 @@ COMMIT_MATCHER = "Bash"
 # different scripts, and sharing the constant would make a change to one silently rewire
 # the other. `Bash` for the command arm, `Write|Edit` for the path arm.
 REMIND_MATCHER = "Bash|Write|Edit"
-# THE MISSION HOOK IS THE ONE PreToolUse ENTRY OF OURS WITH NO MATCHER AT ALL, and that
-# is deliberate rather than an omission. Every other entry there names the tools it can
-# act on, because each is looking for a particular call -- a `git commit`, a `git push`, a
-# retried failure, a path a reminder is keyed to. The mission is not looking for a call:
-# its periodic arm is a COOLDOWN and its Stop arm counts the tool calls a turn made, and
-# both of those are wrong if the stream they see is a subset of what the turn did. A
-# matcher of `Bash|Write|Edit|Agent|Task|Workflow` looks careful and makes the counter
-# undercount by exactly the calls it excludes, which moves a threshold nobody can then
-# see moving. Cost is bounded in-script, by the cooldown, and not by the matcher.
 LEDGER = "ledger.jsonl"
 BACKUP_PREFIX = ".bak-skill-compounder-"
 MAX_BACKUPS = 10
@@ -764,16 +751,16 @@ OUR_EVENTS = ("SessionStart", "SubagentStart", "UserPromptSubmit", "PreToolUse",
 # one-tuple rather than a bare string -- a string is iterable too, so `for marker in
 # markers` over `"precompact.sh"` would strip on the letter `p` and delete every hook of
 # the user's whose command contains one.
-OUR_EVENT_MARKERS = (("SessionStart", (MISSION_MARKER,)),
-                     ("SubagentStart", (MISSION_MARKER,)),
-                     ("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER, MISSION_MARKER)),
+OUR_EVENT_MARKERS = (("SessionStart", (MISSION_RETIRED,)),
+                     ("SubagentStart", (MISSION_RETIRED,)),
+                     ("UserPromptSubmit", (HOOK_MARKER, REMIND_MARKER, MISSION_RETIRED)),
                      ("PreToolUse", (CLAIM_GATE_MARKER, DOC_GATE_MARKER,
                                      REPEAT_GATE_RETIRED, REMIND_MARKER,
-                                     MISSION_MARKER)),
+                                     MISSION_RETIRED)),
                      ("PostToolUse", (HOOK_MARKER, USE_MARKER, REPEAT_GATE_RETIRED)),
                      ("PostToolUseFailure", (USE_MARKER, REPEAT_GATE_RETIRED)),
                      ("Stop", (INSIGHT_MARKER, CLAIM_GATE_MARKER, APPLY_GATE_MARKER,
-                               MISSION_MARKER)),
+                               MISSION_RETIRED)),
                      ("PreCompact", (PRECOMPACT_MARKER,)))
 
 
@@ -820,11 +807,16 @@ def validate_settings(settings):
     return settings
 
 
-def merge_hooks(settings, app_home):
+def merge_hooks(settings, app_home, preexisting=()):
     """Add our hook entries, replacing any previous copy of them.
 
     Other tools' hooks on the same events are preserved: we only ever remove
     entries whose command contains one of our markers.
+
+    ``preexisting`` is what ``preexisting_events`` answered for this config: the event
+    keys that are the user's. It matters only for the two events nothing of ours is wired
+    to any more, where stripping an older install's entry can empty a key, and an empty
+    key is deleted unless it was the user's to begin with.
     """
     hooks = _hooks_map(settings, strict=True)
     settings["hooks"] = hooks
@@ -833,20 +825,13 @@ def merge_hooks(settings, app_home):
     # Stripped BEFORE anything is appended, like every other marker here, so an entry an
     # older checkout left behind is never found sitting beside a fresh one.
     ups = _strip_marker(ups, REMIND_MARKER)
-    ups = _strip_marker(ups, MISSION_MARKER)
+    ups = _strip_marker(ups, MISSION_RETIRED)
     ups.append({"hooks": [{"type": "command",
                            "command": _hook_cmd(app_home, "prompt"),
                            "timeout": 10}]})
     if _has_gate(app_home, "remind.sh"):
         ups.append({"hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "remind.sh"),
-                               "timeout": 10}]})
-    # The mission's ambiguity arm. Last, like the PreToolUse one below, and for the same
-    # reason: everything above it either states a fact or decides, and this states the
-    # request that the short prompt in front of it is leaning on.
-    if _has_gate(app_home, "mission.sh"):
-        ups.append({"hooks": [{"type": "command",
-                               "command": _gate_cmd(app_home, "mission.sh"),
                                "timeout": 10}]})
     hooks["UserPromptSubmit"] = ups
 
@@ -855,14 +840,14 @@ def merge_hooks(settings, app_home):
     # may already be using for permission rules of their own, so the marker strip matters
     # here as much as the append does.
     #
-    # Three of our entries now live on PreToolUse and all three can deny. Every marker is
-    # stripped before any is appended, so an entry left by an older checkout is never found
+    # Three of our entries live on PreToolUse and two of them can deny. Every marker, the
+    # two retired ones included, is stripped before any is appended, so an entry left by an older checkout is never found
     # sitting beside a fresh one -- and the strip is per marker, so a gate whose script is
     # missing from this checkout has its stale entry removed rather than left orphaned
     # pointing at a file that is gone.
     pre = _event_groups(hooks, "PreToolUse", True)
     for _m in (CLAIM_GATE_MARKER, DOC_GATE_MARKER, REPEAT_GATE_RETIRED, REMIND_MARKER,
-               MISSION_MARKER):
+               MISSION_RETIRED):
         pre = _strip_marker(pre, _m)
     _pre_wired = False
     if _has_claim_gate(app_home):
@@ -877,22 +862,13 @@ def merge_hooks(settings, app_home):
                                "command": _gate_cmd(app_home, "doc-gate.sh"),
                                "timeout": 10}]})
         _pre_wired = True
-    # THIRD of the four, and the order is pinned by tests/test_plugin.py, which compares
-    # the two wirings' matcher lists POSITIONALLY. It is also one of the two PreToolUse
-    # entries of ours that cannot deny: the two gates above decide, these two state a
-    # fact.
+    # LAST of the three, and the order is pinned by tests/test_plugin.py, which compares
+    # the two wirings' matcher lists POSITIONALLY. It is the one PreToolUse entry of ours
+    # that cannot deny: the two gates above decide, this one states a fact.
     if _has_gate(app_home, "remind.sh"):
         pre.append({"matcher": REMIND_MATCHER,
                     "hooks": [{"type": "command",
                                "command": _gate_cmd(app_home, "remind.sh"),
-                               "timeout": 10}]})
-        _pre_wired = True
-    # LAST, and the only one of the four with no matcher. This one is not looking for a
-    # call, it is counting them. See MISSION_MATCHER's absence above. It denies nothing
-    # either.
-    if _has_gate(app_home, "mission.sh"):
-        pre.append({"hooks": [{"type": "command",
-                               "command": _gate_cmd(app_home, "mission.sh"),
                                "timeout": 10}]})
         _pre_wired = True
     # `or "PreToolUse" in hooks` IS THE WHOLE OF A FIX, and the bug it closes was silent.
@@ -942,7 +918,7 @@ def merge_hooks(settings, app_home):
     stop = _strip_marker(_event_groups(hooks, "Stop", True), INSIGHT_MARKER)
     stop = _strip_marker(stop, CLAIM_GATE_MARKER)
     stop = _strip_marker(stop, APPLY_GATE_MARKER)
-    stop = _strip_marker(stop, MISSION_MARKER)
+    stop = _strip_marker(stop, MISSION_RETIRED)
     wired_stop = False
     if (Path(app_home) / "hooks" / "insight-capture.sh").exists():
         stop.append({"hooks": [{"type": "command",
@@ -957,15 +933,6 @@ def merge_hooks(settings, app_home):
     if _has_gate(app_home, "apply-gate.sh"):
         stop.append({"hooks": [{"type": "command",
                                 "command": _gate_cmd(app_home, "apply-gate.sh"),
-                                "timeout": 10}]})
-        wired_stop = True
-    # The mission's completion arm, and the third entry of ours that can block a Stop. It
-    # blocks at most once per `prompt_id` and states the request rather than instructing:
-    # measured on 2.1.259, the model quotes a Stop reason back and declines any
-    # instruction inside it, so a reason that is a fact is the only kind that lands.
-    if _has_gate(app_home, "mission.sh"):
-        stop.append({"hooks": [{"type": "command",
-                                "command": _gate_cmd(app_home, "mission.sh"),
                                 "timeout": 10}]})
         wired_stop = True
     # The same fix, and this site was the worst of the three: it had no `or stop` fallback
@@ -991,32 +958,21 @@ def merge_hooks(settings, app_home):
     if wired_pre or pre or "PreCompact" in hooks:
         hooks["PreCompact"] = pre
 
-    # THE TWO EVENT KEYS THIS INSTALLER HAD NEVER WRITTEN. Both carry the mission and
-    # nothing else, both with NO matcher, and neither is a duplicate of the other.
-    #
-    # `SessionStart` fires with `source` in {startup, resume, compact}. It is wired
-    # unmatched for the reason PreCompact is: the matcher selects the source, and the
-    # source a session most needs its own request restated in -- `compact`, where the
-    # prompts have just been replaced by a summary -- is the one nobody types. The script
-    # decides which sources it acts on.
-    #
-    # `SubagentStart` is the only channel that reaches a subagent. Measured on 2.1.259:
-    # `SessionStart` and `UserPromptSubmit` context reaches the PARENT only, and
-    # `SubagentStart`'s reaches the subagent only, so a subagent handed a task with none
-    # of the request behind it has no other event that can tell it.
+    # THE TWO EVENT KEYS ONLY THE MISSION EVER USED. Nothing of ours is wired to either
+    # since 2026-10-03, so all that is left here is the strip: an older install's
+    # `mission.sh` entry comes off, a hook of the user's on the same event stays, and a key
+    # that held nothing but ours is DELETED rather than left behind as an empty list --
+    # unless the manifest says the key was the user's before we ever ran, which
+    # `remove_hooks` judges at uninstall from the same record.
     for _event in ("SessionStart", "SubagentStart"):
-        _groups = _strip_marker(_event_groups(hooks, _event, True), MISSION_MARKER)
-        _wired = False
-        if _has_gate(app_home, "mission.sh"):
-            _groups.append({"hooks": [{"type": "command",
-                                       "command": _gate_cmd(app_home, "mission.sh"),
-                                       "timeout": 10}]})
-            _wired = True
-        # Same `or <event> in hooks` guard the three sites above carry: `_strip_marker`
-        # returns a NEW list, so a checkout with no mission.sh must still write the
-        # stripped list back or a stale entry pointing at a script that is gone survives.
-        if _wired or _groups or _event in hooks:
+        if _event not in hooks:
+            continue
+        _before = _event_groups(hooks, _event, True)
+        _groups = _strip_marker(_before, MISSION_RETIRED)
+        if _groups or len(_groups) == len(_before) or _event in preexisting:
             hooks[_event] = _groups
+        else:
+            del hooks[_event]
     return settings
 
 
@@ -1735,15 +1691,108 @@ def disable_review(claude_dir, state_dir=None):
     return result
 
 
+# ------------------------------------------------------------------------- the mod
+#
+# ONE ELEMENT OF A PATH LIST, and every rule below follows from the list not being ours.
+# `env.CLAUDE_CODE_PLUGIN_DIRS` may already name plugins the user develops or another tool
+# installed, so install keeps every element it did not add, in the order it found them,
+# and appends its own once. It changes NOTHING when its element is already there -- not
+# even to tidy an empty element out of the user's value -- so a second install leaves
+# settings.json byte-identical. Uninstall removes the string the manifest recorded and the
+# one this checkout would add (they differ only when the checkout moved), drops the key
+# when that empties the list and `env` when that empties the object, and so hands back the
+# file it was given. Both functions edit the settings object in place; `install` and
+# `uninstall` own the backup and the one atomic write.
+
+def _has_mod(app_home):
+    return (Path(app_home) / MOD_DIR).is_dir()
+
+
+def mod_path(app_home):
+    """The exact string install adds to the plugin-directory list."""
+    return str(Path(app_home) / MOD_DIR)
+
+
+def _plugin_dirs(settings, strict):
+    """The elements of ``env.CLAUDE_CODE_PLUGIN_DIRS``, or ``None`` when it cannot be read.
+
+    Strict, a shape we cannot merge into raises and names the key, as ``_env_map`` does.
+    """
+    env = _env_map(settings, strict)
+    if env is None:
+        return None
+    value = env.get(MOD_ENV_KEY)
+    if value is None:
+        return []
+    if not isinstance(value, str):
+        if not strict:
+            return None
+        raise SettingsShapeError(
+            'settings.json: "env.%s" must be a string of paths separated by %r, but it '
+            'is %s. Nothing was changed; fix or remove that key.'
+            % (MOD_ENV_KEY, os.pathsep, _jsontype(value)))
+    return [e for e in value.split(os.pathsep) if e]
+
+
+def enable_mod(settings, app_home, manifest):
+    """Add ``<app home>/mod/compound`` to ``env.CLAUDE_CODE_PLUGIN_DIRS``. One report line."""
+    if not _has_mod(app_home):
+        return "not enabled: %s is not in this checkout" % MOD_DIR
+    ours = mod_path(app_home)
+    elements = _plugin_dirs(settings, strict=True)
+    # A checkout that MOVED: the path the last install recorded is ours and now names
+    # nothing we ship from, so it comes off as the new one goes on.
+    stale = manifest.get("mod_plugin_dir")
+    kept = [e for e in elements if not (stale and e == stale and e != ours)]
+    manifest["mod_plugin_dir"] = ours
+    if ours in kept and kept == elements:
+        return "already enabled: %s is in env.%s" % (ours, MOD_ENV_KEY)
+    if ours not in kept:
+        kept.append(ours)
+    env = dict(_env_map(settings, strict=True))
+    env[MOD_ENV_KEY] = os.pathsep.join(kept)
+    settings["env"] = env
+    return "enabled: added %s to env.%s" % (ours, MOD_ENV_KEY)
+
+
+def disable_mod(settings, app_home, manifest):
+    """Take our element back out, leaving every other one. Never raises."""
+    ours = set([mod_path(app_home)])
+    if manifest.get("mod_plugin_dir"):
+        ours.add(manifest["mod_plugin_dir"])
+    manifest.pop("mod_plugin_dir", None)
+    elements = _plugin_dirs(settings, strict=False)
+    if elements is None:
+        return ('left alone: "env" or "env.%s" is not a shape this can read, so it holds '
+                "no element of ours (fix that key by hand if you did not mean it)"
+                % MOD_ENV_KEY)
+    kept = [e for e in elements if e not in ours]
+    if kept == elements:
+        return "nothing to remove"
+    env = dict(_env_map(settings, strict=False))
+    if kept:
+        env[MOD_ENV_KEY] = os.pathsep.join(kept)
+    else:
+        del env[MOD_ENV_KEY]
+    if env:
+        settings["env"] = env
+    else:
+        settings.pop("env", None)
+    return "removed %s from env.%s" % (", ".join(sorted(ours & set(elements))), MOD_ENV_KEY)
+
+
 # ------------------------------------------------------------------ history-surfer
 #
-# THE MISSION HOOK READS PROMPTS IT DOES NOT STORE. `hooks/mission.sh` states the user's
-# own requests back, verbatim, and the only place those exist as data is
-# claude-history-surfer's per-project JSONL. The alternative -- this package keeping its
-# own copy of every prompt -- breaks the design's first principle ("a single source of
-# truth, never a second copy"), and two stores of the same prompts drift the moment either
-# one gains a filter. So history-surfer is a DEPENDENCY, installed here, and without it
-# the mission hook is inert and `skillforge doctor` says so.
+# THE MISSION READS PROMPTS THIS PACKAGE DOES NOT STORE. The mod's mission hooks (and
+# `hooks/mission.sh`, which they replaced in the wiring on 2026-10-03) state the user's
+# own requests back, verbatim, and the only place those exist as durable data is
+# claude-history-surfer's per-project JSONL. Without it the mod falls back to the prompts
+# the running process saw submitted, which do not survive a resume or a compaction in a
+# new process. Below, "the mission hook" means whichever of the two is reading that store.
+# The alternative -- this package keeping its own durable copy of every prompt -- breaks
+# the design's first principle ("a single source of truth, never a second copy"), and two
+# stores of the same prompts drift the moment either one gains a filter. So history-surfer
+# is a DEPENDENCY, installed here, and without it `skillforge doctor` says what is lost.
 #
 # Four rules, and each of them is the answer to a way this could go wrong:
 #
@@ -2040,7 +2089,9 @@ def install_surfer(app_home, claude_dir, bin_dir, manifest):
         # NOT "until `surfer` is on PATH": the mission hook needs history-surfer's
         # capture hook wired into THIS config, which is what fills the store it reads.
         # A `surfer` on PATH wired somewhere else leaves it just as quiet.
-        return ("skipped (%s is set); the mission hook stays inert until history-surfer's "
+        return ("skipped (%s is set); the mission is restated only from the prompts the "
+                "running process saw submitted, so it does not survive a resume or a "
+                "compaction in a new process, until history-surfer's "
                 "capture hook is wired into %s -- %s"
                 % (SURFER_SKIP_ENV, Path(claude_dir) / "settings.json",
                    SURFER_INSTALL_LINE))
@@ -2071,8 +2122,8 @@ def install_surfer(app_home, claude_dir, bin_dir, manifest):
                     % _surfer_store(claude_dir))
         reason = _surfer_clone(url, home)
         if reason:
-            return ("NOT INSTALLED: %s could not be cloned into %s (%s). The mission hook "
-                    "delivers nothing until it is -- %s"
+            return ("NOT INSTALLED: %s could not be cloned into %s (%s). The mission does "
+                    "not survive a resume or a compaction in a new process until it is -- %s"
                     % (url, home, reason, SURFER_INSTALL_LINE))
         cloned = True
 
@@ -2126,6 +2177,11 @@ def install(app_home, claude_dir, bin_dir, state_dir=None, doctrine=None):
 
     # Everything that can be checked is checked before anything is applied.
     settings = validate_settings(read_settings(settings_path))
+    # The one shape check that needs the checkout: `env` is only ours to read when there
+    # is a mod to enable. Here, with the others, so a malformed `env` refuses before
+    # anything is written rather than after history-surfer's installer has run.
+    if _has_mod(app_home):
+        _plugin_dirs(settings, strict=True)
     preflight(claude_dir, bin_dir, state_dir, settings_path, app_home, doctrine)
     # Which event keys are the user's, so uninstall can put back exactly what it found.
     # Read together with the manifest: a reinstall must not adopt the keys the first
@@ -2152,7 +2208,8 @@ def install(app_home, claude_dir, bin_dir, state_dir=None, doctrine=None):
     # was BEFORE anything of ours or history-surfer's touched it.
     settings = validate_settings(read_settings(settings_path))
 
-    merge_hooks(settings, app_home)
+    merge_hooks(settings, app_home, preexisting)
+    report["mod"] = enable_mod(settings, app_home, manifest)
     install_statusline(settings, app_home, state_dir)
     write_settings(settings_path, settings)
     report["settings"] = str(settings_path)
@@ -2245,6 +2302,7 @@ def uninstall(app_home, claude_dir, bin_dir, state_dir=None):
                     report["review"] = ("manifest recorded env.%s but it was not present "
                                         "in settings.json" % REVIEW_ENV_KEY)
                 manifest.pop("review_env_set", None)
+            report["mod"] = disable_mod(settings, app_home, manifest)
             write_settings(settings_path, settings)
             report["settings"] = str(settings_path)
 

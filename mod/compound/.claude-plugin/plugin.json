@@ -1,0 +1,6 @@
+{
+  "name": "compound",
+  "version": "0.2.0",
+  "description": "Writes a lesson down after a failed call is fixed, and states the user's own requests back at the moments a session loses them.",
+  "author": { "name": "Jeremy Manning" }
+}

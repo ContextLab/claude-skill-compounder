@@ -1,5 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { claimsDone, lastSubstantive, mission, storeRows, substantive, type Row } from './render'
+import { inSubagent, startTurn, turn } from './calls'
+import { claimsDone, lastSubstantive, mission, storeRows, substantive, typedByUser, type Row } from './render'
 
 // compound-mission: the user's own requests, stated back verbatim at the moments a session
 // tends to lose them. The same five moments hooks/mission.sh had, on the same events, plus
@@ -30,10 +31,6 @@ const seen: Row[] = []
 // Set when the module loads, so the periodic arm counts from the session's start and a
 // session's first tool call is not "due" by default.
 let lastDelivery = now()
-let turn = { id: '', tools: 0, blocked: false }
-// Calls now inside a subagent, by tool_use_id. `classic.PreToolUse` carries the call and
-// not the loop it runs in; the tool.call hook around it does, and runs first.
-const inSubagent = new Set<string>()
 
 // A value that is not a short run of digits takes the default: a typo is not a setting.
 function numeric(raw: string | undefined, fallback: number): number {
@@ -78,16 +75,16 @@ async function delivered($: EngineInterface, moment: string, text: string, agent
   await record($, { moment, agent: agent ?? null, chars: text.length })
 }
 
-export const register: Register = on => {
+export const registerMission: Register = on => {
   on('turn.start', async ($, e, next) => {
     const started = await next(e)
-    turn = { id: started.turnId, tools: 0, blocked: false }
+    startTurn(started.turnId)
     return started
   })
 
   on('prompt.submit', async ($, e, next) => {
     const text = e.text.trim()
-    if (text === '' || text.startsWith('/') || (await off($))) return next(e)
+    if (text === '' || text.startsWith('/') || !typedByUser(text) || (await off($))) return next(e)
     const before = await rows($)
     seen.push({ text })
     if (substantive(text)) return next(e)
@@ -138,19 +135,6 @@ export const register: Register = on => {
     if (text === '') return result
     await delivered($, dispatch ? 'dispatch' : 'periodic', text)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
-  })
-
-  on('tool.call', async (_$, e, next) => {
-    if (e.agentId === undefined) {
-      turn.tools += 1
-      return next(e)
-    }
-    inSubagent.add(e.tool_use_id)
-    try {
-      return await next(e)
-    } finally {
-      inSubagent.delete(e.tool_use_id)
-    }
   })
 
   // Once per turn. `stop_hook_active` is the engine saying this stop follows a block.

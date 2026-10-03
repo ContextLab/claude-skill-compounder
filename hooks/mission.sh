@@ -2,6 +2,11 @@
 # States the user's own requests, verbatim, at the five moments a session is most likely
 # to have lost them.
 #
+# NOT WIRED SINCE 2026-10-03. Neither install path adds this script to an event any more:
+# stating the mission moved to the function hooks in mod/compound, which both install
+# paths enable instead. Everything below that says how it is wired describes the five
+# entries it had until then. It is still run directly, by tests/test_mission.py.
+#
 # THE GAP THIS CLOSES. Everything else in this package is addressed to the session's
 # ATTENTION -- a nudge, a queue, a checkpoint -- and nothing carries the CONTENT the
 # session lost. A reminder that says "check whether a skill exists" competes with the
