@@ -25,9 +25,9 @@ Session e7609af7. Exploration only; no shipped code changed. Branch `resume/afte
 - Three lesson statements fired in this session; one was a false binding (a for-loop whose
   last `[ -n ] &&` returned 1), one a real lesson, one a one-off typo.
 
-## Mod spike (scripts/mod-spike/, CLI 2.1.288)
+## Mod spike (CLI 2.1.288; the spike itself was replaced by mod/compound-lessons the same day)
 
-Run: `printf '%s' "<prompt>" | claude -p --model haiku --plugin-dir scripts/mod-spike --allowedTools Bash`
+Run: `printf '%s' "<prompt>" | claude -p --model haiku --plugin-dir <mod dir> --allowedTools Bash`
 (the prompt goes on stdin: `--allowedTools` is variadic and swallows a trailing prompt argument).
 
 Observed:
@@ -47,3 +47,40 @@ Not observed: the `context` return reaching the model (the judge answered NO on
 2. Outcome journeys under `claude -p`, pass criterion on the outcome and never on delivery,
    N runs each, with and without the mod.
 3. Live counter: failures of a lesson's kind in sessions after the lesson was written.
+
+## Built the same day: mod/compound-lessons
+
+User: "ok, continue: build it!". What exists (see its README for the commands):
+
+- `hooks/register.ts`: one tool.call hook. Failure held per agent loop; recall question at
+  the failure when lessons exist; fix question on the next two successes; a new lesson is
+  written by the hook through `skillnote add --scope project`; a lesson from another
+  project that matches here is moved with `skillnote promote`.
+- `hooks/judge.ts`: both prompts and their parsers. A LESSON needs three true checks and a
+  quote that is really in the error text (enforced in `parseFix`).
+- `hooks/judge.test.ts`: 8 tests under `claude plugin test`, no model calls.
+- `tools/journey.py`: control, A, B, C, S. 15 checks.
+- `tools/sample_pairs.py`, `tools/score_replay.py`: the labelled replay.
+
+Results:
+
+- Replay, 40 tuned + 40 held-out pairs, labels mine and unreviewed
+  (`~/.claude/skill-compounder/mod/pairs-labelled.jsonl`, `heldout-labelled.jsonl`):
+  sonnet 4 of 5 real / 1 of 33 false (tuned), 4 of 5 / 0 of 32 (held out);
+  haiku 3 of 5 / 2 of 33, 4 of 5 / 6 of 32. Default judge is sonnet for that reason.
+- First judge prompt (no checks, 1200-char truncation): 3 of 5 real, 14 of 33 false. The
+  false ones mostly read a truncated command as a broken one.
+- Journey: 6 of 7 runs passed every check. One run failed 5 of 13 (sessions B and C logged
+  no failure and no build result); streams were not kept then, cause unknown. Streams are
+  kept now (`<root>/*.stream`).
+
+Open:
+
+- Not enabled in real sessions. Enabling = `CLAUDE_CODE_PLUGIN_DIRS` in the env block of
+  `~/.claude/settings.json`; the user has not been asked yet.
+- `hooks/repeat-gate.sh`'s lesson arm is still wired and would announce the same fix twice.
+- Labels need the user's review.
+- Mission (scenario 1) as a mod is not started. `session.compact` and `prompt.compose`
+  are the hooks to try; only read in the types so far.
+- `/tmp/compound-sub-Pdl1` is a leftover probe directory; the removal was blocked because
+  it was the shell's working directory at the time.

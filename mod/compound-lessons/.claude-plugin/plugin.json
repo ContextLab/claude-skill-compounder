@@ -1,0 +1,6 @@
+{
+  "name": "compound-lessons",
+  "version": "0.1.0",
+  "description": "After a failed call is fixed, writes the lesson down itself and states it back when the failure recurs.",
+  "author": { "name": "Jeremy Manning" }
+}
