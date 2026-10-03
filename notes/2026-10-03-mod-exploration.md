@@ -76,9 +76,17 @@ Results:
 
 Open:
 
-- Not enabled in real sessions. Enabling = `CLAUDE_CODE_PLUGIN_DIRS` in the env block of
-  `~/.claude/settings.json`; the user has not been asked yet.
-- `hooks/repeat-gate.sh`'s lesson arm is still wired and would announce the same fix twice.
+- ENABLED 2026-10-03 on the user's say-so ("yes, switch on real sessions", "unwire old lesson
+  hook"): `~/.claude/settings.json` now has `env.CLAUDE_CODE_PLUGIN_DIRS` naming
+  `mod/compound-lessons`, and its three `repeat-gate.sh` entries (PreToolUse, PostToolUse,
+  PostToolUseFailure) are removed. Backup beside it:
+  `settings.json.bak-compound-lessons-20261003-123510`. Verified with a plain `claude -p`
+  (no --plugin-dir) under a scratch state: the mod logged the failure and no repeat store
+  was created.
+- Consequences not yet dealt with: `skillforge doctor` reports 17 of 20 entries and FAILs
+  its settings row; `install.sh` or an update would wire `repeat-gate.sh` back, because the
+  installer and `hooks/hooks.json` still carry it; and the repeat store stops growing, so
+  new pairs for labelling come only from the mod's own `events.jsonl`.
 - Labels need the user's review.
 - Mission (scenario 1) as a mod is not started. `session.compact` and `prompt.compose`
   are the hooks to try; only read in the types so far.
