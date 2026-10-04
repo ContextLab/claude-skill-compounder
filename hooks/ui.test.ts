@@ -28,12 +28,15 @@ const EVENTS = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'guard', less
 // `owed` is what the CLI answers `events --unsettled --session S`: the log's own account of
 // what the session owes. The world keeps it as the log would: a capture or an ineffective
 // recall the mod logs is owed from then on, until the test says the log holds its settlement.
-type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean }
+// `tool` answers a tool call in the engine's place (undefined: the default below), `show` is
+// what the CLI prints for `show <name> --json`, and `asked` counts the questions put to the judge.
+type Answer = { text: string; isError?: true }
+type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false }
+  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0 }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -72,12 +75,18 @@ function world(on: On, env: Record<string, string> = {}): World {
     if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(w.owed) : '[]') : w.events)
     if (verb === 'find') return done('{"words":[],"items":[],"prompts":[],"surfer":"ok"}')
     if (verb === 'check') return done(w.check)
+    if (verb === 'show') return done(w.show)
     return done('')
   })
-  on('model.complete', async () => ({ value: { isAnswered: true as const, text: await w.judge(), usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }))
+  on('model.complete', async () => {
+    w.asked += 1
+    return { value: { isAnswered: true as const, text: await w.judge(), usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }
+  })
   // A Bash call fails unless it carries its flag; every other call succeeds.
   on('tool.call', (_$, e) => {
     const command = String((e as unknown as { command?: unknown }).command ?? '')
+    const answer = w.tool(command)
+    if (answer !== undefined) return { result: {}, ...answer } as never
     const failed = command === './deploy.sh'
     return (failed ? { result: {}, text: 'deploy.sh: error: a target is required', isError: true } : { result: {}, text: 'ok' }) as never
   })
@@ -132,7 +141,7 @@ test('the band spins while the reuse check runs, shows what it found, fades, and
     expect(await ui.find({ type: 'Text', text: '1 lesson or skill' })).toBeDefined()
     expect((await ui.findAll({ type: 'Text' }))[0]!.text).toBe(`${NOTES.reuse.glyph} `)
     expect(await ui.find({ type: 'Text', text: BUSY.reuse })).toBeUndefined()
-    expect(w.logged.map(e => e.type), JSON.stringify(w.logged)).toEqual(['reuse'])
+    expect(w.logged.map(e => e.type), JSON.stringify(w.logged)).toEqual(['judge', 'reuse'])
 
     // It dims, and then it is gone and the engine's band stands again.
     await clock.advance(GONE_MS - 1500)
@@ -192,7 +201,7 @@ test('a failure, its fix, the lesson owed and the lesson recorded walk the track
   await fixing
   expect(await shown()).toBe(`${OWED.glyph} compound lesson owed   ✓ failed → ✓ fixed → ● owed → ○ recorded`)
   expect((await ui.find({ type: 'Text', text: '● owed' }))?.props).toEqual({ color: 'warning', bold: true })
-  expect(w.logged.map(e => e.type)).toEqual(['capture'])
+  expect(w.logged.map(e => e.type)).toEqual(['judge', 'judge', 'capture'])
 
   // Owed stays, and nothing animates while it does.
   await clock.advance(3_600_000)
@@ -215,7 +224,7 @@ test('COMPOUND_QUIET=1 turns the band off and leaves the moments, the status ent
     w.logged.length = 0
     const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'AbovePrompt', props: BAND })
     await $.prompt.submit({ text: `${PROMPT} (${surface})`, wait: false, origin: { kind: 'composer' } })
-    expect(w.logged.map(e => e.type)).toEqual(['reuse'])
+    expect(w.logged.map(e => e.type)).toEqual(['judge', 'reuse'])
     expect(await ui.find({ type: 'Text', text: NOTES.reuse.label })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
     await ui.unmount()
@@ -524,4 +533,160 @@ test('a lesson recorded between a failure and its fix is that failure\'s lesson,
   w.judge = async () => KNOWN
   await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
   expect(w.logged.filter(e => e.type === 'recall').map(e => [e.lesson, e.at])).toEqual([['release-notes-format', 'fix']])
+})
+
+// ---- what counts as a failed call ----
+
+test('a call refused before it ran is not a failed call: no judge, nothing held, nothing watched', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  // Refusals as the harness worded them on this machine, 2026-10-04.
+  const refusals = [
+    'Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier.',
+    "This agent is isolated in the worktree /work/alpha/.claude/worktrees/agent-1, but this command is too complex to verify that it stays inside the worktree. Refusing to run it — a worktree-isolated agent's git operations must target its own worktree.",
+    "Claude requested permissions to write to /work/alpha/parseDuration.js, but you haven't granted it yet.",
+    "...Do not work around the check by splitting, scripting, or re-issuing the removal through another tool or shell ... What was flagged: Dangerous rm operation detected: '/Users/jmanning/claude-skill-compounder/lessons/*'",
+  ]
+  for (const [i, text] of refusals.entries()) {
+    w.tool = () => ({ text, isError: true })
+    const ran = await $.tool.call({ tool: 'Bash', command: `rm -rf lessons/* # ${i}` })
+    expect(ran.context ?? []).toEqual([])
+  }
+  expect(w.asked).toBe(0)
+  expect(w.logged).toEqual([])
+  expect(await shown()).not.toContain('watching for the fix')
+  // Nothing was held, so the call that then works is not put to the judge as a fix.
+  w.tool = () => ({ text: 'ok' })
+  w.judge = async () => FIX
+  await $.tool.call({ tool: 'Bash', command: 'rm -r lessons/old' })
+  expect(w.asked).toBe(0)
+  expect(w.logged).toEqual([])
+  // The same command, really run and really failing, is a failed call.
+  w.tool = () => ({ text: 'Exit code 1\nrm: lessons/old: No such file or directory', isError: true })
+  w.judge = async () => '{"name":null}'
+  await $.tool.call({ tool: 'Bash', command: 'rm -r lessons/old' })
+  expect(w.asked).toBe(1)
+  expect(await shown()).toContain('watching for the fix')
+  await ui.unmount()
+})
+
+test('a Bash call that exits 0 with a shell error in its output is a failed call: recalled, held, and captured when fixed', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  // A pipeline's status is its last command's: `timeout` is missing and the call "succeeds".
+  w.tool = () => ({ text: '(eval):1: command not found: timeout\n' })
+  w.judge = async () => '{"name":null}'
+  await $.tool.call({ tool: 'Bash', command: 'timeout 5 ./slow.sh | tail -5' })
+  expect(w.asked).toBe(1)
+  expect(await shown()).toContain('watching for the fix')
+  expect(w.logged.map(e => [e.type, e.moment, e.verdict, typeof e.ms])).toEqual([['judge', 'recall', 'none', 'number']])
+  // The call that works is judged as its fix, and the evidence is the shell's own line.
+  w.tool = () => ({ text: 'done' })
+  w.judge = async () => JSON.stringify({ same_goal: true, call_mistake: true, recurs: true, evidence: 'command not found: timeout', verdict: 'FIX' })
+  await $.tool.call({ tool: 'Bash', command: 'perl -e "alarm 5; exec @ARGV" ./slow.sh | tail -5' })
+  const capture = w.logged.find(e => e.type === 'capture')
+  expect(capture?.failed).toBe('timeout 5 ./slow.sh | tail -5')
+  expect(String(capture?.error)).toContain('(eval):1: command not found: timeout')
+  expect(w.logged.filter(e => e.type === 'judge').map(e => [e.moment, e.verdict])).toEqual([['recall', 'none'], ['fix', 'fix']])
+  await ui.unmount()
+})
+
+test('output that only mentions a shell error, or another tool\'s output, is a success', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  w.tool = () => ({ text: 'notes.md:12:(eval):1: command not found: timeout\nnotes.md:40:  zsh: command not found: gtimeout' })
+  await $.tool.call({ tool: 'Bash', command: "grep -n 'command not found' notes.md" })
+  w.tool = () => ({ text: '(eval):1: command not found: timeout' })
+  await $.tool.call({ tool: 'WebFetch', url: 'https://example.com/log.txt', prompt: 'the log' } as never)
+  expect(w.asked).toBe(0)
+  expect(w.logged).toEqual([])
+})
+
+// ---- a recall after the guard refused ----
+
+test('a failure after the lesson\'s guard refused in this session is recalled and is not counted as the lesson failing', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_RECUR_LIMIT: '1' })
+  mock.clock(on, { now: T0 })
+  // The guard refuses the call once; sent again, it runs and fails.
+  w.check = hit('release-notes-format')
+  const refused = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(refused.deny).toContain('lesson=release-notes-format')
+  expect(w.asked).toBe(0)
+  w.judge = async () => '{"name":"release-notes-format"}'
+  // The CLI's account: the guard refused in this session, so no recall of it counts.
+  w.show = JSON.stringify({ name: 'release-notes-format', level: 'project', path: '/p/l/release-notes-format', text: 'Print it with printf.', counts: { recall: 0 }, recalls_since: 0, recur_limit: 1, guarded_in_session: true })
+  const again = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  const recall = w.logged.find(e => e.type === 'recall')
+  expect([recall?.lesson, recall?.ineffective, recall?.after_guard, typeof recall?.ms]).toEqual(['release-notes-format', false, true, 'number'])
+  expect(w.owed).toEqual([])
+  expect(JSON.stringify(again.context)).toContain('A recorded lesson may describe this failure')
+  expect(JSON.stringify(again.context)).not.toContain('is not preventing that failure')
+  const stop = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(stop.block).toBe(undefined)
+  // Without a refusal in the session, the same answer from the CLI is a recurrence that counts.
+  w.show = JSON.stringify({ name: 'release-notes-format', text: 'Print it with printf.', counts: { recall: 1 }, recalls_since: 0, recur_limit: 1, guarded_in_session: false })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(w.logged.filter(e => e.type === 'recall').map(e => [e.ineffective, e.after_guard])).toEqual([[false, true], [true, false]])
+})
+
+// ---- every verdict is logged ----
+
+test('every question put to the judge writes a judge event with its ms, whatever the answer', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  const verdicts = () => w.logged.filter(e => e.type === 'judge').map(e => [e.moment, e.verdict])
+  // Reuse: nothing named, not substantial, named, unreadable.
+  for (const [n, reply] of ['{"substantial":true,"items":[],"requests":[]}', '{"substantial":false,"items":[],"requests":[]}', '{"substantial":true,"items":["release-notes-format"],"requests":[]}', 'I cannot say.'].entries()) {
+    w.judge = async () => reply
+    await $.prompt.submit({ text: `${PROMPT} (${n})`, wait: false, origin: { kind: 'composer' } })
+  }
+  expect(verdicts()).toEqual([['reuse', 'nothing'], ['reuse', 'not-substantial'], ['reuse', 'named'], ['reuse', 'unreadable']])
+  expect(w.logged.filter(e => e.type === 'judge').map(e => typeof e.ms)).toEqual(['number', 'number', 'number', 'number'])
+  expect(w.logged.filter(e => e.type === 'judge')[2]?.named).toEqual(['release-notes-format'])
+  expect(typeof w.logged.filter(e => e.type === 'judge')[0]?.prompt_id).toBe('string')
+  w.logged.length = 0
+  // Recall: none, then a fix that is none, then a fix that is known.
+  w.judge = async () => '{"name":null}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => '{"verdict":"NONE","reason":"the next step"}'
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  w.judge = async () => KNOWN
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  // Recall: named.
+  w.judge = async () => '{"name":"release-notes-format"}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(verdicts()).toEqual([['recall', 'none'], ['fix', 'none'], ['fix', 'known'], ['recall', 'named']])
+  const rows = w.logged.filter(e => e.type === 'judge')
+  expect(rows.map(e => typeof e.ms)).toEqual(['number', 'number', 'number', 'number'])
+  expect(rows.map(e => e.tool)).toEqual(['Bash', 'Bash', 'Bash', 'Bash'])
+  expect(rows[1]?.reason).toBe('the next step')
+  expect(rows[2]?.named).toEqual(['release-notes-format'])
+  expect(w.logged.filter(e => e.type === 'recall').map(e => typeof e.ms)).toEqual(['number', 'number'])
+})
+
+// ---- guards apply to tools ----
+
+test('no check is made before a call of a tool no guard applies to', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  const checks = () => w.calls.filter(c => c[1] === 'check').length
+  w.check = '{"hits":[],"guards":2,"tools":["Bash","Edit"]}'
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checks()).toBe(1)
+  // A file's content and an agent's prompt are not commands: nothing is asked before them.
+  await $.tool.call({ tool: 'Write', file_path: '/work/alpha/notes.md', content: 'Run the tests; git commit -m done' } as never)
+  await $.tool.call({ tool: 'Agent', prompt: 'run the suite; git commit only if green' } as never)
+  expect(checks()).toBe(1)
+  await $.tool.call({ tool: 'Edit', file_path: '/work/alpha/.env', old_string: 'a', new_string: 'b' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'ls -la' })
+  expect(checks()).toBe(3)
+  // The store changed: what was known about the guards is asked again.
+  w.events = '[]'
+  await $.tool.call({ tool: 'Bash', command: 'compound add --update --name release-notes-format --match x --tool Write' })
+  await $.tool.call({ tool: 'Write', file_path: '/work/alpha/notes.md', content: 'x' } as never)
+  expect(checks()).toBe(4)
 })

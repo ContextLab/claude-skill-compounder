@@ -215,3 +215,8 @@ test('running a named command and reporting its output is not a build task', asy
   expect(p.includes('however long the request is')).toBe(true)
   expect(p.includes('substantial is false')).toBe(true)
 })
+
+test('the fix question rules out a call that was refused before it ran', async () => {
+  const fix = fixPrompt({ failed: 'rm -rf build', error: 'x', worked: 'rm -r build' }, [])
+  expect(fix.includes('Not when the call was refused before it ran')).toBe(true)
+})

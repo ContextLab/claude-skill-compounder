@@ -180,7 +180,7 @@ A guard, recorded at the user level:
 ```bash
 compound add --name zsh-equals-word --level user \
   --when 'Use when a zsh command line has a bare word starting with "=".' \
-  --match '(^|[;&|]\s*)echo\s+=+' <<'EOF'
+  --match '(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)echo\s+=+' <<'EOF'
 zsh expands a bare word starting with "=" as a command lookup and fails with "not found".
 Quote it or use printf '%s\n' '====='.
 EOF
@@ -191,9 +191,22 @@ recorded guard zsh-equals-word (user)
   /Users/me/.claude/compound/lessons/zsh-equals-word
 ```
 
-A pattern is a Python regular expression. It is tested against the command of a Bash
-call, or against the JSON input of any other tool. Write it so that it matches the wrong
-form and not the right one.
+A pattern is a Python regular expression, tested against the command of a Bash call. `^`
+and `$` match at the start and end of every line of the command. Write it so that it
+matches the wrong form and not the right one. The group that opens the pattern above,
+`(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)`, is the anchor for "a command starts here": the start
+of a line, after `;`, `&&`, `||`, `|` or `(` (which covers `$(`), and after `do`, `then`
+or `else`. Without it a pattern also matches the command's name inside an argument.
+
+A pattern is not tested against the calls of any other tool, so a file being written or
+an agent's prompt that mentions the mistake is not stopped. A lesson about another tool
+names it with `--tool` (repeatable), and its patterns are then tested against the JSON of
+that tool's input and not against Bash commands unless `--tool Bash` is given too:
+
+```bash
+compound add --name no-env-edit --when "Use when editing a .env file." \
+  --match '"file_path": "[^"]*\.env"' --tool Edit --tool Write --body "Never edit .env; change .env.example."
+```
 
 ## Change a lesson
 
@@ -203,7 +216,7 @@ Add a pattern, which makes the lesson a guard:
 
 ```bash
 compound add --update --name build-needs-profile \
-  --match '(^|[;&|]\s*)\./build\.sh\s*($|[;&|])'
+  --match '(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)\./build\.sh\s*($|[;&|)])'
 ```
 
 ```

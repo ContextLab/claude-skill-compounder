@@ -176,6 +176,8 @@ export function fixPrompt(pair: Pair, lessons: readonly Item[]): string {
     '   Not when a test, linter or check legitimately reported a problem in the work, a search found nothing, an assert in a patch script did not match,',
     '   freshly written code had a bug, or one URL or file was unavailable.',
     '   Not when the output was what the agent wanted and only an exit status was non-zero.',
+    '   Not when the call was refused before it ran: a permission or approval that was denied, a safety check, a hook or the harness',
+    '   declining to run it. Nothing was executed, so the error says nothing about how the call was written.',
     '   Exception: a non-zero status that stopped the REST of an && chain, or a shell that rejected the command, IS a call mistake.',
     'C. evidence: you can quote, word for word, the part of the error text that names the mistake.',
     'D. recurs: a future session, knowing nothing of this one, would predictably write the call the same wrong way, and a short lesson would prevent it.',

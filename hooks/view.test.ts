@@ -356,6 +356,9 @@ test('the pane\'s data is what the CLI printed: levels, the most used first, eve
   // With no events reply, the status's own recent rows are the timeline.
   expect(boardFrom(STATUS, '', 's1', T0)!.recent.map(r => r.type)).toEqual(['guard'])
   expect(boardFrom('not json', EVENTS, 's1', T0)).toBe(undefined)
+  // The judge's verdicts are in the log to be measured: the timeline leaves them out.
+  const judged = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'guard', lesson: 'a' }, { ts: '2026-10-03T12:00:01Z', type: 'judge', moment: 'fix', verdict: 'none', ms: 800 }])
+  expect(boardFrom(STATUS, judged, 's1', T0)!.recent.map(r => r.type)).toEqual(['guard'])
   expect(boardFrom('[]', EVENTS, 's1', T0)).toBe(undefined)
 })
 

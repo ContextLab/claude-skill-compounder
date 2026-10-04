@@ -66,6 +66,73 @@ export function judged(tool: string): boolean {
   return !QUIET.has(tool) && !SLIPS.has(tool)
 }
 
+// ---- what counts as a failed call --------------------------------------------------------
+
+// A CALL THAT WAS REFUSED BEFORE IT RAN IS NOT A FAILED CALL. The engine reports a
+// permission denial, a safety check, its own refusal of a command and a hook's refusal as
+// an errored result, exactly as it reports a command that ran and failed, and it gives no
+// flag to tell them apart: the text is all there is. Nothing was run, so there is no
+// mistake in how the call was written, nothing to recall and nothing to fix. Each entry is
+// the wording of one kind of refusal, as the harness words it.
+const REFUSALS: readonly (readonly [string, RegExp])[] = [
+  ['permission', /denied by the Claude Code auto mode classifier/],
+  ['permission', /^Claude requested permissions to [\s\S]{0,400}but you haven't granted it yet/],
+  ['permission', /The user doesn't want to proceed with this tool use|doesn't want to proceed/],
+  ['permission', /requires explicit approval/],
+  ['harness', /^This agent is isolated in the worktree /],
+  ['safety', /Do not work around the check by splitting, scripting, or re-issuing/],
+  ['hook', /^(?:<tool_use_error>)?\[compound\] This call was stopped before it ran/],
+  ['harness', /^<tool_use_error>/],
+]
+// Only the opening of an error is read: a refusal says what it is at once.
+const REFUSAL_HEAD = 1200
+
+// The kind of refusal an errored result is (`permission`, `safety`, `harness`, `hook`), or
+// undefined when the call ran and failed. A text that opens with `Exit code` is always a
+// command that ran, whatever its output quotes.
+export function refusal(errorText: string): string | undefined {
+  const head = errorText.trimStart().slice(0, REFUSAL_HEAD)
+  if (head === '' || /^Exit code\b/.test(head)) return undefined
+  for (const [kind, wording] of REFUSALS) {
+    if (wording.test(head)) return kind
+  }
+  return undefined
+}
+
+// A BASH CALL THAT EXITED 0 CAN STILL HAVE FAILED. A pipeline's status is its last
+// command's, so `timeout 5 x | tail` with no `timeout`, or a glob that matches nothing
+// ahead of `; echo done`, comes back as a success with the shell's error in its output.
+// The shell's own line is recognised by its prefix AT THE START OF A LINE: `(eval):N: `,
+// which is how the shell Claude Code runs commands in reports anything, or the shell's name
+// followed by one of its own messages. Output that only contains the words (a grep hit with
+// its file name in front, a diff line, a sentence) starts with something else.
+const SHELL_SAID =
+  '(?:command not found|no matches found|read-only variable|parse error|syntax error|bad substitution|permission denied|no such file or directory|unbound variable|not found)'
+const SHELL_LINES: readonly RegExp[] = [
+  /^\(eval\):\d+: \S.*$/,
+  // zsh: `zsh: command not found: x`, `zsh:1: no matches found: *.txt`.
+  new RegExp(`^zsh:(?:\\d+:)? ${SHELL_SAID}(?:: .*| near .*)?$`, 'i'),
+  // bash and sh: `bash: line 1: x: command not found`, `bash: x: command not found`, `sh: 1: x: not found`.
+  new RegExp(`^(?:ba)?sh: (?:line \\d+: |\\d+: )?(?:\\S.*: )?${SHELL_SAID}(?: near .*)?$`, 'i'),
+]
+const SHELL_OUTPUT = 20000
+
+// The first shell-error line of a Bash call's output, or undefined when it has none.
+export function shellError(output: string): string | undefined {
+  for (const raw of output.slice(0, SHELL_OUTPUT).split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    if (line.length < 8 || line.length > 400) continue
+    if (SHELL_LINES.some(form => form.test(line))) return line
+  }
+  return undefined
+}
+
+// The error text of such a call, as the judge and the lesson's author read it: the shell's
+// line first, because the output around it can be long, then the output.
+export function shellFailure(line: string, output: string): string {
+  return `The call exited with status 0, and its output carries a shell error: ${line}\n${output}`
+}
+
 // A tool call's arguments without the three keys the engine adds beside them.
 export function inputOf(e: Record<string, unknown>): Record<string, unknown> {
   const { tool: _tool, tool_use_id: _id, agentId: _agent, consent: _consent, ...input } = e
@@ -343,7 +410,9 @@ export function recallContext(lesson: Item, text: string, count: number, ineffec
 // "When a lesson does not work": the instruction to strengthen it.
 // What a `match` is tested against: said wherever one is asked for, because a pattern
 // written from the error text never matches a call.
-const MATCH_TESTS = 'A match pattern is tested against the text of the call (for Bash, the command), never against its output or error: write it to match the failing call and not the corrected one.'
+const MATCH_TESTS =
+  'A match pattern is tested against the command of a Bash call (for a lesson that names other tools with --tool, the JSON of their input), never against output or error: ' +
+  'write it to match the failing call and not the corrected one. ^ matches at the start of every line of the command.'
 
 // A lesson that already has a `match` and still recurs is told its pattern missed the call.
 export function ineffectiveText(name: string, count: number, cli: string, match: readonly string[] = [], call = ''): string {
