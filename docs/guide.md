@@ -321,6 +321,32 @@ zsh-equals-word is now a skill (user)
 The directory moves from the lessons directory to the skills directory of the same
 level. No copy is left behind.
 
+From then on compound sees the skill being used. Each time a session invokes it (Claude
+through the Skill tool, or you by typing `/zsh-equals-word`), the band shows `skill used`
+with its name, an event of type `use` is written, and the count appears as `used` beside
+the skill in `compound list`, in `compound status` and on the `/compound` pane. The same
+holds for every skill in your `~/.claude/skills` and in the project's `.claude/skills`,
+and for the `finish-task` and `verify-assumptions-first` skills compound ships.
+`compound:learn` and `compound:reuse` are not counted.
+
+## When a request keeps coming back
+
+When you ask for something substantial, compound's reuse check reads your earlier
+requests. If the same kind of request was made in three sessions, this one included, and
+no lesson, skill or script covers it, the note Claude gets says so and offers to make it
+a skill: once the work is done, record how it was done (`compound add`) and turn the
+lesson into a skill (`compound skill <name>`). Claude does the work first, then tells you
+the offer stands. The band shows `asked before`, and the event has the type `repeat`:
+
+```bash
+compound events --type repeat
+```
+
+The offer is made once per session for one kind of request. "The same kind" is decided
+by the model that answers compound's questions, from the requests that share the rare
+words of yours: the same procedure asked for again counts, the same topic or file does
+not. `COMPOUND_REPEAT_MIN` sets how many sessions it takes (3; at least 2).
+
 ## Move a lesson up a level
 
 A lesson starts at the project level, or at the user level when it is about your machine,
@@ -587,7 +613,7 @@ Open
 |-|-|
 | Health | ten checks; the [README](../README.md#troubleshooting) says what to do for each `WARN` and `FAIL` |
 | Store | how many lessons, skills and guards each level holds |
-| Lessons | per lesson: times reused, times it stopped a call, times recalled, and a flag |
+| Lessons | per lesson or skill: times reused, times it stopped a call, times recalled, times used (a skill a session invoked), and a flag |
 | Recent | the newest events: time, type, session, project, detail |
 | Open | everything that waits for you |
 

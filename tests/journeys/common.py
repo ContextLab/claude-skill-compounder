@@ -171,14 +171,16 @@ class World:
         with open(path) as fh:
             return [line.strip() for line in fh if line.strip()]
 
-    def session(self, project, prompts, model, tools=("Bash",), also=(), plugin=None, flags=(), **extra):
+    def session(self, project, prompts, model, tools=("Bash",), also=(), plugin=None, flags=(),
+                denied=("Read", "Grep", "Glob"), **extra):
         """One headless session. `prompts` is one prompt, or a list sent as turns of one process,
         each one typed when the turn before it has ended. `also` names further plugin
         directories to load beside the package; `plugin` names a copy to load in its place;
-        `flags` are further arguments for `claude`."""
+        `flags` are further arguments for `claude`; `denied` are the tools the session may
+        not use."""
         self.count += 1
         argv = ["claude", "-p", "--model", model, "--setting-sources", "project", "--output-format", "stream-json",
-                "--verbose", "--plugin-dir", plugin or PLUGIN, "--disallowed-tools", "Read,Grep,Glob", *flags]
+                "--verbose", "--plugin-dir", plugin or PLUGIN, "--disallowed-tools", ",".join(denied), *flags]
         for folder in also:
             argv += ["--plugin-dir", folder]
         if not isinstance(prompts, str):

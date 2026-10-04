@@ -808,14 +808,14 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
   if (memo !== undefined) {
     // The same prompt, project and store as a verdict the CLI holds: no model is asked.
     const again = memo.items.map(n => items.find(i => i.name === n)).filter((i): i is Item => i !== undefined)
-    const judgedBuild = memo.verdict !== 'not-substantial'
-    // The memo also knows which sessions asked this very request since it was judged.
-    const repeat = judgedBuild ? await repeated($, sid, again, [...memo.earlier, ...memo.repeats], memo.asked, k, { ...asked, memo: true }) : undefined
-    const context = judgedBuild ? reuseContext(again, memo.earlier, await cliPath($), repeat) : ''
-    await ruled($, 'reuse', context !== '' ? 'named' : memo.verdict === 'named' ? 'nothing' : memo.verdict, { text: '', ms: 0, reason: '' }, {
+    // The memo also knows which sessions asked this very request since it was judged. A
+    // request that builds nothing reuses nothing, and can still be one that keeps coming back.
+    const repeat = await repeated($, sid, again, [...memo.earlier, ...memo.repeats], memo.asked, k, { ...asked, memo: true })
+    const context = reuseContext(memo.verdict === 'not-substantial' ? [] : again, memo.verdict === 'not-substantial' ? [] : memo.earlier, await cliPath($), repeat)
+    await ruled($, 'reuse', memo.verdict === 'not-substantial' ? memo.verdict : context !== '' ? 'named' : 'nothing', { text: '', ms: 0, reason: '' }, {
       ...asked,
       memo: true,
-      ...(context === '' ? {} : { named: [...again.map(i => i.name), ...memo.earlier.map(e => e.id)] }),
+      ...(context === '' ? {} : { named: [...again.map(i => i.name), ...memo.earlier.map(e => e.id), ...also(repeat, memo.earlier)] }),
     })
     if (context === '') return ''
     return reuseNamed($, again, memo.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: 0, memo: true }, repeat)
@@ -837,12 +837,14 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
   // The earlier requests of the same kind: the ones that asked for the same deliverable, and
   // the ones the judge named as the same procedure asked for again.
   const alike = [...answer.earlier, ...answer.repeats.filter(e => !answer.earlier.includes(e))]
-  const repeat = answer.substantial ? await repeated($, sid, answer.items, alike, [], k, asked) : undefined
-  const context = answer.substantial ? reuseContext(answer.items, answer.earlier, await cliPath($), repeat) : ''
+  // A prompt that builds nothing (a routine to run) is given no existing work, and may still
+  // be offered a skill for the routine: `parseReuse` gives it no items and no covering requests.
+  const repeat = await repeated($, sid, answer.items, alike, [], k, asked)
+  const context = reuseContext(answer.items, answer.earlier, await cliPath($), repeat)
   const verdict = !answer.substantial ? 'not-substantial' : context === '' ? 'nothing' : 'named'
   await ruled($, 'reuse', verdict, reply, {
     ...asked,
-    ...(context === '' ? {} : { named: [...answer.items.map(i => i.name), ...answer.earlier.map(e => e.id)] }),
+    ...(context === '' ? {} : { named: [...answer.items.map(i => i.name), ...answer.earlier.map(e => e.id), ...also(repeat, answer.earlier)] }),
     ...(answer.unquoted > 0 ? { unquoted: answer.unquoted } : {}),
   })
   // The verdict is kept by the CLI, so this prompt asked again against this store costs no model call.
@@ -852,6 +854,11 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
   if (context === '') return ''
   // What the check added to the prompt, in milliseconds: gathering, and the judge.
   return reuseNamed($, answer.items, answer.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: reply.ms }, repeat)
+}
+
+// The ids of the earlier requests an offer rests on that are not already named as covering the request.
+function also(repeat: Repeat | undefined, earlier: readonly Earlier[]): string[] {
+  return repeat === undefined ? [] : repeat.rows.filter(e => !earlier.includes(e)).map(e => e.id)
 }
 
 // A request that keeps coming back: made in at least COMPOUND_REPEAT_MIN sessions, this one

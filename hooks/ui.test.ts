@@ -1264,12 +1264,6 @@ test('two sessions are not three, a covered request is offered nothing, and the 
   let told = await $.prompt.submit({ text: `${DIGEST} (two)`, wait: false, origin: { kind: 'composer' } })
   expect(told.context ?? []).toEqual([])
   expect(w.logged.map(e => [e.type, e.verdict])).toEqual([['judge', 'nothing']])
-  // The judge names earlier requests but says the request builds nothing: no offer.
-  w.logged.length = 0
-  w.found = () => SEEN
-  w.judge = async () => SAME_KIND.replace('"substantial":true', '"substantial":false')
-  told = await $.prompt.submit({ text: `${DIGEST} (not a build)`, wait: false, origin: { kind: 'composer' } })
-  expect(told.context ?? []).toEqual([])
   // A recorded lesson covers it: the lesson is offered, not a new skill.
   w.logged.length = 0
   w.found = () => JSON.stringify({ ...JSON.parse(SEEN), items: JSON.parse(ITEMS) })
@@ -1285,6 +1279,23 @@ test('two sessions are not three, a covered request is offered nothing, and the 
   told = await $.prompt.submit({ text: `${DIGEST} (unquoted)`, wait: false, origin: { kind: 'composer' } })
   expect(told.context ?? []).toEqual([])
   expect(w.logged.map(e => [e.type, e.verdict, e.unquoted])).toEqual([['judge', 'nothing', 2]])
+})
+
+test('a routine the judge says builds nothing is still offered a skill when it keeps coming back', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.found = () => SEEN
+  w.judge = async () => SAME_KIND.replace('"substantial":true', '"substantial":false')
+  const told = await $.prompt.submit({ text: DIGEST, wait: false, origin: { kind: 'composer' } })
+  expect((told.context ?? []).join('\n').split('\n')[0]).toBe('[compound] A request that keeps coming back.')
+  // The verdict is the judge's own, and it is kept with the requests of the same kind.
+  expect(w.logged.map(e => [e.type, e.verdict ?? e.times])).toEqual([['repeat', 3], ['judge', 'not-substantial']])
+  expect(w.memos.map(m => [m.verdict, (m.repeats as { id: string }[]).map(r => r.id)])).toEqual([['not-substantial', ['wk1:3', 'wk2:1']]])
+  // And a prompt that builds nothing and repeats nothing still gets nothing.
+  w.logged.length = 0
+  w.judge = async () => NOTHING
+  expect((await $.prompt.submit({ text: `${DIGEST} (other)`, wait: false, origin: { kind: 'composer' } })).context ?? []).toEqual([])
+  expect(w.logged.map(e => [e.type, e.verdict])).toEqual([['judge', 'not-substantial']])
 })
 
 test('COMPOUND_REPEAT_MIN=2 offers at the first repetition', async ($, on) => {
@@ -1310,4 +1321,6 @@ test('a request the CLI holds a verdict for is counted with the sessions that as
   expect(w.asked).toBe(0)
   expect((told.context ?? []).join('\n')).toContain('This kind of request has now been made in 3 sessions')
   expect(w.logged.map(e => [e.type, e.memo, e.times ?? e.verdict])).toEqual([['repeat', true, 3], ['judge', true, 'named']])
+  // The verdict names the earlier requests the offer rests on.
+  expect(w.logged[1]!.named).toEqual(['wk1:3'])
 })

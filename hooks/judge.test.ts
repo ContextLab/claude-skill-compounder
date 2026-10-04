@@ -266,9 +266,12 @@ test('the reuse prompt asks which earlier requests are the same kind of work, an
   // Words that are not the request's name nothing, and are counted.
   const bare = parseReuse('{"substantial":true,"items":[],"requests":[],"repeats":[{"label":"r2","quote":"the same routine"},"r1"]}', request, [], earlier)!
   expect([bare.repeats, bare.unquoted]).toEqual([[], 2])
-  // One request may be both, a list that is no list is unreadable, and a trivial prompt repeats nothing.
+  // One request may be both, and a list that is no list is unreadable. A prompt that builds nothing
+  // reuses nothing, and the earlier requests of its kind are still read: a routine asked for again.
   const both = parseReuse('{"substantial":true,"items":[],"requests":[{"label":"r1","quote":"weekly digest"}],"repeats":[{"label":"r1","quote":"weekly digest"}]}', request, [], earlier)!
   expect([both.earlier, both.repeats]).toEqual([[earlier[0]!], [earlier[0]!]])
   expect(parseReuse('{"substantial":true,"items":[],"requests":[],"repeats":"r1"}', request, [], earlier)).toBe(undefined)
-  expect(parseReuse('{"substantial":false,"items":[],"requests":[],"repeats":[{"label":"r1","quote":"weekly digest"}]}', request, [], earlier)!.repeats).toEqual([])
+  const routine = parseReuse('{"substantial":false,"items":["x"],"requests":[{"label":"r1","quote":"weekly digest"}],"repeats":[{"label":"r1","quote":"weekly digest"},{"label":"r2","quote":"not in it"}]}', request, [], earlier)!
+  expect(routine).toEqual({ substantial: false, items: [], earlier: [], repeats: [earlier[0]!], unquoted: 1 })
+  expect(prompt.includes('This is decided apart from 1')).toBe(true)
 })
