@@ -3,7 +3,7 @@
 // so the two skills can be followed in a session where `compound` is not on PATH.
 
 import { excerpt, oneLine, redact } from './safe'
-import type { Debt, Earlier, Hit, Item, Strengthening, Unsettled } from './store'
+import type { Debt, Earlier, Event, Hit, Item, Strengthening, Unsettled } from './store'
 
 export const EARLIER_MAX = 3
 const EARLIER_CHARS = 300
@@ -138,6 +138,53 @@ export function cliCall(command: string): string | undefined {
 
 export function changesStore(verb: string | undefined): boolean {
   return verb === 'add' || verb === 'promote' || verb === 'skill' || verb === 'rm' || verb === 'update'
+}
+
+// The CLI calls that write an event when they do something. After one, the mod reads the
+// log for what was written and reports that, never the command's text: `promote --to
+// general` without --yes prints a plan and writes nothing.
+export function reportsEvents(verb: string | undefined): boolean {
+  return verb === 'add' || verb === 'skip' || verb === 'promote' || verb === 'skill' || verb === 'rm'
+}
+
+// ---- the CLI's time -------------------------------------------------------------------
+
+// How long one CLI call may take, in milliseconds, by where it is made. A tool call and a
+// stop wait for the mod, so a call made there is short; the prompt path searches the prompt
+// log and gets longer; `/compound` is the user asking for a report. `check` holds every
+// guarded tool call, and `claim` is the `mkdir` behind a once-per-session claim.
+export const BUDGET = { check: 1500, call: 2000, claim: 2000, prompt: 5000, command: 15000 } as const
+
+// `$.process.run` rejects both for a child it could not start and for one it killed at its
+// budget. The second took the whole budget.
+export function ranOut(elapsedMs: number, budgetMs: number): boolean {
+  return elapsedMs >= budgetMs - 50
+}
+
+// ---- what a CLI call changed ----------------------------------------------------------
+
+export type News = { key: string; toast: string | undefined; status: string | undefined }
+
+// What to tell the user about the events a session's own CLI calls wrote: a toast, and the
+// status entry (`undefined` clears it: a recorded or declined lesson settles the debt the
+// entry stood for). `told` holds the keys already reported. An automatic move is reported
+// where the mod makes it.
+export function storeNews(events: readonly Event[], told: ReadonlySet<string>): News[] {
+  const out: News[] = []
+  for (const e of events) {
+    const name = typeof e.lesson === 'string' ? oneLine(e.lesson, 80) : ''
+    const key = `${typeof e.ts === 'string' ? e.ts : ''}|${e.type}|${name}`
+    if (told.has(key) || out.some(n => n.key === key)) continue
+    if (e.type === 'skip') out.push({ key, toast: undefined, status: undefined })
+    if (name === '') continue
+    if (e.type === 'learn') out.push({ key, toast: `compound: lesson ${e.update === true ? 'rewritten' : 'recorded'}: ${name}`, status: undefined })
+    else if (e.type === 'promote' && e.auto !== true) {
+      const where = e.to === 'general' ? 'proposed to the general pool' : 'moved to the user level'
+      out.push({ key, toast: `compound: lesson ${name} ${where}`, status: `compound: ${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
+    } else if (e.type === 'skill') out.push({ key, toast: `compound: lesson ${name} is now a skill`, status: `compound: skill ${name}` })
+    else if (e.type === 'rm') out.push({ key, toast: `compound: ${name} removed`, status: `compound: removed ${name}` })
+  }
+  return out
 }
 
 // ---- the turn, and a failure held for its fix -----------------------------------------
@@ -312,20 +359,29 @@ export function ineffectiveText(name: string, count: number, cli: string, match:
 }
 
 // Moment 3, second project: the lesson has now moved.
-export function promotedText(name: string, from: string, cli: string): string {
-  return [
+// `also` names the projects that keep a committed, byte-identical copy of it.
+export function promotedText(name: string, from: string, cli: string, also: readonly string[] = []): string {
+  const out = [
     `[compound] Lesson ${name} was recorded in another project (${from}) and has now applied in a second one, so it was moved to the user level. It is one lesson, moved, not copied.`,
     `It is now read from every project. If its text speaks of "this repository", "this project" or a path of ${from}, reword it so it reads true anywhere: ${cli} add --update --name ${name} --when "<trigger>" <<'EOF' ... EOF`,
-  ].join('\n')
+  ]
+  if (also.length > 0) out.push(`The same lesson stays committed in ${also.join(', ')}: that copy was not touched, and it is this lesson, not another.`)
+  return out.join('\n')
 }
 
-// Moment 3, second project, when git tracks the lesson where it is: it stays, and the
-// move is the user's to make.
-export function candidateText(name: string, from: string, cli: string): string {
+// Moment 3, second project, when the lesson stays where it is and the move is the user's
+// to make: git tracks it there, or (`conflict`) another project holds a different lesson of
+// its name, and the user level has one name for one lesson.
+export function candidateText(name: string, from: string, cli: string, conflict: readonly string[] = []): string {
+  const command = `COMPOUND_PROJECT=${from} ${cli} promote ${name} --to user`
   return [
     `[compound] Lesson ${name} belongs to another project (${from}) and has now applied here too, so it is a candidate for the user level.`,
-    `It is tracked by git in ${from}, so it was not moved: moving it would delete a committed file from that repository. It was read from there, in place.`,
-    `Offer that move to the user, with this exact command: COMPOUND_PROJECT=${from} ${cli} promote ${name} --to user`,
+    conflict.length > 0
+      ? `${conflict.join(', ')} holds a different lesson of that name, so it was not moved: at the user level it needs a name of its own. It was read from ${from}, in place.`
+      : `It is tracked by git in ${from}, so it was not moved: moving it would delete a committed file from that repository. It was read from there, in place.`,
+    conflict.length > 0
+      ? `Offer that move to the user, with this exact command and a name the user chooses for NEWNAME: ${command} --as NEWNAME`
+      : `Offer that move to the user, with this exact command: ${command}`,
     `Do not run it unless the user says yes. \`${cli} status\` keeps listing it under Open until it is moved.`,
   ].join('\n')
 }

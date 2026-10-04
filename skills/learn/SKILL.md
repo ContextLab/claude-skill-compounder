@@ -21,6 +21,9 @@ line `compound CLI: <absolute path>`. Run that path. If there is no such message
 - When the message says an EARLIER session left a lesson unsettled, it quotes that
   session's failing call, error and working call with an id. Every unsettled one, with its
   id: `compound events --unsettled --json`
+- When this skill was invoked as `/compound:learn settle <id>` (the line `compound status`
+  prints for an unsettled lesson), the lesson to record is that one: find the id in
+  `compound events --unsettled --json` and pass `--settles <id>` in step 6.
 - If the lesson is about something else in this session, re-read the tool calls and results
   in the transcript above. Quote the command and the error text exactly.
 - For what the user asked for, in their words: `surfer search "<keywords>"` (history-surfer's
@@ -161,7 +164,7 @@ value you do not give. Do not add a second lesson.
 
 - If the message says the lesson already has a match pattern that did not catch the call,
   it quotes the call and the pattern. Write a pattern that matches that call and not the
-  right form, and pass it the same way (`--match` replaces the old patterns).
+  right form, and pass it the same way (`--match` replaces the patterns the lesson has).
 - Or attach a script that does the step correctly (`--attach <file>`, with a body on stdin
   that says to run it), or rewrite `--when` so it names the situation.
 - If none is worth doing, decline: `compound skip --why "<reason>"`.

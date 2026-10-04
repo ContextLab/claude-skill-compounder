@@ -43,8 +43,10 @@ class Sandbox(object):
 
     def plugin(self):
         """Give the package copy the files that make a checkout loadable as the plugin."""
-        for rel in (os.path.join(".claude-plugin", "plugin.json"), os.path.join("hooks", "hooks.json"),
-                    os.path.join("hooks", "register.ts")):
+        modules = sorted(name for name in os.listdir(os.path.join(REPO, "hooks"))
+                         if name.endswith(".ts") and not name.endswith(".test.ts"))
+        for rel in [os.path.join(".claude-plugin", "plugin.json"), os.path.join("hooks", "hooks.json")] + [
+                os.path.join("hooks", name) for name in modules]:
             target = os.path.join(self.pkg, rel)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copy2(os.path.join(REPO, rel), target)
@@ -233,6 +235,23 @@ class SupportTest(Case):
         found = set(_re.findall(r"^\s*import (\w+)", text, _re.M))
         found |= set(_re.findall(r"^\s*from (\w+) import", text, _re.M))
         self.assertEqual(found - allowed, set())
+
+    def test_a_reader_that_goes_away_is_not_an_error(self):
+        """`compound list | head -1`: the pipe closes under the writer. No traceback and no
+        "Exception ignored" line, with or without the help text."""
+        for index in range(40):
+            self.box.add("lesson-%02d" % index)
+        for args in (["--help"], ["list"], ["events", "--json"], ["add", "--help"]):
+            reader, writer = os.pipe()
+            os.close(reader)
+            try:
+                proc = subprocess.run([sys.executable, self.box.script] + args, stdin=subprocess.DEVNULL, stdout=writer,
+                                      stderr=subprocess.PIPE, cwd=self.box.project, env=self.box.env(),
+                                      universal_newlines=True, timeout=60)
+            finally:
+                os.close(writer)
+            self.assertEqual(proc.stderr, "", args)
+            self.assertEqual(proc.returncode, 0, args)
 
     def test_a_bad_pinned_clock_is_refused(self):
         proc = self.box.run("skip", "--why", "x", COMPOUND_NOW="yesterday")

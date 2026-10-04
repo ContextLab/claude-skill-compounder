@@ -76,6 +76,13 @@ export function parseTimedOut(stdout: string): string[] {
   return o.timed_out.map(t => (typeof t === 'string' ? t : str(record(t)?.name))).filter(t => t !== '')
 }
 
+// `compound check --guards`: the number under "guards", how many lessons carry a pattern.
+// undefined when the reply does not say.
+export function parseGuards(stdout: string): number | undefined {
+  const o = record(parsed(stdout))
+  return o !== undefined && typeof o.guards === 'number' ? o.guards : undefined
+}
+
 // `compound check`: {"hits":[{name,level,path,text}]}.
 export function parseHits(stdout: string): Hit[] | undefined {
   const o = record(parsed(stdout))
@@ -261,4 +268,16 @@ export function parseLeft(stdout: string): string | undefined {
   if (o === undefined || o.moved !== false) return undefined
   const from = str(o.from)
   return from === '' ? undefined : from
+}
+
+// `compound promote <name> --to user --auto --json`, whatever it did: the project root the
+// lesson left or stays in, the projects that keep a committed copy of it (`also`), and the
+// lessons of the same name and another text that stand in the way (`conflict`).
+export function parseMoved(stdout: string): { from: string; also: string[]; conflict: string[] } | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined) return undefined
+  const from = str(o.from)
+  if (from === '') return undefined
+  const list = (value: unknown) => (Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v !== '') : [])
+  return { from, also: list(o.also), conflict: list(o.conflict) }
 }

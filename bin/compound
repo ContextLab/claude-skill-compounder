@@ -3,7 +3,7 @@
 
 This file is the only code that reads or writes lessons, skills, the event log and the
 install record. The mod (hooks/) calls it for every store operation. Standard library
-only; runs on Python 3.8 and later.
+only; runs on Python 3.9 and later.
 
 LEVELS
     project   <repo>/.claude/compound/lessons/<name>/   <repo>/.claude/skills/<name>/
@@ -101,7 +101,15 @@ EVENT LOG
                                     auto     bool      --auto: the mod asked for it;
                                                        `project` is then the project
                                                        of the session that met it
-        candidate CLI `promote`     lesson*  string    a lesson --auto left in place
+                                    also*    [string]  project roots that keep a
+                                                       committed, byte-identical copy
+                                                       of the lesson
+                                    merged   [string]  project roots whose untracked,
+                                                       byte-identical copy was removed
+        candidate CLI `promote`     lesson*  string    a lesson --auto left in place:
+                                                       git tracks it, or another
+                                                       project holds a different
+                                                       lesson of its name
                                     from*    string    the project root that holds it
                                     seen_in* string    the project root it applied in
         error     mod, `check`      where*   string    hook or step that failed
@@ -131,6 +139,10 @@ EVENT LOG
     2) `recall` events naming it have a `ts` later than its SKILL.md's modification
     time. Rewriting the lesson (`compound add --update`) clears the flag.
 
+    One lesson in two places. Two lesson directories of one name whose trees are byte
+    for byte the same are one lesson. A project copy identical to the user-level
+    lesson of its name is not listed; `status` names it as "also committed in".
+
 ENVIRONMENT
     COMPOUND_HOME        user level root and the event log (default <claude dir>/compound)
     COMPOUND_CLAUDE_DIR  the Claude Code directory (default ~/.claude)
@@ -138,11 +150,18 @@ ENVIRONMENT
     COMPOUND_NOW         pins the clock: epoch seconds or an ISO 8601 time
     COMPOUND_CHECK_BUDGET_MS  wall-clock budget of one `check`, default 500
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
+    COMPOUND_OFF         1 switches the mod off; `status` reports it
     COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
     COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
     COMPOUND_NO_SURFER   install does not fetch history-surfer
     COMPOUND_SURFER_URL  where install clones history-surfer from
     CLAUDE_CODE_SESSION_ID  set by Claude Code; stamps `session` on events written here
+
+    COMPOUND_RECUR_LIMIT and COMPOUND_OFF are shared with the mod, which reads them in
+    a session where Claude Code has applied the `env` block of its settings. Run from
+    a terminal the CLI has no such environment, so it resolves each of the two from
+    the process environment first, then from `env` in <claude dir>/settings.json,
+    then the default (see `setting`).
 
 EXIT STATUS
     0 success; 2 usage or validation error (an unknown lesson name included);
@@ -721,6 +740,15 @@ def scan(project, with_body=False):
                 previous = found.get(real)
                 if previous is None or rank[level] > rank[previous["level"]]:
                     found[real] = item
+    # A project lesson whose tree is the user-level lesson of its name, byte for byte, is
+    # that lesson (a committed copy a move left in place), not a second one.
+    lessons_by_name = {}
+    for real, item in found.items():
+        if item["kind"] == "lesson" and item["level"] in ("project", "user"):
+            lessons_by_name.setdefault(item["name"], {})[item["level"]] = real
+    for levels in lessons_by_name.values():
+        if len(levels) == 2 and same_tree(found[levels["project"]]["path"], found[levels["user"]]["path"]):
+            del found[levels["project"]]
     items = sorted(found.values(), key=lambda it: (rank[it["level"]], it["kind"], it["name"]))
     return items, broken
 
@@ -948,8 +976,34 @@ def tally(events):
     return counts, recalls
 
 
+_settings_env = []
+
+
+def setting(name):
+    """(value, where) of a setting the CLI shares with the mod: the process environment
+    first ("environment"), then `env` in <claude dir>/settings.json ("settings"), else
+    ("", None) and the caller's default stands. A settings file that does not read
+    sets nothing."""
+    value = os.environ.get(name)
+    if value:
+        return value, "environment"
+    if not _settings_env:
+        env = {}
+        try:
+            data = json.loads(read_text(os.path.realpath(settings_path())))
+            if isinstance(data, dict) and isinstance(data.get("env"), dict):
+                env = data["env"]
+        except (OSError, ValueError):
+            pass
+        _settings_env.append(env)
+    value = _settings_env[0].get(name)
+    if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value):
+        return str(value), "settings"
+    return "", None
+
+
 def recur_limit():
-    value = os.environ.get("COMPOUND_RECUR_LIMIT", "")
+    value = setting("COMPOUND_RECUR_LIMIT")[0]
     if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
         return int(value)
     return 2
@@ -1028,9 +1082,19 @@ def _under(path, top):
 
 
 def holders_elsewhere(name, events, project, skip=()):
-    """Directories of lessons or skills called `name` at the project level of every
-    project the event log knows (the `project` of its `learn` events), leaving out the
-    user level's own directories and the real paths in `skip`."""
+    """The directories `holders` finds, without their project roots."""
+    return [directory for _root, directory in holders(name, events, project, skip)]
+
+
+def promote_command(project, name, rename=False):
+    """The command that moves `name` of `project` to the user level, as it is typed."""
+    return "COMPOUND_PROJECT=%s compound promote %s --to user%s" % (project, name, " --as NEWNAME" if rename else "")
+
+
+def holders(name, events, project, skip=()):
+    """[(project root, directory)] of lessons or skills called `name` at the project
+    level of every project the event log knows (the `project` of its `learn` events),
+    leaving out the user level's own directories and the real paths in `skip`."""
     user_lessons, user_skills = dirs_of(project, "user")
     skipped = set(os.path.realpath(path) for path in skip)
     seen = []
@@ -1048,7 +1112,7 @@ def holders_elsewhere(name, events, project, skip=()):
             if real in skipped or _under(directory, user_lessons) or _under(directory, user_skills):
                 continue
             skipped.add(real)
-            out.append(directory)
+            out.append((root, directory))
     return out
 
 
@@ -1617,7 +1681,8 @@ def run_guards(guards, text, deadline):
     return hits, unfinished, never
 
 
-def cmd_check(_args=None):
+def cmd_check(args=None, count=False):
+    count = count or bool(getattr(args, "guards", False))
     began = time.monotonic()
     raw = read_stdin()
     try:
@@ -1637,11 +1702,14 @@ def cmd_check(_args=None):
         text = json.dumps(payload, ensure_ascii=False)
     text = text[:CHECK_TEXT_CAP]
     result = {"hits": []}
-    if text:
+    if text or count:
         budget = check_budget()
         project = project_root(fast=True)
         items, _ = scan(project, with_body=True)
         guarded = [item for item in items if item["match"]]
+        if count:
+            result["guards"] = len(guarded)
+    if text:
         hits, unfinished, never = run_guards([item["match"] for item in guarded], text, began + budget)
         for index in sorted(hits):
             item = guarded[index]
@@ -1783,45 +1851,100 @@ def cmd_promote(args):
                 text = edit_frontmatter(item.get("_text", ""), {"name": yaml_string(new)}, first=("name",))
             except Fail as exc:
                 raise usage("%s cannot be renamed: %s" % (item["_file"], exc.message))
-        held = holders_elsewhere(new, events, project, skip=(item["path"],))
-        if held:
-            raise usage("%r is also the name of a different lesson in another project (%s). At the user level "
-                        "it would be seen there too, under one name. Nothing was moved; give it another name "
-                        "with: compound promote %s --to user --as NEWNAME" % (new, ", ".join(held), name))
         seen_in = _expand(args.seen_in) if args.seen_in else project
-        if args.auto and git_tracked(item["path"]):
-            command = "COMPOUND_PROJECT=%s compound promote %s --to user" % (project, name)
+
+        def candidate(command, **extra):
+            """An automatic move that was not made: logged once per pair of projects, so
+            `status` lists it under Open."""
             known = any(event.get("type") == "candidate" and event.get("lesson") == name
                         and event.get("from") == project and event.get("seen_in") == seen_in for event in events)
             if not known:
                 log_soft("candidate", seen_in, lesson=name, seen_in=seen_in, **{"from": project})
             if args.json:
-                emit({"name": name, "moved": False, "candidate": True, "from": project, "seen_in": seen_in,
-                      "kind": item["kind"], "path": item["path"], "command": command})
-            sys.stderr.write("compound: %s is tracked by git in %s, so it was left where it is. It is a candidate "
-                             "for the user level; when the user agrees, move it with: %s\n" % (name, project, command))
-            return 3
+                row = {"name": name, "moved": False, "candidate": True, "from": project, "seen_in": seen_in,
+                       "kind": item["kind"], "path": item["path"], "command": command}
+                row.update(extra)
+                emit(row)
+
+        # A copy of this lesson in another project, byte for byte, is this lesson. Any
+        # other holder of the name is a different lesson, and the user level has one name.
+        twins = [(root, directory) for root, directory in holders(name, events, project, skip=(item["path"],))
+                 if same_tree(item["path"], directory)]
+        twin_dirs = set(os.path.realpath(directory) for _root, directory in twins)
+        held = [directory for directory in holders_elsewhere(new, events, project, skip=(item["path"],))
+                if os.path.realpath(directory) not in twin_dirs]
+        if held:
+            command = promote_command(project, name, rename=True)
+            message = ("%r is also the name of a different lesson in another project (%s). At the user level "
+                       "it would be seen there too, under one name. Nothing was moved; give it another name "
+                       "with: %s" % (new, ", ".join(held), command))
+            if not args.auto:
+                raise usage(message)
+            candidate(command, conflict=held)
+            sys.stderr.write("compound: %s\n" % message)
+            return 2
+        committed = [(root, directory) for root, directory in twins if git_tracked(directory)]
+        loose = [pair for pair in twins if pair not in committed]
+        source_root, source = project, item["path"]
+        if args.auto and git_tracked(item["path"]):
+            if not loose:
+                command = promote_command(project, name)
+                candidate(command)
+                sys.stderr.write("compound: %s is tracked by git in %s, so it was left where it is. It is a "
+                                 "candidate for the user level; when the user agrees, move it with: %s\n" % (
+                                     name, project, command))
+                return 3
+            # The committed copy stays; an untracked copy of the same lesson is the one that moves.
+            source_root, source = loose.pop(0)
+            committed.insert(0, (project, item["path"]))
         lessons, skills = dirs_of(project, "user")
         target = os.path.join(lessons if item["kind"] == "lesson" else skills, new)
-        _move(item["path"], target)
+        _move(source, target)
         if text is not None:
             atomic_write(os.path.join(target, "SKILL.md"), text)
-        fields = {"from": project if args.auto else "project"}
+        merged = []
+        for root, directory in loose:
+            try:
+                if os.path.islink(directory):
+                    os.unlink(directory)
+                else:
+                    import shutil
+
+                    shutil.rmtree(directory)
+                merged.append(root)
+            except OSError as exc:
+                sys.stderr.write("compound: warning: the identical copy %s could not be removed (%s)\n" % (
+                    directory, exc.strerror or exc))
+        # Under a new name the committed copies are no longer this lesson's twins.
+        also = [root for root, _directory in committed] if new == name else []
+        fields = {"from": source_root if args.auto else "project"}
         if new != name:
             fields["was"] = name
         if args.auto:
             fields["auto"] = True
+        if also:
+            fields["also"] = also
+        if merged:
+            fields["merged"] = merged
         log_soft("promote", seen_in if args.auto else project, lesson=new, to="user", path=target, **fields)
         result = {"name": new, "from": "project", "to": "user", "kind": item["kind"], "path": target}
         if new != name:
             result["was"] = name
         if args.auto:
-            result.update({"moved": True, "from": project, "seen_in": seen_in})
+            result.update({"moved": True, "from": source_root, "seen_in": seen_in})
+        if also:
+            result["also"] = also
+        if merged:
+            result["merged"] = merged
         if args.json:
             emit(result)
         else:
             sys.stdout.write("moved %s from project to user%s\n  %s\n" % (
                 name, " as %s" % new if new != name else "", target))
+            for root in also:
+                sys.stdout.write("  the same lesson stays committed in %s\n" % root)
+            for root in merged:
+                sys.stdout.write("  the identical untracked copy in %s was removed\n" % root)
         return 0
 
     if item["level"] == "general":
@@ -2126,9 +2249,15 @@ def mod_enabled(settings, package):
     return any(_same_path(part, package) for part in plugin_dirs(settings))
 
 
+# `... from './x'` (an import or a re-export, on one line or several) and `import './x'`.
+IMPORT_RE = re.compile(r"""(?:^|[\s}])from\s+['"](\.{1,2}/[^'"\n]+)['"]|^\s*import\s+['"](\.{1,2}/[^'"\n]+)['"]""", re.M)
+IMPORT_ENDS = ("", ".ts", ".tsx", ".d.ts", ".js", "/index.ts", "/index.tsx", "/index.d.ts")
+
+
 def plugin_problem(package):
     """Why `package` cannot load as the plugin, or None: it needs its manifest, its
-    hooks file, and every module that file names."""
+    hooks file, every module that file names, and every file those modules import by
+    a relative path."""
     manifest = os.path.join(package, ".claude-plugin", "plugin.json")
     if not os.path.isfile(manifest):
         return "%s is missing" % manifest
@@ -2142,10 +2271,31 @@ def plugin_problem(package):
     modules = data.get("modules") if isinstance(data, dict) else None
     if not isinstance(modules, list) or not modules or not all(isinstance(one, str) for one in modules):
         return "%s names no module" % hooks
+    waiting = []
     for one in modules:
         path = os.path.normpath(os.path.join(os.path.dirname(hooks), one))
         if not os.path.isfile(path):
             return "the module %s, named in %s, is missing" % (path, hooks)
+        waiting.append(path)
+    # Every relative import of those modules, and of what they import, is a file.
+    seen = set()
+    while waiting:
+        path = waiting.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            source = read_text(path)
+        except OSError as exc:
+            return "the module %s cannot be read (%s)" % (path, exc.strerror or exc)
+        for found in IMPORT_RE.finditer(source):
+            spec = found.group(1) or found.group(2)
+            base = os.path.normpath(os.path.join(os.path.dirname(path), spec))
+            hit = [base + end for end in IMPORT_ENDS if os.path.isfile(base + end)]
+            if not hit:
+                return "the module %s.ts, which %s imports, is missing" % (base, path)
+            if hit[0].endswith((".ts", ".tsx")) and not hit[0].endswith(".d.ts"):
+                waiting.append(hit[0])
     return None
 
 
@@ -2469,12 +2619,17 @@ def cmd_uninstall(args):
                     "of compound's; nothing was removed" % (home, ", ".join(strangers[:8]) + (
                         " and %d more" % (len(strangers) - 8) if len(strangers) > 8 else "")))
             else:
+                clone = os.path.isdir(os.path.join(home, "app"))
                 shutil.rmtree(home)
-                report.append("purged   %s (user lessons and the event log)" % home)
+                report.append("purged   %s (user lessons, the event log%s)" % (
+                    home, " and the package clone" if clone else ""))
         else:
             report.append("purged   nothing: %s does not exist" % home)
     elif not args.purge:
         report.append("kept     %s (your lessons and the event log; --purge removes them)" % home_dir())
+        clone = os.path.join(home_dir(), "app")
+        if os.path.isdir(clone):
+            report.append("kept     %s (the package clone; --purge removes it)" % clone)
     if args.json:
         emit({"report": report, "problems": problems})
     else:
@@ -2577,6 +2732,25 @@ def same_tree(left, right):
 # ----------------------------------------------------------------------------- status
 
 
+def committed_copies(row, project, events):
+    """The project roots that hold a byte-identical copy of the user-level lesson `row`:
+    this project, and the ones a `promote` event recorded under `also`."""
+    if row["level"] != "user" or row["kind"] != "lesson":
+        return []
+    roots = [project]
+    for event in events:
+        if event.get("type") == "promote" and event.get("lesson") == row["name"] and isinstance(event.get("also"), list):
+            roots.extend(root for root in event["also"] if isinstance(root, str) and root)
+    out = []
+    for root in roots:
+        directory = os.path.join(root, ".claude", "compound", "lessons", row["name"])
+        if root in out or not os.path.isdir(directory) or _same_path(directory, row["path"]):
+            continue
+        if same_tree(directory, row["path"]):
+            out.append(root)
+    return out
+
+
 def build_status():
     import shutil
 
@@ -2594,8 +2768,8 @@ def build_status():
     version = "%d.%d.%d" % sys.version_info[:3]
     unparseable = [{"name": row["name"], "level": row["level"], "path": row["path"], "problem": row["problem"]}
                    for row in broken if row.get("unparseable")]
-    check("python", "PASS" if sys.version_info >= (3, 8) else "FAIL",
-          version if sys.version_info >= (3, 8) else version + " is older than 3.8")
+    check("python", "PASS" if sys.version_info >= (3, 9) else "FAIL",
+          version if sys.version_info >= (3, 9) else version + " is older than 3.9")
 
     spath = settings_path()
     try:
@@ -2603,13 +2777,13 @@ def build_status():
     except Fail as exc:
         check("mod", "FAIL", exc.message)
     else:
-        env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
         broken_plugin = plugin_problem(package)
+        off, off_where = setting("COMPOUND_OFF")
         if mod_enabled(settings, package) and broken_plugin:
             check("mod", "FAIL", "%s names %s, which cannot load as a plugin: %s" % (spath, package, broken_plugin))
-        elif mod_enabled(settings, package) and str(env.get("COMPOUND_OFF", "")) == "1":
+        elif mod_enabled(settings, package) and off == "1" and off_where == "settings":
             check("mod", "WARN", "switched off: env.COMPOUND_OFF is 1 in %s" % spath)
-        elif mod_enabled(settings, package) and os.environ.get("COMPOUND_OFF") == "1":
+        elif mod_enabled(settings, package) and off == "1":
             check("mod", "WARN", "switched off: COMPOUND_OFF is 1 in this environment")
         elif mod_enabled(settings, package):
             check("mod", "PASS", "enabled in %s" % spath)
@@ -2724,7 +2898,8 @@ def build_status():
         flag = "ineffective" if row["ineffective"] else ("never used" if used == 0 else "")
         lessons.append({"name": row["name"], "level": row["level"], "kind": row["kind"],
                         "guard": bool(row["match"]), "reuse": counts["reuse"], "guard_hits": counts["guard"],
-                        "recall": counts["recall"], "flag": flag, "path": row["path"]})
+                        "recall": counts["recall"], "flag": flag, "path": row["path"],
+                        "also_in": committed_copies(row, project, events)})
 
     unsettled = []
     for cap in unsettled_captures(events, clock):
@@ -2746,8 +2921,22 @@ def build_status():
             if seen not in row[0]["seen_in"]:
                 row[0]["seen_in"].append(seen)
             continue
-        candidates.append({"lesson": name, "from": source, "seen_in": [seen],
-                           "command": "COMPOUND_PROJECT=%s compound promote %s --to user" % (source, name)})
+        directory = [path for path in (os.path.join(source, ".claude", sub, name)
+                                       for sub in (os.path.join("compound", "lessons"), "skills"))
+                     if os.path.isfile(os.path.join(path, "SKILL.md"))][0]
+        at_user = [path for path in (os.path.join(base, name) for base in dirs_of(project, "user"))
+                   if os.path.isfile(os.path.join(path, "SKILL.md"))]
+        if any(same_tree(directory, path) for path in at_user):
+            continue  # the user level holds this very lesson: its committed copy, not a candidate
+        conflict = [path for path in holders_elsewhere(name, events, source, skip=(directory,)) + at_user
+                    if not same_tree(directory, path)]
+        entry = {"lesson": name, "from": source, "seen_in": [seen],
+                 "command": promote_command(source, name, rename=bool(conflict))}
+        if conflict:
+            entry["conflict"] = conflict
+        elif not git_tracked(directory):
+            entry["tracked"] = False
+        candidates.append(entry)
 
     skips = [{"ts": event.get("ts"), "session": event.get("session", ""),
               "project": event.get("project", ""), "why": one_line(event.get("why", ""))}
@@ -2793,6 +2982,9 @@ def cmd_status(args):
             ["name", "level", "kind", "reuse", "guard", "recall", "flag"]).splitlines()))
     else:
         out("  none recorded yet\n")
+    for row in data["lessons"]:
+        for root in row["also_in"]:
+            out("  %s (%s) is also committed in %s\n" % (row["name"], row["level"], root))
     out("\nRecent\n")
     if data["recent"]:
         for event in data["recent"]:
@@ -2805,14 +2997,20 @@ def cmd_status(args):
             or opened["unsettled"] or opened["candidates"]):
         out("  nothing open\n")
     for row in opened["unsettled"]:
-        out("  unsettled    %s %s %s: `%s` failed and `%s` worked; no lesson was recorded or declined. "
-            "Settle it: compound add ... --settles %s, or compound skip --settles %s --why T\n" % (
+        out("  unsettled    %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
+            "/compound:learn settle %s  Or decline it: compound skip --settles %s --why \"<reason>\"\n" % (
                 row["id"], row["age"], os.path.basename(str(row["project"])) or "-", row["failed"], row["fixed"],
                 row["id"], row["id"]))
     for row in opened["candidates"]:
-        out("  candidate    %s is a project lesson of %s that also applied in %s. It is tracked by git there, "
-            "so it was not moved. Move it to the user level with: %s\n" % (
-                row["lesson"], row["from"], ", ".join(row["seen_in"]), row["command"]))
+        if row.get("conflict"):
+            why = ("%s holds a different lesson of that name, so it was not moved. Move it to the user level "
+                   "under a new name with" % ", ".join(row["conflict"]))
+        elif row.get("tracked") is False:
+            why = "It was not moved. Move it to the user level with"
+        else:
+            why = "It is tracked by git there, so it was not moved. Move it to the user level with"
+        out("  candidate    %s is a project lesson of %s that also applied in %s. %s: %s\n" % (
+            row["lesson"], row["from"], ", ".join(row["seen_in"]), why, row["command"]))
     for row in data["unparseable"]:
         out("  unparseable  %s (%s): %s. Fix %s or remove it: compound rm %s\n" % (
             row["name"], row["level"], one_line(row["problem"])[:120], row["path"], row["name"]))
@@ -2868,8 +3066,9 @@ def build_parser():
     one.add_argument("words", nargs="+")
     one.add_argument("--limit", type=int, default=10)
 
-    command("check", cmd_check, "Test a tool call (JSON on stdin) against every guard.", json_flag=False) \
-        .add_argument("--json", action="store_true", help="accepted; the output is always JSON")
+    one = command("check", cmd_check, "Test a tool call (JSON on stdin) against every guard.", json_flag=False)
+    one.add_argument("--json", action="store_true", help="accepted; the output is always JSON")
+    one.add_argument("--guards", action="store_true", help="add \"guards\": how many lessons carry a pattern")
 
     one = command("skill", cmd_skill, "Move a lesson to the skills directory of its level.")
     one.add_argument("name")
@@ -2926,8 +3125,8 @@ def main(argv):
         except (AttributeError, ValueError, OSError):
             pass
     try:
-        if checking and len(argv) == 1:
-            return cmd_check()
+        if checking and argv[1:] in ([], ["--guards"]):
+            return cmd_check(count=len(argv) == 2)
         parser = build_parser()
         args = parser.parse_args(argv)
         if not getattr(args, "func", None):
@@ -2957,5 +3156,27 @@ def main(argv):
         return 1
 
 
+def run(argv):
+    """main(), with everything written out before the interpreter exits. A reader that
+    has gone away (`compound list | head -1`) is not an error: the rest of the output
+    has nowhere to go, and the exit status is the command's own."""
+    try:
+        code = main(argv)
+    except SystemExit as exc:  # argparse: --help, or a usage error
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Nothing more can be written: point stdout at the null device, so the flush
+        # at exit has somewhere to go.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+    except (OSError, ValueError):
+        pass
+    return code
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(run(sys.argv[1:]))

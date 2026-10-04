@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, debts, mayNudge, parseLeft, parseUnsettled, strengthenings, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, debts, mayNudge, parseGuards, parseLeft, parseMoved, parseUnsettled, strengthenings, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -172,4 +172,25 @@ test('a lesson left in place by the automatic move is read with the project that
   expect(parseLeft('{"name":"a","moved":false,"candidate":true,"from":"/work/alpha","seen_in":"/work/beta","command":"x"}')).toBe('/work/alpha')
   expect(parseLeft('{"name":"a","moved":true}')).toBe(undefined)
   expect(parseLeft('not json')).toBe(undefined)
+})
+
+test('a move the CLI refused for the name is read with the project and the lessons in the way', async () => {
+  const out = '{"name":"a","moved":false,"candidate":true,"from":"/work/alpha","seen_in":"/work/beta","command":"x","conflict":["/work/beta/.claude/compound/lessons/a"]}'
+  expect(parseLeft(out)).toBe('/work/alpha')
+  expect(parseMoved(out)?.conflict).toEqual(['/work/beta/.claude/compound/lessons/a'])
+})
+
+test('a move the CLI made says which project the lesson left and which keep a committed copy', async () => {
+  expect(parseMoved('{"name":"a","moved":true,"from":"/work/gamma","seen_in":"/work/beta","also":["/work/alpha"]}')).toEqual({ from: '/work/gamma', also: ['/work/alpha'], conflict: [] })
+  expect(parseMoved('{"name":"a","moved":true,"from":"/work/gamma"}')).toEqual({ from: '/work/gamma', also: [], conflict: [] })
+  expect(parseMoved('{"name":"a","moved":false,"from":"/work/alpha","conflict":["/p/a"]}')).toEqual({ from: '/work/alpha', also: [], conflict: ['/p/a'] })
+  expect(parseMoved('not json')).toBe(undefined)
+})
+
+test('`check --guards` says how many lessons carry a pattern; a reply without the count says nothing', async () => {
+  expect(parseGuards('{"hits": [], "guards": 0}')).toBe(0)
+  expect(parseGuards('{"hits": [{"name":"a"}], "guards": 3}')).toBe(3)
+  expect(parseGuards('{"hits": []}')).toBe(undefined)
+  expect(parseGuards('{"hits": [], "guards": "none"}')).toBe(undefined)
+  expect(parseGuards('not json')).toBe(undefined)
 })

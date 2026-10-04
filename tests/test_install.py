@@ -280,9 +280,9 @@ class UninstallTest(Case):
         self.assertEqual(json.loads(read(self.box.settings)), {"env": {}})
 
     def test_an_element_that_was_there_before_install_goes_too(self):
-        """Until the review of 2026-10-03 it stayed. The element that names this package
-        is this package's, whoever the record says added it: a record written after a
-        failed install said "not us" and the element then outlived every uninstall."""
+        """The element that names this package is this package's, whoever the record says
+        added it: a record written after a failed install says "not us" about an element
+        an earlier run added."""
         write(self.box.settings, json.dumps({"env": {PLUGIN_ENV: self.box.pkg}}))
         self.install()
         self.assertFalse(json.loads(read(self.box.manifest))["plugin_dir_added"])
@@ -411,6 +411,55 @@ class InstallShTest(Case):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(read(os.path.join(app, "VERSION")), "2\n", "a second run pulls the clone")
         self.assertEqual(json.loads(read(self.box.settings)), {"env": {PLUGIN_ENV: app}})
+
+    def origin(self):
+        origin = os.path.join(self.box.root, "origin")
+        os.makedirs(os.path.join(origin, "bin"))
+        shutil.copy2(self.box.script, os.path.join(origin, "bin", "compound"))
+        shutil.copy2(os.path.join(REPO, "install.sh"), os.path.join(origin, "install.sh"))
+        git_ok("init", "-q", origin)
+        git_ok("checkout", "-q", "-b", "release", cwd=origin)
+        git_ok("add", "-A", cwd=origin)
+        git_ok("commit", "-q", "-m", "package", cwd=origin)
+        return origin
+
+    def test_on_a_clean_home_the_closing_line_is_a_command_that_runs(self):
+        """No bin directory on PATH and none named: the link goes to ~/.local/bin, and the
+        last line names it by its absolute path, which runs with PATH as it is."""
+        script = read(os.path.join(REPO, "install.sh"))
+        proc = self.sh(["bash", "-s"], stdin=script, COMPOUND_REPO=self.origin(), COMPOUND_REF="release")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        link = os.path.join(self.box.home, ".local", "bin", "compound")
+        last = proc.stdout.strip().splitlines()[-1]
+        self.assertEqual(last, "Check it with: %s status" % link)
+        check = self.sh(last[len("Check it with: "):].split())
+        self.assertIn(check.returncode, (0, 1), check.stderr)
+        self.assertIn("Health", check.stdout)
+        readme = read(os.path.join(REPO, "README.md"))
+        self.assertIn("~/.local/bin/compound status", readme,
+                      "the README's check step gives the path that works before PATH is edited")
+
+    def test_uninstall_keeps_the_clone_and_says_where_and_purge_removes_it(self):
+        script = read(os.path.join(REPO, "install.sh"))
+        argv = ["bash", "-s", "--", "--bin-dir", self.box.bin]
+        proc = self.sh(argv, stdin=script, COMPOUND_REPO=self.origin(), COMPOUND_REF="release")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        app = os.path.join(self.box.chome, "app")
+        cli = os.path.join(app, "bin", "compound")
+        proc = self.box.run("uninstall", script=cli)
+        self.assertExit(proc, 0)
+        self.assertTrue(os.path.isfile(cli), "plain uninstall leaves the clone")
+        line = [text for text in proc.stdout.splitlines() if app in text and "clone" in text]
+        self.assertEqual(len(line), 1, proc.stdout)
+        self.assertIn("--purge", line[0])
+
+        proc = self.sh(argv, stdin=script, COMPOUND_REPO=os.path.join(self.box.root, "origin"), COMPOUND_REF="release")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        proc = self.box.run("uninstall", "--purge", script=cli)
+        self.assertExit(proc, 0)
+        self.assertFalse(os.path.exists(app), "--purge removes the clone")
+        self.assertFalse(os.path.exists(self.box.chome))
+        self.assertIn("the package clone", proc.stdout)
 
     def test_a_clone_that_fails_exits_non_zero_and_installs_nothing(self):
         script = read(os.path.join(REPO, "install.sh"))

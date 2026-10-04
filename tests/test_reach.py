@@ -158,7 +158,55 @@ class NamesTest(TwoProjects):
         self.assertIn(self.box.lesson_dir("same-name"), proc.stderr)
         self.assertIn("--as", proc.stderr)
         self.assertExit(self.auto("same-name"), 2)
-        self.assertEqual(self.box.snapshot(), before)
+        after = self.box.snapshot()
+        log = os.path.relpath(self.box.events, self.box.root)
+        self.assertEqual({key: value for key, value in after.items() if key != log},
+                         {key: value for key, value in before.items() if key != log},
+                         "an automatic move that is refused changes nothing but the event log")
+
+    def test_the_refusal_prints_the_exact_as_command(self):
+        self.lesson_in_a("same-name")
+        self.box.add("same-name", "Use when B.", "B's own lesson.\n")
+        command = "COMPOUND_PROJECT=%s compound promote same-name --to user --as NEWNAME" % self.a
+        proc = self.box.run("promote", "same-name", "--to", "user", COMPOUND_PROJECT=self.a)
+        self.assertExit(proc, 2)
+        self.assertIn(command, proc.stderr)
+        proc = self.auto("same-name", "--json")
+        self.assertExit(proc, 2)
+        self.assertIn(command, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual((data["moved"], data["candidate"], data["from"], data["command"]),
+                         (False, True, self.a, command))
+        self.assertEqual(data["conflict"], [self.box.lesson_dir("same-name")])
+
+    def test_an_automatic_move_refused_for_its_name_is_a_candidate_in_open(self):
+        self.lesson_in_a("same-name")
+        self.box.add("same-name", "Use when B.", "B's own lesson.\n")
+        gamma = os.path.join(self.box.root, "gamma")
+        os.makedirs(gamma)
+        for _ in range(2):
+            proc = self.box.run("promote", "same-name", "--to", "user", "--auto", "--seen-in", gamma,
+                                COMPOUND_PROJECT=self.a)
+            self.assertExit(proc, 2)
+        rows = [e for e in self.box.read_events() if e["type"] == "candidate"]
+        self.assertEqual(len(rows), 1, "logged once per pair of projects")
+        self.assertEqual((rows[0]["lesson"], rows[0]["from"], rows[0]["seen_in"], rows[0]["project"]),
+                         ("same-name", self.a, gamma, gamma))
+        command = "COMPOUND_PROJECT=%s compound promote same-name --to user --as NEWNAME" % self.a
+        data = self.status()
+        self.assertEqual(data["open"]["candidates"],
+                         [{"lesson": "same-name", "from": self.a, "seen_in": [gamma], "command": command,
+                           "conflict": [self.box.lesson_dir("same-name")]}])
+        opened = self.box.run("status").stdout.split("Open")[1]
+        line = [text for text in opened.splitlines() if "candidate" in text]
+        self.assertEqual(len(line), 1, opened)
+        self.assertIn(command, line[0])
+        self.assertIn(self.box.lesson_dir("same-name"), line[0])
+        self.assertNotIn("tracked by git", line[0], "this one was held back by its name, not by git")
+        proc = self.box.run("promote", "same-name", "--to", "user", "--as", "alpha-same-name",
+                            COMPOUND_PROJECT=self.a)
+        self.assertExit(proc, 0)
+        self.assertEqual(self.status()["open"]["candidates"], [])
 
     def test_as_renames_while_moving(self):
         directory = self.lesson_in_a("same-name", "A's lesson.\n")
@@ -212,6 +260,169 @@ class NamesTest(TwoProjects):
         self.assertIn(self.box.lesson_dir("twice", "user"), row["detail"])
 
 
+class SameLessonTest(TwoProjects):
+    """One lesson, byte for byte, under one name in two projects: alpha commits it, gamma
+    holds an untracked copy. It is the same lesson, so a move up takes one copy."""
+
+    def setUp(self):
+        TwoProjects.setUp(self)
+        self.gamma = os.path.join(self.box.root, "gamma")
+        os.makedirs(self.gamma)
+        self.in_a = self.lesson_in_a("shared")
+        helper = os.path.join(self.in_a, "helper.sh")
+        with open(helper, "w") as handle:
+            handle.write("#!/bin/sh\necho right\n")
+        git_ok("init", cwd=self.a)
+        git_ok("add", "-A", cwd=self.a)
+        git_ok("commit", "-m", "the lesson", cwd=self.a)
+        self.in_gamma = os.path.join(self.gamma, ".claude", "compound", "lessons", "shared")
+        import shutil
+        shutil.copytree(self.in_a, self.in_gamma)
+        self.box.log({"type": "learn", "lesson": "shared", "level": "project", "kind": "lesson",
+                      "project": self.gamma, "path": self.in_gamma})
+        self.user = self.box.lesson_dir("shared", "user")
+
+    def user_lessons(self):
+        return sorted(os.listdir(os.path.join(self.box.chome, "lessons")))
+
+    def test_the_open_command_for_the_committed_copy_runs(self):
+        """The automatic move leaves alpha's committed copy and takes gamma's, so nothing
+        is left open; moving alpha's by hand afterwards is refused as already done."""
+        proc = self.auto("shared", "--json")
+        self.assertExit(proc, 0)
+        data = json.loads(proc.stdout)
+        self.assertEqual((data["moved"], data["from"], data["also"]), (True, self.gamma, [self.a]))
+        self.assertTrue(os.path.isfile(os.path.join(self.user, "SKILL.md")))
+        self.assertTrue(os.path.isfile(os.path.join(self.user, "helper.sh")))
+        self.assertFalse(os.path.exists(self.in_gamma), "the untracked copy is the one that moved")
+        self.assertTrue(os.path.isfile(os.path.join(self.in_a, "SKILL.md")), "the committed copy stays")
+        self.assertEqual(git_ok("status", "--porcelain", cwd=self.a), "")
+        event = self.box.read_events()[-1]
+        self.assertEqual(event, {"ts": "2026-09-21T14:13:20Z", "type": "promote", "session": "sess-0001-aaaa",
+                                 "project": self.b, "lesson": "shared", "to": "user", "path": self.user,
+                                 "from": self.gamma, "auto": True, "also": [self.a]})
+        self.assertEqual([e for e in self.box.read_events() if e["type"] == "candidate"], [])
+        self.assertEqual(self.status()["open"]["candidates"], [])
+        self.assertEqual(self.user_lessons(), ["shared"])
+
+    def test_moving_the_untracked_copy_records_the_committed_one(self):
+        proc = self.box.run("promote", "shared", "--to", "user", "--auto", "--seen-in", self.b,
+                            COMPOUND_PROJECT=self.gamma)
+        self.assertExit(proc, 0)
+        self.assertFalse(os.path.exists(self.in_gamma))
+        self.assertTrue(os.path.isfile(os.path.join(self.in_a, "SKILL.md")))
+        self.assertEqual(self.box.read_events()[-1]["also"], [self.a])
+
+    def test_moving_the_committed_copy_by_hand_removes_the_untracked_one(self):
+        proc = self.box.run("promote", "shared", "--to", "user", COMPOUND_PROJECT=self.a)
+        self.assertExit(proc, 0)
+        self.assertNotIn("--as", proc.stderr)
+        self.assertFalse(os.path.exists(self.in_a), "moved by hand, as the user asked")
+        self.assertFalse(os.path.exists(self.in_gamma), "the identical untracked copy is not left behind")
+        self.assertEqual(self.user_lessons(), ["shared"], "one lesson at the user level, not two")
+        event = self.box.read_events()[-1]
+        self.assertEqual((event["type"], event["merged"]), ("promote", [self.gamma]))
+        self.assertNotIn("also", event)
+
+    def test_the_committed_copy_is_not_a_second_lesson(self):
+        self.assertExit(self.auto(), 0)
+        for project in (self.a, self.b, self.gamma):
+            rows = [(row["level"], row["name"]) for row in self.box.json("list", "--json", COMPOUND_PROJECT=project)]
+            self.assertEqual(rows, [("user", "shared")], project)
+            data = self.status(COMPOUND_PROJECT=project)
+            dup = [row for row in data["health"] if row["check"] == "duplicates"][0]
+            self.assertEqual(dup["status"], "PASS", dup)
+            row = [row for row in data["lessons"] if row["name"] == "shared"][0]
+            self.assertEqual(row["also_in"], [self.a])
+            text = self.box.run("status", COMPOUND_PROJECT=project).stdout
+            self.assertIn("shared (user) is also committed in %s" % self.a, text)
+        # No project offers it to another as a different lesson: nothing is left to move.
+        proc = self.box.run("promote", "shared", "--to", "user", COMPOUND_PROJECT=self.a)
+        self.assertExit(proc, 2)
+        self.assertIn("already at the user level", proc.stderr)
+
+    def test_a_committed_copy_that_was_edited_is_a_different_lesson_again(self):
+        self.assertExit(self.auto(), 0)
+        with open(os.path.join(self.in_a, "SKILL.md"), "a") as handle:
+            handle.write("And one more thing.\n")
+        data = self.status(COMPOUND_PROJECT=self.a)
+        dup = [row for row in data["health"] if row["check"] == "duplicates"][0]
+        self.assertEqual(dup["status"], "FAIL", dup)
+        self.assertEqual([row for row in self.status()["lessons"] if row["name"] == "shared"][0]["also_in"], [])
+
+    def test_a_copy_whose_text_differs_is_still_a_conflict(self):
+        with open(os.path.join(self.in_gamma, "SKILL.md"), "a") as handle:
+            handle.write("Gamma does it another way.\n")
+        before = self.box.snapshot(self.gamma)
+        proc = self.box.run("promote", "shared", "--to", "user", COMPOUND_PROJECT=self.a)
+        self.assertExit(proc, 2)
+        self.assertIn("COMPOUND_PROJECT=%s compound promote shared --to user --as NEWNAME" % self.a, proc.stderr)
+        self.assertEqual(self.box.snapshot(self.gamma), before)
+        self.assertTrue(os.path.isdir(self.in_a))
+
+
+class KnobTest(Case):
+    """A setting the CLI shares with the mod: the process environment, then `env` in the
+    Claude directory's settings.json, then the default."""
+
+    def settings_env(self, **env):
+        with open(self.box.settings, "w") as handle:
+            json.dump({"env": env}, handle)
+
+    def limit(self, **kw):
+        self.box.add("flaky") if not os.path.isdir(self.box.lesson_dir("flaky")) else None
+        return self.box.json("show", "flaky", "--json", **kw)["recur_limit"]
+
+    def test_the_default(self):
+        self.assertEqual(self.limit(), 2)
+
+    def test_the_settings_env_block_is_read(self):
+        self.settings_env(COMPOUND_RECUR_LIMIT="3")
+        self.assertEqual(self.limit(), 3)
+
+    def test_the_process_environment_comes_first(self):
+        self.settings_env(COMPOUND_RECUR_LIMIT="3")
+        self.assertEqual(self.limit(COMPOUND_RECUR_LIMIT="5"), 5)
+
+    def test_a_value_of_the_wrong_shape_is_the_default(self):
+        self.settings_env(COMPOUND_RECUR_LIMIT="many")
+        self.assertEqual(self.limit(), 2)
+        self.assertEqual(self.limit(COMPOUND_RECUR_LIMIT="0"), 2)
+
+    def test_settings_that_do_not_read_are_the_default(self):
+        with open(self.box.settings, "w") as handle:
+            handle.write("{broken")
+        self.assertEqual(self.limit(), 2)
+        with open(self.box.settings, "w") as handle:
+            json.dump({"env": ["not", "an", "object"]}, handle)
+        self.assertEqual(self.limit(), 2)
+
+    def test_status_and_the_ineffective_flag_use_the_same_limit(self):
+        self.box.add("flaky")
+        for offset in (10, 20):
+            self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + offset)
+        proc = self.box.run("status", "--json", COMPOUND_NOW=NOW + 30)
+        self.assertEqual([row["name"] for row in json.loads(proc.stdout)["open"]["ineffective"]], ["flaky"])
+        self.settings_env(COMPOUND_RECUR_LIMIT="3")
+        proc = self.box.run("status", "--json", COMPOUND_NOW=NOW + 30)
+        self.assertEqual(json.loads(proc.stdout)["open"]["ineffective"], [])
+
+    def test_off_in_the_process_environment_overrides_the_settings(self):
+        self.box.plugin()
+        self.assertExit(self.box.run("install", "--bin-dir", self.box.bin), 0)
+        data = json.loads(read(self.box.settings))
+        data["env"]["COMPOUND_OFF"] = "1"
+        with open(self.box.settings, "w") as handle:
+            json.dump(data, handle)
+
+        def mod(**kw):
+            proc = self.box.run("status", "--json", **kw)
+            return [row for row in json.loads(proc.stdout)["health"] if row["check"] == "mod"][0]
+
+        self.assertEqual(mod()["status"], "WARN")
+        self.assertEqual(mod(COMPOUND_OFF="0")["status"], "PASS", "the process environment comes first")
+
+
 class ModHealthTest(Case):
     def health(self, name, **kw):
         proc = self.box.run("status", "--json", **kw)
@@ -248,6 +459,20 @@ class ModHealthTest(Case):
         row = self.health("mod")
         self.assertEqual(row["status"], "FAIL", row)
         self.assertIn(os.path.join(self.box.pkg, "hooks", "hooks.json"), row["detail"])
+
+    def test_a_module_the_hooks_import_that_is_missing_fails(self):
+        self.installed()
+        self.assertEqual(self.health("mod")["status"], "PASS")
+        for name in ("render.ts", "safe.ts"):
+            module = os.path.join(self.box.pkg, "hooks", name)
+            kept = read(module)
+            os.unlink(module)
+            row = self.health("mod")
+            self.assertEqual(row["status"], "FAIL", "%s is imported and missing: %r" % (name, row))
+            self.assertIn(module, row["detail"])
+            with open(module, "w") as handle:
+                handle.write(kept)
+        self.assertEqual(self.health("mod")["status"], "PASS")
 
     def test_switched_off_in_the_settings_env_warns(self):
         self.installed()
@@ -388,6 +613,9 @@ class CaptureTest(TwoProjects):
         self.assertIn("./build.sh --profile dev", line[0])
         self.assertLess(len(line[0]), 330, "the two commands are truncated")
         self.assertIn("--settles %s" % event["id"], opened)
+        self.assertNotIn("...", line[0], "every command in the line can be run as it is printed")
+        self.assertIn("/compound:learn settle %s" % event["id"], line[0])
+        self.assertIn('compound skip --settles %s --why "<reason>"' % event["id"], line[0])
         self.assertExit(self.box.run("skip", "--why", "no", "--settles", event["id"],
                                      CLAUDE_CODE_SESSION_ID="s-nine"), 0)
         self.assertEqual(self.status()["open"]["unsettled"], [])

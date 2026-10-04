@@ -2,15 +2,15 @@ import type { EngineInterface, Register } from 'claude-code'
 import { isOff, knobsFrom, type Knobs } from './knobs'
 import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
-  callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, heldStep,
-  inputOf, isCommand, judged, knownContext, promotedText, recallContext, reusable, reuseContext, reuseStatus, stopDebt, stopNudge,
-  stopStrengthen, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
+  BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason,
+  heldStep, inputOf, isCommand, judged, knownContext, promotedText, ranOut, recallContext, reportsEvents, reusable, reuseContext, reuseStatus,
+  stopDebt, stopNudge, stopStrengthen, storeNews, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseLeft, parseShow, parseTimedOut, parseUnsettled,
-  strengthenings,
+  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseGuards, parseHits, parseInventory, parseMoved, parseShow, parseTimedOut,
+  parseUnsettled, strengthenings,
   type Earlier, type Event, type Item,
 } from './store'
 
@@ -34,7 +34,13 @@ import {
 //
 // THE MOD NEVER READS OR WRITES A LESSON FILE OR THE EVENT LOG. Every store operation is
 // one `$.process.run` of bin/compound, and ./store reads what it prints. Every firing
-// writes an event that way and sets the status entry. Every failure of the mod itself is
+// writes an event that way and sets the status entry.
+//
+// EVERY CLI CALL HAS A BUDGET (./render BUDGET): 1.5 s for the check a tool call waits
+// for, 2 s for anything else on a tool-call or stop path, 5 s at a typed prompt. Before a
+// tool call the mod makes ONE call, `check`, and no listing. A subcommand that ran out of
+// time is not called again until the next typed prompt (`stalled`), so a slow CLI costs a
+// turn one budget per subcommand and not one per tool call. Every failure of the mod itself is
 // caught, logged as an `error`, and told to Claude at the next typed prompt. Lesson text is
 // only ever shown to Claude as a quotation (./render), never as the mod's own instruction.
 // COMPOUND_OFF=1 switches all of it off.
@@ -45,11 +51,11 @@ import {
 
 const LOGGED_CALL = 4000
 const LOGGED_ERROR = 2000
-const CLI_TIMEOUT_MS = 15000
-// The guard holds a tool call while `compound check` runs. Past this the child is killed
-// and the call runs unguarded.
-const GUARD_TIMEOUT_MS = 1500
-const CLAIM_TIMEOUT_MS = 5000
+// What `spawn` answers in place of an exit code: the child could not start, it was killed
+// at its budget, or it was not started because its subcommand ran out of time this turn.
+const NOT_STARTED = -1
+const TIMED_OUT = -2
+const SKIPPED = -3
 // How many prompt-log candidates the judge is shown.
 const CANDIDATES_MAX = 5
 const CLAIMS_KEPT_DAYS = 14
@@ -78,6 +84,15 @@ const claimed = new Set<string>()
 const failedOnce = new Set<string>()
 // How many failure reports each session has been given.
 const reports = new Map<string, number>()
+// The subcommands that ran out of time in a session's current turn. None of them is
+// called again until the next typed prompt starts a turn.
+const stalled = new Map<string, Set<string>>()
+// The sessions whose last `check` said that no lesson carries a pattern: nothing can hit,
+// so no call is made before a tool call. Forgotten at each typed prompt and whenever the
+// session runs a CLI command that changes the store.
+const noGuards = new Set<string>()
+// The events of a session's own CLI calls that were already toasted, per session.
+const told = new Map<string, Set<string>>()
 let sweptClaims = false
 let ownCli: string | undefined
 let settings: { at: number; off: boolean; knobs: Knobs } | undefined
@@ -138,27 +153,45 @@ async function knobs($: EngineInterface): Promise<Knobs> {
 }
 
 // One CLI call, with the session stamped on it and the three store locations passed
-// through when they are set. `project` runs it as another project. Never rejects: a child
-// that could not start or ran out of time is exit code -1 with the reason as its stderr.
-async function spawn($: EngineInterface, args: readonly string[], stdin?: string, project?: string, timeoutMs = CLI_TIMEOUT_MS): Promise<Ran> {
+// through when they are set. `project` runs it as another project. `timeoutMs` is its
+// budget: past it the child is killed, the answer is TIMED_OUT, and the subcommand is not
+// started again in this turn (SKIPPED). Never rejects: a child that could not start is
+// NOT_STARTED with the reason as its stderr.
+async function spawn($: EngineInterface, args: readonly string[], stdin?: string, project?: string, timeoutMs: number = BUDGET.call): Promise<Ran> {
+  const verb = args[0] ?? ''
+  let sid = ''
+  let began = 0
   try {
-    const env: Record<string, string> = { CLAUDE_CODE_SESSION_ID: await $.session.id() }
+    sid = await $.session.id()
+    if (stalled.get(sid)?.has(verb) === true) {
+      return { code: SKIPPED, stdout: '', stderr: `compound ${verb} ran out of time earlier in this turn and is not called again in it` }
+    }
+    const env: Record<string, string> = { CLAUDE_CODE_SESSION_ID: sid }
     const home = await $.env.get('COMPOUND_HOME')
     if (home) env.COMPOUND_HOME = home
     const claudeDir = await $.env.get('COMPOUND_CLAUDE_DIR')
     if (claudeDir) env.COMPOUND_CLAUDE_DIR = claudeDir
     const pinned = project ?? (await $.env.get('COMPOUND_PROJECT'))
     if (pinned) env.COMPOUND_PROJECT = pinned
-    const done = await $.process.run([await cliPath($), ...args], {
-      cwd: await projectRoot($),
-      env,
-      timeoutMs,
-      ...(stdin === undefined ? {} : { stdin }),
-    })
+    const argv = [await cliPath($), ...args]
+    const cwd = await projectRoot($)
+    began = Date.now()
+    const done = await $.process.run(argv, { cwd, env, timeoutMs, ...(stdin === undefined ? {} : { stdin }) })
     return { code: done.exitCode, stdout: done.stdout, stderr: done.stderr }
   } catch (err) {
-    return { code: -1, stdout: '', stderr: said(err) }
+    if (began > 0 && ranOut(Date.now() - began, timeoutMs)) {
+      if (sid !== '') stalled.set(sid, (stalled.get(sid) ?? new Set<string>()).add(verb))
+      return { code: TIMED_OUT, stdout: '', stderr: `compound ${verb} did not answer within ${timeoutMs} ms and was stopped; it is not called again in this turn` }
+    }
+    return { code: NOT_STARTED, stdout: '', stderr: said(err) }
   }
+}
+
+// Why a CLI call failed, in one line.
+function why(ran: Ran): string {
+  if (ran.code === TIMED_OUT) return ran.stderr
+  if (ran.code === NOT_STARTED) return `could not start: ${ran.stderr.trim()}`
+  return `exit ${ran.code}: ${ran.stderr.trim() || ran.stdout.trim() || '(no output)'}`
 }
 
 // A failure of the mod itself: kept for this session, shown in the status entry, and
@@ -181,23 +214,37 @@ async function fail($: EngineInterface, where: string, err: unknown): Promise<vo
     // A surface that cannot show a status entry does not make the failure worse.
   }
   const logged = await spawn($, ['log'], JSON.stringify({ type: 'error', where, message }))
-  if (logged.code !== 0) kept.push({ where: 'cli.log', message: oneLine(`exit ${logged.code}: ${logged.stderr}`, 300) })
+  if (logged.code !== 0) {
+    // The log itself failing is one failure of the session, however many events it loses.
+    const id = `${sid}\u0000cli.log\u0000${logged.code === SKIPPED ? TIMED_OUT : logged.code}`
+    if (!failedOnce.has(id)) {
+      failedOnce.add(id)
+      kept.push({ where: 'cli.log', message: oneLine(why(logged), 300) })
+    }
+  }
 }
 
 // A failure that would repeat on every call (an unusable claims directory, a guard check
-// that does not answer): logged once per session.
-async function failOnce($: EngineInterface, sid: string, where: string, err: unknown): Promise<void> {
-  const id = `${sid}\u0000${where}`
+// that does not answer, a CLI subcommand that fails the same way): logged once per
+// session. `what` tells two failures at one place apart.
+async function failOnce($: EngineInterface, sid: string, where: string, err: unknown, what = ''): Promise<void> {
+  const id = `${sid}\u0000${where}\u0000${what}`
   if (failedOnce.has(id)) return
   failedOnce.add(id)
   await fail($, where, err)
 }
 
-// A failure with no `$` call at all, for a `.catch` handler's one-second grace.
-function failQuietly(where: string, message: string): void {
+// A failure reported from a `.catch` handler, which has one second: it is kept for the
+// next typed prompt and shown in the status entry, with nothing awaited.
+function failQuietly($: EngineInterface, where: string, message: string): void {
   const kept = failures.get('unknown') ?? []
   kept.push({ where, message: oneLine(message, 500) })
   failures.set('unknown', kept)
+  try {
+    $.ui.status(errorStatus(kept.length))
+  } catch {
+    // A surface that cannot show a status entry does not make the failure worse.
+  }
 }
 
 function hasFailures(sid: string): boolean {
@@ -212,23 +259,37 @@ function takeFailures(sid: string): Failure[] {
   return out
 }
 
+// A failed CLI call: each distinct failure of a subcommand is logged once per session. A
+// call that was skipped because its subcommand already ran out of time is not a new failure.
+async function cliFailed($: EngineInterface, verb: string, ran: Ran): Promise<void> {
+  if (ran.code === SKIPPED) return
+  const message = why(ran)
+  let sid = 'unknown'
+  try {
+    sid = await $.session.id()
+  } catch {
+    // The session id is only the key the failure is kept under.
+  }
+  await failOnce($, sid, `cli.${verb}`, message, ran.code === TIMED_OUT ? 'timeout' : message)
+}
+
 // A CLI call whose exit code must be one of `ok`. Anything else is logged as an error and
 // answered `undefined`, so a caller reads "the CLI could not say" and adds nothing.
-async function cli($: EngineInterface, args: readonly string[], stdin?: string, ok: readonly number[] = [0], project?: string): Promise<Ran | undefined> {
-  const ran = await spawn($, args, stdin, project)
+async function cli($: EngineInterface, args: readonly string[], stdin?: string, ok: readonly number[] = [0], project?: string, timeoutMs: number = BUDGET.call): Promise<Ran | undefined> {
+  const ran = await spawn($, args, stdin, project, timeoutMs)
   if (ok.includes(ran.code)) return ran
-  await fail($, `cli.${args[0] ?? ''}`, `exit ${ran.code}: ${ran.stderr.trim() || ran.stdout.trim() || '(no output)'}`)
+  await cliFailed($, args[0] ?? '', ran)
   return undefined
 }
 
 // Appends one event. The CLI fills in `ts`, `session` and `project`.
 async function log($: EngineInterface, event: Record<string, unknown>): Promise<void> {
   const ran = await spawn($, ['log'], JSON.stringify(event))
-  if (ran.code !== 0) await fail($, 'cli.log', `exit ${ran.code}: ${ran.stderr.trim() || '(no output)'}`)
+  if (ran.code !== 0) await cliFailed($, 'log', ran)
 }
 
-async function events($: EngineInterface, args: readonly string[]): Promise<Event[] | undefined> {
-  const ran = await cli($, ['events', '--json', ...args])
+async function events($: EngineInterface, args: readonly string[], timeoutMs: number = BUDGET.call): Promise<Event[] | undefined> {
+  const ran = await cli($, ['events', '--json', ...args], undefined, [0], undefined, timeoutMs)
   if (ran === undefined) return undefined
   const rows = parseEvents(ran.stdout)
   if (rows === undefined) await fail($, 'events.parse', `compound events --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
@@ -236,11 +297,12 @@ async function events($: EngineInterface, args: readonly string[]): Promise<Even
 }
 
 // Every lesson and skill at all three levels and the project's scripts, as the CLI lists
-// them. Cached for a minute: the pre-call guard asks on every tool call.
-async function inventory($: EngineInterface): Promise<Item[] | undefined> {
+// them. Cached for a minute. Asked for at a typed prompt and after a failed or fixing
+// call, never before a tool call.
+async function inventory($: EngineInterface, timeoutMs: number = BUDGET.call): Promise<Item[] | undefined> {
   const root = await projectRoot($)
   if (listed !== undefined && listed.root === root && Date.now() - listed.at < INVENTORY_TTL_MS) return listed.items
-  const ran = await cli($, ['list', '--scripts', '--json'])
+  const ran = await cli($, ['list', '--scripts', '--json'], undefined, [0], undefined, timeoutMs)
   if (ran === undefined) return undefined
   const items = parseInventory(ran.stdout)
   if (items === undefined) {
@@ -272,9 +334,11 @@ async function lessonsElsewhere($: EngineInterface, have: readonly Item[]): Prom
   return out
 }
 
-function forgetInventory(): void {
+// The store changed: what was listed, and what was known about guards, is asked again.
+function forgetInventory(sid: string): void {
   listed = undefined
   elsewhere = undefined
+  noGuards.delete(sid)
 }
 
 // One question to the judge model, bounded by COMPOUND_JUDGE_TIMEOUT. Never rejects.
@@ -348,9 +412,9 @@ async function claim($: EngineInterface, sid: string, key: string): Promise<Clai
     }
     if (!sweptClaims) {
       sweptClaims = true
-      await $.process.run(['sh', '-c', SWEEP_SH, 'sh', root, String(CLAIMS_KEPT_DAYS)], { timeoutMs: CLAIM_TIMEOUT_MS })
+      await $.process.run(['sh', '-c', SWEEP_SH, 'sh', root, String(CLAIMS_KEPT_DAYS)], { timeoutMs: BUDGET.claim })
     }
-    const ran = await $.process.run(['sh', '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key)], { timeoutMs: CLAIM_TIMEOUT_MS })
+    const ran = await $.process.run(['sh', '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key)], { timeoutMs: BUDGET.claim })
     if (ran.exitCode === 0) return 'mine'
     if (ran.exitCode === 1) return 'taken'
     await failOnce($, sid, 'claim', `${ran.stderr.trim() || `exit ${ran.exitCode}`}; the claims directory is unusable, so nothing is refused in this session`)
@@ -384,7 +448,7 @@ async function registerCommand($: EngineInterface): Promise<void> {
 // words. Candidates only; the judge decides which of them are like this request.
 async function earlierCandidates($: EngineInterface, sid: string, text: string, words: readonly string[]): Promise<Earlier[]> {
   if (words.length === 0) return []
-  const found = await cli($, ['find', '--json', ...words])
+  const found = await cli($, ['find', '--json', ...words], undefined, [0], undefined, BUDGET.prompt)
   if (found === undefined) return []
   // The CLI's prompt rows carry no session, so this session's own prompts are recognised by text.
   const mine = [text, ...(await $.session.messages()).filter(m => m.role === 'user').map(m => m.text)]
@@ -400,7 +464,7 @@ async function earlierCandidates($: EngineInterface, sid: string, text: string, 
 // the CLI at the first typed prompt of a session and told once; it refuses no stop.
 async function unsettledReminder($: EngineInterface, sid: string): Promise<string> {
   if (!(await firstTime($, sid, 'unsettled'))) return ''
-  const ran = await cli($, ['events', '--unsettled', '--project', await projectRoot($), '--json'])
+  const ran = await cli($, ['events', '--unsettled', '--project', await projectRoot($), '--json'], undefined, [0], undefined, BUDGET.prompt)
   if (ran === undefined) return ''
   const open = parseUnsettled(ran.stdout, sid, nowS())
   if (open === undefined) {
@@ -421,7 +485,10 @@ async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knob
   const began = Date.now()
   const request = redact(text)
   if (!(await firstTime($, sid, `reuse-${digest(text)}-${Math.floor(nowS() / 20)}`))) return ''
-  const items = reusable((await inventory($)) ?? [])
+  const listing = await inventory($, BUDGET.prompt)
+  // The listing also says whether any lesson carries a pattern, so the guard need not ask.
+  if (listing !== undefined && !listing.some(i => i.match.length > 0)) noGuards.add(sid)
+  const items = reusable(listing ?? [])
   const words = significantWords(request)
   const candidates = await earlierCandidates($, sid, text, words)
   // Nothing recorded and nothing like it asked before: no model call is made.
@@ -463,7 +530,12 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
   // The user typed. With the session idle a turn starts here, and what the stop moment
   // counts starts over; typed over a running turn, the prompt waits for that turn's stop.
   turns.set(sid, turnAfterPrompt(turns.get(sid), nowS(), midTurn))
-  if (!midTurn) $.ui.status(undefined)
+  if (!midTurn) {
+    $.ui.status(undefined)
+    // A new turn: a subcommand that ran out of time is tried again, and so is the check.
+    stalled.delete(sid)
+    noGuards.delete(sid)
+  }
   await registerCommand($)
   const out: string[] = []
   // The mod's own failures since the last report: each is told once.
@@ -491,19 +563,22 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
 
 // ---- moment 2: guard ------------------------------------------------------------------
 
+// THE PRE-CALL PATH MAKES ONE CLI CALL, `check`, and no listing. The reply also counts the
+// lessons that carry a `match`; when there is none, nothing can hit, and the calls that
+// follow are not held for a process start at all.
 async function guard($: EngineInterface, sid: string, tool: string, input: Record<string, unknown>): Promise<string | undefined> {
+  if (noGuards.has(sid)) return undefined
   const began = Date.now()
-  const items = await inventory($)
-  // No lesson has a `match`: nothing can hit, and the call is not held for a process start.
-  if (items === undefined || !items.some(i => i.match.length > 0)) return undefined
   // The call waits for this child, so it gets a short time. A check that does not answer,
-  // or fails, is killed and the call runs: the guard fails open.
-  const ran = await spawn($, ['check'], JSON.stringify({ tool, input }), undefined, GUARD_TIMEOUT_MS)
+  // or fails, is killed and the call runs: the guard fails open, and `check` is not
+  // called again in this turn.
+  const ran = await spawn($, ['check', '--guards'], JSON.stringify({ tool, input }), undefined, BUDGET.check)
+  if (ran.code === SKIPPED) return undefined
   if (ran.code !== 0) {
-    const why = ran.code === -1 ? `did not answer within ${GUARD_TIMEOUT_MS} ms or could not start (${ran.stderr.trim()})` : `exit ${ran.code}: ${ran.stderr.trim() || '(no output)'}`
-    await failOnce($, sid, 'guard.check', `compound check ${why}; calls run unguarded while this lasts`)
+    await failOnce($, sid, 'guard.check', `${ran.code === TIMED_OUT ? '' : 'compound check: '}${why(ran)}; calls run unguarded while this lasts`)
     return undefined
   }
+  if (parseGuards(ran.stdout) === 0) noGuards.add(sid)
   const slow = parseTimedOut(ran.stdout)
   if (slow.length > 0) await failOnce($, sid, 'guard.pattern', `compound check gave up on the match pattern of: ${slow.join(', ')}; rewrite the pattern so it cannot backtrack`)
   const hits = parseHits(ran.stdout)
@@ -532,23 +607,27 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
 // level, and does so only when git does not track it there: a tracked lesson stays, is read
 // from where it is, and is offered to the user as a move. The recurrence is logged, marked
 // ineffective when this one makes it so. Answers the text Claude reads beside the result.
-async function recurred($: EngineInterface, found: Item, tool: string, call: string, error: string, k: Knobs, known: boolean): Promise<string[]> {
+async function recurred($: EngineInterface, sid: string, found: Item, tool: string, call: string, error: string, k: Knobs, known: boolean): Promise<string[]> {
   const cliAt = await cliPath($)
   const out: string[] = []
   let lesson = found
   let asProject = lesson.project
   if (asProject !== undefined) {
-    // Exit 3: tracked, left in place. Exit 2: not movable as it is (the name is taken in
-    // another project, or the lesson is gone): it is read from where it is, if it is there.
+    // Exit 3: tracked, left in place. Exit 2: not movable as it is (another project holds
+    // a different lesson of its name, or the lesson is gone). Either way it is read from
+    // where it is, if it is there, and offered to the user as a move when the CLI says so.
     const moved = await cli($, ['promote', lesson.name, '--to', 'user', '--auto', '--seen-in', await projectRoot($), '--json'], undefined, [0, 2, 3], asProject)
+    const left = moved === undefined ? undefined : parseMoved(moved.stdout)
     if (moved !== undefined && moved.code === 0) {
-      forgetInventory()
-      out.push(promotedText(lesson.name, asProject, cliAt))
+      forgetInventory(sid)
+      out.push(promotedText(lesson.name, left?.from ?? asProject, cliAt, left?.also ?? []))
       $.ui.toast(`compound: lesson ${lesson.name} moved to the user level`)
       lesson = { ...lesson, level: 'user', path: '' }
       asProject = undefined
     } else if (moved !== undefined && moved.code === 3) {
-      out.push(candidateText(lesson.name, parseLeft(moved.stdout) ?? asProject, cliAt))
+      out.push(candidateText(lesson.name, left?.from ?? asProject, cliAt))
+    } else if (moved !== undefined && left !== undefined && left.conflict.length > 0) {
+      out.push(candidateText(lesson.name, left.from, cliAt, left.conflict))
     }
   }
   const shown = await cli($, ['show', lesson.name, '--json'], undefined, [0], asProject)
@@ -604,7 +683,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   }
   // A failure answered with a recorded lesson is not held: the fix teaches nothing new.
   held.delete(key)
-  return recurred($, hit, tool, call, error, k, false)
+  return recurred($, sid, hit, tool, call, error, k, false)
 }
 
 async function onSuccess($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
@@ -629,7 +708,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   }
   if (answer.verdict === 'NONE') return []
   held.delete(key)
-  if (answer.verdict === 'KNOWN') return recurred($, answer.lesson, tool, was.call, was.error, k, true)
+  if (answer.verdict === 'KNOWN') return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true)
   await log($, {
     type: 'capture',
     id: digest(`${sid}:${callId}`),
@@ -647,20 +726,20 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
 }
 
 // The session ran the CLI itself: the store may have changed, and a lesson may now exist.
-async function onCliCall($: EngineInterface, verb: string, failed: boolean): Promise<void> {
-  if (changesStore(verb)) forgetInventory()
-  if (failed) return
-  // A debt settled, by a lesson or by declining it: nothing is owed, and the entry goes.
-  if (verb === 'skip') {
-    $.ui.status(undefined)
-  } else if (verb === 'add') {
-    const learned = await events($, ['--session', await $.session.id(), '--type', 'learn'])
-    const last = learned?.[learned.length - 1]
-    const name = last === undefined || typeof last.lesson !== 'string' ? '' : last.lesson
-    $.ui.toast(name === '' ? 'compound: lesson recorded' : `compound: lesson recorded: ${name}`)
-    $.ui.status(undefined)
-  } else if (verb === 'promote') {
-    $.ui.toast('compound: lesson moved')
+// What is told to the user follows the EVENTS that call wrote, never the command's text: a
+// command that printed a plan, or failed, wrote none. `began` is when the call started.
+async function onCliCall($: EngineInterface, sid: string, verb: string, began: number): Promise<void> {
+  if (changesStore(verb)) forgetInventory(sid)
+  if (!reportsEvents(verb)) return
+  const rows = await events($, ['--session', sid, '--since', String(began - 1)])
+  if (rows === undefined) return
+  const seen = told.get(sid) ?? new Set<string>()
+  told.set(sid, seen)
+  for (const news of storeNews(rows, seen)) {
+    seen.add(news.key)
+    if (news.toast !== undefined) $.ui.toast(news.toast)
+    // A debt settled, by a lesson or by declining it: nothing is owed, and the entry goes.
+    $.ui.status(news.status)
   }
 }
 
@@ -733,13 +812,13 @@ export const register: Register = on => {
     }
     return next(e)
   }).catch(($, e, next) => {
-    failQuietly('session.start', `${next.error.kind}: ${next.error.message ?? ""}`)
+    failQuietly($, 'session.start', `${next.error.kind}: ${next.error.message ?? ""}`)
     return next(e)
   })
 
   on('command.run', { command: 'compound' }, async $ => {
     // Exit 1 is a health check that failed: the report is still the answer.
-    const ran = await cli($, ['status'], undefined, [0, 1])
+    const ran = await cli($, ['status'], undefined, [0, 1], undefined, BUDGET.command)
     if (ran === undefined) return { text: `compound status could not run. CLI: ${await cliPath($)}` }
     return { text: [ran.stdout.trimEnd(), ran.stderr.trimEnd()].filter(t => t !== '').join('\n') || '(compound status printed nothing)' }
   })
@@ -753,7 +832,7 @@ export const register: Register = on => {
     }
     return next(extra.length === 0 ? e : { ...e, context: [...(e.context ?? []), ...extra] })
   }).catch(($, e, next) => {
-    failQuietly('prompt.submit', `${next.error.kind}: ${next.error.message ?? ""}`)
+    failQuietly($, 'prompt.submit', `${next.error.kind}: ${next.error.message ?? ""}`)
     return next(e)
   })
 
@@ -776,11 +855,12 @@ export const register: Register = on => {
       await fail($, 'guard', err)
     }
 
+    const began = nowS()
     const ran = await next(e)
     if (sid === '' || ran.deny !== undefined) return ran
     try {
       if (verb !== undefined) {
-        await onCliCall($, verb, ran.isError === true)
+        await onCliCall($, sid, verb, began)
         return ran
       }
       if (!judged(tool)) return ran
@@ -796,7 +876,7 @@ export const register: Register = on => {
       return ran
     }
   }).catch(($, e, next) => {
-    failQuietly('tool.call', `${next.error.kind}: ${next.error.message ?? ""}`)
+    failQuietly($, 'tool.call', `${next.error.kind}: ${next.error.message ?? ""}`)
     return next(e)
   })
 
@@ -811,7 +891,7 @@ export const register: Register = on => {
       return result
     }
   }).catch(($, e, next) => {
-    failQuietly('classic.Stop', `${next.error.kind}: ${next.error.message ?? ""}`)
+    failQuietly($, 'classic.Stop', `${next.error.kind}: ${next.error.message ?? ""}`)
     return next(e)
   })
 }

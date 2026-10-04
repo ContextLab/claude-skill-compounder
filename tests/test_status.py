@@ -80,8 +80,8 @@ class StatusTest(Case):
         self.assertEqual((row["status"], row["detail"]), ("PASS", "2h ago (1 events)"))
 
     def test_a_log_line_that_does_not_parse_is_counted_as_a_warning(self):
-        """It was a FAIL until the review of 2026-10-03: readers skip such a line, so the
-        log still works, and what cannot work (a log that cannot be written) is the FAIL."""
+        """Readers skip such a line, so the log still works: a WARN. What cannot work, a
+        log that cannot be written, is the FAIL."""
         self.box.log({"type": "nudge", "calls": 9})
         with open(self.box.events, "a") as handle:
             handle.write("{truncated\n")

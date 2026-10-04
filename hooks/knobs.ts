@@ -1,4 +1,4 @@
-// The mod's settings, read from the environment by ./cli and validated here. A value of
+// The mod's settings, read from the environment by ./register and validated here. A value of
 // the wrong shape takes the default: a typo is not a setting. No `$`, no I/O.
 
 export type Knobs = {
@@ -19,10 +19,10 @@ export type RawKnobs = {
   judgeTimeout?: string
 }
 
-// haiku: the cheapest alias, and every reply it gave in the old mod's replays parsed. Its
-// judgements there were looser than sonnet's (more false lessons). Here a false "this is a
-// fix" costs one `compound skip`, not a written lesson, and the reuse check holds every
-// substantial prompt for one model call, so the faster model is the default.
+// haiku: the cheapest alias, and the fastest. The reuse check holds every substantial
+// prompt for one model call, so speed is what the user feels. Its judgements are looser
+// than a larger model's, and a false "this is a fix" costs one `compound skip`, not a
+// written lesson.
 export const DEFAULT_MODEL = 'haiku'
 
 export const DEFAULTS: Knobs = {

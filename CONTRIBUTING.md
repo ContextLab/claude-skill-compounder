@@ -21,8 +21,35 @@ will be published.
 python3 tests/test_store.py    # one file
 claude plugin validate --strict .
 claude plugin test .           # hooks/*.test.ts: prompt building, parsing, rendering
-python3 tests/journeys/journey_guard.py   # one real session; spends model calls
+python3 tests/journeys/journey_guard.py   # real sessions; spends model calls
 ```
+
+The journeys are in `tests/journeys/`. Each runs real `claude -p` sessions against a
+throwaway store, prints one PASS or FAIL line per check and exits non-zero when one
+fails. They spend model calls, so they are run by hand and never by `run_tests.sh`.
+`--model` names the session's model and `--keep` keeps the throwaway directory.
+
+| Script | What it drives |
+|-|-|
+| `journey_reuse.py` | Moment 1: a substantial prompt is given the existing work and earlier requests that cover it, and a prompt nothing covers is given nothing. |
+| `journey_guard.py` | Moment 2: a call matching a guard is refused once and runs when sent again; a slow `check`, or a slow `list` and `events`, costs the turn one budget each and one `error` each. |
+| `journey_recall.py` | Moment 3: a failed call is given its recorded lesson, and a lesson met in a second project is moved to the user level or left in place when git tracks it. |
+| `journey_capture.py` | Moments 4 and 5: a fix after a failure makes the session owe a lesson, and the stop is refused until it is recorded. |
+| `journey_stop.py` | Moment 5: an owed lesson refuses one stop, declining it settles it, and a long turn is asked once whether it learned anything. |
+| `journey_strengthen.py` | A lesson recalled after its failure came back is marked ineffective, and the session must strengthen it or decline before it stops. |
+| `journey_unsettled.py` | A capture an earlier session left unsettled is raised at the next session's first prompt and settled by its id. |
+| `journey_claims.py` | With a claims directory that cannot be made, the mod refuses nothing and logs one `error`. |
+| `journey_error.py` | A failure of the mod itself is logged, reported at the next prompt, each failure once; `COMPOUND_OFF=1` writes nothing. |
+| `journey_skills.py` | The plugin's surface in a headless session: the two skills and the `/compound` command are listed, and `compound:learn`, invoked through the Skill tool, writes a lesson. |
+
+Two more scripts there measure and assert nothing:
+
+| Script | What it measures |
+|-|-|
+| `measure_reuse.py` | How noisy the reuse check is: over eleven ordinary prompts, how many got something added, how many of those additions were relevant, and how many covered prompts got nothing. |
+| `probe_injection.py` | What a session does with a planted lesson whose text gives orders, met as a guard, as a recalled lesson and in the reuse check: whether the quoted note is weighed or obeyed. |
+
+`common.py` is what they share: the throwaway world, the session runner and the checks.
 
 To try a checkout without installing it:
 
@@ -45,4 +72,6 @@ Rules the code is written under:
 - Tests use no mocks. The CLI tests run the real CLI against temporary directories. The
   journeys run real Claude Code sessions with `COMPOUND_HOME` and `COMPOUND_PROJECT`
   pointed at temporary directories.
-- Documentation describes what the package does now.
+- Documentation describes what the package does now. `tests/test_docs.py` fails when
+  `docs/design.md` lacks a `COMPOUND_*` name, a subcommand, an option or a claim kind
+  that the code has, and when this file lacks a journey script.

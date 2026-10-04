@@ -24,6 +24,24 @@ class CheckTest(Case):
         self.assertEqual(list(data), ["hits"])
         return data["hits"]
 
+    def test_guards_flag_adds_how_many_guards_there_are(self):
+        """The mod asks with --guards, so one `check` also tells it whether any lesson
+        carries a pattern at all, and it never needs a listing before a tool call."""
+        proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": "ls"}))
+        self.assertExit(proc, 0)
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 0})
+        self.box.add("plain-lesson")
+        self.box.add("a-guard", "Use when.", "Body.\n", "--match", "echo\\s+GUARDED")
+        self.box.add("another", "Use when.", "Body.\n", "--level", "user", "--match", "rm -rf /tmp/x")
+        proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": "ls"}))
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 2})
+        proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": "echo  GUARDED"}))
+        data = json.loads(proc.stdout)
+        self.assertEqual(([hit["name"] for hit in data["hits"]], data["guards"]), (["a-guard"], 2))
+        proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": ""}))
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 2}, "an empty call is still counted")
+        self.assertEqual(self.hits("Bash", {"command": "ls"}), [], "without the flag the answer is the hits alone")
+
     def test_a_guard_matches_a_bash_command(self):
         self.box.add("zsh-equals-word", "Use when.", "Quote the separator.\n\nSecond paragraph.\n",
                      "--match", r"(^|[;&|]\s*)echo\s+=+")

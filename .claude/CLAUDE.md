@@ -42,5 +42,12 @@ python3 tests/journeys/journey_<name>.py
 - The function-hook API allows a plugin one unmatched `tool.call` hook, requires literal
   names in `$.env.get`, and keeps a module's variables for the life of the process, so
   per-session state is keyed on the session id.
+- Before a tool call the mod makes one CLI call, `check`, and no listing. Every CLI call
+  the mod makes takes its budget from `BUDGET` in `hooks/render.ts`: 2 s at most while a
+  tool call or a stop waits, 5 s at most at a typed prompt.
+- What the user is told about a `compound` command the session ran follows the event the
+  command wrote, never the command's text.
 - Documentation describes what the package does now, for a reader who has never seen it.
+  A new `COMPOUND_*` name, subcommand, option or claim kind goes into `docs/design.md` in
+  the same change; `tests/test_docs.py` fails otherwise.
 - `notes/` holds dated session notes. It is a log, not a description of behaviour.

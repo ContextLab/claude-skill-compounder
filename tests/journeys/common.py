@@ -146,16 +146,30 @@ class World:
             with open(path, "w") as fh:
                 fh.write("not a directory\n")
 
-    def slow_copy(self, verb, seconds):
-        """A copy of the package whose CLI sleeps before `verb` and is otherwise this one."""
-        target = os.path.join(self.root, "slow-copy")
+    def slow_copy(self, verbs, seconds, name="slow-copy"):
+        """A copy of the package whose CLI sleeps before each of `verbs` (one name, or
+        several) and is otherwise this one. Every call it gets is noted, one verb per
+        line, in the file `slow_calls` names."""
+        if isinstance(verbs, str):
+            verbs = (verbs,)
+        target = os.path.join(self.root, name)
         shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "__pycache__", "types", "bin"))
         os.makedirs(os.path.join(target, "bin"))
         wrapper = os.path.join(target, "bin", "compound")
         with open(wrapper, "w") as fh:
-            fh.write('#!/bin/sh\nif [ "$1" = "%s" ]; then sleep %d; fi\nexec "%s" "$@"\n' % (verb, seconds, CLI))
+            # The sleep holds none of the wrapper's pipes, so killing the wrapper ends the call.
+            fh.write('#!/bin/sh\necho "$1" >> "%s"\ncase "$1" in %s) sleep %d >/dev/null 2>&1 </dev/null ;; esac\nexec "%s" "$@"\n'
+                     % (os.path.join(target, "calls.log"), "|".join(verbs), seconds, CLI))
         os.chmod(wrapper, 0o755)
         return target
+
+    def slow_calls(self, target):
+        """The verbs a slow copy's CLI was called with, in order."""
+        path = os.path.join(target, "calls.log")
+        if not os.path.isfile(path):
+            return []
+        with open(path) as fh:
+            return [line.strip() for line in fh if line.strip()]
 
     def session(self, project, prompts, model, tools=("Bash",), also=(), plugin=None, flags=(), **extra):
         """One headless session. `prompts` is one prompt, or a list sent as turns of one process,
