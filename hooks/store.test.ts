@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, memoOf, parseEarlier, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -245,4 +245,54 @@ test('`check --guards` names the tools the guards apply to; a reply without them
   expect(parseGuardTools('{"hits": [], "tools": "Bash"}')).toBe(undefined)
   expect(parseGuardTools('{"hits": [], "tools": ["Bash", 3]}')).toBe(undefined)
   expect(parseGuardTools('not json')).toBe(undefined)
+})
+
+// ---- what `find --request` prints ----
+
+const REQUESTED = JSON.stringify({
+  words: ['release', 'changelog', 7],
+  items: [
+    { kind: 'lesson', name: 'release-tagging', level: 'project', description: 'Use when tagging a release.', path: '/p/l/release-tagging', match: [], score: 3, weight: 2.5, matched: ['release'] },
+    { kind: 'skill', name: 'reuse', level: 'general', description: 'The package\'s own.', path: '/pkg/skills/reuse', match: [] },
+    { name: 'no kind' },
+  ],
+  floor: 1.5,
+  memo_key: '0123456789abcdef0123456789abcdef',
+  prompts: [
+    { id: 'p1', ts: '2026-09-30T10:00:00Z', project: '/work/alpha', session: 's9', scope: 'all', score: 4, weight: 0.5, prompt: 'write a release script' },
+    { id: 'p2', ts: '2026-09-29T10:00:00Z', project: '/work/alpha', session: 's1', scope: 'all', score: 4, weight: 0.4, prompt: 'asked in this session' },
+  ],
+  surfer: 'ok',
+})
+
+test('a request\'s candidates, earlier requests, words and key are read from one reply', async () => {
+  const found = parseFound(REQUESTED, 's1', [], 5)
+  expect(found?.words).toEqual(['release', 'changelog'])
+  expect(found?.items.map(i => i.name)).toEqual(['release-tagging', 'reuse'])
+  expect(found?.earlier.map(e => e.id)).toEqual(['p1'])
+  expect(found?.key).toBe('0123456789abcdef0123456789abcdef')
+  expect(found?.memo).toBe(undefined)
+  expect(parseFound('not json', 's1', [], 5)).toBe(undefined)
+  expect(parseFound('[]', 's1', [], 5)).toBe(undefined)
+  expect(parseFound('{}', 's1', [], 5)).toEqual({ words: [], items: [], earlier: [], key: '', memo: undefined })
+})
+
+test('a remembered verdict comes back with what it named, and is written as the CLI reads it', async () => {
+  const item = { kind: 'lesson' as const, name: 'release-tagging', level: 'project', description: '', path: '/p', match: [] }
+  const earlier = { id: 'p1', date: '2026-09-30', project: 'alpha', session: 's9', text: 'write a release script', score: 4 }
+  const written = JSON.parse(memoOf('k'.repeat(32), 'named', [item], [earlier])) as Record<string, unknown>
+  expect(written).toEqual({ key: 'k'.repeat(32), verdict: 'named', items: ['release-tagging'], prompts: [{ id: 'p1', ts: '2026-09-30', project: 'alpha', session: 's9', prompt: 'write a release script' }] })
+  // The CLI gives the same rows back under "memo"; they are read as earlier requests again,
+  // and are not dropped for being this session's own.
+  const reply = JSON.stringify({ ...JSON.parse(REQUESTED), prompts: [], surfer: 'memo', memo: { verdict: 'named', items: written.items, prompts: written.prompts, ts: '2026-10-01T00:00:00Z' } })
+  const memo = parseFound(reply, 's9', ['write a release script'], 5)?.memo
+  expect(memo?.verdict).toBe('named')
+  expect(memo?.items).toEqual(['release-tagging'])
+  expect(memo?.earlier).toEqual([{ ...earlier, score: 0 }])
+  for (const verdict of ['nothing', 'not-substantial']) {
+    expect(parseFound(JSON.stringify({ memo: { verdict } }), 's1', [], 5)?.memo).toEqual({ verdict, items: [], earlier: [] })
+  }
+  for (const bad of [{ verdict: 'unanswered' }, { items: [] }, 'named', null]) {
+    expect(parseFound(JSON.stringify({ memo: bad }), 's1', [], 5)?.memo).toBe(undefined)
+  }
 })

@@ -181,7 +181,7 @@ class FindTest(Case):
         every = self.box.run("find", "zsh", "equals").stdout.splitlines()[0]
         self.assertEqual(every, "lesson zsh-equals (project): Use when zsh reads an equals sign as a command.")
         some = self.box.run("find", "zsh", "xylophone", "equals").stdout.splitlines()[0]
-        self.assertEqual(some, "lesson zsh-equals (project), matched 2 of 3 words: Use when zsh reads an equals sign as a command.")
+        self.assertEqual(some, "lesson zsh-equals (project), matched 2 of 3 words (zsh, equals): Use when zsh reads an equals sign as a command.")
         self.assertNotIn("words]", every + some)
         # The score is still in the JSON.
         self.assertEqual(self.box.json("find", "zsh", "xylophone", "--json")["items"][0]["score"], 1)

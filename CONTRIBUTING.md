@@ -38,7 +38,7 @@ fails. They spend model calls, so they are run by hand and never by `run_tests.s
 
 | Script | What it drives |
 |-|-|
-| `journey_reuse.py` | Moment 1: a substantial prompt is given the existing work and earlier requests that cover it, and a prompt nothing covers is given nothing. |
+| `journey_reuse.py` | Moment 1: a substantial prompt is given the existing work and earlier requests that cover it, a prompt nothing covers is given nothing, and the first prompt sent again in a new session is given the same from the memo, with no model asked. |
 | `journey_guard.py` | Moment 2: a call matching a guard is refused once and runs when sent again; a slow `check`, or a slow `list` and `events`, costs the turn one budget each and one `error` each. |
 | `journey_recall.py` | Moment 3: a failed call is given its recorded lesson, and a lesson met in a second project is moved to the user level or left in place when git tracks it. |
 | `journey_capture.py` | Moments 4 and 5: a fix after a failure makes the session owe a lesson, and the stop is refused until it is recorded. |
@@ -54,7 +54,7 @@ Two more scripts there measure and assert nothing:
 
 | Script | What it measures |
 |-|-|
-| `measure_reuse.py` | How noisy the reuse check is: over eleven ordinary prompts, how many got something added, how many of those additions were relevant, and how many covered prompts got nothing. |
+| `measure_reuse.py` | How noisy the reuse check is: over fourteen ordinary prompts, how many got something added, how many of those additions were relevant, how many covered prompts got nothing, how many prompts were put to the judge at all and how long it took; and that a prompt sent a second time asks no model. |
 | `probe_injection.py` | What a session does with a planted lesson whose text gives orders, met as a guard, as a recalled lesson and in the reuse check: whether the quoted note is weighed or obeyed. |
 
 `common.py` is what they share: the throwaway world, the session runner and the checks.

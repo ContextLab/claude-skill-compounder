@@ -72,7 +72,15 @@ EVENT LOG
                                                        script's name is its path
                                                        relative to the project)
                                     prompts  [string]  prompt-log ids offered
-                                    keywords [string]  the search words
+                                    words    [string]  the words the prompt log was
+                                                       searched for
+                                    candidates int     earlier requests put to the judge
+                                    prompt_id string   the digest of the prompt
+                                    ms, gather_ms, judge_ms  int  milliseconds the check
+                                                       took: in all, before the judge,
+                                                       and the judge
+                                    memo     bool      the verdict came from the memo;
+                                                       no model was asked
         guard     mod               lesson*  string    the lesson whose match hit
                                     tool     string    tool name
                                     text     string    the text that was tested
@@ -140,6 +148,12 @@ EVENT LOG
                                     tool     string    recall, fix: the tool whose
                                                        call was judged
                                     prompt_id string   reuse: the digest of the prompt
+                                    unquoted int       reuse: names the answer gave with
+                                                       no words of the prompt to show
+                                                       for them, which were dropped
+                                    memo     bool      reuse: the verdict was taken from
+                                                       the memo and no model was asked
+                                                       (`ms` is then 0)
         nudge     mod               calls    int       tool calls in the turn
         promote   CLI `promote`     lesson*  string
                                     from     string    level it left; for an automatic
@@ -218,6 +232,33 @@ EVENT LOG
     the log. They are many and say nothing by themselves: `status` leaves them out of
     Recent, and they are counted for no lesson.
 
+    Finding. `find` ranks lessons, skills and the project's scripts by the WEIGHT of the
+    words they share with the query, not by their number. Words are compared by a light
+    stem (`stem`). A word's rarity is read from the store: 1 when one entry carries it,
+    down to 0 when every entry does (`rarity`); a word in COMMON_WORDS counts for a tenth.
+    A word found only in a body counts for half, and a body for one word at most. Each
+    row carries `weight`, `score` (the number of query words it holds) and `matched`.
+    `find --request` reads a whole request on stdin and lists only candidates: weight at
+    least the floor (--floor, else COMPOUND_REUSE_FLOOR, else 1.5) and at least a third
+    of the best one's. The prompt log is searched for at most ten of the request's words
+    (`search_words`), a logged prompt is matched on its first 300 characters, and for a
+    request a hit must hold two of the words and a third of their weight (`prompt_hits`).
+
+    The memo. <COMPOUND_HOME>/memo.json: {"version": 1, "entries": {key: {"at": epoch
+    seconds, "verdict": named | nothing | not-substantial, "items": [names], "prompts":
+    [{id, ts, project, session, prompt}]}}}. `find --request --json` prints the key of a
+    request as `memo_key` (a digest of the project, the request's text, the floor, the
+    limit and the content of everything it was ranked against, so any change to the
+    store changes it) and the entry kept for it, if any, as `memo`. `compound memo`
+    reads {"key", "verdict", "items", "prompts"} on stdin and keeps it. An entry lives 7
+    days and the memo holds the newest 200. Two writers at once may lose one entry,
+    which costs one model call the next time.
+
+    What `add` refuses. A new lesson whose text is a copy of one the session can see
+    (`duplicate_of`; --new records it anyway), and a description or body that names a
+    temporary path or the id of one session, or speaks of "this session"
+    (`residue_problem`; --as-written records it anyway). Both are exit 2.
+
     Ineffective. A lesson is ineffective when at least COMPOUND_RECUR_LIMIT (default
     2) `recall` events naming it have a `ts` later than its SKILL.md's modification
     time. Rewriting the lesson (`compound add --update`) clears the flag. A `recall`
@@ -251,6 +292,7 @@ ENVIRONMENT
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
     COMPOUND_PLATFORM    the platform a lesson's `platform` is held against (default: this one)
     COMPOUND_SHELL       the shell a lesson's `shell` is held against (default: CLAUDE_CODE_SHELL, else SHELL)
+    COMPOUND_REUSE_FLOOR the weight a candidate of `find --request` must reach (default 1.5)
     COMPOUND_OFF         1 switches the mod off; `status` reports it
     COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
     COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
@@ -322,7 +364,7 @@ MATCH_PROBES = ("a", "ls", "git status")
 # The package's own procedures: listed, never offered by `find` as reusable work.
 OWN_SKILLS = ("learn", "reuse")
 # What COMPOUND_HOME holds when it is ours; `uninstall --purge` removes nothing else.
-HOME_NAMES = ("lessons", "events.jsonl", "install.json", "app", "history-surfer", "claims", "disabled.json")
+HOME_NAMES = ("lessons", "events.jsonl", "install.json", "app", "history-surfer", "claims", "disabled.json", "memo.json")
 # The frontmatter keys that say where a lesson applies, and the shape of one name in them.
 CONDITION_KEYS = ("platform", "shell")
 CONDITION_RE = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,31}$")
@@ -334,6 +376,68 @@ NOT_TYPED = ("<agent-message", "<task-notification", "<system-reminder",
 STOPWORDS = frozenset(
     "a an and are as at be by for from in is it of on or that the this to with".split()
 )
+# Words that say little about what a text is about: the everyday words of English, and the
+# verbs and nouns nearly every request to a coding agent carries. In a ranking each counts
+# for a tenth of a word, and none is a word a request is searched for in the prompt log.
+COMMON_WORDS = frozenset((
+    "able about above across actually add adds after again against ahead all allow allows along already also "
+    "although always am another any anyone anything appear around available away awesome back basically because "
+    "become been before begin being believe below best better between big bit both broadly build builds built but "
+    "call called calls came can careful "
+    "carefully case cases certain change changes check code come comes consider correctly could create creates "
+    "current currently day days did different directly do does doing done down during each earlier easier easily "
+    "easy either else end ended ends ensure ensures entire especially even ever every everyone everything exactly "
+    "example examples false far fast faster few fewer file files find first fix fixes full fully generally get gets "
+    "give go goes going good got great had handle handles has have having hello help hence her here hi high higher "
+    "him his how however idea ideas ideally if immediately implement include includes including instead into issue "
+    "issues item items its just keep keeps kept kind know large last later least leave left less let lets like line "
+    "lines list lists little long look looks lot lots low lower made main make makes making many may maybe me might "
+    "more most much must my name names near need needs neither never new next nice no nor not note notes nothing now "
+    "number numbers off often ok okay old once one only onto open opens other our out over own part parts "
+    "particularly people per perhaps piece place please point points possible problem problems project properly "
+    "provide provides put question quick quickly quite rather read reading reads really repo repository right run "
+    "running runs same save saves see seem seems set several shall she short should show similar simply since small "
+    "so some someone something sometimes soon sort specifically start started starts still stop stops stuff such "
+    "support supports sure take takes tell text than thank thanks their them then there therefore these they thing "
+    "things think those though thought three through thus time times together too took tool tools true try twice two "
+    "type types under unless until up update updates us use used user users uses using usually value values various "
+    "very via want wants was way ways we week well went were what when where whether which while who whole whom "
+    "whose why will within without word words work working works would write writes wrong yes yet you your"
+).split())
+COMMON_FACTOR = 0.1
+# A word found only in the body of an entry counts for half of one found in its name or
+# description, and everything found in a body together for at most one whole word: a long
+# body holds a little of every subject.
+BODY_FACTOR = 0.5
+BODY_CAP = 1.0
+# A word's rarity falls from 1 (one entry carries it) to 0 (every entry does) on a log
+# scale. A store smaller than this many entries is read as if it had this many, so that
+# in a store of three a word two of them share still counts.
+RARITY_DOCS = 20
+# `find --request`: the weight an entry must reach to be a candidate for a request (the
+# default of COMPOUND_REUSE_FLOOR), the words a request is searched for in the prompt
+# log, how much of a logged prompt is matched (what `find` shows of it), and the share of
+# the search words' weight an earlier request must carry.
+REUSE_FLOOR = 1.5
+# ... and the part of the best candidate's weight a further candidate must reach: next to
+# an entry that shares ten words with a request, one that shares two is there by chance.
+REUSE_NEAR = 1.0 / 3
+SEARCH_WORDS = 10
+REQUEST_CAP = 20000
+PROMPT_SHOWN = 300
+PROMPT_SHARE = 1.0 / 3
+# The memo of judged requests: how many it holds, and for how many days.
+MEMO_MAX = 200
+MEMO_DAYS = 7
+MEMO_VERDICTS = ("named", "nothing", "not-substantial")
+MEMO_ITEMS = 20
+MEMO_PROMPTS = 10
+# `add`: two texts are one lesson when this much of the weight of their words is shared,
+# in the description and in the body both; texts with fewer distinct words than these are
+# too short to compare.
+SAME_SHARE = 0.8
+SAME_WHEN_WORDS = 4
+SAME_BODY_WORDS = 8
 
 
 class Fail(Exception):
@@ -1776,6 +1880,71 @@ def body_of(args):
     return "", False
 
 
+# What only the session that wrote a text can make sense of: a path that lives as long as
+# one session does, a session's id, and words about "this session". Compiled when `add`
+# asks, not when the file is loaded: `check` runs before every tool call and needs none.
+RESIDUE = (
+    (r"(?:/private)?/tmp/claude-[^\s'\"`)\]>,;]*", "a temporary path of one session"),
+    (r"/[^\s'\"`(\[<]*/scratchpad/[^\s'\"`)\]>,;]*", "a scratchpad path of one session"),
+    (r"/var/folders/[^\s'\"`)\]>,;]*", "a temporary path"),
+    (r"[^\s'\"`(\[<]*/\.claude/worktrees/[^\s'\"`)\]>,;]*", "the worktree of one agent"),
+    (r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "the id of one session"),
+    (r"(?i)\b(?:earlier )?in this (?:session|conversation)\b", "words about the session it was written in"),
+)
+
+
+def residue_problem(texts):
+    """Why a lesson's text would mean nothing to a later session, or None."""
+    for text in texts:
+        for pattern, what in RESIDUE:
+            found = re.search(pattern, text or "")
+            if found:
+                return ("the text holds \"%s\" (%s). A lesson is read by sessions that never saw this one, so "
+                        "say what to do without it: name the program or the file as a later session would find "
+                        "it. To record the text as it is, pass --as-written. Nothing was written"
+                        % (one_line(found.group(0))[:200], what))
+    return None
+
+
+def duplicate_of(description, body, patterns, items):
+    """(the lesson or skill the session can see that this text is another copy of, why),
+    or None. Deliberately narrow, so that two lessons about one subject are two lessons:
+    the same words in the description and in the body; or SAME_SHARE of the weight of the
+    words shared in the description AND in the body; or the same guard patterns under a
+    description that shares that much. A word weighs what it does in `find`. Texts of a
+    few words are not compared at all."""
+    others = [item for item in items
+              if not (item["kind"] == "skill" and item["level"] == "general" and item["name"] in OWN_SKILLS)]
+    _docs, counts = index_of(others)
+    total = len(others)
+
+    def telling(roots):
+        return [root for root in roots if not is_common(root, root)]
+
+    def shared(left, right):
+        whole = sum(weight_of(root, root, counts, total) for root in left | right)
+        return sum(weight_of(root, root, counts, total) for root in left & right) / whole if whole > 0 else 0.0
+
+    when = set(stems_of(description))
+    text = set(stems_of(body))
+    long_when = len(telling(when)) >= SAME_WHEN_WORDS
+    long_text = len(telling(text)) >= SAME_BODY_WORDS
+    for item in others:
+        its_body = item.get("_body", "")
+        if (long_when or long_text) and words_of(description) == words_of(item["description"]) \
+                and words_of(body) == words_of(its_body):
+            return item, "its description and its body are the same words"
+        like_when = shared(when, set(stems_of(item["description"])))
+        if long_when and long_text and like_when >= SAME_SHARE:
+            like_text = shared(text, set(stems_of(its_body)))
+            if like_text >= SAME_SHARE:
+                return item, "%d%% of its description and %d%% of its body are the same words" % (
+                    round(like_when * 100), round(like_text * 100))
+        if long_when and patterns and sorted(patterns) == sorted(item["match"]) and like_when >= SAME_SHARE:
+            return item, "it guards the same pattern and %d%% of its description is the same words" % round(like_when * 100)
+    return None
+
+
 def cmd_add(args):
     name = args.name
     if not SLUG_RE.match(name):
@@ -1823,6 +1992,10 @@ def cmd_add(args):
     if body_given and not body.strip():
         raise usage("the body is empty: --body and --body-file take the text of the lesson")
     description = one_line(args.when) if args.when is not None else None
+    if not args.as_written:
+        issue = residue_problem([description or "", body])
+        if issue:
+            raise usage(issue)
 
     project = project_root()
     items, _ = scan(project, with_body=True)
@@ -1892,6 +2065,19 @@ def cmd_add(args):
         if not body.strip():
             raise usage("the body is empty: write the lesson on stdin, or pass it with --body TEXT or "
                         "--body-file PATH")
+        if not args.new:
+            same = duplicate_of(description, body, args.match or [], items)
+            if same:
+                item, why = same
+                if item["level"] == "general":
+                    raise usage("this is the %s %r of the general pool again (%s): %s. Every session already "
+                                "sees that one. If this really is a different lesson, pass --new. Nothing was "
+                                "written" % (item["kind"], item["name"], item["path"], why))
+                raise usage("this is the %s %r again, recorded at the %s level (%s): %s. Rewrite that one where "
+                            "it is with `compound add --update --name %s` and the flags for what changes (--when, "
+                            "--body, --match); a second copy is never added. If this really is a different "
+                            "lesson, pass --new. Nothing was written"
+                            % (item["kind"], item["name"], item["level"], item["path"], why, item["name"]))
         if args.level == "project":
             issue = project_level_problem(project)
             if issue:
@@ -2100,6 +2286,86 @@ def words_of(text):
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
+def _undouble(word):
+    """`running` without its ending is `runn`: one of a doubled consonant goes, except l, s, z."""
+    if len(word) > 2 and word[-1] == word[-2] and word[-1] not in "aeioulsz":
+        return word[:-1]
+    return word
+
+
+def stem(word):
+    """A light stem: the plural, -ing and -ed endings go, then a final e, so `install`,
+    `installs`, `installing` and `installed` are one word, and so are `chain` and
+    `chained`, `release` and `releases`. Not a linguistic stem: it only has to give two
+    forms of a word the same result, and it is applied to both sides of every comparison."""
+    if len(word) > 4 and word.endswith("ies"):
+        word = word[:-3] + "y"
+    elif len(word) > 5 and word.endswith("ing"):
+        word = _undouble(word[:-3])
+    elif len(word) > 4 and word.endswith("ed"):
+        word = _undouble(word[:-2])
+    elif len(word) > 4 and (word.endswith(("ches", "shes")) or (word.endswith("es") and word[-3] in "sxz")):
+        word = word[:-2]
+    elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        word = word[:-1]
+    if len(word) > 4 and word.endswith("e"):
+        word = word[:-1]
+    return word
+
+
+def stems_of(text):
+    return [stem(word) for word in words_of(text)]
+
+
+_COMMON = []
+
+
+def is_common(word, root):
+    if not _COMMON:
+        _COMMON.append(frozenset(stem(each) for each in COMMON_WORDS) | COMMON_WORDS | STOPWORDS)
+    return word in _COMMON[0] or root in _COMMON[0]
+
+
+def rarity(count, total):
+    """How much a word tells entries apart: 1 for a word one entry carries (or none), 0
+    for a word every entry of a store of RARITY_DOCS or more carries, on a log scale."""
+    if count <= 1:
+        return 1.0
+    import math
+
+    return max(0.0, 1.0 - math.log(count) / math.log(max(total, RARITY_DOCS)))
+
+
+def index_of(candidates):
+    """([(stems of the name and description, stems only the body has)], {stem: how many
+    candidates carry it}). The store's own count of each word is what its rarity is read from."""
+    docs = []
+    counts = {}
+    for item in candidates:
+        head = set(stems_of(item["name"] + " " + item["description"]))
+        body = set(stems_of(item.get("_body", ""))) - head
+        docs.append((head, body))
+        for root in head | body:
+            counts[root] = counts.get(root, 0) + 1
+    return docs, counts
+
+
+def weight_of(word, root, counts, total):
+    return rarity(counts.get(root, 0), total) * (COMMON_FACTOR if is_common(word, root) else 1.0)
+
+
+def pairs_of(words):
+    """[(word, stem)] with each stem once, under the first word that gave it."""
+    out = []
+    seen = set()
+    for word in words:
+        root = stem(word)
+        if root not in seen:
+            seen.add(root)
+            out.append((word, root))
+    return out
+
+
 def query_words(parts):
     seen = []
     for word in words_of(" ".join(parts)):
@@ -2107,6 +2373,49 @@ def query_words(parts):
             seen.append(word)
     kept = [word for word in seen if word not in STOPWORDS]
     return kept or seen
+
+
+def request_words(text):
+    """The words of a whole request, in the order they first appear: three characters or
+    more, not a number, not a stopword."""
+    return [word for word in words_of(text[:REQUEST_CAP])
+            if 3 <= len(word) <= 40 and not word.isdigit() and word not in STOPWORDS]
+
+
+def search_words(query, counts, total, most=SEARCH_WORDS):
+    """The words a request is searched for in the prompt log: none of the common ones,
+    the ones that are rare in the store before the ones many entries carry, and in the
+    order of the request within each. The same request always gives the same words."""
+    def order(index):
+        word, root = query[index]
+        return (0 if rarity(counts.get(root, 0), total) >= 0.5 else 1, index)
+
+    kept = sorted((index for index in range(len(query)) if not is_common(*query[index])), key=order)[:most]
+    return [query[index] for index in sorted(kept)]
+
+
+def rank_items(query, candidates, rows):
+    """`rows` (the public form of `candidates`, in the same order) that share a word with
+    `query`, best first. A word counts for its rarity in the store, a common word for a
+    tenth of that; one found only in the body for half, and the body for one word at most.
+    Each row gets `weight` (that sum), `score` (how many of the words it holds) and
+    `matched` (which)."""
+    docs, counts = index_of(candidates)
+    total = len(candidates)
+    weights = [(word, root, weight_of(word, root, counts, total)) for word, root in query]
+    scored = []
+    for (head, body), row in zip(docs, rows):
+        in_head = [value for _word, root, value in weights if root in head]
+        in_body = [value for _word, root, value in weights if root in body]
+        value = round(sum(in_head) + min(BODY_CAP, BODY_FACTOR * sum(in_body)), 2)
+        if value <= 0:
+            continue
+        row["matched"] = [word for word, root, _value in weights if root in head or root in body]
+        row["score"] = len(row["matched"])
+        row["weight"] = value
+        scored.append((value, len(in_head), row))
+    scored.sort(key=lambda entry: (-entry[0], -entry[1], entry[2]["name"]))
+    return [entry[2] for entry in scored], counts
 
 
 def surfer_bin():
@@ -2118,15 +2427,22 @@ def surfer_bin():
     return shutil.which("surfer")
 
 
-def prompt_hits(words, project, cap=5):
+def prompt_hits(query, project, cap=5, share=0.0):
     """(hits, state). Prompt-log matches for the current project first, then for every
-    project, de-duplicated, best word overlap first within each scope."""
+    project, de-duplicated, best first within each scope. `query` is [(word, stem, weight)].
+    A prompt is matched on what is shown of it, its first PROMPT_SHOWN characters. A word
+    counts for its weight times its rarity among the prompts the search returned, so a
+    word most of them carry tells little; a hit's `weight` is its share of the weight of
+    all the words, and `score` how many of them it holds. With `share`, a hit must hold
+    two of the words (or the one there is) and that share of the weight."""
     binary = surfer_bin()
     if not binary:
         return [], "missing"
     import subprocess
 
-    pattern = "|".join(re.escape(word) for word in words)
+    # A stem that begins its word finds the word's other forms too.
+    pattern = "|".join(re.escape(root if (word.startswith(root) and len(root) >= 3) else word)
+                       for word, root, _weight in query)
     hits = []
     seen = set()
     state = "ok"
@@ -2145,18 +2461,32 @@ def prompt_hits(words, project, cap=5):
         if not isinstance(rows, list):
             state = "error: surfer search exited %d" % proc.returncode
             continue
-        ranked = []
+        read = []
+        counts = {}
         for row in rows:
             if not isinstance(row, dict) or row.get("is_command"):
                 continue
             prompt = str(row.get("prompt") or "")
             if prompt.lstrip().startswith(NOT_TYPED):
                 continue
-            present = set(words_of(prompt))
-            score = sum(1 for word in words if word in present)
-            ranked.append((score, str(row.get("ts") or ""), row, prompt))
-        ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-        for score, _ts, row, prompt in ranked:
+            present = set(stems_of(one_line(prompt)[:PROMPT_SHOWN]))
+            held = [root for _word, root, _weight in query if root in present]
+            if not held:
+                continue
+            for root in held:
+                counts[root] = counts.get(root, 0) + 1
+            read.append((present, row, prompt))
+        worth = {root: weight * rarity(counts.get(root, 0), len(read)) for _word, root, weight in query}
+        whole = sum(worth.values())
+        ranked = []
+        for present, row, prompt in read:
+            score = sum(1 for _word, root, _weight in query if root in present)
+            part = (sum(worth[root] for _word, root, _weight in query if root in present) / whole) if whole > 0 else 0.0
+            if share and (score < min(2, len(query)) or part < share):
+                continue
+            ranked.append((part, score, str(row.get("ts") or ""), row, prompt))
+        ranked.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+        for part, score, _ts, row, prompt in ranked:
             key = str(row.get("id") or "") or prompt
             if key in seen or one_line(prompt) in seen:
                 continue
@@ -2165,17 +2495,147 @@ def prompt_hits(words, project, cap=5):
             hits.append({"id": str(row.get("id") or ""), "ts": str(row.get("ts") or ""),
                          "session": str(row.get("session_id") or row.get("session") or ""),
                          "project": str(row.get("cwd") or ""), "scope": scope,
-                         "score": score, "prompt": one_line(prompt)[:300]})
+                         "score": score, "weight": round(part, 2), "prompt": one_line(prompt)[:PROMPT_SHOWN]})
             if len(hits) >= cap:
                 break
     return hits, state
 
 
+def find_floor(args):
+    """The weight an entry must reach to be listed: --floor, else for a request
+    COMPOUND_REUSE_FLOOR or its default, else none."""
+    if args.floor is not None:
+        if not (0 <= args.floor < float("inf")):
+            raise usage("--floor is a weight, zero or more: %r" % args.floor)
+        return args.floor
+    if not args.request:
+        return 0.0
+    named = os.environ.get("COMPOUND_REUSE_FLOOR", "")
+    if re.match(r"^\d{1,4}(\.\d{1,4})?$", named):
+        return float(named)
+    return REUSE_FLOOR
+
+
+# ----------------------------------------------------------------------------- the memo
+
+
+def memo_path():
+    return os.path.join(home_dir(), "memo.json")
+
+
+def store_signature(candidates):
+    """A digest of everything a request is judged against: the level, kind, name,
+    description and body of every candidate. Any change to the store changes it."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    for item in sorted(candidates, key=lambda it: (it["level"], it["kind"], it["name"])):
+        for part in (item["level"], item["kind"], item["name"], item["description"], item.get("_body", "")):
+            digest.update(part.encode("utf-8", "replace") + b"\0")
+        digest.update(b"\1")
+    return digest.hexdigest()
+
+
+def memo_key(project, text, floor, limit, candidates):
+    """The key a judged request is remembered under: the project, the request's text with
+    its white space squeezed, the floor and limit it was asked with, and the store."""
+    import hashlib
+
+    parts = ["1", os.path.realpath(project), " ".join(text.split()), "%.4f" % floor, str(limit),
+             store_signature(candidates)]
+    return hashlib.sha256("\0".join(parts).encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def read_memo():
+    """{key: entry}. A memo that is missing or does not read is an empty one."""
+    try:
+        data = json.loads(read_text(memo_path()))
+    except (OSError, ValueError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    return {key: entry for key, entry in entries.items()
+            if isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
+            and not isinstance(entry.get("at"), bool) and entry.get("verdict") in MEMO_VERDICTS}
+
+
+def remembered(key, clock):
+    entry = read_memo().get(key)
+    if entry is None or not (0 <= clock - entry["at"] <= MEMO_DAYS * 86400):
+        return None
+    return {"verdict": entry["verdict"], "items": _memo_items(entry.get("items")),
+            "prompts": _memo_prompts(entry.get("prompts")) or [], "ts": iso(entry["at"])}
+
+
+def _memo_items(value):
+    if not isinstance(value, list):
+        return []
+    return [one_line(name)[:200] for name in value if isinstance(name, str) and name.strip()][:MEMO_ITEMS]
+
+
+def _memo_prompts(value):
+    """The earlier requests of a verdict as they are kept, or None when one is not a row."""
+    if not isinstance(value, list):
+        return []
+    out = []
+    for row in value:
+        if not isinstance(row, dict):
+            return None
+        out.append({name: one_line(str(row.get(name) or ""))[:PROMPT_SHOWN]
+                    for name in ("id", "ts", "project", "session", "prompt")})
+    return out[:MEMO_PROMPTS]
+
+
+def cmd_memo(args):
+    try:
+        data = json.loads(read_stdin())
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise usage("memo reads one JSON object on stdin: {\"key\", \"verdict\", \"items\", \"prompts\"}")
+    key = data.get("key")
+    if not isinstance(key, str) or not re.match(r"^[0-9a-f]{32}$", key):
+        raise usage("\"key\" is the `memo_key` that `compound find --request --json` printed")
+    if data.get("verdict") not in MEMO_VERDICTS:
+        raise usage("\"verdict\" is one of: %s" % ", ".join(MEMO_VERDICTS))
+    for name in ("items", "prompts"):
+        if name in data and not isinstance(data[name], list):
+            raise usage("%r is a list" % name)
+    prompts = _memo_prompts(data.get("prompts"))
+    if prompts is None:
+        raise usage("\"prompts\" is a list of the rows `compound find --json` printed under \"prompts\"")
+    clock = now()
+    entries = {name: entry for name, entry in read_memo().items()
+               if name != key and 0 <= clock - entry["at"] <= MEMO_DAYS * 86400}
+    entries[key] = {"at": clock, "verdict": data["verdict"], "items": _memo_items(data.get("items")),
+                    "prompts": prompts}
+    newest = sorted(entries.items(), key=lambda pair: pair[1]["at"])[-MEMO_MAX:]
+    atomic_write(memo_path(), dumps({"version": 1, "entries": dict(newest)}) + "\n")
+    if args.json:
+        emit({"key": key, "verdict": data["verdict"], "entries": len(newest)})
+    else:
+        sys.stdout.write("remembered %s for %d days (%d in the memo)\n" % (data["verdict"], MEMO_DAYS, len(newest)))
+    return 0
+
+
 def cmd_find(args):
-    words = query_words(args.words)
-    if not words:
-        raise usage("give at least one word to search for")
     project = project_root()
+    if args.request:
+        if args.words:
+            raise usage("--request reads the request from stdin and takes no words")
+        text = read_stdin()
+        if not text.strip():
+            raise usage("--request reads the request on stdin, and stdin is empty")
+        # A request with no word in it (digits, symbols, another script) has no candidates.
+        typed = request_words(text)
+    else:
+        text = None
+        typed = query_words(args.words)
+        if not typed:
+            raise usage("give at least one word to search for")
+    query = pairs_of(typed)
+    floor = find_floor(args)
     items, _ = scan(project, with_body=True)
     # The package's own procedures are how lessons are made and reused, not reusable work.
     items = [item for item in items
@@ -2184,34 +2644,49 @@ def cmd_find(args):
     items = [item for item in items if active(item)]
     candidates = items + scan_scripts(project)
     events, _ = read_events()
-    scored = []
-    for item, row in zip(candidates, annotate(candidates, events)):
-        head = set(words_of(item["name"] + " " + item["description"]))
-        everything = head | set(words_of(item.get("_body", "")))
-        score = sum(1 for word in words if word in everything)
-        if score == 0:
-            continue
-        row["score"] = score
-        scored.append((score, sum(1 for word in words if word in head), row))
-    scored.sort(key=lambda entry: (-entry[0], -entry[1], entry[2]["name"]))
-    rows = [entry[2] for entry in scored[: args.limit]]
-    prompts, state = prompt_hits(words, project)
+    ranked, counts = rank_items(query, candidates, annotate(candidates, events))
+    bar = floor
+    if args.request and floor > 0 and ranked:
+        bar = max(floor, ranked[0]["weight"] * REUSE_NEAR)
+    rows = [row for row in ranked if row["weight"] >= bar][: args.limit]
+    searched = search_words(query, counts, len(candidates)) if args.request else query
+    words = [word for word, _root in searched] if args.request else typed
+    out = {"words": words, "items": rows, "floor": floor}
+    memo = None
+    if args.request:
+        out["memo_key"] = memo_key(project, text, floor, args.limit, candidates)
+        memo = remembered(out["memo_key"], now())
+    if memo is not None:
+        # A request already judged against this store is not searched for again.
+        prompts, state = [], "memo"
+        out["memo"] = memo
+    elif searched:
+        prompts, state = prompt_hits([(word, root, weight_of(word, root, counts, len(candidates)))
+                                      for word, root in searched], project,
+                                     share=PROMPT_SHARE if args.request else 0.0)
+    else:
+        prompts, state = [], "ok"
+    out["prompts"] = prompts
+    out["surfer"] = state
     if args.json:
-        emit({"words": words, "items": rows, "prompts": prompts, "surfer": state})
+        emit(out)
         return 0
     if rows:
         width = term_width()
         for row in rows:
             # How many of the words matched is said only when some did not.
-            partial = "" if row["score"] == len(words) else ", matched %d of %d words" % (row["score"], len(words))
+            partial = "" if len(row["matched"]) == len(query) else ", matched %d of %d words (%s)" % (
+                len(row["matched"]), len(query), ", ".join(row["matched"]))
             head = "%s %s (%s)%s: " % (row["kind"], row["name"], row["level"], partial)
             text = row["description"] if width is None else clip(row["description"], max(10, width - len(head)))
             sys.stdout.write("%s %s (%s)%s: %s\n  %s\n" % (
                 row["kind"], paint(row["name"], BOLD), row["level"], partial, text, paint("-> " + row["path"], DIM)))
     else:
-        sys.stdout.write("no lesson, skill or script matches: %s\n" % " ".join(words))
+        sys.stdout.write("no lesson, skill or script matches: %s\n" % (" ".join(words or typed) or "(the request holds no word)"))
     if state == "missing":
         sys.stdout.write("prompt log: not searched (history-surfer's `surfer` is not on PATH)\n")
+    elif state == "memo":
+        sys.stdout.write("prompt log: not searched (this request was judged %s: %s)\n" % (memo["ts"], memo["verdict"]))
     elif state != "ok":
         sys.stdout.write("prompt log: %s\n" % state)
     if prompts:
@@ -3960,6 +4435,10 @@ def build_parser():
     one.add_argument("--settles", metavar="ID", help="the id of the unsettled capture this lesson settles")
     one.add_argument("--body", metavar="TEXT", help="the lesson's text; `-` reads stdin to its end")
     one.add_argument("--body-file", metavar="PATH", help="a file holding the lesson's text")
+    one.add_argument("--new", action="store_true",
+                     help="record it although a lesson the session can see reads as the same one")
+    one.add_argument("--as-written", action="store_true",
+                     help="record the text although it names a path or an id of one session")
 
     one = command("list", cmd_list, "Lessons and skills at every level.")
     one.add_argument("--level", choices=LEVELS)
@@ -3968,9 +4447,17 @@ def build_parser():
     one = command("show", cmd_show, "One lesson's path and text.")
     one.add_argument("name")
 
-    one = command("find", cmd_find, "Lessons, skills and scripts by word overlap, then prompt-log hits.")
-    one.add_argument("words", nargs="+")
+    one = command("find", cmd_find, "Lessons, skills and scripts ranked by the words they share, then prompt-log hits.")
+    one.add_argument("words", nargs="*")
     one.add_argument("--limit", type=int, default=10)
+    one.add_argument("--request", action="store_true",
+                     help="read a whole request on stdin: its rare words are searched, and only candidates "
+                          "that reach the floor are listed")
+    one.add_argument("--floor", type=float, metavar="W",
+                     help="the weight an entry must reach to be listed (default: none for words, "
+                          "COMPOUND_REUSE_FLOOR for a request)")
+
+    command("memo", cmd_memo, "Remember the verdict on a request (a JSON object on stdin).")
 
     one = command("check", cmd_check, "Test a tool call (JSON on stdin) against every guard.", json_flag=False)
     one.add_argument("--json", action="store_true", help="accepted; the output is always JSON")

@@ -457,7 +457,7 @@ the same account as your session.
 
 | When | Model calls | Added time |
 |-|-|-|
-| a substantial prompt | one | about 1 second |
+| a substantial prompt | one; none when nothing recorded and no earlier request shares enough of its rare words, or when the same prompt was already judged against the same store | about 1 second; 0.3 to 0.7 seconds with no model call |
 | a call of a tool some guard applies to (Bash, unless a lesson names another) | none | about 45 ms |
 | a call of any other tool, or any call when no lesson has a pattern | none | the first call of a turn pays about 45 ms; the rest pay nothing |
 | a failed tool call (not one refused before it ran) | one | none before the call |

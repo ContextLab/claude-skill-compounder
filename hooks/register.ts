@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement, Timer } from 'claude-code'
 import type { CompoundBand, CompoundBoard, CompoundBusyKind } from '../types'
 import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
-import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
+import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import {
   BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli,
   heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, reportsEvents, reusable, reuseContext, reuseStatus,
@@ -11,9 +11,9 @@ import {
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  learnedSince, mayNudge, otherProjects, parseEarlier, parseEvents, parseGuards, parseGuardTools, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
+  learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
   parseTimedOut, parseUnsettled, settlers,
-  type Earlier, type Event, type Item,
+  type Earlier, type Event, type Found, type Item,
 } from './store'
 import {
   allLines, bandRow, began as checkBegan, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
@@ -731,20 +731,24 @@ async function registerCommand($: EngineInterface): Promise<void> {
 
 // ---- moment 1: reuse ------------------------------------------------------------------
 
-// Candidate earlier requests: the prompt log searched with the prompt's own significant
-// words. Candidates only; the judge decides which of them are like this request.
-async function earlierCandidates($: EngineInterface, sid: string, text: string, words: readonly string[]): Promise<Earlier[]> {
-  if (words.length === 0) return []
-  const found = await cli($, ['find', '--json', ...words], undefined, [0], undefined, BUDGET.prompt)
-  if (found === undefined) return []
+// What the CLI finds for a typed prompt, in one call: the lessons, skills and scripts whose
+// weighted overlap with it reaches the floor, the earlier requests that share its rare words,
+// and the verdict it holds for this very prompt against this very store, if it holds one.
+// Candidates only; the judge decides which of them cover the request. undefined when the CLI
+// could not say.
+async function gathered($: EngineInterface, sid: string, text: string, request: string): Promise<Found | undefined> {
+  const floor = (await $.env.get('COMPOUND_REUSE_FLOOR')) ?? ''
+  const args = ['find', '--request', '--json', ...(/^\d{1,4}(\.\d{1,4})?$/.test(floor) ? ['--floor', floor] : [])]
+  const ran = await cli($, args, request, [0], undefined, BUDGET.prompt)
+  if (ran === undefined) return undefined
   // The CLI's prompt rows carry no session, so this session's own prompts are recognised by text.
   const mine = [text, ...(await $.session.messages()).filter(m => m.role === 'user').map(m => m.text)]
-  const earlier = parseEarlier(found.stdout, sid, mine, CANDIDATES_MAX, candidateFloor(words.length))
-  if (earlier === undefined) {
-    await fail($, 'reuse.find', `compound find --json printed something unreadable: ${found.stdout.slice(0, 200)}`)
-    return []
+  const found = parseFound(ran.stdout, sid, mine, CANDIDATES_MAX)
+  if (found === undefined) {
+    await fail($, 'reuse.find', `compound find --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
+    return undefined
   }
-  return earlier.map(e => ({ ...e, text: redact(e.text) }))
+  return { ...found, items: reusable(found.items), earlier: found.earlier.map(e => ({ ...e, text: redact(e.text) })) }
 }
 
 // What earlier sessions in this project fixed and neither recorded nor declined. Asked of
@@ -767,8 +771,9 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   return unsettledContext(shown, await cliPath($))
 }
 
-// Candidates first, then ONE question: the inventory and the candidate earlier requests go
-// to the judge together, and only what it names is added to the prompt.
+// Candidates first, then ONE question: the candidates and the candidate earlier requests go
+// to the judge together, and only what it names is added to the prompt. A prompt the CLI
+// holds a verdict for is not put to the judge again.
 async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knobs): Promise<string> {
   const began = Date.now()
   const request = redact(text)
@@ -785,45 +790,56 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
   if (listing !== undefined && !listing.some(i => i.match.length > 0)) noGuards.add(sid)
   // The same listing gives the greeting its counts: no call is made for them.
   if (listing !== undefined) await paint($, band => inventoried(band, listing.filter(i => i.kind === 'lesson').length, listing.filter(i => i.match.length > 0).length))
-  const items = reusable(listing ?? [])
-  const words = significantWords(request)
-  const candidates = await earlierCandidates($, sid, text, words)
-  // Nothing recorded and nothing like it asked before: no model call is made.
-  if (items.length === 0 && candidates.length === 0) return ''
-  const gathered = Date.now() - began
-  const reply = await ask($, reusePrompt(request, items, candidates), k)
+  const found = await gathered($, sid, text, request)
+  if (found === undefined) return ''
+  const { items, earlier: candidates, memo } = found
   const asked = { prompt_id: digest(text) }
+  const gatheredMs = Date.now() - began
+  if (memo !== undefined) {
+    // The same prompt, project and store as a verdict the CLI holds: no model is asked.
+    const again = memo.items.map(n => items.find(i => i.name === n)).filter((i): i is Item => i !== undefined)
+    const context = memo.verdict === 'named' ? reuseContext(again, memo.earlier, await cliPath($)) : ''
+    await ruled($, 'reuse', context !== '' ? 'named' : memo.verdict === 'named' ? 'nothing' : memo.verdict, { text: '', ms: 0, reason: '' }, {
+      ...asked,
+      memo: true,
+      ...(context === '' ? {} : { named: [...again.map(i => i.name), ...memo.earlier.map(e => e.id)] }),
+    })
+    if (context === '') return ''
+    return reuseNamed($, again, memo.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: 0, memo: true })
+  }
+  // Nothing reached the floor and nothing like it was asked before: no model call is made.
+  if (items.length === 0 && candidates.length === 0) return ''
+  const reply = await ask($, reusePrompt(request, items, candidates), k)
   if (reply.text === undefined) {
     await ruled($, 'reuse', 'unanswered', reply, { ...asked, reason: oneLine(reply.reason, 200) })
     await fail($, 'reuse.judge', `${k.model} gave no answer: ${reply.reason}`)
     return ''
   }
-  const answer = parseReuse(reply.text, items, candidates)
+  const answer = parseReuse(reply.text, request, items, candidates)
   if (answer === undefined) {
     await ruled($, 'reuse', 'unreadable', reply, asked)
     await fail($, 'reuse.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return ''
   }
   const context = answer.substantial ? reuseContext(answer.items, answer.earlier, await cliPath($)) : ''
-  await ruled($, 'reuse', !answer.substantial ? 'not-substantial' : context === '' ? 'nothing' : 'named', reply, {
+  const verdict = !answer.substantial ? 'not-substantial' : context === '' ? 'nothing' : 'named'
+  await ruled($, 'reuse', verdict, reply, {
     ...asked,
     ...(context === '' ? {} : { named: [...answer.items.map(i => i.name), ...answer.earlier.map(e => e.id)] }),
+    ...(answer.unquoted > 0 ? { unquoted: answer.unquoted } : {}),
   })
+  // The verdict is kept by the CLI, so this prompt asked again against this store costs no model call.
+  if (found.key !== '') await cli($, ['memo'], memoOf(found.key, verdict, answer.items, answer.earlier))
   if (context === '') return ''
-  await log($, {
-    type: 'reuse',
-    lessons: answer.items.map(i => i.name),
-    prompts: answer.earlier.map(e => e.id),
-    words,
-    candidates: candidates.length,
-    prompt_id: digest(text),
-    // What the check added to the prompt, in milliseconds: gathering, and the judge.
-    ms: Date.now() - began,
-    gather_ms: gathered,
-    judge_ms: reply.ms,
-  })
-  $.ui.status(reuseStatus(answer.items.map(i => i.name), answer.earlier.length))
-  await paint($, (band, now) => reuseFound(band, answer.items.map(i => i.name), answer.earlier.length, now))
+  // What the check added to the prompt, in milliseconds: gathering, and the judge.
+  return reuseNamed($, answer.items, answer.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: reply.ms })
+}
+
+// Something was named: the `reuse` event, the status entry and the band say so.
+async function reuseNamed($: EngineInterface, items: readonly Item[], earlier: readonly Earlier[], context: string, more: Record<string, unknown>): Promise<string> {
+  await log($, { type: 'reuse', lessons: items.map(i => i.name), prompts: earlier.map(e => e.id), ...more })
+  $.ui.status(reuseStatus(items.map(i => i.name), earlier.length))
+  await paint($, (band, now) => reuseFound(band, items.map(i => i.name), earlier.length, now))
   return context
 }
 

@@ -63,6 +63,12 @@ A lesson at the `general` level ships with the package and `--update` refuses it
 one already covers the mistake there is nothing to record: decline (step 2) and say that
 the general lesson covers it.
 
+`compound add` refuses the plainest cases itself, with exit 2 and a message that says what
+it found: a text that is a copy of a lesson you can see (update the one it names, or pass
+`--new` if yours is a different lesson), and a text that names a scratch path, a session
+id or "this session" (say it so that a later session can follow it, or pass
+`--as-written`).
+
 ## 4. Choose the form.
 
 | Form | Choose it when | How |

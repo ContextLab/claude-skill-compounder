@@ -15,6 +15,10 @@ const PROMPT = 'Write the release notes for version 2.1 of this project in the f
 const ITEMS = JSON.stringify([
   { kind: 'lesson', name: 'release-notes-format', level: 'project', description: 'Use when writing release notes.', path: '/p/l/release-notes-format', match: [] },
 ])
+// The judge names the one candidate, with the words of the request that ask for it.
+const NAMED = '{"substantial":true,"items":[{"name":"release-notes-format","quote":"Write the release notes"}],"requests":[]}'
+// `compound find --request --json`: the one lesson reaches the floor, and no verdict is held.
+const FOUND = JSON.stringify({ words: ['release', 'notes'], items: JSON.parse(ITEMS), floor: 1.5, memo_key: 'a'.repeat(32), prompts: [], surfer: 'ok' })
 const STATUS = JSON.stringify({
   ok: true,
   totals: { reused: 3, guarded: 1, recalled: 1, recorded: 5, since: '2026-09-12T10:00:00Z' },
@@ -47,12 +51,12 @@ type Answer = { text: string; isError?: true }
 // `listed` is what the CLI prints for the pane's `list --json`, `showCode` and `listCode` their exit
 // codes, `wait` is awaited before either answers, `closed` are the panes the mod closed, and
 // `focusAsked` is what each open asked of the keyboard.
-type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[] }
+type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[] }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [] }
+  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [] }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -99,7 +103,11 @@ function world(on: On, env: Record<string, string> = {}): World {
     if (verb === 'show' && w.showCode !== 0) return w.wait().then(() => failed(w.showCode, `compound: no lesson or skill named '${argv[2]}'`))
     if (verb === 'show') return w.wait().then(() => done(w.show))
     if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(w.owed) : '[]') : w.events)
-    if (verb === 'find') return done('{"words":[],"items":[],"prompts":[],"surfer":"ok"}')
+    if (verb === 'find') return done(w.found())
+    if (verb === 'memo') {
+      w.memos.push(JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>)
+      return done('')
+    }
     if (verb === 'check') return done(w.check)
     if (verb === 'show') return done(w.show)
     return done('')
@@ -138,7 +146,7 @@ test('the band spins while the reuse check runs, shows what it found, fades, and
   // The judge answers half a second in: until then the check is in flight.
   w.judge = async () => {
     await clock.sleep(500)
-    return '{"substantial":true,"items":["release-notes-format"],"requests":[]}'
+    return NAMED
   }
   for (const surface of SURFACES) {
     w.logged.length = 0
@@ -1021,7 +1029,7 @@ test('every question put to the judge writes a judge event with its ms, whatever
   mock.clock(on, { now: T0 })
   const verdicts = () => w.logged.filter(e => e.type === 'judge').map(e => [e.moment, e.verdict])
   // Reuse: nothing named, not substantial, named, unreadable.
-  for (const [n, reply] of ['{"substantial":true,"items":[],"requests":[]}', '{"substantial":false,"items":[],"requests":[]}', '{"substantial":true,"items":["release-notes-format"],"requests":[]}', 'I cannot say.'].entries()) {
+  for (const [n, reply] of ['{"substantial":true,"items":[],"requests":[]}', '{"substantial":false,"items":[],"requests":[]}', NAMED, 'I cannot say.'].entries()) {
     w.judge = async () => reply
     await $.prompt.submit({ text: `${PROMPT} (${n})`, wait: false, origin: { kind: 'composer' } })
   }
@@ -1070,4 +1078,74 @@ test('no check is made before a call of a tool no guard applies to', async ($, o
   await $.tool.call({ tool: 'Bash', command: 'compound add --update --name release-notes-format --match x --tool Write' })
   await $.tool.call({ tool: 'Write', file_path: '/work/alpha/notes.md', content: 'x' } as never)
   expect(checks()).toBe(4)
+})
+
+test('a prompt is asked of the CLI in one call, its verdict is given to the CLI to keep, and a kept verdict asks no model', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  await $.prompt.submit({ text: `${PROMPT} (first)`, wait: false, origin: { kind: 'composer' } })
+  const find = w.calls.find(c => c.includes('find'))!
+  expect(find.slice(1)).toEqual(['find', '--request', '--json'])
+  expect(w.asked).toBe(1)
+  // The verdict goes to the CLI, with the key the CLI gave and what was named.
+  expect(w.memos).toEqual([{ key: 'a'.repeat(32), verdict: 'named', items: ['release-notes-format'], prompts: [] }])
+  const first = w.logged.find(e => e.type === 'reuse')!
+  expect(first.lessons).toEqual(['release-notes-format'])
+  expect(first.words).toEqual(['release', 'notes'])
+  expect(first.memo).toBe(undefined)
+
+  // The CLI now holds a verdict for the prompt: nothing is asked, and the same thing is added.
+  const earlier = { id: 'old:1', ts: '2026-09-01', project: 'alpha', session: 'old', prompt: 'write the release notes for 2.0' }
+  w.found = () => JSON.stringify({ ...JSON.parse(FOUND), surfer: 'memo', memo: { verdict: 'named', items: ['release-notes-format'], prompts: [earlier], ts: '2026-10-03T00:00:00Z' } })
+  w.logged.length = 0
+  const told = await $.prompt.submit({ text: `${PROMPT} (second)`, wait: false, origin: { kind: 'composer' } })
+  expect(w.asked).toBe(1)
+  expect(w.memos.length).toBe(1)
+  const context = (told.context ?? []).join('\n')
+  expect(context).toContain('[compound] Reuse before building.')
+  expect(context).toContain('release-notes-format')
+  expect(context).toContain('write the release notes for 2.0')
+  expect(w.logged.filter(e => e.type === 'judge')).toEqual([{ type: 'judge', moment: 'reuse', verdict: 'named', ms: 0, prompt_id: w.logged[0]!.prompt_id, memo: true, named: ['release-notes-format', 'old:1'] }])
+  const again = w.logged.find(e => e.type === 'reuse')!
+  expect([again.lessons, again.prompts, again.memo, again.judge_ms]).toEqual([['release-notes-format'], ['old:1'], true, 0])
+
+  // A kept "nothing" adds nothing and asks nothing; so does a kept "not a build task".
+  for (const verdict of ['nothing', 'not-substantial']) {
+    w.found = () => JSON.stringify({ ...JSON.parse(FOUND), surfer: 'memo', memo: { verdict, items: [], prompts: [], ts: '2026-10-03T00:00:00Z' } })
+    w.logged.length = 0
+    await $.prompt.submit({ text: `${PROMPT} (${verdict})`, wait: false, origin: { kind: 'composer' } })
+    expect(w.asked).toBe(1)
+    expect(w.logged.map(e => [e.type, e.verdict, e.memo])).toEqual([['judge', verdict, true]])
+  }
+
+  // Nothing reaches the floor and nothing like it was asked: no model call and no event.
+  w.found = () => JSON.stringify({ ...JSON.parse(FOUND), items: [] })
+  w.logged.length = 0
+  await $.prompt.submit({ text: `${PROMPT} (floor)`, wait: false, origin: { kind: 'composer' } })
+  expect(w.asked).toBe(1)
+  expect(w.logged).toEqual([])
+})
+
+test('a floor set in the environment is passed to the CLI, and a value that is no number is not', async ($, on) => {
+  const w = world(on, { COMPOUND_REUSE_FLOOR: '0.5' })
+  mock.clock(on, { now: T0 })
+  await $.prompt.submit({ text: `${PROMPT} (set)`, wait: false, origin: { kind: 'composer' } })
+  expect(w.calls.find(c => c.includes('find'))!.slice(1)).toEqual(['find', '--request', '--json', '--floor', '0.5'])
+})
+
+test('a floor that is no number is left to the CLI', async ($, on) => {
+  const w = world(on, { COMPOUND_REUSE_FLOOR: 'high' })
+  mock.clock(on, { now: T0 })
+  await $.prompt.submit({ text: `${PROMPT} (bad)`, wait: false, origin: { kind: 'composer' } })
+  expect(w.calls.find(c => c.includes('find'))!.slice(1)).toEqual(['find', '--request', '--json'])
+})
+
+test('a judge that names the candidate without words of the request adds nothing, and that is kept too', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.judge = async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}'
+  const told = await $.prompt.submit({ text: `${PROMPT} (unquoted)`, wait: false, origin: { kind: 'composer' } })
+  expect((told.context ?? []).join('\n')).not.toContain('Reuse before building')
+  expect(w.logged.map(e => [e.type, e.verdict, e.unquoted])).toEqual([['judge', 'nothing', 1]])
+  expect(w.memos.map(m => m.verdict)).toEqual(['nothing'])
 })
