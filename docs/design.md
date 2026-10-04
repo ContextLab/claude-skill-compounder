@@ -424,8 +424,8 @@ or recorded. Every new failure is reported, each one once.
   someone (lessons owed, ineffective lessons, lessons that could move to the user level,
   errors of the last seven days, each with up to three entries, and the count of lessons
   declined); **Levels**, the lessons, guards and skills at each of the three levels;
-  **Most used**, up to six lessons with a bar and a count each for reused (`◆`), guarded
-  (`■`) and recalled (`↺`); and **Recent**, the newest events with the band's glyphs and
+  **Most used**, up to six lessons in a table whose three columns are reused (`◆`), guarded
+  (`■`) and recalled (`↺`), each a count and a bar; and **Recent**, the newest events with the band's glyphs and
   colours. `Refresh` (`r` while the pane has the keyboard) reads it again, `Close` (`x`)
   or `/compound close` closes it. The pane reads `compound status --json` and `compound
   events --json`, when it opens, when `Refresh` is pressed, and 400 ms after the mod logs

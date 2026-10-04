@@ -370,14 +370,57 @@ test('the pane lists what is open first, then the levels, the most used and the 
   expect(lines).toContain('  ✖ 1 error in the last 7 days')
   expect(lines).toContain('  ○ 1 lesson declined')
   expect(lines).toContain('  project    2 lessons   1 guard    0 skills')
-  expect(lines[at('Most used')]).toBe('Most used  ◆ reused  ■ guarded  ↺ recalled')
+  expect(lines[at('Most used')]).toBe('Most used              ◆ reused     ■ guarded    ↺ recalled')
   // A lesson never used is not among the most used.
   expect(at('never-used')).toBe(-1)
-  expect(lines[at('no-marker-echo  ')]).toContain('■ ▇▇▇▇▇▇ 9')
+  expect(lines[at('no-marker-echo  ')]).toBe('  no-marker-echo       0            9 ▇▇▇▇▇▇     0')
   expect(at('learn    deploy-needs-target') < at('reuse    2 lessons')).toBe(true)
   // The timeline's glyph and colour are the band's.
   const learn = boardLines(boardFrom(STATUS, EVENTS, 's1', T0), 60).find(l => text(l).includes('learn '))!
   expect(learn.some(s => s.text === '✔ ' && s.color === 'success')).toBe(true)
+})
+
+test('the most used table is in columns: each count ends under its legend glyph and each bar starts in one cell', async () => {
+  const lessons = [
+    { name: 'a-long-lesson-name-that-is-cut-in-a-narrow-pane', reuse: 12, guard_hits: 0, recall: 3 },
+    { name: 'short', reuse: 0, guard_hits: 7, recall: 0 },
+    { name: 'mid-length-name', reuse: 1, guard_hits: 1, recall: 1 },
+  ]
+  const board = boardFrom(JSON.stringify({ health: [], store: {}, lessons, open: {} }), '[]', 's1', T0)!
+  for (const columns of [36, 44, 49, 60, 100, 140]) {
+    const lines = boardLines(board, columns).map(text)
+    const head = lines.findIndex(l => l.startsWith('Most used'))
+    const rows = lines.slice(head + 1, head + 1 + lessons.length)
+    for (const line of boardLines(board, columns)) expect(width(line) <= columns, `${columns}: ${text(line)}`).toBe(true)
+    const glyphs = ['◆', '■', '↺'].map(g => [...lines[head]!].indexOf(g))
+    expect(glyphs.every(g => g > 0), `${columns}: ${lines[head]}`).toBe(true)
+    for (const row of rows) {
+      const cells = [...row]
+      for (const g of glyphs) {
+        // The count's last digit is under the glyph, and the cell after it is the gap before the bar.
+        expect(/\d/.test(cells[g] ?? ''), `${columns}: a digit under the glyph in "${row}"`).toBe(true)
+        expect(cells[g + 1] === undefined || cells[g + 1] === ' ', `${columns}: a gap after the count in "${row}"`).toBe(true)
+        expect([undefined, ' ', '▇']).toContain(cells[g + 2])
+      }
+      expect(row).toBe(row.trimEnd())
+      expect(row.endsWith('…')).toBe(false)
+    }
+  }
+  // A two-digit count widens the count column for every row; one digit stays under the glyph.
+  const wide = boardLines(board, 100).map(text)
+  expect(wide[wide.findIndex(l => l.startsWith('Most used')) + 1]).toContain(' 12 ▇▇▇▇▇▇')
+})
+
+test('the recent rows are in columns whatever the longest event type', async () => {
+  const events = JSON.stringify([
+    { ts: '2026-10-03T12:00:00Z', type: 'learn', lesson: 'x' },
+    { ts: '2026-10-03T12:01:00Z', type: 'candidate', lesson: 'x', project: 'y' },
+  ])
+  const lines = boardLines(boardFrom(STATUS, events, 's1', T0), 80).map(text)
+  const rows = lines.slice(lines.indexOf('Recent') + 1)
+  expect(rows.length).toBe(2)
+  const starts = rows.map(r => r.indexOf(' x') )
+  expect(starts[0]).toBe(starts[1])
 })
 
 test('the pane never draws a line wider than it was given', async () => {

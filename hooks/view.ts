@@ -464,6 +464,9 @@ function fit(line: Line, columns: number): Line {
 }
 
 const BAR_CELLS = 6
+const NAME_MIN = 8
+// One counter column of the Most used table: the widest legend entry and a cell between.
+const LEGEND_CELL = 13
 
 // The pane as lines, each at most `columns` cells wide: the levels, the lessons most used,
 // the recent events and what is open. `events` is how many timeline rows there is room for.
@@ -511,30 +514,51 @@ export function boardLines(board: CompoundBoard | null | undefined, columns: num
     ])
   }
 
+  // The legend is the header of the three counter columns: each glyph sits over its counts,
+  // the counts are right-aligned under it and every bar starts in the same cell. A pane too
+  // narrow for the legend's words keeps the glyphs and shortens the bars.
   const used = board.lessons.filter(l => l.reuse + l.guards + l.recall > 0)
-  out.push([], [{ text: 'Most used', bold: true }, ...legend(NOTES.reuse, 'reused'), ...legend(NOTES.guard, 'guarded'), ...legend(NOTES.recall, 'recalled')])
-  if (used.length === 0) out.push([{ text: '  nothing was reused, guarded or recalled yet', dim: true }])
+  const shown = used.slice(0, 6)
+  const kinds: readonly (readonly [Look, string, (l: CompoundBoard['lessons'][number]) => number])[] = [
+    [NOTES.reuse, 'reused', l => l.reuse],
+    [NOTES.guard, 'guarded', l => l.guards],
+    [NOTES.recall, 'recalled', l => l.recall],
+  ]
   const most = Math.max(1, ...used.flatMap(l => [l.reuse, l.guards, l.recall]))
-  const named = Math.max(8, Math.min(28, columns - 3 * (BAR_CELLS + 6) - 2, Math.max(...used.map(l => l.name.length), 0)))
-  for (const l of used.slice(0, 6)) {
-    const cell = (n: number, look: Look): Seg[] => [
-      { text: `  ${look.glyph} `, ...(n > 0 ? { color: look.color } : { dim: true }) },
-      { text: bar(n, most, BAR_CELLS), color: look.color },
-      { text: `${n > 0 ? ' ' : ''}${n}`.padEnd(BAR_CELLS + 3 - bar(n, most, BAR_CELLS).length), ...(n > 0 ? {} : { dim: true }) },
-    ]
+  const digits = String(Math.max(0, ...shown.flatMap(l => [l.reuse, l.guards, l.recall]))).length
+  // The last column is not padded, so the table is one cell narrower than three columns.
+  const roomy = columns >= 2 + NAME_MIN + kinds.length * LEGEND_CELL - 1
+  const bars = roomy ? BAR_CELLS : 3
+  const cellWide = roomy ? LEGEND_CELL : 2 + digits + 1 + bars
+  const named = Math.max(NAME_MIN, Math.min(28, columns - (kinds.length * cellWide - 1) - 2, Math.max(...shown.map(l => l.name.length), 0)))
+  const column = (segs: Seg[], last: boolean): Seg[] => (last ? segs : [...segs, { text: ' '.repeat(Math.max(0, cellWide - width(segs))) }])
+  out.push([], [
+    { text: 'Most used', bold: true },
+    { text: ' '.repeat(named + 2 - 'Most used'.length) },
+    ...kinds.flatMap(([look, word], i) => column([{ text: `  ${' '.repeat(digits - 1)}${look.glyph}`, color: look.color }, ...(roomy ? [{ text: ` ${word}`, dim: true }] : [])], i === kinds.length - 1)),
+  ])
+  if (used.length === 0) out.push([{ text: '  nothing was reused, guarded or recalled yet', dim: true }])
+  for (const l of shown) {
     out.push([
       { text: `  ${clip(l.name, named).padEnd(named)}`, ...(l.flag === 'ineffective' ? { color: WEAK.color } : {}) },
-      ...cell(l.reuse, NOTES.reuse),
-      ...cell(l.guards, NOTES.guard),
-      ...cell(l.recall, NOTES.recall),
+      ...kinds.flatMap(([look, , of], i) => {
+        const n = of(l)
+        const filled = bar(n, most, bars)
+        return column([
+          { text: `  ${String(n).padStart(digits)}`, ...(n > 0 ? {} : { dim: true }) },
+          ...(filled === '' ? [] : [{ text: ' ' }, { text: filled, color: look.color }]),
+        ], i === kinds.length - 1)
+      }),
     ])
   }
 
   out.push([], heading('Recent'))
   if (board.recent.length === 0) out.push([{ text: '  no events yet', dim: true }])
-  for (const e of board.recent.slice(-Math.max(1, events)).reverse()) {
+  const recent = board.recent.slice(-Math.max(1, events)).reverse()
+  const typed = Math.max(8, ...recent.map(e => e.type.length))
+  for (const e of recent) {
     const look = eventLook(e.type)
-    out.push([{ text: `  ${clock(e.at)} `, dim: true }, { text: `${look.glyph} `, color: look.color }, { text: e.type.padEnd(8), color: look.color }, { text: e.text === '' ? '' : ` ${e.text}` }])
+    out.push([{ text: `  ${clock(e.at)} `, dim: true }, { text: `${look.glyph} `, color: look.color }, { text: e.text === '' ? e.type : e.type.padEnd(typed), color: look.color }, { text: e.text === '' ? '' : ` ${e.text}` }])
   }
   return out.map(l => fit(l, columns))
 }
