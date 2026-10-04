@@ -145,3 +145,20 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
 - 2026-10-04: a fifth security notice (titles only): "argument-injection /
   command-execution in bin/compound" and "sensitive-data-to-log in bin/compound". Sent to
   the running track J agent to confirm with a failing test and fix.
+- 2026-10-04: track J merged as one commit, 462761d (notes in `2026-10-05-track-j-decisions.md`).
+  The first push was refused by GitHub push protection: the redaction tests held
+  key-shaped literals (the AWS documentation's example key). The fixtures are now built
+  from halves and the merge was redone as a fresh commit on origin/main, so the refused
+  commit never reached GitHub. All checks green on main: 22 test files, 280 plugin tests,
+  tsc clean.
+- The agent for track J added three rules to `.claude/CLAUDE.md` (the exemption allowlist,
+  where a recall is counted, what `compound log` takes). They state what the code does;
+  the owner has not read them yet.
+- 2026-10-04: a seventh security notice on that commit (5 findings, 3 named):
+  allowlist-resolution-differential in hooks/register.ts, integrity-check-bypass in
+  bin/compound, path-traversal-via-symlink in bin/compound. Track S2 dispatched on 462761d
+  to confirm and fix them. v0.5.1 is held until it merges.
+- After track J, on the owner's real store (nothing was changed): four user lessons show as
+  ineffective from today's agent sessions (agent-worktree-check-base, chain-commit-with-and,
+  heredoc-ends-and-chain, zsh-nomatch-glob), and `echo =====` is now refused by both
+  `zsh-equals-word` and the shipped `zsh-equals-not-found`.
