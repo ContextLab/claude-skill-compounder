@@ -120,3 +120,17 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
   `brew-doctor-exit` wrongly for the LaTeX prompt.
 - 2026-10-04: track M dispatched: docs pass (README Cost table re-measured, guide examples
   regenerated from real output) and re-recorded README media. Then the release (v0.5.0).
+- 2026-10-04: track M merged (b10c312, fast-forward): documents checked against the code,
+  every example regenerated (`dev/guide_examples.py`), README media re-recorded. All checks
+  green: 19 test files, 242 plugin tests, tsc clean. Released as v0.5.0.
+- Found by track M while recording, NOT fixed: a recalled failure drops an earlier held
+  one (`hooks/register.ts` 1168-1169), which cost a capture in one take; the fix judge
+  rejected "module missing" in 2 of 4 takes, which is the README's own example; the band
+  went blank for about 3 s while a failure was still held; the demo pane shows a
+  `claude code` warning because the demo world has no `claude` on PATH.
+- STILL OPEN after v0.5.0: the four items above; the owner decisions from track S; the
+  guard an agent added to the owner's `zsh-nomatch-glob`; #42 (the token, then the
+  marketplace route); #19's composition is shipped but haiku did not route to
+  `verify-assumptions-first`; `find --request` at 500-690 ms; parallel agents can make a
+  lesson ineffective; `measure_reuse.py` offers `brew-doctor-exit` for the LaTeX prompt;
+  the effectiveness sweep once there are weeks of data (`compound report`).
