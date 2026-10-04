@@ -194,34 +194,13 @@ async function cliPath($: EngineInterface): Promise<string> {
   return (await $.env.get('COMPOUND_BIN')) || 'compound'
 }
 
-// Whether the bare name `compound` is this package's CLI for a command the session runs:
-// the first `compound` on PATH is the same file as the CLI the mod calls. Asked of `sh`
-// once and kept for a while; asked only for a call that is otherwise proved to be one
-// simple `compound` invocation. When the mod itself runs `compound` from PATH, the name
-// is the CLI. A question that fails is a no: the call is then checked like any other.
-const BARE_TTL_MS = 300000
-const BARE_SH = 'p=$(command -v compound) && [ "$p" -ef "$1" ]'
-let bareOurs: { at: number; own: string; ok: boolean } | undefined
-
-async function bareIsOurs($: EngineInterface, own: string): Promise<boolean> {
-  if (!own.startsWith('/')) return true
-  if (bareOurs !== undefined && bareOurs.own === own && Date.now() - bareOurs.at < BARE_TTL_MS) return bareOurs.ok
-  let ok = false
-  try {
-    ok = (await $.process.run(['sh', '-c', BARE_SH, 'sh', own], { timeoutMs: BUDGET.claim })).exitCode === 0
-  } catch {
-    ok = false
-  }
-  bareOurs = { at: Date.now(), own, ok }
-  return ok
-}
-
 // The verb of a Bash call that is the CLI's own call, or undefined: see ./render soleCli.
+// Only the path the mod itself runs qualifies. The bare name `compound` never does, and no
+// question is put to a shell about what it would run: the shell that answers is never the
+// shell that runs the call.
 async function ownCall($: EngineInterface, command: string): Promise<string | undefined> {
-  const shape = soleCliShape(command)
-  if (shape === undefined) return undefined
-  const own = await cliPath($)
-  return soleCli(command, own, shape.bare ? await bareIsOurs($, own) : false)
+  if (soleCliShape(command) === undefined) return undefined
+  return soleCli(command, await cliPath($))
 }
 
 // Where CLI calls run: the repository's root, or where the session started. Never the

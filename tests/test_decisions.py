@@ -472,7 +472,7 @@ class PublishScanTest(Case):
         self.box.add("big-note", "Use when big.", "See data.txt.\n", "--level", "user", "--attach", big)
         plan = self.box.json("promote", "big-note", "--to", "general", "--json")
         self.assertEqual(plan["secrets"], ["data.txt: an API token"])
-        proc = self.box.run("promote", "big-note", "--to", "general", "--yes", **self.git_env)
+        proc = self.box.run("promote", "big-note", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env)
         self.assertExit(proc, 2)
         self.assertIn("data.txt: an API token", proc.stderr)
         self.assertNotIn(self.KEY, proc.stderr)
@@ -490,7 +490,7 @@ class PublishScanTest(Case):
         self.assertEqual(len(plan["unpublishable"]), 1)
         self.assertTrue(plan["unpublishable"][0].startswith("helper.sh: cannot be read"), plan["unpublishable"])
         self.assertIn("NOT PUBLISHABLE", self.box.run("promote", "locked-note", "--to", "general").stdout)
-        proc = self.box.run("promote", "locked-note", "--to", "general", "--yes", **self.git_env)
+        proc = self.box.run("promote", "locked-note", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env)
         self.assertExit(proc, 2)
         self.assertIn("helper.sh: cannot be read", proc.stderr)
         self.assertEqual(self.branches(), ["main"])
@@ -502,7 +502,7 @@ class PublishScanTest(Case):
         plan = self.box.json("promote", "huge-note", "--to", "general", "--json")
         self.assertEqual(len(plan["unpublishable"]), 1)
         self.assertTrue(plan["unpublishable"][0].startswith("huge.bin: 8388609 bytes"), plan["unpublishable"])
-        proc = self.box.run("promote", "huge-note", "--to", "general", "--yes", **self.git_env)
+        proc = self.box.run("promote", "huge-note", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env)
         self.assertExit(proc, 2)
         self.assertIn("huge.bin", proc.stderr)
         self.assertIn("too large to scan", proc.stderr)
@@ -518,7 +518,7 @@ class PublishScanTest(Case):
         plan = self.box.json("promote", "zsh-equals-word", "--to", "general", "--json")
         self.assertEqual((plan["secrets"], plan["unpublishable"]), ([], []))
         before = self.box.snapshot(self.box.chome)
-        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--json", **self.git_env)
+        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", self.upstream, "--json", **self.git_env)
         self.assertExit(proc, 0)
         done = json.loads(proc.stdout)
         branch = "compound/lesson-zsh-equals-word"
@@ -551,7 +551,7 @@ class PublishScanTest(Case):
         os.makedirs(scratch)
         before = self.box.snapshot()
         self.assertExit(self.box.run("promote", "plain-note", "--to", "general", TMPDIR=scratch), 0)
-        self.assertExit(self.box.run("promote", "plain-note", "--to", "general", "--yes", TMPDIR=scratch,
+        self.assertExit(self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", self.upstream, TMPDIR=scratch,
                                      **self.git_env), 0)
         self.assertEqual(os.listdir(scratch), [], "the staging copy and the clone were left behind")
         after = self.box.snapshot()
@@ -561,7 +561,7 @@ class PublishScanTest(Case):
 
     def test_a_name_the_pool_already_holds_is_refused_and_nothing_is_pushed(self):
         self.box.add("taken-name", "Use when mine.", "My own.\n", "--level", "user")
-        proc = self.box.run("promote", "taken-name", "--to", "general", "--yes", **self.git_env)
+        proc = self.box.run("promote", "taken-name", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env)
         self.assertExit(proc, 1)
         self.assertIn("lessons/taken-name already exists", proc.stderr)
         self.assertEqual(self.branches(), ["main"])
@@ -579,7 +579,7 @@ class PublishScanTest(Case):
         plan = self.box.json("promote", "linked-note", "--to", "general", "--json")
         self.assertEqual(plan["files"], ["lessons/linked-note/SKILL.md"])
         self.assertEqual(plan["excluded"], ["fix.sh"])
-        self.assertExit(self.box.run("promote", "linked-note", "--to", "general", "--yes", **self.git_env), 0)
+        self.assertExit(self.box.run("promote", "linked-note", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env), 0)
         tree = git_ok("ls-tree", "-r", "--name-only", "compound/lesson-linked-note", cwd=self.upstream).splitlines()
         self.assertNotIn("lessons/linked-note/fix.sh", tree)
 

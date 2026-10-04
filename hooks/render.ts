@@ -245,16 +245,19 @@ export function cliCall(command: string): string | undefined {
 //   - before the program there may be assignments to COMPOUND_PROJECT, COMPOUND_HOME and
 //     COMPOUND_CLAUDE_DIR and to nothing else (`PATH=`, `LD_PRELOAD=`, or one that names a program
 //     would decide what runs);
-//   - the program is the first word after them: the bare name `compound`, or an absolute
-//     path, which the caller holds to the package's own CLI. No `command`, `env`, `exec`,
-//     `sudo`, `time` or `nohup` in front of it;
+//   - the program is the first word after them, and it is an absolute path, which the
+//     caller holds to the path of the package's own CLI. THE BARE NAME `compound` IS NEVER
+//     EXEMPT: what a name runs is decided by the shell that runs it (an alias, a function,
+//     its own PATH and hash table, the directory it is in), and nothing the mod could ask
+//     beforehand is that shell's answer. No `command`, `env`, `exec`, `sudo`, `time` or
+//     `nohup` in front of it;
 //   - the next word is one of the CLI's subcommands;
 //   - the one redirection allowed is ONE here-document as the last thing on the line, with
 //     a QUOTED delimiter (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`), which the shell passes as text
 //     without expanding it. Its body ends at the delimiter's line, and only blank lines
 //     follow. An unquoted delimiter is expanded by the shell and is not exempt;
 //   - with no here-document, nothing follows the command line but blank lines.
-export type CliShape = { program: string; bare: boolean; verb: string }
+export type CliShape = { program: string; verb: string }
 
 const SOLE_MAX = 400000
 const SOLE_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/
@@ -327,20 +330,21 @@ export function soleCliShape(command: string): CliShape | undefined {
   }
   const program = words[at]?.value ?? ''
   const verb = words[at + 1]?.value ?? ''
-  const bare = program === 'compound'
-  if ((!bare && !program.startsWith('/')) || !SOLE_VERB.test(verb)) return undefined
-  return { program, bare, verb }
+  if (!program.startsWith('/') || !SOLE_VERB.test(verb)) return undefined
+  return { program, verb }
 }
 
 // The verb of a call that is the CLI's own, given what the mod knows: `cli` is the absolute
-// path of the package's CLI (a call by any other path is not exempt, whatever its file is
-// called), and `bareIsOurs` is whether the bare name `compound` resolves to that same file
-// on PATH. What a shell alias or function named `compound` would run cannot be known from
-// here: a guard is advice and not a barrier, and whoever can define one is past it already.
-export function soleCli(command: string, cli: string, bareIsOurs: boolean): string | undefined {
+// path of the CLI the mod itself runs and names in every message, and the call's program
+// must be that path, character for character. Nothing is resolved and nothing is asked of
+// the file system: the shell is handed the same path the mod runs, so there is no second
+// answer to differ from. Another path to the same file (a link in ~/.local/bin, a path
+// with `..` in it), another file called `compound`, and the bare name are calls like any
+// other: checked, recalled, captured. That costs at most one refusal, sent again.
+export function soleCli(command: string, cli: string): string | undefined {
   const shape = soleCliShape(command)
   if (shape === undefined) return undefined
-  return (shape.bare ? bareIsOurs : cli.startsWith('/') && shape.program === cli) ? shape.verb : undefined
+  return cli.startsWith('/') && shape.program === cli ? shape.verb : undefined
 }
 
 // A command that names the CLI anywhere, including through a variable (`C=/path/compound;
@@ -488,7 +492,7 @@ export function digest(text: string): string {
 // ---- messages -------------------------------------------------------------------------
 
 function cliLine(cli: string): string {
-  return `compound CLI: ${cli} (use this path if \`compound\` is not on PATH).`
+  return `compound CLI: ${cli} (run it by this path: a call by any other name, \`compound\` on PATH included, is checked like any other command).`
 }
 
 // ---- recorded text, quoted ------------------------------------------------------------
