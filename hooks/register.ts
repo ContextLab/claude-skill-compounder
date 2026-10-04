@@ -1,9 +1,11 @@
-import type { EngineInterface, Register } from 'claude-code'
-import { isOff, knobsFrom, type Knobs } from './knobs'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, RenderElement, Timer } from 'claude-code'
+import type { CompoundBand, CompoundBoard, CompoundBusyKind } from '../types'
+import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
   BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason,
-  heldStep, inputOf, isCommand, judged, knownContext, promotedText, ranOut, recallContext, reportsEvents, reusable, reuseContext, reuseStatus,
+  heldStep, inputOf, isCommand, judged, knownContext, newsKey, promotedText, ranOut, recallContext, reportsEvents, reusable, reuseContext, reuseStatus,
   stopDebt, stopNudge, stopStrengthen, storeNews, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
 } from './render'
@@ -13,6 +15,11 @@ import {
   parseUnsettled, strengthenings,
   type Earlier, type Event, type Item,
 } from './store'
+import {
+  bandRow, began as checkBegan, boardFrom, boardLines, captured, ended as checkEnded, erred, forSession, FRAME_MS, GUARD_SHOW_MS, motion, newTurn, noted, phaseKey, reuseText,
+  settledBy, stepped, synced, unfixed, weakened,
+  type Seg,
+} from './view'
 
 // compound: before a substantial task it looks for existing work to reuse, and after a
 // problem is solved it has the lesson written down. Five moments, each one a hook:
@@ -45,6 +52,14 @@ import {
 // only ever shown to Claude as a quotation (./render), never as the mod's own instruction.
 // COMPOUND_OFF=1 switches all of it off.
 //
+// WHAT THE PERSON SEES is drawn from two values kept in `$.state` (see ../types and ./view):
+// the band above the prompt, which shows the check in flight and what the last moment did,
+// and the `/compound` pane, a dashboard read from `compound status --json` and `compound
+// events --json`. A drawing problem never breaks a turn: every render hook answers
+// `next(e)` on any failure, and logs one `error` per session per kind. One timer animates
+// the band, and it runs only while a spinner turns or a result fades. COMPOUND_QUIET=1
+// turns the band off; the status entry and the toasts stay.
+//
 // Everything that touches `$` is in this file: the engine follows `$` into a function
 // declared here and never across an import. The pure halves are ./judge (the three
 // questions), ./render (the messages), ./store (the CLI's JSON), ./knobs and ./safe.
@@ -65,6 +80,16 @@ const INVENTORY_TTL_MS = 60000
 const OTHER_PROJECTS = 6
 // How many unsettled captures a session's first prompt is told about.
 const UNSETTLED_SHOWN = 5
+// The pane's id, how long after an event its data is read again, and how many events it asks for.
+const PANE = 'compound'
+const BOARD_AFTER_MS = 400
+const BOARD_EVENTS = 20
+// The rows the pane asks for where it opens above the prompt.
+const PANE_ROWS = 34
+
+const BAND = atom({ plugin: 'compound', key: 'band' } as const, null)
+const FRAME = atom({ plugin: 'compound', key: 'frame' } as const, 0)
+const BOARD = atom({ plugin: 'compound', key: 'board' } as const, null)
 
 type Ran = { code: number; stdout: string; stderr: string }
 type Reply = { text: string | undefined; ms: number; reason: string }
@@ -95,7 +120,14 @@ const noGuards = new Set<string>()
 const told = new Map<string, Set<string>>()
 let sweptClaims = false
 let ownCli: string | undefined
-let settings: { at: number; off: boolean; knobs: Knobs } | undefined
+let settings: { at: number; off: boolean; quiet: boolean; knobs: Knobs } | undefined
+// The band's one timer, whether a frame is being drawn, and what the last frame showed.
+let ticker: Timer | undefined
+let ticking = false
+let drawn = ''
+// The wait before the pane's data is read again, and how many checks were given an id.
+let boardWait: Timer | undefined
+let checks = 0
 let listed: { at: number; root: string; items: Item[] } | undefined
 let elsewhere: { at: number; root: string; items: Item[] } | undefined
 
@@ -128,11 +160,12 @@ async function projectRoot($: EngineInterface): Promise<string> {
   return repo?.root ?? (await $.session.root())
 }
 
-async function readSettings($: EngineInterface): Promise<{ off: boolean; knobs: Knobs }> {
+async function readSettings($: EngineInterface): Promise<{ off: boolean; quiet: boolean; knobs: Knobs }> {
   if (settings !== undefined && Date.now() - settings.at < SETTINGS_TTL_MS) return settings
   // `$.env.get` takes a literal name, so each is written out.
   const isSwitchedOff = isOff(await $.env.get('COMPOUND_OFF'))
-  const read = knobsFrom({
+  const quiet = isQuiet(await $.env.get('COMPOUND_QUIET'))
+  const found = knobsFrom({
     promptMinChars: await $.env.get('COMPOUND_PROMPT_MIN_CHARS'),
     turnMinCalls: await $.env.get('COMPOUND_TURN_MIN_CALLS'),
     nudgeCooldown: await $.env.get('COMPOUND_NUDGE_COOLDOWN'),
@@ -140,7 +173,7 @@ async function readSettings($: EngineInterface): Promise<{ off: boolean; knobs: 
     model: await $.env.get('COMPOUND_MODEL'),
     judgeTimeout: await $.env.get('COMPOUND_JUDGE_TIMEOUT'),
   })
-  settings = { at: Date.now(), off: isSwitchedOff, knobs: read }
+  settings = { at: Date.now(), off: isSwitchedOff, quiet, knobs: found }
   return settings
 }
 
@@ -153,17 +186,19 @@ async function knobs($: EngineInterface): Promise<Knobs> {
 }
 
 // One CLI call, with the session stamped on it and the three store locations passed
-// through when they are set. `project` runs it as another project. `timeoutMs` is its
+// through when they are set. `project` runs it as another project. A call that is not
+// `counted` (the pane's own reads) neither marks its subcommand as out of time nor is
+// skipped for it. `timeoutMs` is its
 // budget: past it the child is killed, the answer is TIMED_OUT, and the subcommand is not
 // started again in this turn (SKIPPED). Never rejects: a child that could not start is
 // NOT_STARTED with the reason as its stderr.
-async function spawn($: EngineInterface, args: readonly string[], stdin?: string, project?: string, timeoutMs: number = BUDGET.call): Promise<Ran> {
+async function spawn($: EngineInterface, args: readonly string[], stdin?: string, project?: string, timeoutMs: number = BUDGET.call, counted = true): Promise<Ran> {
   const verb = args[0] ?? ''
   let sid = ''
   let began = 0
   try {
     sid = await $.session.id()
-    if (stalled.get(sid)?.has(verb) === true) {
+    if (counted && stalled.get(sid)?.has(verb) === true) {
       return { code: SKIPPED, stdout: '', stderr: `compound ${verb} ran out of time earlier in this turn and is not called again in it` }
     }
     const env: Record<string, string> = { CLAUDE_CODE_SESSION_ID: sid }
@@ -180,10 +215,136 @@ async function spawn($: EngineInterface, args: readonly string[], stdin?: string
     return { code: done.exitCode, stdout: done.stdout, stderr: done.stderr }
   } catch (err) {
     if (began > 0 && ranOut(Date.now() - began, timeoutMs)) {
-      if (sid !== '') stalled.set(sid, (stalled.get(sid) ?? new Set<string>()).add(verb))
+      if (counted && sid !== '') stalled.set(sid, (stalled.get(sid) ?? new Set<string>()).add(verb))
       return { code: TIMED_OUT, stdout: '', stderr: `compound ${verb} did not answer within ${timeoutMs} ms and was stopped; it is not called again in this turn` }
     }
     return { code: NOT_STARTED, stdout: '', stderr: said(err) }
+  }
+}
+
+// ---- what the person sees: the band and the pane ----------------------------------------
+
+// A drawing failure, from a place that cannot wait for the log: kept for the next typed
+// prompt, once per session per kind.
+function drawFailed($: EngineInterface, sid: string, kind: 'band' | 'pane', err: unknown): void {
+  const id = `${sid}\u0000ui.${kind}\u0000`
+  if (failedOnce.has(id)) return
+  void failOnce($, sid, `ui.${kind}`, err).catch(() => undefined)
+}
+
+function stopTicker(): void {
+  ticker?.cancel()
+  ticker = undefined
+}
+
+// One frame: the spinner's next glyph, or a fading result's next phase. The timer stops
+// itself the moment nothing on the band moves, with one last frame that draws what is left.
+async function tick($: EngineInterface): Promise<void> {
+  if (ticking) return
+  ticking = true
+  try {
+    const now = await $.clock.now()
+    const band = await read($, BAND)
+    const how = motion(band, now)
+    const key = phaseKey(band, now)
+    if (how === 'still') stopTicker()
+    if (how === 'spin' || key !== drawn) {
+      drawn = key
+      await update($, FRAME, () => now)
+    }
+  } catch (err) {
+    stopTicker()
+    drawFailed($, 'unknown', 'band', err)
+  } finally {
+    ticking = false
+  }
+}
+
+// Starts the band's timer unless it runs: there is one, whatever starts it and however often.
+function animate($: EngineInterface): void {
+  if (ticker !== undefined) return
+  ticker = $.clock.every(FRAME_MS, () => {
+    void tick($)
+  })
+}
+
+// Changes the band's state, which redraws the band. Never rejects, and does nothing when
+// the band is switched off.
+async function paint($: EngineInterface, change: (band: CompoundBand, now: number) => CompoundBand): Promise<void> {
+  let sid = 'unknown'
+  try {
+    const s = await readSettings($)
+    if (s.off || s.quiet) return
+    sid = await $.session.id()
+    const now = await $.clock.now()
+    const next = await update($, BAND, kept => change(forSession(kept, sid), now))
+    if (next !== null && motion(next, now) !== 'still') animate($)
+  } catch (err) {
+    drawFailed($, sid, 'band', err)
+  }
+}
+
+// Runs `work` with the band's spinner turning under `kind`'s label.
+async function during<T>($: EngineInterface, kind: CompoundBusyKind, work: () => Promise<T>): Promise<T> {
+  checks += 1
+  const id = `${kind}-${checks}`
+  await paint($, (band, now) => checkBegan(band, id, kind, now))
+  try {
+    return await work()
+  } finally {
+    await paint($, band => checkEnded(band, id))
+  }
+}
+
+// How many failures of the mod this session has not been told about.
+function untold(sid: string): number {
+  return (failures.get(sid)?.length ?? 0) + (failures.get('unknown')?.length ?? 0)
+}
+
+// Reads the pane's data again: `compound status --json` and `compound events --json`. Only
+// while the pane is open, and never from a path a tool call waits on.
+async function refreshBoard($: EngineInterface): Promise<void> {
+  let sid = 'unknown'
+  try {
+    sid = await $.session.id()
+    if (!(await $.ui.panes()).some(pane => pane.id === PANE)) return
+    // Exit 1 is a health check that failed: the report is still the answer.
+    const status = await spawn($, ['status', '--json'], undefined, undefined, BUDGET.command, false)
+    const recent = await spawn($, ['events', '--json', '--limit', String(BOARD_EVENTS)], undefined, undefined, BUDGET.prompt, false)
+    const now = await $.clock.now()
+    const board: CompoundBoard | undefined = status.code === 0 || status.code === 1 ? boardFrom(status.stdout, recent.code === 0 ? recent.stdout : '', sid, now) : undefined
+    const problem = status.code === 0 || status.code === 1 ? 'compound status --json printed something unreadable' : `compound status ${why(status)}`
+    await update($, BOARD, () => board ?? { session: sid, at: now, health: [], checks: 0, levels: [], lessons: [], recent: [], open: { unsettled: [], ineffective: [], candidates: [], errors: [], skips: 0 }, problem: oneLine(problem, 300) })
+  } catch (err) {
+    drawFailed($, sid, 'pane', err)
+  }
+}
+
+// The log changed: the pane's data is read again shortly, once for a burst of events.
+function boardStale($: EngineInterface): void {
+  if (boardWait !== undefined) return
+  try {
+    boardWait = $.clock.after(BOARD_AFTER_MS, () => {
+      boardWait = undefined
+      void refreshBoard($)
+    })
+  } catch {
+    boardWait = undefined
+  }
+}
+
+// What `h` built, as the tree a render hook answers with.
+function tree(node: ReturnType<typeof h>): RenderElement {
+  if (node === null || node === undefined || typeof node !== 'object' || Array.isArray(node)) throw new Error('the drawing built no element')
+  return node as RenderElement
+}
+
+function textProps(seg: Seg): Record<string, unknown> {
+  return {
+    ...(seg.color === undefined ? {} : { color: seg.color }),
+    ...(seg.dim === true ? { dimColor: true } : {}),
+    ...(seg.bold === true ? { bold: true } : {}),
+    ...(seg.inverse === true ? { inverse: true } : {}),
   }
 }
 
@@ -213,7 +374,10 @@ async function fail($: EngineInterface, where: string, err: unknown): Promise<vo
   } catch {
     // A surface that cannot show a status entry does not make the failure worse.
   }
+  // A failure of the drawing itself is not drawn: that is the one thing that could loop.
+  if (!where.startsWith('ui.')) await paint($, band => erred(band, untold(sid)))
   const logged = await spawn($, ['log'], JSON.stringify({ type: 'error', where, message }))
+  boardStale($)
   if (logged.code !== 0) {
     // The log itself failing is one failure of the session, however many events it loses.
     const id = `${sid}\u0000cli.log\u0000${logged.code === SKIPPED ? TIMED_OUT : logged.code}`
@@ -245,6 +409,7 @@ function failQuietly($: EngineInterface, where: string, message: string): void {
   } catch {
     // A surface that cannot show a status entry does not make the failure worse.
   }
+  void paint($, band => erred(band, untold(band.session)))
 }
 
 function hasFailures(sid: string): boolean {
@@ -286,6 +451,7 @@ async function cli($: EngineInterface, args: readonly string[], stdin?: string, 
 async function log($: EngineInterface, event: Record<string, unknown>): Promise<void> {
   const ran = await spawn($, ['log'], JSON.stringify(event))
   if (ran.code !== 0) await cliFailed($, 'log', ran)
+  boardStale($)
 }
 
 async function events($: EngineInterface, args: readonly string[], timeoutMs: number = BUDGET.call): Promise<Event[] | undefined> {
@@ -439,7 +605,7 @@ async function registerCommand($: EngineInterface): Promise<void> {
   const sid = await $.session.id()
   if (commands.has(sid)) return
   commands.add(sid)
-  await $.command.register({ name: 'compound', description: 'What compound has stored, reused, guarded and recalled, and whether it is healthy.' })
+  await $.command.register({ name: 'compound', description: 'Opens the compound dashboard: what is stored, reused, guarded and recalled, and what is open. `/compound status` prints the report.' })
 }
 
 // ---- moment 1: reuse ------------------------------------------------------------------
@@ -476,6 +642,7 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   const shown = open.slice(-UNSETTLED_SHOWN).map(c => ({ ...c, failed: redact(c.failed), error: redact(c.error), fixed: redact(c.fixed) }))
   await log($, { type: 'remind', captures: shown.map(c => c.id) })
   $.ui.status(`compound: ${open.length} unsettled`)
+  await paint($, (band, now) => noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'} owed`, now))
   return unsettledContext(shown, await cliPath($))
 }
 
@@ -485,6 +652,10 @@ async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knob
   const began = Date.now()
   const request = redact(text)
   if (!(await firstTime($, sid, `reuse-${digest(text)}-${Math.floor(nowS() / 20)}`))) return ''
+  return during($, 'reuse', () => reuseJudged($, sid, text, request, began, k))
+}
+
+async function reuseJudged($: EngineInterface, sid: string, text: string, request: string, began: number, k: Knobs): Promise<string> {
   const listing = await inventory($, BUDGET.prompt)
   // The listing also says whether any lesson carries a pattern, so the guard need not ask.
   if (listing !== undefined && !listing.some(i => i.match.length > 0)) noGuards.add(sid)
@@ -519,6 +690,7 @@ async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knob
     judge_ms: reply.ms,
   })
   $.ui.status(reuseStatus(answer.items.length, answer.earlier.length))
+  await paint($, (band, now) => noted(band, 'reuse', reuseText(answer.items.length, answer.earlier.length), now))
   return context
 }
 
@@ -532,6 +704,7 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
   turns.set(sid, turnAfterPrompt(turns.get(sid), nowS(), midTurn))
   if (!midTurn) {
     $.ui.status(undefined)
+    await paint($, band => newTurn(band))
     // A new turn: a subcommand that ran out of time is tried again, and so is the check.
     stalled.delete(sid)
     noGuards.delete(sid)
@@ -543,6 +716,7 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
     const nth = (reports.get(sid) ?? 0) + 1
     reports.set(sid, nth)
     out.push(errorReport(takeFailures(sid), await cliPath($), nth))
+    await paint($, band => erred(band, 0))
   }
   try {
     const owed = await unsettledReminder($, sid)
@@ -572,7 +746,29 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
   // The call waits for this child, so it gets a short time. A check that does not answer,
   // or fails, is killed and the call runs: the guard fails open, and `check` is not
   // called again in this turn.
-  const ran = await spawn($, ['check', '--guards'], JSON.stringify({ tool, input }), undefined, BUDGET.check)
+  // The band's spinner shows only for a check slow enough to notice: a fast one changes
+  // no state and adds nothing to the call.
+  checks += 1
+  const id = `guard-${checks}`
+  let shown: Promise<void> | undefined
+  let late: Timer | undefined
+  try {
+    late = $.clock.after(GUARD_SHOW_MS, () => {
+      shown = paint($, (band, now) => checkBegan(band, id, 'guard', now))
+    })
+  } catch {
+    // No timer, no spinner: the check itself is what matters.
+  }
+  let ran: Ran
+  try {
+    ran = await spawn($, ['check', '--guards'], JSON.stringify({ tool, input }), undefined, BUDGET.check)
+  } finally {
+    late?.cancel()
+    if (shown !== undefined) {
+      await shown
+      await paint($, band => checkEnded(band, id))
+    }
+  }
   if (ran.code === SKIPPED) return undefined
   if (ran.code !== 0) {
     await failOnce($, sid, 'guard.check', `${ran.code === TIMED_OUT ? '' : 'compound check: '}${why(ran)}; calls run unguarded while this lasts`)
@@ -598,6 +794,7 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
   const ms = Date.now() - began
   for (const h of fresh) await log($, { type: 'guard', lesson: h.name, tool, text, ms })
   $.ui.status(`compound: guard ${first.name}`)
+  await paint($, (band, now) => noted(band, 'guard', first.name, now))
   return guardReason(fresh, await cliPath($))
 }
 
@@ -611,22 +808,24 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   const cliAt = await cliPath($)
   const out: string[] = []
   let lesson = found
+  let moved = false
   let asProject = lesson.project
   if (asProject !== undefined) {
     // Exit 3: tracked, left in place. Exit 2: not movable as it is (another project holds
     // a different lesson of its name, or the lesson is gone). Either way it is read from
     // where it is, if it is there, and offered to the user as a move when the CLI says so.
-    const moved = await cli($, ['promote', lesson.name, '--to', 'user', '--auto', '--seen-in', await projectRoot($), '--json'], undefined, [0, 2, 3], asProject)
-    const left = moved === undefined ? undefined : parseMoved(moved.stdout)
-    if (moved !== undefined && moved.code === 0) {
+    const promoted = await cli($, ['promote', lesson.name, '--to', 'user', '--auto', '--seen-in', await projectRoot($), '--json'], undefined, [0, 2, 3], asProject)
+    const left = promoted === undefined ? undefined : parseMoved(promoted.stdout)
+    if (promoted !== undefined && promoted.code === 0) {
+      moved = true
       forgetInventory(sid)
       out.push(promotedText(lesson.name, left?.from ?? asProject, cliAt, left?.also ?? []))
       $.ui.toast(`compound: lesson ${lesson.name} moved to the user level`)
       lesson = { ...lesson, level: 'user', path: '' }
       asProject = undefined
-    } else if (moved !== undefined && moved.code === 3) {
+    } else if (promoted !== undefined && promoted.code === 3) {
       out.push(candidateText(lesson.name, left?.from ?? asProject, cliAt))
-    } else if (moved !== undefined && left !== undefined && left.conflict.length > 0) {
+    } else if (promoted !== undefined && left !== undefined && left.conflict.length > 0) {
       out.push(candidateText(lesson.name, left.from, cliAt, left.conflict))
     }
   }
@@ -651,6 +850,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   })
   if (ineffective) $.ui.toast(`compound: lesson ${lesson.name} is ineffective (recalled ${count} times)`)
   $.ui.status(ineffective ? `compound: ${lesson.name} ineffective` : `compound: recalled ${lesson.name}`)
+  await paint($, (band, now) => (ineffective ? weakened(band, lesson.name, now) : noted(unfixed(band), moved ? 'moved' : 'recall', lesson.name, now)))
   out.push(known ? knownContext(lesson, text, count, ineffective, cliAt, call) : recallContext(lesson, text, count, ineffective, cliAt, call))
   return out
 }
@@ -668,7 +868,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   const k = await knobs($)
   let hit: Item | undefined
   if (known.length > 0) {
-    const reply = await ask($, recallPrompt(call, error, known), k)
+    const reply = await during($, 'recall', () => ask($, recallPrompt(call, error, known), k))
     if (reply.text === undefined) {
       await fail($, 'recall.judge', `${k.model} gave no answer: ${reply.reason}`)
     } else {
@@ -679,6 +879,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   }
   if (hit === undefined) {
     held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0 })
+    await paint($, (band, now) => stepped(band, 'failed', now))
     return []
   }
   // A failure answered with a recorded lesson is not held: the fix teaches nothing new.
@@ -696,17 +897,23 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   if (was.left <= 0) held.delete(key)
   const known = await lessons($)
   const k = await knobs($)
-  const reply = await ask($, fixPrompt({ failed: was.call, error: was.error, worked: call }, known), k)
+  await paint($, (band, now) => stepped(band, 'fixed', now))
+  const reply = await during($, 'fix', () => ask($, fixPrompt({ failed: was.call, error: was.error, worked: call }, known), k))
   if (reply.text === undefined) {
+    await paint($, band => unfixed(band))
     await fail($, 'capture.judge', `${k.model} gave no answer: ${reply.reason}`)
     return []
   }
   const answer = parseFix(reply.text, known, was.error)
   if (answer === undefined) {
+    await paint($, band => unfixed(band))
     await fail($, 'capture.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return []
   }
-  if (answer.verdict === 'NONE') return []
+  if (answer.verdict === 'NONE') {
+    await paint($, band => unfixed(band))
+    return []
+  }
   held.delete(key)
   if (answer.verdict === 'KNOWN') return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true)
   await log($, {
@@ -722,6 +929,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     ms: reply.ms,
   })
   $.ui.status('compound: lesson owed')
+  await paint($, (band, now) => captured(band, now))
   return [captureContext({ failed: was.call, error: was.error, fixed: call }, await cliPath($))]
 }
 
@@ -740,7 +948,10 @@ async function onCliCall($: EngineInterface, sid: string, verb: string, began: n
     if (news.toast !== undefined) $.ui.toast(news.toast)
     // A debt settled, by a lesson or by declining it: nothing is owed, and the entry goes.
     $.ui.status(news.status)
+    const event = rows.find(row => newsKey(row) === news.key)
+    if (event !== undefined) await paint($, (band, now) => settledBy(band, event, now))
   }
+  boardStale($)
 }
 
 // ---- moment 5: stop -------------------------------------------------------------------
@@ -773,6 +984,7 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   for (const w of weak) {
     if (await mayRefuse($, sid, `strengthen-${w.name}`)) weakFresh.push(w)
   }
+  await paint($, (band, now) => synced(band, owed.length, weak.map(w => w.name), now))
   const refusals: string[] = []
   if (fresh.length > 0) {
     await log($, { type: 'refuse', why: 'debt', debts: fresh })
@@ -798,6 +1010,7 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   await log($, { type: 'nudge', calls })
   await log($, { type: 'refuse', why: 'nudge', calls })
   $.ui.status('compound: asked about lessons')
+  await paint($, (band, now) => noted(band, 'nudge', `${calls} tool calls`, now))
   return stopNudge(calls, cliAt)
 }
 
@@ -806,7 +1019,13 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     try {
-      if (!(await off($))) await registerCommand($)
+      if (!(await off($))) {
+        await registerCommand($)
+        // A reload starts the module over: a check it had in flight is no longer running,
+        // and a pane left open is given its data again.
+        await paint($, band => ({ ...band, busy: [] }))
+        boardStale($)
+      }
     } catch (err) {
       await fail($, 'session.start', err)
     }
@@ -816,7 +1035,29 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'compound' }, async $ => {
+  // `/compound` opens the dashboard pane where a person typed it; `/compound status`, a
+  // run nobody typed, or a surface that seats no pane, gets the report as text.
+  on('command.run', { command: 'compound' }, async ($, e) => {
+    const asked = e.args.trim()
+    if (asked === 'close') {
+      try {
+        await $.ui.close({ id: PANE })
+      } catch (err) {
+        drawFailed($, 'unknown', 'pane', err)
+      }
+      return { text: 'Dashboard closed.' }
+    }
+    if (asked === '' && e.origin.kind === 'composer') {
+      try {
+        const opened = await $.ui.open({ id: PANE, title: 'compound', rows: PANE_ROWS })
+        if (opened.isPlaced) {
+          void refreshBoard($)
+          return { text: 'Dashboard opened. `/compound status` prints the report; `/compound close` closes the dashboard.' }
+        }
+      } catch (err) {
+        drawFailed($, 'unknown', 'pane', err)
+      }
+    }
     // Exit 1 is a health check that failed: the report is still the answer.
     const ran = await cli($, ['status'], undefined, [0, 1], undefined, BUDGET.command)
     if (ran === undefined) return { text: `compound status could not run. CLI: ${await cliPath($)}` }
@@ -841,6 +1082,7 @@ export const register: Register = on => {
     const input = inputOf(e as unknown as Record<string, unknown>)
     const verb = tool === 'Bash' && typeof input.command === 'string' ? cliCall(input.command) : undefined
     let sid = ''
+    let recording: string | undefined
     try {
       if (await off($)) return next(e)
       sid = await $.session.id()
@@ -851,12 +1093,23 @@ export const register: Register = on => {
         const deny = await guard($, sid, tool, input)
         if (deny !== undefined) return { deny }
       }
+      // The session is writing a lesson: the band says so while the CLI runs.
+      if (verb === 'add') {
+        checks += 1
+        const id = `record-${checks}`
+        recording = id
+        await paint($, (band, now) => checkBegan(band, id, 'record', now))
+      }
     } catch (err) {
       await fail($, 'guard', err)
     }
 
     const began = nowS()
     const ran = await next(e)
+    if (recording !== undefined) {
+      const id = recording
+      await paint($, band => checkEnded(band, id))
+    }
     if (sid === '' || ran.deny !== undefined) return ran
     try {
       if (verb !== undefined) {
@@ -879,6 +1132,56 @@ export const register: Register = on => {
     failQuietly($, 'tool.call', `${next.error.kind}: ${next.error.message ?? ""}`)
     return next(e)
   })
+
+  // The band: one row above the prompt, or nothing at all.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    let sid = 'unknown'
+    try {
+      if (e.props.hasSurvey) return next(e)
+      const s = await readSettings($)
+      if (s.off || s.quiet) return next(e)
+      const band = await read($, BAND)
+      // Read for the redraw it brings: the timer writes it once a frame.
+      await read($, FRAME)
+      sid = await $.session.id()
+      if (band === null || band.session !== sid) return next(e)
+      const row = bandRow(band, await $.clock.now(), e.props.bodyColumns)
+      if (row.length === 0) return next(e)
+      const { Box, Text } = $.ui.resolve(e)
+      return tree(h(Box, { flexDirection: 'row' }, ...row.map(seg => h(Text, textProps(seg), seg.text))))
+    } catch (err) {
+      drawFailed($, sid, 'band', err)
+      return next(e)
+    }
+  }).catch(($, e, next) => next(e))
+
+  // The pane: the dashboard `/compound` opens.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    let sid = 'unknown'
+    try {
+      const { Box, Button, Text } = $.ui.resolve(e)
+      const board = await read($, BOARD)
+      sid = await $.session.id()
+      const mine = board !== null && board.session === sid ? board : null
+      const columns = Math.max(24, e.props.bodyColumns)
+      const lines = boardLines(mine, columns)
+      return tree(h(
+        Box,
+        { flexDirection: 'column' },
+        ...lines.map(line => (line.length === 0 ? h(Text, null, ' ') : h(Box, { flexDirection: 'row' }, ...line.map(seg => h(Text, textProps(seg), seg.text))))),
+        h(Text, null, ' '),
+        h(
+          Box,
+          { flexDirection: 'row', gap: 2 },
+          h(Button, { key: 'refresh', label: 'Refresh', hotkey: 'r', onPress: () => refreshBoard($) }),
+          h(Button, { key: 'close', label: 'Close', hotkey: 'x', role: 'dismiss', onPress: () => $.ui.close({ id: PANE }) }),
+        ),
+      ))
+    } catch (err) {
+      drawFailed($, sid, 'pane', err)
+      return next(e)
+    }
+  }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)

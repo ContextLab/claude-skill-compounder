@@ -45,8 +45,9 @@ class Sandbox(object):
         """Give the package copy the files that make a checkout loadable as the plugin."""
         modules = sorted(name for name in os.listdir(os.path.join(REPO, "hooks"))
                          if name.endswith(".ts") and not name.endswith(".test.ts"))
-        for rel in [os.path.join(".claude-plugin", "plugin.json"), os.path.join("hooks", "hooks.json")] + [
-                os.path.join("hooks", name) for name in modules]:
+        # types/index.d.ts is the contract the manifest names and the hooks import their types from.
+        for rel in [os.path.join(".claude-plugin", "plugin.json"), os.path.join("hooks", "hooks.json"),
+                    os.path.join("types", "index.d.ts")] + [os.path.join("hooks", name) for name in modules]:
             target = os.path.join(self.pkg, rel)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copy2(os.path.join(REPO, rel), target)

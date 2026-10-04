@@ -21,8 +21,9 @@ Two rules shape everything below.
 | skills | `skills/learn`, `skills/reuse` | The two procedures Claude follows: record a lesson, and check for reusable work. `/compound:learn` is the manual trigger. |
 | general pool | `lessons/`, `skills/` | Lessons and skills that ship with the package to every user. |
 
-The repository root is the plugin: `.claude-plugin/plugin.json` names it `compound`, and
-`hooks/hooks.json` names the hooks module.
+The repository root is the plugin: `.claude-plugin/plugin.json` names it `compound`,
+`hooks/hooks.json` names the hooks module, and `types/index.d.ts` declares the values the
+mod keeps in the session for its band and its pane.
 
 ## Levels
 
@@ -236,7 +237,7 @@ killed:
 | `check`, before a tool call | 1500 ms |
 | any other call while a tool call or a stop waits | 2000 ms |
 | at a typed prompt (the listing, `find`, the unsettled captures) | 5000 ms |
-| `/compound`, the status report the user asked for | 15000 ms |
+| `/compound status`, the report the user asked for, and the pane's own `status --json` | 15000 ms |
 
 A subcommand that ran out of time is not called again for the rest of the turn: the next
 typed prompt lets it be tried again. What depended on it is skipped (a call runs
@@ -340,6 +341,69 @@ or recorded. Every new failure is reported, each one once.
 
 ## Seeing it work
 
+- **Band**: one row directly above the prompt that shows what the mod is doing now. It is
+  drawn on the terminal and in the desktop app, and it draws nothing when there is nothing
+  to show. `COMPOUND_QUIET=1` turns it off. Each row starts with a glyph, then `compound`,
+  then a label, then the lesson's name where there is one:
+
+  | Glyph | Colour | Label | When | Stays |
+  |-|-|-|-|-|
+  | spinner | orange | `checking for reusable work` | the reuse check of a typed prompt is running | while it runs |
+  | spinner | orange | `checking the guards` | a guard check has taken more than 350 ms | while it runs |
+  | spinner | orange | `matching a recorded lesson` | a failed call is put to the judge | while it runs |
+  | spinner | orange | `is this the fix?` | a success after a held failure is put to the judge | while it runs |
+  | spinner | orange | `recording the lesson` | the session is running `compound add` | while it runs |
+  | `◆` | cyan | `reuse found` and the count | the reuse check added something to the prompt | 8 s |
+  | `■` | red | `guard stopped a call` | a guard refused a call | 8 s |
+  | `↺` | magenta | `lesson recalled` | a failed call was given its recorded lesson | 8 s |
+  | `◌` | orange | `watching for the fix` | a call failed and no lesson describes it | 8 s |
+  | `●` | yellow | `lesson owed` | a fix was captured and the session owes its lesson | until it is recorded or declined |
+  | `✔` | green | `lesson recorded`, `lesson rewritten` | `compound add` wrote the lesson | 8 s |
+  | `○` | grey | `lesson declined` | `compound skip` declined it | 8 s |
+  | `⇡` | blue | `lesson moved to the user level`, `lesson proposed to the general pool` | a lesson moved, by the mod or by `compound promote` | 8 s |
+  | `✦` | blue | `lesson made a skill` | `compound skill` | 8 s |
+  | `−` | grey | `removed` | `compound rm` | 8 s |
+  | `▲` | yellow | `lesson ineffective`, then `strengthening owed` | a recalled lesson did not prevent its failure | until the lesson is rewritten or declined |
+  | `●` | yellow | `unsettled from earlier sessions` | the session's first prompt was told of them | 8 s |
+  | `?` | blue | `asked whether anything was learned` | the question after a long turn | 8 s |
+  | `✖` | red | `N compound errors` | the mod itself failed | until Claude is told at the next typed prompt |
+
+  A result is bold for its first 1.2 seconds, plain until 5 seconds, dim until 8 seconds,
+  and then gone. A state that stays is shown whenever no spinner or newer result is; while
+  one is, it rides behind it as a short mark (`● 1 owed`, `▲ 1 to strengthen`, `✖ 1
+  error`). The colours are theme colours and ANSI names, so they follow the terminal's
+  theme.
+
+  From a failed call until its lesson is settled the row also carries the learn loop as a
+  track of four steps, `failed → fixed → owed → recorded` (the last reads `declined` when
+  the lesson was declined). Steps passed are ticked and dim, the current one is bold in its
+  colour, the ones ahead are dim: `✓ failed → ✓ fixed → ● owed → ○ recorded`. The track
+  stays while a lesson is owed and fades with the result otherwise. Where the row would be
+  wider than the band, the track keeps its glyphs and the current step's name, then the
+  marks go, then the track, and last the name is cut with `…`.
+
+  The spinner turns ten times a second on one timer, which runs only while a spinner
+  shows or a result fades: an idle band and an owed lesson cost no timer at all. A check
+  whose end was never reported stops counting after a minute. The band's state is kept
+  per session id, so `/clear` starts it over.
+- **Pane**: `/compound` opens a dashboard: beside the transcript in the fullscreen
+  layout, above the prompt otherwise. It shows a health line (the checks that failed, by
+  name and detail, and the ones that warned, by name); **Open**, everything that waits for
+  someone (lessons owed, ineffective lessons, lessons that could move to the user level,
+  errors of the last seven days, each with up to three entries, and the count of lessons
+  declined); **Levels**, the lessons, guards and skills at each of the three levels;
+  **Most used**, up to six lessons with a bar and a count each for reused (`◆`), guarded
+  (`■`) and recalled (`↺`); and **Recent**, the newest events with the band's glyphs and
+  colours. `Refresh` (`r` while the pane has the keyboard) reads it again, `Close` (`x`)
+  or `/compound close` closes it. The pane reads `compound status --json` and `compound
+  events --json`, when it opens, when `Refresh` is pressed, and 400 ms after the mod logs
+  an event or the session's own `compound` call returns, once for a burst of events and
+  only while the pane is open. None of those reads is made before a tool call runs, and a
+  slow one is not counted against the subcommand's time for the turn. `/compound status`
+  prints the report as text; so does `/compound` in a session nobody types into.
+- **Drawing failures**: a band or a pane that cannot be drawn leaves the engine's own
+  drawing in its place and never stops a turn. One `error` event per session is logged for
+  the band (`ui.band`) and one for the pane (`ui.pane`).
 - **Status entry**: every firing sets a short entry (`compound: 2 reusable`,
   `compound: guard zsh-equals-word`, `compound: lesson owed`, `compound: 1 error`). A
   hook that the engine stopped (it threw, or ran out of its time) sets `compound: N
@@ -364,7 +428,7 @@ or recorded. Every new failure is reported, each one once.
   and judged by one copy of the mod) and `reuse-<digest>-<n>` (the reuse check of one
   prompt, where the digest is of the prompt's text and the number counts 20-second windows). A
   session's claims are removed two weeks after its last one.
-- **`compound status`** (also `/compound`): health checks; store counts per level; for
+- **`compound status`** (also `/compound status`): health checks; store counts per level; for
   each lesson how often it was reused, guarded, recalled, and the projects that keep a
   committed copy of a user-level lesson; recent events; and under Open everything that
   waits for someone: unsettled captures, promotion candidates with the command that moves
@@ -428,6 +492,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | Name | Default | Read by | Meaning |
 |-|-|-|-|
 | `COMPOUND_OFF` | unset | mod, CLI | `1` switches the mod off: no hook does anything and no event is written. `compound status` reports it. |
+| `COMPOUND_QUIET` | unset | mod | `1` turns the band above the prompt off. The status entry, the toasts and the `/compound` pane stay. |
 | `COMPOUND_PROMPT_MIN_CHARS` | 80 | mod | The shortest typed prompt the reuse check looks at. |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | mod | Tool calls the main loop makes in a turn before the stop asks whether anything was learned. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
@@ -489,7 +554,12 @@ never touched.
 - `tests/test_*.py`: standard `unittest`, real files in temporary directories, the real
   CLI through `subprocess`. No mocks. `tests/test_docs.py` holds this document to the
   code: every `COMPOUND_*` name, every subcommand and option, every claim kind.
-- `hooks/*.test.ts`: `claude plugin test .` for prompt building, answer parsing and
-  message rendering. No model calls.
+- `hooks/*.test.ts`: `claude plugin test .` for prompt building, answer parsing, message
+  rendering and what the band and the pane show (`view.test.ts`). `ui.test.ts` mounts the
+  band and the pane through the mod's hooks on the terminal and the desktop surface, with
+  the CLI, the judge and the clock answered by the test. No model calls.
+- `dev/ui-check.sh`: records a real interactive session with `vhs` in a throwaway world
+  and writes a screenshot of each phase to `$TMPDIR/compound-ui-check/shots`, for looking
+  at the band and the pane. Run by hand; it spends model calls.
 - `tests/journeys/`: real `claude -p --plugin-dir .` sessions that drive each moment and
   assert on the event log. Run by hand; they spend model calls.

@@ -20,7 +20,7 @@ will be published.
 ./run_tests.sh                 # CLI suite: stdlib unittest, real files, no mocks
 python3 tests/test_store.py    # one file
 claude plugin validate --strict .
-claude plugin test .           # hooks/*.test.ts: prompt building, parsing, rendering
+claude plugin test .           # hooks/*.test.ts: prompt building, parsing, rendering, the band and the pane
 python3 tests/journeys/journey_guard.py   # real sessions; spends model calls
 ```
 
@@ -56,6 +56,17 @@ To try a checkout without installing it:
 ```bash
 claude --plugin-dir /path/to/claude-skill-compounder
 ```
+
+To look at the band and the `/compound` pane as a person sees them:
+
+```bash
+dev/ui-check.sh    # needs vhs; spends model calls
+```
+
+It records a real interactive session in a throwaway store and project and writes a
+screenshot of each phase to `$TMPDIR/compound-ui-check/shots`. Open the PNGs and look:
+the session's own pace decides which frame catches which phase. The header of
+`dev/ui-check.tape` says what it takes to get an interactive session running under vhs.
 
 To exercise `install` and `uninstall`, point them at throwaway directories and never at
 your own configuration:

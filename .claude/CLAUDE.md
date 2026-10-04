@@ -11,12 +11,15 @@ compound: a Claude Code mod plus a CLI. The repository root is the plugin. Read
 |-|-|
 | `.claude-plugin/plugin.json`, `hooks/hooks.json` | the plugin manifest and the hooks module's name |
 | `hooks/register.ts` | every hook; the only file that touches the engine interface `$` |
-| `hooks/judge.ts`, `render.ts`, `store.ts`, `knobs.ts`, `safe.ts` | pure logic, each with a `*.test.ts` |
+| `hooks/judge.ts`, `render.ts`, `store.ts`, `knobs.ts`, `safe.ts`, `view.ts` | pure logic, each with a `*.test.ts`; `view.ts` is what the band and the `/compound` pane show |
+| `hooks/ui.test.ts` | the band and the pane mounted through the hooks on the terminal and desktop surfaces |
+| `types/index.d.ts` | the contract for the values the mod keeps in `$.state`; `plugin.json` names it |
 | `bin/compound` | the CLI: one Python file, standard library only, runs on Python 3.9 |
 | `skills/learn`, `skills/reuse` | the two procedures the mod sends Claude to |
 | `lessons/`, `skills/` | the general pool shipped to every user |
 | `tests/test_*.py` | CLI tests |
 | `tests/journeys/` | real-session drivers, run by hand |
+| `dev/ui-check.sh`, `dev/ui-check.tape` | a recorded interactive session (vhs) with a screenshot of each phase, for looking at the band and the pane |
 
 ## Commands
 
@@ -42,6 +45,9 @@ python3 tests/journeys/journey_<name>.py
 - The function-hook API allows a plugin one unmatched `tool.call` hook, requires literal
   names in `$.env.get`, and keeps a module's variables for the life of the process, so
   per-session state is keyed on the session id.
+- A render hook draws from `$.state` and answers `next(e)` on any failure. The band's one
+  timer runs only while a spinner turns or a result fades. The pane's CLI reads are never
+  made on a path a tool call waits on.
 - Before a tool call the mod makes one CLI call, `check`, and no listing. Every CLI call
   the mod makes takes its budget from `BUDGET` in `hooks/render.ts`: 2 s at most while a
   tool call or a stop waits, 5 s at most at a typed prompt.

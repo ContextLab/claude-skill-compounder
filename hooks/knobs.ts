@@ -63,3 +63,8 @@ export function knobsFrom(raw: RawKnobs): Knobs {
 export function isOff(raw: string | undefined): boolean {
   return raw === '1'
 }
+
+// COMPOUND_QUIET=1 and nothing else turns the band above the prompt off.
+export function isQuiet(raw: string | undefined): boolean {
+  return raw === '1'
+}

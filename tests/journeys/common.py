@@ -132,7 +132,7 @@ class World:
     def copy_of_package(self):
         """A second copy of this package, as an installed clone beside a checkout would be."""
         target = os.path.join(self.root, "second-copy")
-        shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "__pycache__", "types"))
+        shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "dev", "__pycache__"))
         return target
 
     def claims(self, sid):
@@ -153,7 +153,7 @@ class World:
         if isinstance(verbs, str):
             verbs = (verbs,)
         target = os.path.join(self.root, name)
-        shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "__pycache__", "types", "bin"))
+        shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "dev", "__pycache__", "bin"))
         os.makedirs(os.path.join(target, "bin"))
         wrapper = os.path.join(target, "bin", "compound")
         with open(wrapper, "w") as fh:

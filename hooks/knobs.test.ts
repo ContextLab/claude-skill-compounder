@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { DEFAULTS, DEFAULT_MODEL, isOff, knobsFrom, modelName, whole } from './knobs'
+import { DEFAULTS, DEFAULT_MODEL, isOff, isQuiet, knobsFrom, modelName, whole } from './knobs'
 
 test('with nothing set every knob is its default', async () => {
   expect(knobsFrom({})).toEqual(DEFAULTS)
@@ -33,6 +33,11 @@ test('a model name is an alias or an id, and anything else is the default', asyn
   expect(modelName('sonnet; rm -rf /')).toBe(DEFAULT_MODEL)
   expect(modelName('x'.repeat(200))).toBe(DEFAULT_MODEL)
   expect(modelName(undefined)).toBe(DEFAULT_MODEL)
+})
+
+test('only the literal 1 turns the band off', async () => {
+  expect(isQuiet('1')).toBe(true)
+  for (const raw of [undefined, '', '0', 'true', 'yes', ' 1', '11']) expect(isQuiet(raw)).toBe(false)
 })
 
 test('only the literal 1 switches the mod off', async () => {

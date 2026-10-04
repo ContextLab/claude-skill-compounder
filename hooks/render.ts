@@ -168,12 +168,16 @@ export type News = { key: string; toast: string | undefined; status: string | un
 // What to tell the user about the events a session's own CLI calls wrote: a toast, and the
 // status entry (`undefined` clears it: a recorded or declined lesson settles the debt the
 // entry stood for). `told` holds the keys already reported. An automatic move is reported
-// where the mod makes it.
+// where the mod makes it. `newsKey` is what one event is known by.
+export function newsKey(e: Event): string {
+  return `${typeof e.ts === 'string' ? e.ts : ''}|${e.type}|${typeof e.lesson === 'string' ? oneLine(e.lesson, 80) : ''}`
+}
+
 export function storeNews(events: readonly Event[], told: ReadonlySet<string>): News[] {
   const out: News[] = []
   for (const e of events) {
     const name = typeof e.lesson === 'string' ? oneLine(e.lesson, 80) : ''
-    const key = `${typeof e.ts === 'string' ? e.ts : ''}|${e.type}|${name}`
+    const key = newsKey(e)
     if (told.has(key) || out.some(n => n.key === key)) continue
     if (e.type === 'skip') out.push({ key, toast: undefined, status: undefined })
     if (name === '') continue

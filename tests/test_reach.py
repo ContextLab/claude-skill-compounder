@@ -474,6 +474,15 @@ class ModHealthTest(Case):
                 handle.write(kept)
         self.assertEqual(self.health("mod")["status"], "PASS")
 
+    def test_the_state_contract_the_hooks_import_that_is_missing_fails(self):
+        self.installed()
+        self.assertEqual(self.health("mod")["status"], "PASS")
+        contract = os.path.join(self.box.pkg, "types", "index.d.ts")
+        os.unlink(contract)
+        row = self.health("mod")
+        self.assertEqual(row["status"], "FAIL", "types/index.d.ts is imported and missing: %r" % (row,))
+        self.assertIn(os.path.join(self.box.pkg, "types"), row["detail"])
+
     def test_switched_off_in_the_settings_env_warns(self):
         self.installed()
         data = json.loads(read(self.box.settings))

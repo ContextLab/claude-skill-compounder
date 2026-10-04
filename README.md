@@ -214,6 +214,7 @@ reads. `compound status` run in a terminal reads `COMPOUND_OFF` and
 | Variable | Default | Meaning |
 |-|-|-|
 | `COMPOUND_OFF` | unset | `1` switches the mod off |
+| `COMPOUND_QUIET` | unset | `1` turns the band above the prompt off; the status entry, the toasts and the `/compound` pane stay |
 | `COMPOUND_PROMPT_MIN_CHARS` | 80 | shortest prompt the reuse check looks at |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | tool calls in a turn before Claude is asked whether it learned anything |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
