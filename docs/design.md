@@ -319,6 +319,11 @@ none), the mod makes no call at all before the tool calls that follow, and it ma
 before a call of a tool no guard applies to, until the next typed prompt or until the
 session runs a `compound` command that changes the store.
 
+A refusal's `guard` event is marked `watched`, and the first call of that tool the same
+agent loop sends afterwards is logged as a `retry` event that says whether it is the
+refused call again (see "After a refusal" under "Seeing it work"). That event is written
+once the call has run, so the call does not wait for it.
+
 The call waits for `compound check`, so the check gets 1500 ms. A check that has not
 answered by then is killed and the call runs unguarded; an `error` is logged for it once
 per session, and `check` is not called again in that turn (see "The CLI's time").
@@ -329,8 +334,8 @@ per session, and `check` is not called again in that turn (see "The CLI's time")
 corrections, each one function in `hooks/render.ts` (`refusal`, `shellError`):
 
 - A call that was **refused before it ran** is not a failed call: a permission denial
-  (the auto mode classifier, a permission not granted, the user rejecting the call), a
-  safety check, the harness refusing a command (a tool-use error, an agent held to its
+  (the auto mode classifier, a permission not granted, the user rejecting the call, a
+  command of several parts held for the approval of one of them), a safety check, the harness refusing a command (a tool-use error, an agent held to its
   worktree), or a hook's refusal, this mod's own guard included. Nothing was run, so
   there is no mistake in how the call was written and nothing to fix: no model is asked,
   the failure is not held, and the band does not say it is watching for a fix. A refusal
@@ -884,8 +889,8 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   prints a plan, writes no event and raises nothing.
 - **Event log**: `~/.claude/compound/events.jsonl`, one JSON object per line: `ts`,
   `type` (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `learn`, `skip`,
-  `nudge`, `judge`, `promote`, `candidate`, `skill`, `rm`, `error`), `session`, `project`,
-  and the fields of that type. `compound log` refuses any other type.
+  `nudge`, `judge`, `promote`, `candidate`, `skill`, `rm`, `error`, `retry`), `session`,
+  `project`, and the fields of that type. `compound log` refuses any other type.
 - **Verdicts**: every question the mod puts to the model writes one `judge` event,
   whatever the answer: `moment` (`reuse`, `recall` or `fix`), `verdict` (`named`,
   `nothing` or `not-substantial` for reuse; `named` or `none` for recall; `fix`, `known`
@@ -897,6 +902,15 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   `ms` means the same on a `recall` and a `capture` event. The rate of each verdict, the
   timeouts and the model's latency are read from these. They are left out of Recent, in
   `compound status` and in the pane, and are counted for no lesson.
+- **After a refusal**: a `guard` event carries `ms` (the milliseconds the check took) and
+  `watched: true`, which says that the mod will log what that agent loop does next with
+  that tool. The first call of the tool that follows in the loop, a call of the `compound`
+  CLI aside, writes one `retry` event: `lessons` (the lessons whose guards refused),
+  `tool`, `same` (the call's text is the refused call's, whatever the space around it) and
+  `text`. It is written after that call has run, or just before that call is refused by
+  another guard, so no call waits for it. A refusal with no `retry` event had no later
+  call of the tool by that loop while the process lived. Like a `judge` event it is left
+  out of Recent and counted for no lesson.
 - **Claims**: `~/.claude/compound/claims/<session id>/`, one empty directory per thing
   the mod did once in that session: `guard-<lesson>` (a guard's refusal),
   `stop-<call id>` (a stop refused for an owed lesson), `strengthen-<lesson>` (a stop
@@ -927,7 +941,26 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   --json` carries them as `totals`: `reused`, `guarded`, `recalled`, `recorded`, `since`.
   Nothing is said of time or tokens saved: the log holds no duration of a failed call or
   of its fix, so such a figure would be invented.
-- **Text output of the CLI**: `status`, `list`, `find` and `events` print for a person.
+- **`compound report`**: what the event log says the package did, for a reader who wants
+  the figures and how they were counted. It reads the log and nothing else, and writes
+  nothing. `--since TS` and `--until TS` (epoch seconds or ISO 8601) and `--project P`
+  choose the events counted; what followed a counted event is looked for in the whole
+  log. Every figure is a count over what it is counted among (`3/12 (25.0%)`, in JSON
+  `{"n": 3, "of": 12, "pct": 25.0}`), never a percentage alone. A percentage, a median and
+  a 90th percentile (nearest rank) are given for 10 or more; for fewer the text says
+  `n is too small` with the n, and `pct`, `median` and `p90` are null. The sections:
+
+  | Section | `--json` key | What is counted |
+  |-|-|-|
+  | Window | `window` | the first and the last event counted, the events and the sessions, the lines that do not parse, the events with no readable time, and under `unread` the events of a type the report does not read |
+  | The learn loop | `learn` | the `capture` events and how each ended: a lesson recorded, declined (the reasons grouped by their text up to the first colon, semicolon or full stop), still unsettled, or expired (unsettled for over 14 days); the median and 90th percentile of the seconds from a capture to the event that settled it; lessons recorded and rewritten, stops refused by reason, questions after a long turn, reminders, moves and candidates |
+  | Guards | `guards` | refusals in all and per lesson. Of the refusals whose `guard` event carries `watched`: the loop then sent a different call (`changed`), the same call again (`same`), or no call of that tool (`none`). A refusal without the field is counted under `unwatched` and in none of the three. `failed_after`: a `recall` of the same lesson later in the same session |
+  | Recall | `recall` | recalls in all and per lesson; the ones that follow the lesson's own guard refusal in their session (`after_guard`); the ones followed by a later recall of the same lesson (`again`); the ones marked `ineffective`. The marked recalls that one event settled in one session are one debt (`owed`), and each debt ended `rewritten`, `declined`, `removed` or `open`; `wrong_lesson` counts the debts declined with a reason that says the lesson does not describe the failure (the words "does not describe", or "not the failure ... describes") |
+  | Reuse | `reuse` | the checks that had a candidate (`reached`: the `judge` events of the reuse question), how many of them asked the model and how many were answered from the memo, the verdicts, the offers made (`reuse` events) and how often each item was offered. `checks` is null: a check that finds no candidate writes no event. `used` is null: nothing in the log says an offered item was opened or run |
+  | The judge | `judge` | the model calls (`judge` events without `memo`), in all and per question: the count of each verdict, the median and 90th percentile of `ms`, the calls that got no answer, those of them that ran out of time, and the unreadable answers |
+  | Cost to the user | `cost` | the milliseconds a reuse check added to a prompt when it offered something (`ms`, `gather_ms`, `judge_ms` of the `reuse` events), the judge's `ms` for every reuse question, the `ms` of a refused call's check, the judge's `ms` after a failed call and after a fix, and the `error` events grouped by `where` |
+  | Not measured | `not_measured` | what the log cannot support, in words: time or tokens saved, whether an offered item was used, what followed a refusal without `watched`, how many reuse checks were made, the whole time of a check that named nothing |
+- **Text output of the CLI**: `status`, `report`, `list`, `find` and `events` print for a person.
   A time is how long ago it was, as on the pane; `--json` keeps every timestamp as it is
   in the log. `events` prints the log's type names, which are what `--type` takes;
   `status` prints the words below. With stdout a terminal the output is coloured (the
@@ -959,6 +992,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | `rm` | `removed` | a lesson removed |
   | `judge` | `judged` | a question put to the model, with its verdict and time; left out of Recent |
   | `error` | `error` | the mod itself failed |
+  | `retry` | `retried` | the call sent after a guard refused one; left out of Recent |
 
   A lesson that did not prevent its failure is `ineffective`, and what it is owed is `to
   strengthen`. The three counters are `reused`, `guarded` and `recalled` wherever they are
@@ -972,7 +1006,7 @@ The health checks, in order:
 | `python` | the interpreter is 3.9 or later |
 | `claude code` | `claude --version`, asked of the `claude` on `PATH` with a 5-second limit, is Claude Code 2.1.288 or later. FAIL when it is older, with the command that updates it. WARN when no `claude` is on `PATH` or it gives no version. |
 | `mod` | the package is in `env.CLAUDE_CODE_PLUGIN_DIRS` of `settings.json`, and that directory holds `.claude-plugin/plugin.json`, `hooks/hooks.json`, the module file it names, and every file that module and the files it imports name in a relative import (FAIL when one is missing). WARN "switched off" when `COMPOUND_OFF` resolves to `1` (see Environment variables). |
-| `mod last fired` | the newest event of a type the mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `judge`, `error`) is at most 7 days old. WARN when there is none or it is older. |
+| `mod last fired` | the newest event of a type the mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `judge`, `error`, `retry`) is at most 7 days old. WARN when there is none or it is older. |
 | `cli` | `compound` on `PATH` is this package's. WARN with the line to add to the shell profile when the installed link's directory is not on `PATH`. |
 | `prompt log` | history-surfer answers; the row reads `N prompts in this project`, or `reachable` when its answer holds no count |
 | `last event` | the event log can be written and every line of it parses |
@@ -1003,6 +1037,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound log` | stdin: one event object of a known type. Appends it with `ts`, `session` and `project` filled in, and an `id` for a `capture`. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |
+| `compound report [--since TS] [--until TS] [--project P]` | What the event log says the package did, section by section (see "Seeing it work"): each figure a count over what it is counted among, and `n is too small` in place of a rate for fewer than 10. `--since` and `--until` take epoch seconds or an ISO 8601 time; a value that is neither is exit 2. Reads the log only and writes nothing. |
 | `compound install [--claude-dir D] [--bin-dir D]` | See below. `--claude-dir` names the Claude Code directory and `--bin-dir` the directory the link goes into. |
 | `compound update [--ref REF]` | See below. `--ref` names the branch or tag to move the checkout to. |
 | `compound uninstall [--claude-dir D] [--purge]` | See below. |
@@ -1143,7 +1178,9 @@ never touched.
   `tests/test_security.py` writes hostile lesson files, skills and scripts into a project
   by hand and checks what the CLI makes of them; `hooks/security.test.ts` puts hostile
   text where the mod reads a tool's output, the CLI's JSON and the event log, and checks
-  what reaches Claude.
+  what reaches Claude. `tests/test_report.py` builds event logs with the CLI and holds
+  `compound report` to them, figure by figure; `hooks/measure.test.ts` sends calls through
+  the mod's hooks and checks the `retry` event that follows a refusal.
 - `hooks/*.test.ts`: `claude plugin test .` for prompt building, answer parsing, message
   rendering and what the band and the pane show (`view.test.ts`). `ui.test.ts` mounts the
   band and the pane through the mod's hooks on the terminal and the desktop surface, with

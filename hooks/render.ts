@@ -59,6 +59,12 @@ const QUIET: ReadonlySet<string> = new Set([
 // Failures of these are path or match slips, one-off by nature, and they are frequent.
 const SLIPS: ReadonlySet<string> = new Set(['Read', 'Edit', 'Write', 'NotebookEdit'])
 
+// Whether the call sent after a refusal is the refused call again: the same text, whatever
+// the space around it.
+export function sameCall(refused: string, next: string): boolean {
+  return refused.trim() === next.trim()
+}
+
 export function guarded(tool: string): boolean {
   return !QUIET.has(tool)
 }
@@ -80,6 +86,7 @@ const REFUSALS: readonly (readonly [string, RegExp])[] = [
   ['permission', /^Claude requested permissions to [\s\S]{0,400}but you haven't granted it yet/],
   ['permission', /The user doesn't want to proceed with this tool use|doesn't want to proceed/],
   ['permission', /requires explicit approval/],
+  ['permission', /^This Bash command contains multiple operations\. The following part requires approval/],
   ['harness', /^This agent is isolated in the worktree /],
   ['safety', /Do not work around the check by splitting, scripting, or re-issuing/],
   ['hook', /^(?:<tool_use_error>)?\[compound\] This call was stopped before it ran/],

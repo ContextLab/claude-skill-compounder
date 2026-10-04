@@ -71,19 +71,29 @@ EVENT LOG
                                                        list --json` names them (a
                                                        script's name is its path
                                                        relative to the project)
-                                    prompts  [string]  prompt-log ids offered
+                                    prompts* [string]  prompt-log ids offered
                                     words    [string]  the words the prompt log was
                                                        searched for
                                     candidates int     earlier requests put to the judge
                                     prompt_id string   the digest of the prompt
-                                    ms, gather_ms, judge_ms  int  milliseconds the check
-                                                       took: in all, before the judge,
-                                                       and the judge
+                                    ms*, gather_ms*, judge_ms*  int  milliseconds the
+                                                       check took: in all, before the
+                                                       judge, and the judge
                                     memo     bool      the verdict came from the memo;
                                                        no model was asked
         guard     mod               lesson*  string    the lesson whose match hit
                                     tool     string    tool name
                                     text     string    the text that was tested
+                                    ms*      int       milliseconds the check took
+                                    watched* bool      the next call of that tool in
+                                                       that agent loop is logged as a
+                                                       `retry` event
+        retry     mod               lessons* [string]  the lessons whose guards refused
+                                                       the loop's call before this one
+                                    tool     string
+                                    same*    bool      this call is the refused call
+                                                       sent again (the same text)
+                                    text     string    this call
         recall    mod               lesson*  string    the lesson returned beside a
                                                        failure (one recurrence)
                                     tool     string
@@ -98,7 +108,7 @@ EVENT LOG
                                                        `guard` events and does not
                                                        read the field
                                     ms       int       milliseconds the judge took
-                                    ineffective bool   this recurrence made or found
+                                    ineffective* bool  this recurrence made or found
                                                        the lesson ineffective, and
                                                        the session can rewrite it
                                                        (never set for a lesson left
@@ -109,6 +119,12 @@ EVENT LOG
                                     failed*  string    the failing call
                                     error    string
                                     fixed*   string    the working call
+                                    evidence string    the words of the error the judge
+                                                       gave for its verdict
+                                    call     string    the id of the failed tool call
+                                    agent    string    the subagent whose loop it was,
+                                                       null for the main loop
+                                    ms       int       milliseconds the judge took
         remind    mod               captures [string]  ids of the unsettled captures a
                                                        session was told about at its
                                                        first prompt
@@ -128,22 +144,26 @@ EVENT LOG
                                     settles* string    --settles: the capture it settles
         refuse    mod               why*     string    debt | strengthen | nudge: why a
                                                        stop was refused
-        judge     mod               moment   string    reuse | recall | fix: which of
+                                    debts    [string]  debt: the failed calls' ids
+                                    lessons  [string]  strengthen: the lessons owed a
+                                                       rewrite
+                                    calls    int       nudge: tool calls in the turn
+        judge     mod               moment*  string    reuse | recall | fix: which of
                                                        the three questions was asked
-                                    verdict  string    what the model answered. reuse:
+                                    verdict* string    what the model answered. reuse:
                                                        named | nothing | not-substantial.
                                                        recall: named | none. fix:
                                                        fix | known | none. Any of
                                                        them: unanswered (no reply in
                                                        time) | unreadable
-                                    ms       int       milliseconds the model call
+                                    ms*      int       milliseconds the model call
                                                        took. THE one definition of
                                                        `ms` for a verdict: `recall`
                                                        and `capture` carry the same
                                                        number for theirs
                                     named    [string]  the lessons, skills or earlier
                                                        requests the answer named
-                                    reason   string    for none, unanswered and
+                                    reason*  string    for none, unanswered and
                                                        unreadable: why, a few words
                                     tool     string    recall, fix: the tool whose
                                                        call was judged
@@ -151,7 +171,7 @@ EVENT LOG
                                     unquoted int       reuse: names the answer gave with
                                                        no words of the prompt to show
                                                        for them, which were dropped
-                                    memo     bool      reuse: the verdict was taken from
+                                    memo*    bool      reuse: the verdict was taken from
                                                        the memo and no model was asked
                                                        (`ms` is then 0)
         nudge     mod               calls    int       tool calls in the turn
@@ -225,12 +245,34 @@ EVENT LOG
     the type names themselves, and `--json` the stored values.
 
     Last fired. The types the mod writes are reuse, guard, recall, capture, remind,
-    refuse, nudge, judge and error; `status` reports the age of the newest of them.
+    refuse, nudge, judge, error and retry; `status` reports the age of the newest of them.
 
     Verdicts. A `judge` event is written for every question put to the model, whatever
     the answer, so the rate of each verdict and the model's latency can be read from
     the log. They are many and say nothing by themselves: `status` leaves them out of
-    Recent, and they are counted for no lesson.
+    Recent, and they are counted for no lesson. The same holds for a `retry` event.
+
+    Report. `report` reads the log and nothing else, and writes nothing. It counts the
+    events in its window (--since, --until, --project; all of the log without them) and
+    looks in the WHOLE log for what followed each: the first later event that settles a
+    capture or an ineffective recall (`settled_by`), the `retry` event after a `guard`
+    event of the same session that names its lesson, a later `recall` of the lesson.
+    Every figure is {n, of, pct}: a count over what it is counted among. `pct`, a median
+    and a 90th percentile (nearest rank) are null when there are fewer than REPORT_MIN_N
+    (10), and the text then says "n is too small" with the n. A refusal is `changed`,
+    `same` or `none` (no later call of the tool) only when its `guard` event carries
+    `watched`; the others are counted under `unwatched`. A recall counts as `again` when
+    a later recall names the same lesson; the recalls that follow the lesson's own guard
+    in their session are counted apart. The recalls marked `ineffective` that one event
+    settled (or that nothing settled) in one session are one debt, and a debt declined
+    with a reason that says the lesson "does not describe" the failure (WRONG_LESSON_RE)
+    is counted as the wrong lesson. Declines of captures are grouped by the reason up to
+    its first colon, semicolon or full stop (`reason_key`). A `judge` event with `memo`
+    is no model call. A duration is a number, or a string of digits. A reuse check that
+    finds no candidate writes no event, so the number of checks made is not reported, and
+    nothing says whether an offered item was opened or run: `not_measured` lists what
+    the log cannot support. An event of a type the report does not read is counted under
+    `window.unread` and nowhere else.
 
     Finding. `find` ranks lessons, skills and the project's scripts by the WEIGHT of the
     words they share with the query, not by their number. Words are compared by a light
@@ -352,11 +394,12 @@ LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn")
 # Every type the table in the docstring names; `compound log` takes no other.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "judge", "promote", "candidate", "error")
+               "nudge", "judge", "promote", "candidate", "error", "retry")
 # The types the mod writes: the newest of them is when the mod last fired.
-MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "error")
-# Written for every question put to the model: left out of `status`'s Recent.
-VERDICT_TYPES = ("judge",)
+MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "error", "retry")
+# Written to be measured (`compound report`), one for every question put to the model and
+# one for the call after a refusal: left out of `status`'s Recent.
+VERDICT_TYPES = ("judge", "retry")
 # The tools a lesson's patterns are tested against when it names none.
 MATCH_TOOLS = ("Bash",)
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -606,6 +649,7 @@ EVENT_WORDS = {
     "reuse": "reused", "guard": "guarded", "recall": "recalled", "capture": "owed", "remind": "reminded",
     "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
     "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "error": "error",
+    "retry": "retried",
 }
 
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
@@ -614,6 +658,7 @@ EVENT_COLOURS = {
     "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
     "judge": DIM,
     "error": RED,
+    "retry": DIM,
 }
 STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
 
@@ -1970,6 +2015,10 @@ def event_summary(event):
         named = ", ".join(str(one) for one in named) if isinstance(named, list) else ""
         return "%s: %s, %s ms%s" % (one_line(event.get("moment", "?")), one_line(event.get("verdict", "?")),
                                     event.get("ms", "?"), (" (%s)" % named) if named else "")
+    if kind == "retry":
+        said = event.get("same")
+        return "%s: %s" % (", ".join(names) or "?", "the same call again" if said is True
+                           else "a different call" if said is False else "?")
     if names:
         return ", ".join(names)
     if kind == "capture":
@@ -4697,6 +4746,584 @@ def cmd_status(args):
     return 0 if data["ok"] else 1
 
 
+# ----------------------------------------------------------------------------- report
+
+# A percentage, a median and a 90th percentile are given for this many or more. Below it
+# the count is given and the figure is "n is too small": one event moves a rate over
+# fewer than ten by more than ten points.
+REPORT_MIN_N = 10
+# What a decline says when the lesson recalled was not the lesson of the failure.
+WRONG_LESSON_RE = re.compile(r"does not describe|not the failure\b[^.]*\bdescribes", re.I)
+# The verdicts each question can get, in the order they are printed.
+REPORT_VERDICTS = {
+    "reuse": ("named", "nothing", "not-substantial", "unanswered", "unreadable"),
+    "recall": ("named", "none", "unanswered", "unreadable"),
+    "fix": ("fix", "known", "none", "unanswered", "unreadable"),
+}
+# The types `report` reads. An event of any other type is counted under "unread".
+REPORT_TYPES = ("reuse", "guard", "retry", "recall", "capture", "remind", "learn", "skill", "rm", "skip",
+                "refuse", "nudge", "judge", "promote", "candidate", "error")
+REPORT_NOT_MEASURED = (
+    "time or tokens saved: no duration of a failed call or of its fix is logged",
+    "whether an offered item was then used: no event this report reads says that an offered lesson, skill, "
+    "script or earlier request was opened or run",
+    "what followed a refusal whose `guard` event carries no `watched` field: the next call of that tool "
+    "was not logged for it",
+    "how many reuse checks were made: a check that finds no candidate writes no event, so only the checks "
+    "that reached the judge or the memo are counted",
+    "the time a reuse check took when the judge named nothing: only the judge's `ms` is logged for it",
+)
+
+
+def figure(n, of):
+    """{n, of, pct}: a count over what it is counted among. `pct` is null under
+    REPORT_MIN_N, so no rate is claimed that so few events cannot support."""
+    return {"n": n, "of": of, "pct": round(100.0 * n / of, 1) if of >= REPORT_MIN_N else None}
+
+
+def _amount(value):
+    """A logged duration: a number that is not negative, or a string of digits."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and re.match(r"^\d{1,12}$", value):
+        return int(value)
+    if isinstance(value, (int, float)) and _finite(float(value)) is not None and value >= 0:
+        return value
+    return None
+
+
+def _whole(number):
+    return int(number) if float(number).is_integer() else round(number, 1)
+
+
+def spread(values):
+    """{n, median, p90} of the numbers among `values`. The median is the middle value (the
+    mean of the two middle ones), the 90th percentile the smallest value that at least 90%
+    of them do not exceed (nearest rank). Both are null under REPORT_MIN_N."""
+    numbers = sorted(one for one in (_amount(value) for value in values) if one is not None)
+    count = len(numbers)
+    if count < REPORT_MIN_N:
+        return {"n": count, "median": None, "p90": None}
+    middle = count // 2
+    median = numbers[middle] if count % 2 else (numbers[middle - 1] + numbers[middle]) / 2.0
+    return {"n": count, "median": _whole(median), "p90": _whole(numbers[-(-9 * count // 10) - 1])}
+
+
+def reason_key(why):
+    """What declines are grouped by: the reason up to its first colon, semicolon or full
+    stop, in lower case, at most 80 characters."""
+    text = one_line(why).lower()
+    head = re.split(r"[:;]|\.(?:\s|$)", text, 1)[0].strip()
+    return (head or text)[:80] or "?"
+
+
+def _grouped(values, label):
+    counts = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return [{label: value, "n": count} for value, count in sorted(counts.items(), key=lambda row: (-row[1], row[0]))]
+
+
+def _name(event):
+    names = event_names(event)
+    return names[0] if names else "?"
+
+
+def report_window(events, since, until, project):
+    """The positions in `events` of the ones a report covers. With a bound, an event
+    without a time a parser reads is outside it."""
+    picked = []
+    for index, event in enumerate(events):
+        if project is not None and not (isinstance(event.get("project"), str) and event["project"]
+                                        and os.path.realpath(event["project"]) == project):
+            continue
+        if since is not None or until is not None:
+            stamp = parse_ts(event.get("ts"))
+            if stamp is None or (since is not None and stamp < since) or (until is not None and stamp > until):
+                continue
+        picked.append(index)
+    return picked
+
+
+def report_learn(events, picked, clock):
+    ends = {"recorded": 0, "declined": 0, "unsettled": 0, "expired": 0}
+    reasons, waits = [], []
+    for index in picked:
+        capture = events[index]
+        if capture.get("type") != "capture":
+            continue
+        made = parse_ts(capture.get("ts"))
+        settler = next((event for event in events[index + 1:] if settled_by(capture, event)), None)
+        if settler is None:
+            fresh = made is not None and clock - made <= UNSETTLED_DAYS * 86400
+            ends["unsettled" if fresh else "expired"] += 1
+            continue
+        if settler.get("type") == "learn":
+            ends["recorded"] += 1
+        else:
+            ends["declined"] += 1
+            reasons.append(reason_key(settler.get("why", "")))
+        done = parse_ts(settler.get("ts"))
+        if made is not None and done is not None and done >= made:
+            waits.append(done - made)
+    captures = sum(ends.values())
+    kinds = [events[index].get("type") for index in picked]
+    refused = {"debt": 0, "strengthen": 0, "nudge": 0}
+    for index in picked:
+        if events[index].get("type") == "refuse":
+            why = one_line(events[index].get("why", "")) or "?"
+            refused[why] = refused.get(why, 0) + 1
+    learned = [events[index] for index in picked if events[index].get("type") == "learn"]
+    out = {"captures": captures}
+    out.update((key, figure(ends[key], captures)) for key in ("recorded", "declined", "unsettled", "expired"))
+    out.update({
+        "reasons": _grouped(reasons, "reason"),
+        "settle_seconds": spread(waits),
+        "reminded": kinds.count("remind"),
+        "stops_refused": refused,
+        "nudges": kinds.count("nudge"),
+        "lessons_recorded": sum(1 for event in learned if not event.get("update")),
+        "lessons_rewritten": sum(1 for event in learned if event.get("update")),
+        "moved": kinds.count("promote"),
+        "candidates": kinds.count("candidate"),
+    })
+    return out
+
+
+def report_guards(events, picked):
+    """What the log holds on each refusal. A `guard` event with `watched: true` was made
+    by a mod that logs the next call of that tool in that agent loop as a `retry` event
+    naming the lesson: `same` says whether it was the refused call sent again. A watched
+    refusal with no such event had no later call of the tool."""
+    rows = {}
+    taken = set()
+    for index in picked:
+        guard = events[index]
+        if guard.get("type") != "guard":
+            continue
+        name, session = _name(guard), guard.get("session")
+        row = rows.setdefault(name, {"name": name, "refusals": 0, "watched": 0, "changed": 0, "same": 0, "none": 0,
+                                     "failed_after": 0})
+        row["refusals"] += 1
+        later = [(at, event) for at, event in enumerate(events[index + 1:], index + 1)
+                 if event.get("session") == session and name in event_names(event)]
+        if any(event.get("type") == "recall" for _at, event in later):
+            row["failed_after"] += 1
+        if guard.get("watched") is not True:
+            continue
+        row["watched"] += 1
+        follow = next(((at, event) for at, event in later if event.get("type") == "retry"
+                       and isinstance(event.get("same"), bool) and (at, name) not in taken), None)
+        if follow is None:
+            row["none"] += 1
+        else:
+            taken.add((follow[0], name))
+            row["same" if follow[1]["same"] else "changed"] += 1
+    lessons = sorted(rows.values(), key=lambda row: (-row["refusals"], row["name"]))
+    total = dict((key, sum(row[key] for row in lessons)) for key in
+                 ("refusals", "watched", "changed", "same", "none", "failed_after"))
+    return {
+        "refusals": total["refusals"], "watched": total["watched"],
+        "changed": figure(total["changed"], total["watched"]), "same": figure(total["same"], total["watched"]),
+        "none": figure(total["none"], total["watched"]), "unwatched": total["refusals"] - total["watched"],
+        "failed_after": figure(total["failed_after"], total["refusals"]), "lessons": lessons,
+    }
+
+
+def report_recall(events, picked):
+    """Recalls, and what became of the ones marked ineffective. A recall that follows the
+    lesson's own guard refusal in its session is counted apart, as `tally` leaves it out
+    of the recurrences. A session owes one stronger lesson for a lesson however many of
+    its recalls were marked, so the marked recalls that one event settled (or that nothing
+    settled) are one debt, and the endings are counted over the debts."""
+    guarded = set()
+    after = set()
+    for index, event in enumerate(events):
+        session = _text(event.get("session"))
+        if event.get("type") == "guard" and session:
+            guarded.update((session, name) for name in event_names(event))
+        elif event.get("type") == "recall" and (session, _name(event)) in guarded:
+            after.add(index)
+    rows = {}
+    ends = {"rewritten": 0, "declined": 0, "wrong_lesson": 0, "removed": 0, "open": 0}
+    debts = set()
+    for index in picked:
+        recall = events[index]
+        if recall.get("type") != "recall":
+            continue
+        name = _name(recall)
+        row = rows.setdefault(name, {"name": name, "recalls": 0, "after_guard": 0, "again": 0, "ineffective": 0,
+                                     "wrong_lesson": 0})
+        row["recalls"] += 1
+        if index in after:
+            row["after_guard"] += 1
+        elif any(event.get("type") == "recall" and at not in after and _name(event) == name
+                 for at, event in enumerate(events[index + 1:], index + 1)):
+            row["again"] += 1
+        if recall.get("ineffective") is not True:
+            continue
+        row["ineffective"] += 1
+        at, settler = next(((at, event) for at, event in enumerate(events[index + 1:], index + 1)
+                            if settled_by(recall, event)), (None, None))
+        debt = (_text(recall.get("session")), name, at)
+        if debt in debts:
+            continue
+        debts.add(debt)
+        if settler is None:
+            ends["open"] += 1
+        elif settler.get("type") == "learn":
+            ends["rewritten"] += 1
+        elif settler.get("type") == "skip":
+            ends["declined"] += 1
+            if WRONG_LESSON_RE.search(one_line(settler.get("why", ""))):
+                ends["wrong_lesson"] += 1
+                row["wrong_lesson"] += 1
+        else:
+            ends["removed"] += 1
+    lessons = sorted(rows.values(), key=lambda row: (-row["recalls"], row["name"]))
+    recalls = sum(row["recalls"] for row in lessons)
+    out = {"recalls": recalls}
+    out.update((key, figure(sum(row[key] for row in lessons), recalls))
+               for key in ("after_guard", "again", "ineffective"))
+    out["owed"] = len(debts)
+    out.update((key, figure(ends[key], len(debts)))
+               for key in ("rewritten", "declined", "wrong_lesson", "removed", "open"))
+    out["lessons"] = lessons
+    return out
+
+
+def _verdict(event):
+    return one_line(event.get("verdict", "")) or "?"
+
+
+def _moment(event):
+    return one_line(event.get("moment", "")) or "?"
+
+
+def _asked(event):
+    """Whether a `judge` event is a question that was put to the model."""
+    return event.get("memo") is not True
+
+
+def report_reuse(events, picked):
+    """The reuse check. A check that finds no candidate writes no event, so the number of
+    checks made is not in the log (`checks` is null): what is counted is the checks that
+    had a candidate, each a `judge` event of the reuse question, answered by the model or
+    from the memo."""
+    ruled = [events[index] for index in picked if events[index].get("type") == "judge"
+             and events[index].get("moment") == "reuse"]
+    verdicts = [_verdict(event) for event in ruled]
+    out = {"checks": None, "reached": len(ruled),
+           "judged": figure(sum(1 for event in ruled if _asked(event)), len(ruled)),
+           "memo": figure(sum(1 for event in ruled if not _asked(event)), len(ruled))}
+    known = REPORT_VERDICTS["reuse"]
+    out["verdicts"] = dict((name, figure(verdicts.count(name), len(ruled)))
+                           for name in known + tuple(sorted(set(verdicts) - set(known))))
+    offers = [events[index] for index in picked if events[index].get("type") == "reuse"]
+    items = {}
+    earlier = 0
+    for event in offers:
+        for name in event_names(event):
+            items[name] = items.get(name, 0) + 1
+        prompts = event.get("prompts")
+        earlier += len(prompts) if isinstance(prompts, list) else 0
+    out.update({
+        "offers": len(offers), "earlier_requests": earlier,
+        "items": [{"name": name, "offered": count}
+                  for name, count in sorted(items.items(), key=lambda row: (-row[1], row[0]))],
+        # Nothing this report reads says that an offered item was opened or run.
+        "used": None,
+    })
+    return out
+
+
+def report_judge(events, picked):
+    calls = [events[index] for index in picked if events[index].get("type") == "judge" and _asked(events[index])]
+    moments = {}
+    for name in tuple(REPORT_VERDICTS) + tuple(sorted(set(_moment(event) for event in calls) - set(REPORT_VERDICTS))):
+        mine = [event for event in calls if _moment(event) == name]
+        verdicts = [_verdict(event) for event in mine]
+        known = REPORT_VERDICTS.get(name, ())
+        moments[name] = {
+            "calls": len(mine), "ms": spread(event.get("ms") for event in mine),
+            "verdicts": dict((verdict, figure(verdicts.count(verdict), len(mine)))
+                             for verdict in known + tuple(sorted(set(verdicts) - set(known)))),
+        }
+    unanswered = [event for event in calls if _verdict(event) == "unanswered"]
+    return {
+        "calls": len(calls), "ms": spread(event.get("ms") for event in calls),
+        "unanswered": figure(len(unanswered), len(calls)),
+        "timeouts": figure(sum(1 for event in unanswered
+                               if one_line(event.get("reason", "")).startswith("no answer within")), len(calls)),
+        "unreadable": figure(sum(1 for event in calls if _verdict(event) == "unreadable"), len(calls)),
+        "moments": moments,
+    }
+
+
+def report_cost(events, picked):
+    chosen = [events[index] for index in picked]
+    offers = [event for event in chosen if event.get("type") == "reuse"]
+    judged = [event for event in chosen if event.get("type") == "judge"]
+
+    def asked(moment):
+        return [event.get("ms") for event in judged if _asked(event) and event.get("moment") == moment]
+
+    return {
+        "prompt": {
+            "offered_ms": spread(event.get("ms") for event in offers),
+            "offered_gather_ms": spread(event.get("gather_ms") for event in offers),
+            "offered_judge_ms": spread(event.get("judge_ms") for event in offers),
+            "judged_ms": spread(asked("reuse")),
+        },
+        "tool_call": {
+            "guard_ms": spread(event.get("ms") for event in chosen if event.get("type") == "guard"),
+            "recall_ms": spread(asked("recall")),
+            "fix_ms": spread(asked("fix")),
+        },
+        "errors": {
+            "total": sum(1 for event in chosen if event.get("type") == "error"),
+            "kinds": _grouped([one_line(event.get("where", "")) or "?" for event in chosen
+                               if event.get("type") == "error"], "where"),
+        },
+    }
+
+
+def build_report(events, bad, since=None, until=None, project=None, clock=None):
+    """Everything `report` prints, from the log alone. The events counted are the ones in
+    the window; what followed one of them (the event that settled a capture, the call
+    after a refusal, a later recall) is looked for in the whole log."""
+    clock = now() if clock is None else clock
+    picked = report_window(events, since, until, project)
+    stamps = [stamp for stamp in (parse_ts(events[index].get("ts")) for index in picked)
+              if stamp is not None and 0 <= stamp <= MAX_EPOCH]
+    unread = {}
+    for index in picked:
+        kind = events[index].get("type")
+        if kind not in REPORT_TYPES:
+            kind = kind if isinstance(kind, str) and kind else "?"
+            unread[kind] = unread.get(kind, 0) + 1
+    return {
+        "window": {
+            "since": iso(since) if since is not None else None,
+            "until": iso(until) if until is not None else None,
+            "project": project,
+            "first": iso(min(stamps)) if stamps else None,
+            "last": iso(max(stamps)) if stamps else None,
+            "events": len(picked),
+            "sessions": len(set(events[index]["session"] for index in picked
+                                if isinstance(events[index].get("session"), str) and events[index]["session"])),
+            "unparseable": bad,
+            "untimed": len(picked) - len(stamps),
+            "unread": unread,
+        },
+        "min_n": REPORT_MIN_N,
+        "learn": report_learn(events, picked, clock),
+        "guards": report_guards(events, picked),
+        "recall": report_recall(events, picked),
+        "reuse": report_reuse(events, picked),
+        "judge": report_judge(events, picked),
+        "cost": report_cost(events, picked),
+        "not_measured": list(REPORT_NOT_MEASURED),
+    }
+
+
+def figure_text(value):
+    """`3/12 (25.0%)`, never a percentage alone; under REPORT_MIN_N the count and why
+    there is no rate."""
+    if value is None:
+        return "not measurable"
+    if value["pct"] is None:
+        return "%d/%d (n is too small: %d)" % (value["n"], value["of"], value["of"])
+    return "%d/%d (%.1f%%)" % (value["n"], value["of"], value["pct"])
+
+
+def spread_text(value, unit):
+    if value["median"] is None:
+        return "n is too small: %d" % value["n"]
+    return "median %s %s, p90 %s %s (n=%d)" % (value["median"], unit, value["p90"], unit, value["n"])
+
+
+def _bound(args, name):
+    given = getattr(args, name)
+    if given is None:
+        return None
+    stamp = parse_ts(given)
+    if stamp is None or not 0 <= stamp <= MAX_EPOCH:
+        raise usage("--%s %r is neither epoch seconds nor an ISO 8601 time" % (name, given[:80]))
+    return stamp
+
+
+def cmd_report(args):
+    since, until = _bound(args, "since"), _bound(args, "until")
+    project = os.path.realpath(_expand(args.project)) if args.project else None
+    events, bad = read_events()
+    clock = now()
+    data = build_report(events, bad, since, until, project, clock)
+    if args.json:
+        emit(data)
+        return 0
+    width = term_width()
+    lines = []
+
+    def head(text):
+        if lines:
+            lines.append("")
+        lines.append(paint(text, BOLD))
+
+    def say(text, indent="  "):
+        """One line, cut to the width; text from the log is on one line already."""
+        text = indent + text
+        lines.append(clip(text, width) if width is not None else text)
+
+    def note(text):
+        """A sentence of the report's own, wrapped to the width."""
+        line = " "
+        for word in text.split():
+            if width is not None and len(line) > 1 and len(line) + 1 + len(word) > width:
+                lines.append(line)
+                line = " "
+            line += " " + word
+        lines.append(clip(line, width) if width is not None else line)
+
+    def rows(pairs, indent="  ", wide=0):
+        wide = max([wide] + [len(label) for label, _value in pairs])
+        for label, value in pairs:
+            say("%s  %s" % (label.ljust(wide), value), indent)
+
+    def columns(header, body):
+        cells = [header] + [[str(cell) for cell in row] for row in body]
+        wide = [max(len(row[index]) for row in cells) for index in range(len(header))]
+        for row in cells:
+            say("  ".join(cell.ljust(wide[index]) if index == 0 else cell.rjust(wide[index])
+                          for index, cell in enumerate(row)).rstrip())
+
+    window = data["window"]
+    head("Window")
+    if window["first"] is None:
+        say("the event log holds no event%s" % (" in this window" if since is not None or until is not None
+                                                 or project else ""))
+    else:
+        say("%s to %s (oldest %s, newest %s)" % (
+            window["first"], window["last"], when_text(parse_ts(window["first"]), clock),
+            when_text(parse_ts(window["last"]), clock)))
+    bounds = [text for text in ("since %s" % window["since"] if window["since"] else "",
+                                "until %s" % window["until"] if window["until"] else "",
+                                "project %s" % one_line(window["project"]) if window["project"] else "") if text]
+    say("%s in %s%s" % (plural(window["events"], "event"), plural(window["sessions"], "session"),
+                        (", " + ", ".join(bounds)) if bounds else ""))
+    if window["unparseable"]:
+        say("%s of the log %s not parse and %s skipped" % (
+            plural(window["unparseable"], "line"), "does" if window["unparseable"] == 1 else "do",
+            "was" if window["unparseable"] == 1 else "were"))
+    if window["untimed"]:
+        say("%s no time a parser reads" % plural(window["untimed"], "event carries", "events carry"))
+    if window["unread"]:
+        say("not read by this report: %s" % ", ".join(
+            "%s %d" % (one_line(kind), count) for kind, count in sorted(window["unread"].items())))
+    note("A percentage, a median and a 90th percentile are printed for %d or more; fewer says "
+         "\"n is too small\". What followed an event is looked for in the whole log." % data["min_n"])
+
+    learn = data["learn"]
+    head("The learn loop")
+    ended = [("captures", str(learn["captures"])),
+             ("a lesson recorded", figure_text(learn["recorded"])),
+             ("declined", figure_text(learn["declined"]))]
+    rest = [("still unsettled", figure_text(learn["unsettled"])),
+            ("expired (over %d days)" % UNSETTLED_DAYS, figure_text(learn["expired"])),
+            ("capture to settlement", spread_text(learn["settle_seconds"], "s")),
+            ("lessons recorded", "%d new, %d rewritten" % (learn["lessons_recorded"], learn["lessons_rewritten"])),
+            ("stops refused", ", ".join("%s %d" % (one_line(why), count)
+                                        for why, count in learn["stops_refused"].items())),
+            ("asked after a long turn", str(learn["nudges"])),
+            ("reminded of unsettled", str(learn["reminded"])),
+            ("moved", "%d, %s left in place" % (learn["moved"], plural(learn["candidates"], "candidate")))]
+    wide = max(len(label) for label, _value in ended + rest)
+    rows(ended, wide=wide)
+    for row in learn["reasons"]:
+        say("%d  %s" % (row["n"], one_line(row["reason"])), "    ")
+    rows(rest, wide=wide)
+
+    guards = data["guards"]
+    head("Guards")
+    rows([("refusals", str(guards["refusals"])),
+          ("then a different call", figure_text(guards["changed"])),
+          ("then the same call again", figure_text(guards["same"])),
+          ("then no call of that tool", figure_text(guards["none"])),
+          ("the lesson's failure later in the session", figure_text(guards["failed_after"]))])
+    if guards["unwatched"]:
+        note("%s no `watched` field, so the call that followed was not logged for %s." % (
+            plural(guards["unwatched"], "refusal carries", "refusals carry"),
+            "it" if guards["unwatched"] == 1 else "them"))
+    if guards["lessons"]:
+        columns(["lesson", "refused", "watched", "different", "same", "none", "failed after"],
+                [[one_line(row["name"]), row["refusals"], row["watched"], row["changed"], row["same"], row["none"],
+                  row["failed_after"]] for row in guards["lessons"]])
+
+    recall = data["recall"]
+    head("Recall")
+    rows([("recalls", str(recall["recalls"])),
+          ("after the lesson's guard refused", figure_text(recall["after_guard"])),
+          ("the same lesson recalled again later", figure_text(recall["again"])),
+          ("marked ineffective", figure_text(recall["ineffective"])),
+          ("stronger lessons owed", str(recall["owed"]))])
+    rows([("rewritten", figure_text(recall["rewritten"])),
+          ("declined", figure_text(recall["declined"])),
+          ("declined: the lesson does not describe the failure", figure_text(recall["wrong_lesson"])),
+          ("lesson removed or moved", figure_text(recall["removed"])),
+          ("nothing done", figure_text(recall["open"]))], "    ")
+    if recall["lessons"]:
+        columns(["lesson", "recalled", "after guard", "again", "ineffective", "wrong lesson"],
+                [[one_line(row["name"]), row["recalls"], row["after_guard"], row["again"], row["ineffective"],
+                  row["wrong_lesson"]] for row in recall["lessons"]])
+
+    reuse = data["reuse"]
+    head("Reuse")
+    note("checks made: not measurable. A check that finds no candidate writes no event.")
+    rows([("checks with a candidate", str(reuse["reached"])),
+          ("put to the judge", figure_text(reuse["judged"])),
+          ("answered from the memo", figure_text(reuse["memo"]))])
+    say("verdicts")
+    rows([(one_line(name).replace("-", " "), figure_text(value)) for name, value in reuse["verdicts"].items()], "    ")
+    rows([("offers made", "%d, with %s" % (reuse["offers"], plural(reuse["earlier_requests"], "earlier request")))])
+    if reuse["items"]:
+        columns(["item", "offered"], [[one_line(row["name"]), row["offered"]] for row in reuse["items"]])
+    note("whether an offered item was then used: not measurable from the events this report reads.")
+
+    judge = data["judge"]
+    head("The judge")
+    rows([("model calls", str(judge["calls"])),
+          ("latency", spread_text(judge["ms"], "ms")),
+          ("no answer", "%s, in time: %s" % (figure_text(judge["unanswered"]), figure_text(judge["timeouts"]))),
+          ("unreadable answer", figure_text(judge["unreadable"]))])
+    wide = max(len(one_line(name)) for name in judge["moments"])
+    count = max(len(str(moment["calls"])) for moment in judge["moments"].values())
+    for name, moment in judge["moments"].items():
+        say("%s  %s  %s" % (one_line(name).ljust(wide), str(moment["calls"]).rjust(count),
+                            spread_text(moment["ms"], "ms")))
+        if moment["calls"]:
+            rows([(one_line(verdict).replace("-", " "), figure_text(value))
+                  for verdict, value in moment["verdicts"].items()], "    ")
+
+    cost = data["cost"]
+    head("Cost to the user")
+    rows([("at a prompt, something offered", spread_text(cost["prompt"]["offered_ms"], "ms")),
+          ("  of it gathering", spread_text(cost["prompt"]["offered_gather_ms"], "ms")),
+          ("  of it the judge", spread_text(cost["prompt"]["offered_judge_ms"], "ms")),
+          ("at a prompt, the judge alone", spread_text(cost["prompt"]["judged_ms"], "ms")),
+          ("a refused call's check", spread_text(cost["tool_call"]["guard_ms"], "ms")),
+          ("after a failed call, the judge", spread_text(cost["tool_call"]["recall_ms"], "ms")),
+          ("after a fix, the judge", spread_text(cost["tool_call"]["fix_ms"], "ms")),
+          ("errors", str(cost["errors"]["total"]))])
+    for row in cost["errors"]["kinds"]:
+        say("%d  %s" % (row["n"], one_line(row["where"])), "    ")
+
+    head("Not measured")
+    for text in data["not_measured"]:
+        note(text)
+    sys.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+
 # ----------------------------------------------------------------------------- main
 
 
@@ -4800,6 +5427,11 @@ def build_parser():
     one.add_argument("--limit", type=int, default=0)
 
     command("status", cmd_status, "Health, totals, counts per level, per-lesson use, recent events, what is open.")
+
+    one = command("report", cmd_report, "What the event log says the package did: each figure over its denominator.")
+    one.add_argument("--since", metavar="TS", help="only events at or after this time")
+    one.add_argument("--until", metavar="TS", help="only events at or before this time")
+    one.add_argument("--project", metavar="P", help="only events of this project root")
 
     one = command("install", cmd_install, "Enable the mod, link the CLI, fetch history-surfer.")
     one.add_argument("--claude-dir")
