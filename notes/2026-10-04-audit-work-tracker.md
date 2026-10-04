@@ -13,18 +13,18 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 
 | Track | Proposal | Scope | Status |
 |-|-|-|-|
-| A | 1. trustworthy capture and guards | non-command failures dropped before the judge; guards match commands only, multi-line anchor; exit-0 shell errors count as failures; no recurrence after a guard refusal; verdicts logged with `ms` | dispatched |
-| B | 3. install and uninstall | curl-able uninstall; default to the newest release tag; `update` moves between tags; Claude Code version check; shadowed `compound` on PATH reported; marketplace route only if a real session shows the hooks load | dispatched |
+| A | 1. trustworthy capture and guards | non-command failures dropped before the judge; guards match commands only, multi-line anchor; exit-0 shell errors count as failures; no recurrence after a guard refusal; verdicts logged with `ms` | MERGED (a1ddff4), notes in `2026-10-04-track-a-capture-guards.md` |
+| B | 3. install and uninstall | curl-able uninstall; default to the newest release tag; `update` moves between tags; Claude Code version check; shadowed `compound` on PATH reported; marketplace route only if a real session shows the hooks load | MERGED (0dd8d4a), notes in `2026-10-04-track-b-install.md`; marketplace NOT shipped (tool-call and stop hooks unproven: the sandbox was not logged in) |
 | C | 4. indicators | names instead of counts; totals line; once-per-session ready note; relative times; one vocabulary; pane at 40 columns; CLI text polish | dispatched |
 
 ## Wave 2 (after wave 1 is merged)
 
 | Track | Proposal | Scope | Status |
 |-|-|-|-|
-| D | 2. general pool | platform and shell condition on a lesson; a general lesson can be strengthened locally or switched off; ship the six drafts (four as guards) | waiting on A |
+| D | 2. general pool | platform and shell condition on a lesson; a general lesson can be strengthened locally or switched off; ship the six drafts (four as guards) | dispatched |
 | E | 5. pane drill-down | open a lesson from the pane; settling command on Open rows; all-lessons view | waiting on C |
-| F | 6. reuse precision | rarity-weighted words; memo for repeated prompts; stemming in `find`; duplicate gate in `add` | waiting on A |
-| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | waiting on A |
+| F | 6. reuse precision | rarity-weighted words; memo for repeated prompts; stemming in `find`; duplicate gate in `add` | dispatched |
+| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | dispatched |
 
 ## Not to do without the owner
 
@@ -37,3 +37,12 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 
 - 2026-10-04: tracker written, wave 1 dispatched.
 - 2026-10-04: a background security review of a commit reported 4 findings; track S added.
+- 2026-10-04: tracks A and B merged, all checks green; released v0.4.1 (the installer on main
+  installs the newest tag, and v0.4.0's update fails on a tag). Public install, update and
+  piped uninstall run in a sandbox against v0.4.1.
+- 2026-10-04: a second security notice: untrusted tool output reaches the LLM judge
+  (persistent lesson poisoning) in `hooks/register.ts`. Given to track S.
+- 2026-10-04: wave 2 tracks D, F, S dispatched on base v0.4.1. C still running; E waits on C.
+- Left by track A for the owner: three `compound add --update --match` commands for the
+  owner's guards (in the track A notes), and an unanchored pattern still hits
+  `grep -n '; git commit' file`.
