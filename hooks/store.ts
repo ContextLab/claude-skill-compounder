@@ -17,7 +17,7 @@ export type Item = {
 }
 
 export type Hit = { name: string; level: string; path: string; text: string }
-export type Earlier = { id: string; date: string; project: string; session: string; text: string }
+export type Earlier = { id: string; date: string; project: string; session: string; text: string; score: number }
 export type Event = Record<string, unknown> & { type: string }
 
 function parsed(text: string): unknown {
@@ -68,6 +68,14 @@ export function parseInventory(stdout: string): Item[] | undefined {
   return list.map(itemOf).filter((i): i is Item => i !== undefined)
 }
 
+// `compound check`: the names under "timed_out", the lessons whose pattern the CLI gave up
+// on. A list of names, or of rows that carry one.
+export function parseTimedOut(stdout: string): string[] {
+  const o = record(parsed(stdout))
+  if (o === undefined || !Array.isArray(o.timed_out)) return []
+  return o.timed_out.map(t => (typeof t === 'string' ? t : str(record(t)?.name))).filter(t => t !== '')
+}
+
 // `compound check`: {"hits":[{name,level,path,text}]}.
 export function parseHits(stdout: string): Hit[] | undefined {
   const o = record(parsed(stdout))
@@ -86,7 +94,9 @@ export function squeezed(text: string): string {
   return text.split(/\s+/).filter(w => w !== '').join(' ').slice(0, 300)
 }
 
-export function parseEarlier(stdout: string, session: string, mine: readonly string[], most: number): Earlier[] | undefined {
+// `least` is how many of the searched words a prompt must share to be a candidate at all:
+// a row the CLI scored below it is dropped, and a row with no score is kept.
+export function parseEarlier(stdout: string, session: string, mine: readonly string[], most: number, least = 0): Earlier[] | undefined {
   const o = record(parsed(stdout))
   if (o === undefined) return undefined
   const list = rows(o, ['prompts'])
@@ -98,8 +108,10 @@ export function parseEarlier(stdout: string, session: string, mine: readonly str
     const from = str(r.session) || str(r.session_id)
     if (text.trim() === '' || (session !== '' && from === session) || own.has(squeezed(text))) continue
     if (out.some(e => e.text === text)) continue
+    const score = typeof r.score === 'number' ? r.score : -1
+    if (score >= 0 && score < least) continue
     const project = str(r.project)
-    out.push({ id: str(r.id), date: (str(r.ts) || str(r.date)).slice(0, 10), project: project.split('/').filter(p => p !== '').pop() ?? '', session: from, text })
+    out.push({ id: str(r.id), date: (str(r.ts) || str(r.date)).slice(0, 10), project: project.split('/').filter(p => p !== '').pop() ?? '', session: from, text, score: Math.max(0, score) })
     if (out.length >= most) break
   }
   return out
@@ -183,13 +195,15 @@ export function debts(events: readonly Event[]): Debt[] {
   return owed
 }
 
-// Whether a big turn may be asked about lessons: nothing was recorded or owed since the
-// turn began, and the last nudge is at least `cooldown` seconds old.
-export function mayNudge(events: readonly Event[], turnStart: number, now: number, cooldown: number): boolean {
+// Whether a big turn may be asked about lessons: nothing was recorded or owed in this
+// session since the turn began, and the last nudge in ANY session (`nudges`, the log's
+// `nudge` events) is at least `cooldown` seconds old.
+export function mayNudge(events: readonly Event[], turnStart: number, now: number, cooldown: number, nudges: readonly Event[]): boolean {
   for (const e of events) {
-    const at = seconds(e)
-    if ((e.type === 'learn' || e.type === 'skip' || e.type === 'capture') && at >= turnStart) return false
-    if (e.type === 'nudge' && now - at < cooldown) return false
+    if ((e.type === 'learn' || e.type === 'skip' || e.type === 'capture') && seconds(e) >= turnStart) return false
+  }
+  for (const e of nudges) {
+    if (e.type === 'nudge' && now - seconds(e) < cooldown) return false
   }
   return true
 }

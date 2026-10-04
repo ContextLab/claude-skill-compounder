@@ -9,9 +9,14 @@ Nothing here touches the real store or the real settings:
   COMPOUND_HOME, COMPOUND_CLAUDE_DIR     a temporary user level and Claude directory
   COMPOUND_PROJECT                       the temporary project of each session
   CLAUDE_HISTORY_SURFER_DIR              a temporary prompt log, seeded by the journey
-  TMPDIR                                 where the mod keeps its once-per-session claims
+  TMPDIR                                 a temporary directory of the session's own
   CLAUDE_CODE_PLUGIN_DIRS=""             so no installed copy of the mod loads as well
   --setting-sources project              so the user's own hooks stay out
+
+The mod's once-per-session claims are under COMPOUND_HOME, in claims/<session id>/.
+
+COMPOUND_JOURNEY_PLUGIN names another copy of the package to load in place of this
+checkout (an installed copy, an older one); the CLI the journeys call stays this one.
 
 The event log is read through `bin/compound events --json`, the same way the mod reads it.
 """
@@ -22,9 +27,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CLI = os.path.join(REPO, "bin", "compound")
+PLUGIN = os.environ.get("COMPOUND_JOURNEY_PLUGIN") or REPO
 
 BUILD_SH = """#!/bin/sh
 # The build needs a profile; there is no default.
@@ -125,31 +132,50 @@ class World:
     def copy_of_package(self):
         """A second copy of this package, as an installed clone beside a checkout would be."""
         target = os.path.join(self.root, "second-copy")
-        shutil.copytree(REPO, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "__pycache__", "types"))
+        shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "__pycache__", "types"))
         return target
 
     def claims(self, sid):
         """The names of what the mod did once in a session (guard-<lesson>, stop-<call>, ...)."""
-        folder = os.path.join(self.tmp, "compound-claims", sid)
+        folder = os.path.join(self.home, "claims", sid)
         return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
 
-    def session(self, project, prompts, model, tools=("Bash",), also=(), **extra):
-        """One headless session. `prompts` is one prompt, or a list sent as turns of one process.
-        `also` names further plugin directories to load beside this repository."""
+    def block_claims(self):
+        """Puts a regular file wherever a claims directory would be made, so none can be."""
+        for path in (os.path.join(self.home, "claims"), os.path.join(self.tmp, "compound-claims")):
+            with open(path, "w") as fh:
+                fh.write("not a directory\n")
+
+    def slow_copy(self, verb, seconds):
+        """A copy of the package whose CLI sleeps before `verb` and is otherwise this one."""
+        target = os.path.join(self.root, "slow-copy")
+        shutil.copytree(PLUGIN, target, ignore=shutil.ignore_patterns(".git", "notes", "docs", "tests", "__pycache__", "types", "bin"))
+        os.makedirs(os.path.join(target, "bin"))
+        wrapper = os.path.join(target, "bin", "compound")
+        with open(wrapper, "w") as fh:
+            fh.write('#!/bin/sh\nif [ "$1" = "%s" ]; then sleep %d; fi\nexec "%s" "$@"\n' % (verb, seconds, CLI))
+        os.chmod(wrapper, 0o755)
+        return target
+
+    def session(self, project, prompts, model, tools=("Bash",), also=(), plugin=None, flags=(), **extra):
+        """One headless session. `prompts` is one prompt, or a list sent as turns of one process,
+        each one typed when the turn before it has ended. `also` names further plugin
+        directories to load beside the package; `plugin` names a copy to load in its place;
+        `flags` are further arguments for `claude`."""
         self.count += 1
         argv = ["claude", "-p", "--model", model, "--setting-sources", "project", "--output-format", "stream-json",
-                "--verbose", "--plugin-dir", REPO, "--disallowed-tools", "Read,Grep,Glob"]
+                "--verbose", "--plugin-dir", plugin or PLUGIN, "--disallowed-tools", "Read,Grep,Glob", *flags]
         for folder in also:
             argv += ["--plugin-dir", folder]
-        if isinstance(prompts, str):
-            stdin = prompts
-        else:
+        if not isinstance(prompts, str):
             argv += ["--input-format", "stream-json"]
-            stdin = "".join(json.dumps({"type": "user", "message": {"role": "user", "content": p}}) + "\n" for p in prompts)
         # --allowedTools is variadic and would swallow a prompt argument: the prompt is on stdin.
         argv += ["--allowedTools", *tools]
-        done = subprocess.run(argv, input=stdin, cwd=project, env=self.env(project, **extra),
-                              capture_output=True, text=True, timeout=900)
+        if isinstance(prompts, str):
+            done = subprocess.run(argv, input=prompts, cwd=project, env=self.env(project, **extra),
+                                  capture_output=True, text=True, timeout=900)
+        else:
+            done = self._turns(argv, prompts, project, self.env(project, **extra))
         stream = os.path.join(self.root, "session-%d.stream" % self.count)
         with open(stream, "w") as fh:
             fh.write(done.stdout + "\n--- stderr ---\n" + done.stderr)
@@ -183,6 +209,53 @@ class World:
         if not sid:
             raise SystemExit("the session did not start: rc=%d\n%s" % (done.returncode, done.stderr[-2000:]))
         return Session(sid, [tuple(calls[i]) for i in order], result, done.returncode, stream)
+
+    def _turns(self, argv, prompts, project, env):
+        """Several turns of one process: a prompt is written only once the turn before it
+        has reported its result, so none is typed over a running turn."""
+        errors = os.path.join(self.root, "session-%d.stderr" % self.count)
+        with open(errors, "w") as err:
+            proc = subprocess.Popen(argv, cwd=project, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True)
+            timer = threading.Timer(900, proc.kill)
+            timer.start()
+            try:
+                waiting = list(prompts)
+                lines = []
+
+                def send():
+                    proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": waiting.pop(0)}}) + "\n")
+                    proc.stdin.flush()
+
+                send()
+                for line in proc.stdout:
+                    lines.append(line)
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(msg, dict) and msg.get("type") == "result":
+                        if waiting:
+                            send()
+                        else:
+                            proc.stdin.close()
+                proc.wait()
+            finally:
+                timer.cancel()
+        with open(errors) as fh:
+            return subprocess.CompletedProcess(argv, proc.returncode, "".join(lines), fh.read())
+
+    def turns(self, s):
+        """The final message of each turn of a session, in order."""
+        out = []
+        with open(s.stream) as fh:
+            for line in fh:
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("type") == "result":
+                    out.append(str(msg.get("result") or ""))
+        return out
 
     def check(self, step, what, ok, detail=""):
         self.results.append(bool(ok))

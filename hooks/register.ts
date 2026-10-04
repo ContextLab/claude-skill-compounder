@@ -1,14 +1,16 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import { isOff, knobsFrom, type Knobs } from './knobs'
+import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
-  callText, captureContext, changesStore, cliCall, digest, EARLIER_MAX, errorReport, errorStatus, guarded, guardReason, inputOf, isCommand,
-  judged, knownContext, promotedText, recallContext, reusable, reuseContext, reuseStatus, stopDebt, stopNudge, typedByUser, userOrigin,
-  type Failure,
+  callText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, heldStep, inputOf,
+  isCommand, judged, knownContext, promotedText, recallContext, reusable, reuseContext, reuseStatus, stopDebt, stopNudge, turnAfterCall,
+  turnAfterPrompt, turnAfterStop, typedByUser, userOrigin,
+  type Failure, type Held, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, type Earlier, type Event, type Item,
+  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut,
+  type Earlier, type Event, type Item,
 } from './store'
 
 // compound: before a substantial task it looks for existing work to reuse, and after a
@@ -20,23 +22,32 @@ import {
 //   4 capture  tool.call       a success after a held failure makes the session owe a lesson
 //   5 stop     classic.Stop    an owed lesson refuses the stop once; a long turn is asked once
 //
+// A REFUSAL HAPPENS AT MOST ONCE. A guard's deny and a stop's refusal each need a claim
+// (see `claim`), and a claim that cannot be made means the mod does not refuse.
+//
 // A plugin gets ONE unmatched tool.call hook, so moments 2, 3 and 4 share it.
 //
 // THE MOD NEVER READS OR WRITES A LESSON FILE OR THE EVENT LOG. Every store operation is
 // one `$.process.run` of bin/compound, and ./store reads what it prints. Every firing
 // writes an event that way and sets the status entry. Every failure of the mod itself is
-// caught, logged as an `error`, and told to Claude at the next typed prompt.
+// caught, logged as an `error`, and told to Claude at the next typed prompt. Lesson text is
+// only ever shown to Claude as a quotation (./render), never as the mod's own instruction.
 // COMPOUND_OFF=1 switches all of it off.
 //
 // Everything that touches `$` is in this file: the engine follows `$` into a function
 // declared here and never across an import. The pure halves are ./judge (the three
 // questions), ./render (the messages), ./store (the CLI's JSON), ./knobs and ./safe.
 
-// How many successes after one failure are put to the judge before the failure is dropped.
-const FIX_ATTEMPTS = 2
 const LOGGED_CALL = 4000
 const LOGGED_ERROR = 2000
 const CLI_TIMEOUT_MS = 15000
+// The guard holds a tool call while `compound check` runs. Past this the child is killed
+// and the call runs unguarded.
+const GUARD_TIMEOUT_MS = 1500
+const CLAIM_TIMEOUT_MS = 5000
+// How many prompt-log candidates the judge is shown.
+const CANDIDATES_MAX = 5
+const CLAIMS_KEPT_DAYS = 14
 const SETTINGS_TTL_MS = 30000
 const INVENTORY_TTL_MS = 60000
 // How many other projects' lessons are looked at when a call fails.
@@ -44,8 +55,9 @@ const OTHER_PROJECTS = 6
 
 type Ran = { code: number; stdout: string; stderr: string }
 type Reply = { text: string | undefined; ms: number; reason: string }
-type Held = { call: string; error: string; left: number }
-type Turn = { calls: number; start: number }
+// What a claim answers. `mine`: this instance acts. `taken`: it was already done in this
+// session. `unusable`: the record on disk cannot be made, so nothing is known across copies.
+type Claim = 'mine' | 'taken' | 'unusable'
 
 // Module variables are per process and survive /clear, so everything that belongs to a
 // session is keyed on the session id (and, for a held failure, on the agent loop too).
@@ -53,6 +65,13 @@ const held = new Map<string, Held>()
 const turns = new Map<string, Turn>()
 const commands = new Set<string>()
 const failures = new Map<string, Failure[]>()
+// What this process has already done once, as `<session>\0<key>`: the first check of every claim.
+const claimed = new Set<string>()
+// Failures that are logged once per session however often they repeat, as `<session>\0<where>`.
+const failedOnce = new Set<string>()
+// How many failure reports each session has been given.
+const reports = new Map<string, number>()
+let sweptClaims = false
 let ownCli: string | undefined
 let settings: { at: number; off: boolean; knobs: Knobs } | undefined
 let listed: { at: number; root: string; items: Item[] } | undefined
@@ -114,7 +133,7 @@ async function knobs($: EngineInterface): Promise<Knobs> {
 // One CLI call, with the session stamped on it and the three store locations passed
 // through when they are set. `project` runs it as another project. Never rejects: a child
 // that could not start or ran out of time is exit code -1 with the reason as its stderr.
-async function spawn($: EngineInterface, args: readonly string[], stdin?: string, project?: string): Promise<Ran> {
+async function spawn($: EngineInterface, args: readonly string[], stdin?: string, project?: string, timeoutMs = CLI_TIMEOUT_MS): Promise<Ran> {
   try {
     const env: Record<string, string> = { CLAUDE_CODE_SESSION_ID: await $.session.id() }
     const home = await $.env.get('COMPOUND_HOME')
@@ -126,7 +145,7 @@ async function spawn($: EngineInterface, args: readonly string[], stdin?: string
     const done = await $.process.run([await cliPath($), ...args], {
       cwd: await projectRoot($),
       env,
-      timeoutMs: CLI_TIMEOUT_MS,
+      timeoutMs,
       ...(stdin === undefined ? {} : { stdin }),
     })
     return { code: done.exitCode, stdout: done.stdout, stderr: done.stderr }
@@ -156,6 +175,15 @@ async function fail($: EngineInterface, where: string, err: unknown): Promise<vo
   }
   const logged = await spawn($, ['log'], JSON.stringify({ type: 'error', where, message }))
   if (logged.code !== 0) kept.push({ where: 'cli.log', message: oneLine(`exit ${logged.code}: ${logged.stderr}`, 300) })
+}
+
+// A failure that would repeat on every call (an unusable claims directory, a guard check
+// that does not answer): logged once per session.
+async function failOnce($: EngineInterface, sid: string, where: string, err: unknown): Promise<void> {
+  const id = `${sid}\u0000${where}`
+  if (failedOnce.has(id)) return
+  failedOnce.add(id)
+  await fail($, where, err)
 }
 
 // A failure with no `$` call at all, for a `.catch` handler's one-second grace.
@@ -254,26 +282,86 @@ async function ask($: EngineInterface, prompt: string, k: Knobs): Promise<Reply>
   }
 }
 
-// ONE INSTANCE ACTS, ONCE. The package can be loaded twice in one session (a checkout
-// named by --plugin-dir and the installed copy named by CLAUDE_CODE_PLUGIN_DIRS), and then
-// every hook runs in two environments that share no variables. `mkdir` without -p is
-// atomic, so whichever instance creates <tmp>/compound-claims/<session>/<key> first owns
-// that event. The same directory is what makes "once per session" survive a module reload.
-// It lives under the system's temporary directory, which the system clears; it is not part
-// of the store. When the directory cannot be made at all the caller proceeds: a check that
-// runs twice is better than one that never runs.
-async function claim($: EngineInterface, sid: string, key: string): Promise<boolean> {
-  const safe = (t: string) => t.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || '_'
-  const tmp = ((await $.env.get('TMPDIR')) || '/tmp').replace(/\/+$/, '')
-  const dir = `${tmp}/compound-claims/${safe(sid)}`
-  try {
-    const ran = await $.process.run(['sh', '-c', 'mkdir -p "$1" || exit 3; mkdir "$1/$2" 2>/dev/null', 'sh', dir, safe(key)], { timeoutMs: 10000 })
-    if (ran.exitCode === 3) await fail($, 'claim', `cannot create ${dir}: ${ran.stderr.trim()}`)
-    return ran.exitCode === 0 || ran.exitCode === 3
-  } catch (err) {
-    await fail($, 'claim', err)
-    return true
+// ONCE, AND ONE INSTANCE. "Once per session" is held in two places.
+//
+// This process's own record (`claimed`) is checked first and is always usable: whatever
+// happens on disk, one instance never does the same thing twice.
+//
+// The record on disk is what holds across instances. The package can be loaded twice in
+// one session (a checkout named by --plugin-dir and the installed copy named by
+// CLAUDE_CODE_PLUGIN_DIRS), and then every hook runs in two environments that share no
+// variables; a module reload also starts the variables over. `mkdir` without -p is atomic,
+// so whichever instance creates <compound home>/claims/<session>/<key> first owns that
+// event. The directory is the user's own, under COMPOUND_HOME (default ~/.claude/compound),
+// never a shared temporary directory.
+//
+// When that directory cannot be made for any reason other than "it already exists", the
+// answer is `unusable`, and what the caller does with it depends on what is at stake. A
+// REFUSAL (a guard's deny, a stop's refusal) needs `mine`: with no record that it happened,
+// a refusal could repeat, so the mod does not refuse. Anything else proceeds, since this
+// process's own record already keeps it to once here.
+const CLAIM_SH = [
+  'mkdir -p "$1" 2>/dev/null',
+  'if mkdir "$1/$2" 2>/dev/null; then exit 0; fi',
+  'if [ -d "$1/$2" ]; then exit 1; fi',
+  'echo "cannot create $1/$2" >&2',
+  'exit 3',
+].join('\n')
+
+// Claims of sessions that ended more than two weeks ago, removed once per process.
+const SWEEP_SH = 'case "$1" in */claims) [ -d "$1" ] && find "$1" -mindepth 1 -maxdepth 1 -type d -mtime +"$2" -exec rm -rf {} + ;; esac; exit 0'
+
+async function claimsRoot($: EngineInterface): Promise<string | undefined> {
+  const strip = (t: string) => t.replace(/\/+$/, '')
+  const userHome = await $.env.get('HOME')
+  let home = await $.env.get('COMPOUND_HOME')
+  if (!home) {
+    const claudeDir = await $.env.get('COMPOUND_CLAUDE_DIR')
+    home = `${strip(claudeDir || '~/.claude')}/compound`
   }
+  if (home === '~' || home.startsWith('~/')) {
+    if (!userHome) return undefined
+    home = `${strip(userHome)}${home.slice(1)}`
+  }
+  // A relative path is read the way the CLI reads it: from where the CLI runs.
+  if (!home.startsWith('/')) home = `${await projectRoot($)}/${home}`
+  return `${strip(home)}/claims`
+}
+
+async function claim($: EngineInterface, sid: string, key: string): Promise<Claim> {
+  const id = `${sid}\u0000${key}`
+  if (claimed.has(id)) return 'taken'
+  claimed.add(id)
+  const safe = (t: string) => t.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || '_'
+  try {
+    const root = await claimsRoot($)
+    if (root === undefined) {
+      await failOnce($, sid, 'claim', 'no home directory is known, so there is nowhere to keep the claims; nothing is refused in this session')
+      return 'unusable'
+    }
+    if (!sweptClaims) {
+      sweptClaims = true
+      await $.process.run(['sh', '-c', SWEEP_SH, 'sh', root, String(CLAIMS_KEPT_DAYS)], { timeoutMs: CLAIM_TIMEOUT_MS })
+    }
+    const ran = await $.process.run(['sh', '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key)], { timeoutMs: CLAIM_TIMEOUT_MS })
+    if (ran.exitCode === 0) return 'mine'
+    if (ran.exitCode === 1) return 'taken'
+    await failOnce($, sid, 'claim', `${ran.stderr.trim() || `exit ${ran.exitCode}`}; the claims directory is unusable, so nothing is refused in this session`)
+    return 'unusable'
+  } catch (err) {
+    await failOnce($, sid, 'claim', `${said(err)}; the claims directory is unusable, so nothing is refused in this session`)
+    return 'unusable'
+  }
+}
+
+// For anything that is not a refusal: act unless it is known to be done already.
+async function firstTime($: EngineInterface, sid: string, key: string): Promise<boolean> {
+  return (await claim($, sid, key)) !== 'taken'
+}
+
+// For a refusal: act only when the claim is on record.
+async function mayRefuse($: EngineInterface, sid: string, key: string): Promise<boolean> {
+  return (await claim($, sid, key)) === 'mine'
 }
 
 async function registerCommand($: EngineInterface): Promise<void> {
@@ -285,66 +373,78 @@ async function registerCommand($: EngineInterface): Promise<void> {
 
 // ---- moment 1: reuse ------------------------------------------------------------------
 
-async function earlierRequests($: EngineInterface, sid: string, text: string, keywords: readonly string[]): Promise<Earlier[]> {
-  if (keywords.length === 0) return []
-  const found = await cli($, ['find', '--json', ...keywords])
+// Candidate earlier requests: the prompt log searched with the prompt's own significant
+// words. Candidates only; the judge decides which of them are like this request.
+async function earlierCandidates($: EngineInterface, sid: string, text: string, words: readonly string[]): Promise<Earlier[]> {
+  if (words.length === 0) return []
+  const found = await cli($, ['find', '--json', ...words])
   if (found === undefined) return []
   // The CLI's prompt rows carry no session, so this session's own prompts are recognised by text.
   const mine = [text, ...(await $.session.messages()).filter(m => m.role === 'user').map(m => m.text)]
-  const earlier = parseEarlier(found.stdout, sid, mine, EARLIER_MAX)
+  const earlier = parseEarlier(found.stdout, sid, mine, CANDIDATES_MAX, candidateFloor(words.length))
   if (earlier === undefined) {
     await fail($, 'reuse.find', `compound find --json printed something unreadable: ${found.stdout.slice(0, 200)}`)
     return []
   }
-  return earlier
+  return earlier.map(e => ({ ...e, text: redact(e.text) }))
 }
 
+// Candidates first, then ONE question: the inventory and the candidate earlier requests go
+// to the judge together, and only what it names is added to the prompt.
 async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knobs): Promise<string> {
   const began = Date.now()
+  const request = redact(text)
+  if (!(await firstTime($, sid, `reuse-${digest(text)}-${Math.floor(nowS() / 20)}`))) return ''
   const items = reusable((await inventory($)) ?? [])
-  // Nothing recorded yet: there is nothing to reuse, and no model call is made.
-  if (items.length === 0) return ''
-  if (!(await claim($, sid, `reuse-${digest(text)}-${Math.floor(nowS() / 20)}`))) return ''
-  const reply = await ask($, reusePrompt(redact(text), items), k)
+  const words = significantWords(request)
+  const candidates = await earlierCandidates($, sid, text, words)
+  // Nothing recorded and nothing like it asked before: no model call is made.
+  if (items.length === 0 && candidates.length === 0) return ''
+  const gathered = Date.now() - began
+  const reply = await ask($, reusePrompt(request, items, candidates), k)
   if (reply.text === undefined) {
     await fail($, 'reuse.judge', `${k.model} gave no answer: ${reply.reason}`)
     return ''
   }
-  const answer = parseReuse(reply.text, items)
+  const answer = parseReuse(reply.text, items, candidates)
   if (answer === undefined) {
     await fail($, 'reuse.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return ''
   }
-  if (!answer.substantial) return ''
-  const earlier = await earlierRequests($, sid, text, answer.keywords)
-  const context = reuseContext(answer.items, earlier, await cliPath($))
+  const context = answer.substantial ? reuseContext(answer.items, answer.earlier, await cliPath($)) : ''
   if (context === '') return ''
   await log($, {
     type: 'reuse',
     lessons: answer.items.map(i => i.name),
-    prompts: earlier.map(e => e.id),
-    keywords: answer.keywords,
+    prompts: answer.earlier.map(e => e.id),
+    words,
+    candidates: candidates.length,
     prompt_id: digest(text),
-    // What the check added to the prompt, in milliseconds, and the judge's share of it.
+    // What the check added to the prompt, in milliseconds: gathering, and the judge.
     ms: Date.now() - began,
+    gather_ms: gathered,
     judge_ms: reply.ms,
   })
-  $.ui.status(reuseStatus(answer.items.length, earlier.length))
+  $.ui.status(reuseStatus(answer.items.length, answer.earlier.length))
   return context
 }
 
-async function onPrompt($: EngineInterface, raw: string, kind: string | undefined): Promise<string[]> {
+async function onPrompt($: EngineInterface, raw: string, kind: string | undefined, midTurn: boolean): Promise<string[]> {
   if (await off($)) return []
   const text = raw.trim()
   if (text === '' || !userOrigin(kind) || !typedByUser(text) || isCommand(text)) return []
   const sid = await $.session.id()
-  // The user typed: what the stop moment counts starts over here.
-  turns.set(sid, { calls: 0, start: nowS() })
+  // The user typed. With the session idle a turn starts here, and what the stop moment
+  // counts starts over; typed over a running turn, the prompt waits for that turn's stop.
+  turns.set(sid, turnAfterPrompt(turns.get(sid), nowS(), midTurn))
+  if (!midTurn) $.ui.status(undefined)
   await registerCommand($)
   const out: string[] = []
-  // The mod's own failures so far, once per session.
-  if (hasFailures(sid) && (await claim($, sid, 'errors-reported'))) {
-    out.push(errorReport(takeFailures(sid), await cliPath($)))
+  // The mod's own failures since the last report: each is told once.
+  if (hasFailures(sid)) {
+    const nth = (reports.get(sid) ?? 0) + 1
+    reports.set(sid, nth)
+    out.push(errorReport(takeFailures(sid), await cliPath($), nth))
   }
   const k = await knobs($)
   if (text.length < k.promptMinChars) return out
@@ -364,17 +464,26 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
   const items = await inventory($)
   // No lesson has a `match`: nothing can hit, and the call is not held for a process start.
   if (items === undefined || !items.some(i => i.match.length > 0)) return undefined
-  const ran = await cli($, ['check'], JSON.stringify({ tool, input }))
-  if (ran === undefined) return undefined
+  // The call waits for this child, so it gets a short time. A check that does not answer,
+  // or fails, is killed and the call runs: the guard fails open.
+  const ran = await spawn($, ['check'], JSON.stringify({ tool, input }), undefined, GUARD_TIMEOUT_MS)
+  if (ran.code !== 0) {
+    const why = ran.code === -1 ? `did not answer within ${GUARD_TIMEOUT_MS} ms or could not start (${ran.stderr.trim()})` : `exit ${ran.code}: ${ran.stderr.trim() || '(no output)'}`
+    await failOnce($, sid, 'guard.check', `compound check ${why}; calls run unguarded while this lasts`)
+    return undefined
+  }
+  const slow = parseTimedOut(ran.stdout)
+  if (slow.length > 0) await failOnce($, sid, 'guard.pattern', `compound check gave up on the match pattern of: ${slow.join(', ')}; rewrite the pattern so it cannot backtrack`)
   const hits = parseHits(ran.stdout)
   if (hits === undefined) {
     await fail($, 'guard.parse', `compound check printed something unreadable: ${ran.stdout.slice(0, 200)}`)
     return undefined
   }
-  // Once per session per lesson: the claim is the record, so the same call sent again runs.
+  // Once per session per lesson: the claim is the record, so the same call sent again
+  // runs. With no record there is no refusal.
   const fresh = []
   for (const h of hits) {
-    if (await claim($, sid, `guard-${h.name}`)) fresh.push(h)
+    if (await mayRefuse($, sid, `guard-${h.name}`)) fresh.push(h)
   }
   const first = fresh[0]
   if (first === undefined) return undefined
@@ -426,7 +535,7 @@ async function lessons($: EngineInterface): Promise<Item[]> {
 
 async function onFailure($: EngineInterface, sid: string, key: string, tool: string, callId: string, call: string, errorText: string): Promise<string[]> {
   // The instance that claims the failure holds it, and so is the only one that judges the fix.
-  if (!(await claim($, sid, `fail-${callId}`))) return []
+  if (!(await firstTime($, sid, `fail-${callId}`))) return []
   const error = redact(errorText)
   const known = await lessons($)
   const k = await knobs($)
@@ -442,7 +551,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
     }
   }
   if (hit === undefined) {
-    held.set(key, { call, error, left: FIX_ATTEMPTS })
+    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0 })
     return []
   }
   // A failure answered with a recorded lesson is not held: the fix teaches nothing new.
@@ -450,9 +559,12 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   return recurred($, hit, tool, error, k, false)
 }
 
-async function onSuccess($: EngineInterface, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
+async function onSuccess($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
   const was = held.get(key)
-  if (was === undefined) return []
+  const step = heldStep(was, tool, turns.get(sid)?.n ?? 0)
+  if (step === 'expired') held.delete(key)
+  // Another tool's success is not an attempt at the failed call: no question is asked.
+  if (was === undefined || step !== 'judge') return []
   was.left -= 1
   if (was.left <= 0) held.delete(key)
   const known = await lessons($)
@@ -487,15 +599,17 @@ async function onSuccess($: EngineInterface, key: string, tool: string, callId: 
 
 // The session ran the CLI itself: the store may have changed, and a lesson may now exist.
 async function onCliCall($: EngineInterface, verb: string, failed: boolean): Promise<void> {
-  if (!changesStore(verb)) return
-  forgetInventory()
+  if (changesStore(verb)) forgetInventory()
   if (failed) return
-  if (verb === 'add') {
+  // A debt settled, by a lesson or by declining it: nothing is owed, and the entry goes.
+  if (verb === 'skip') {
+    $.ui.status(undefined)
+  } else if (verb === 'add') {
     const learned = await events($, ['--session', await $.session.id(), '--type', 'learn'])
     const last = learned?.[learned.length - 1]
     const name = last === undefined || typeof last.lesson !== 'string' ? '' : last.lesson
     $.ui.toast(name === '' ? 'compound: lesson recorded' : `compound: lesson recorded: ${name}`)
-    $.ui.status(name === '' ? 'compound: lesson recorded' : `compound: learned ${name}`)
+    $.ui.status(undefined)
   } else if (verb === 'promote') {
     $.ui.toast('compound: lesson moved')
   }
@@ -503,31 +617,43 @@ async function onCliCall($: EngineInterface, verb: string, failed: boolean): Pro
 
 // ---- moment 5: stop -------------------------------------------------------------------
 
+// The stop goes through: the turn is over, and a prompt that was waiting starts the next.
+function turnEnded(sid: string): undefined {
+  const turn = turns.get(sid)
+  if (turn !== undefined) turns.set(sid, turnAfterStop(turn, nowS()))
+  return undefined
+}
+
 async function onStop($: EngineInterface, followsBlock: boolean): Promise<string | undefined> {
   if (await off($)) return undefined
   const sid = await $.session.id()
   const rows = await events($, ['--session', sid])
-  if (rows === undefined) return undefined
+  if (rows === undefined) return turnEnded(sid)
   const cliAt = await cliPath($)
   // A debt is refused once: the claim is the record, so a stop that follows a refusal for
-  // one debt can still be refused for a newer one, and never twice for the same.
+  // one debt can still be refused for a newer one, and never twice for the same. A debt
+  // whose claim cannot be put on record is not refused at all.
   const owed = debts(rows)
-  let fresh = 0
+  const fresh: string[] = []
   for (const d of owed) {
-    if (await claim($, sid, `stop-${d.key}`)) fresh += 1
+    if (await mayRefuse($, sid, `stop-${d.key}`)) fresh.push(d.key)
   }
-  if (fresh > 0) {
+  if (fresh.length > 0) {
+    await log($, { type: 'refuse', why: 'debt', debts: fresh })
     $.ui.status('compound: lesson owed')
     return stopDebt(owed, cliAt)
   }
   const turn = turns.get(sid)
   const k = await knobs($)
-  if (followsBlock || owed.length > 0 || turn === undefined || turn.calls < k.turnMinCalls) return undefined
-  if (!mayNudge(rows, turn.start, nowS(), k.nudgeCooldown)) return undefined
-  if (!(await claim($, sid, `nudge-${Math.floor(turn.start / 20)}`))) return undefined
+  if (followsBlock || owed.length > 0 || turn === undefined || turn.calls < k.turnMinCalls) return turnEnded(sid)
+  // The cooldown is the user's, not the session's: the last nudge anywhere counts.
+  const nudges = await events($, ['--type', 'nudge', '--limit', '1'])
+  if (nudges === undefined || !mayNudge(rows, turn.start, nowS(), k.nudgeCooldown, nudges)) return turnEnded(sid)
+  if (!(await mayRefuse($, sid, `nudge-${turn.n}`))) return turnEnded(sid)
   const calls = turn.calls
-  turn.calls = 0
+  turns.set(sid, { ...turn, calls: 0 })
   await log($, { type: 'nudge', calls })
+  await log($, { type: 'refuse', why: 'nudge', calls })
   $.ui.status('compound: asked about lessons')
   return stopNudge(calls, cliAt)
 }
@@ -557,7 +683,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     let extra: string[] = []
     try {
-      extra = await onPrompt($, e.text, e.origin?.kind)
+      extra = await onPrompt($, e.text, e.origin?.kind, e.turnId !== undefined)
     } catch (err) {
       await fail($, 'prompt.submit', err)
     }
@@ -575,12 +701,8 @@ export const register: Register = on => {
     try {
       if (await off($)) return next(e)
       sid = await $.session.id()
-      let turn = turns.get(sid)
-      if (turn === undefined) {
-        turn = { calls: 0, start: nowS() }
-        turns.set(sid, turn)
-      }
-      turn.calls += 1
+      // A subagent's calls are its own loop's: they do not count toward the main turn.
+      turns.set(sid, turnAfterCall(turns.get(sid) ?? turnAfterPrompt(undefined, nowS(), false), e.agentId))
       // The CLI's own calls are not guarded: a lesson's text quotes the mistake it is about.
       if (guarded(tool) && verb === undefined) {
         const deny = await guard($, sid, tool, input)
@@ -603,7 +725,7 @@ export const register: Register = on => {
       const extra =
         ran.isError === true
           ? await onFailure($, sid, key, tool, e.tool_use_id, call, String(ran.text ?? ''))
-          : await onSuccess($, key, tool, e.tool_use_id, e.agentId, call)
+          : await onSuccess($, sid, key, tool, e.tool_use_id, e.agentId, call)
       return extra.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...extra] }
     } catch (err) {
       await fail($, ran.isError === true ? 'recall' : 'capture', err)

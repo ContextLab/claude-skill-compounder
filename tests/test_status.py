@@ -77,13 +77,18 @@ class StatusTest(Case):
         row = self.health(self.status(), "last event")
         self.assertEqual((row["status"], row["detail"]), ("PASS", "2h ago (1 events)"))
 
-    def test_a_log_line_that_does_not_parse_fails(self):
+    def test_a_log_line_that_does_not_parse_is_counted_as_a_warning(self):
+        """It was a FAIL until the review of 2026-10-03: readers skip such a line, so the
+        log still works, and what cannot work (a log that cannot be written) is the FAIL."""
         self.box.log({"type": "nudge", "calls": 9})
         with open(self.box.events, "a") as handle:
             handle.write("{truncated\n")
         data = self.status()
-        self.assertEqual(self.health(data, "last event")["status"], "FAIL")
-        self.assertFalse(data["ok"])
+        row = self.health(data, "last event")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("1 line(s)", row["detail"])
+        self.assertIn(self.box.events, row["detail"])
+        self.assertTrue(data["ok"])
 
     def test_a_lesson_name_at_two_levels_fails(self):
         self.box.add("twice")

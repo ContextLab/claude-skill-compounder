@@ -7,10 +7,16 @@
             with `compound add`) or a `skip`; when the session tried to stop first, the
             stop was refused (the mod's `stop-<call>` claim says so).
   lesson    when a lesson was written, it exists in the store and names the working form.
+  late      the fix comes after three other successful Bash calls: it is still captured.
 
 usage: journey_capture.py [--model haiku] [--keep]
 """
 import common
+
+LATE = ("Do these steps in order, each as its own Bash call, and do not skip or merge any. 1: run ./build.sh with no "
+        "arguments (it will fail; do not fix it yet). 2: run echo alpha . 3: run echo beta . 4: run echo gamma . "
+        "5: now run the build correctly, as its error message said. Do not read or inspect build.sh. "
+        "Then tell me what step 5 printed.")
 
 
 def main():
@@ -33,7 +39,7 @@ def main():
             and "--profile" in captures[0].get("fixed", ""))
     after = kinds[kinds.index("capture") + 1:] if "capture" in kinds else []
     settled = [k for k in after if k in ("learn", "skip")]
-    refused = [c for c in w.claims(s.sid) if c.startswith("stop-")]
+    refused = [e for e in events if e["type"] == "refuse"]
     w.check("settle", "the debt was settled by a learn or a skip after the capture", bool(settled),
             "after capture: %s; stop refused: %s" % (", ".join(after) or "nothing", "yes" if refused else "no"))
     print("      the session %s; the stop was %s" % (
@@ -48,6 +54,22 @@ def main():
         w.check("lesson", "it names the working form", "--profile" in shown, shown[-300:])
     w.check("capture", "nothing in the mod failed", [e for e in events if e["type"] == "error"] == [],
             [e for e in events if e["type"] == "error"])
+
+    # A world of its own: the lesson the first session may have recorded would be recalled here.
+    w2 = common.World("capture-late")
+    late = w2.project("beta", build=True)
+    s = w2.session(late, LATE, args.model, tools=("Bash", "Skill"), COMPOUND_PROMPT_MIN_CHARS="100000")
+    order = [c for c in s.bash() if "compound" not in c[0]]
+    print("      calls: %s" % " | ".join("%s -> %s" % (c[0][:40], "error" if c[1] else "ok") for c in order))
+    failed = next((i for i, c in enumerate(order) if "build.sh" in c[0] and c[1] is True), None)
+    fixed = next((i for i, c in enumerate(order) if "build.sh" in c[0] and c[1] is False), None)
+    between = 0 if failed is None or fixed is None else len([c for c in order[failed + 1:fixed] if c[1] is False])
+    w.check("late", "three or more successful calls came between the failure and the fix", between >= 3, "%d between" % between)
+    captures = w2.events(late, session=s.sid, kind="capture")
+    w.show("capture", captures)
+    w.check("late", "the fix was still captured", len(captures) >= 1 and "--profile" in captures[0].get("fixed", ""),
+            ", ".join(e["type"] for e in w2.events(late, session=s.sid)))
+    print("      second root %s" % w2.root)
     w.finish(args.keep)
 
 

@@ -105,8 +105,13 @@ class PromoteGeneralTest(Case):
         self.assertIn("Add lesson: zsh-equals-word", out)
         self.assertIn("Use when a zsh line has a bare equals word.", out)
         self.assertIn("Quote the word.", out)
-        self.assertIn("origin: project project, session sess-000", out,
+        self.assertIn("SKILL.md as it will be published:\n    ---\n    name: zsh-equals-word\n", out,
                       "the plan shows the file exactly as it would be published")
+        self.assertNotIn("origin:", out, "the origin names a private project and session; it is not published")
+        self.assertNotIn("sess-000", out)
+        self.assertIn("origin: project project, session sess-000\n",
+                      read(os.path.join(self.box.lesson_dir("zsh-equals-word", "user"), "SKILL.md")),
+                      "the local lesson keeps its origin")
         self.assertIn("--yes", out)
 
     def test_the_dry_run_as_json(self):

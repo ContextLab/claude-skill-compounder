@@ -73,6 +73,7 @@ class UpdateTest(Case):
         write(os.path.join(self.box.lesson_dir("now-general", "user"), "helper.sh"), "# attached\n")
         other = self.user_lesson("still-mine", "Only mine.")
         write(os.path.join(self.upstream, "lessons", "now-general", "SKILL.md"), read(mine))
+        write(os.path.join(self.upstream, "lessons", "now-general", "helper.sh"), "# attached\n")
         self.commit("merge the promoted lesson")
         proc = self.update()
         self.assertExit(proc, 0)
@@ -97,13 +98,17 @@ class UpdateTest(Case):
         self.assertEqual([row["name"] for row in data["differing"]], ["diverged"])
         self.assertEqual(data["removed"], [])
 
-    def test_a_user_skill_the_pool_now_carries_is_removed_too(self):
+    def test_a_user_skill_the_pool_now_carries_is_never_removed(self):
+        """Until the review of 2026-10-03 it was removed. <claude dir>/skills holds the
+        user's own skills and other tools' too, so nothing under it is a candidate."""
         path = os.path.join(self.box.skill_dir("now-shipped", "user"), "SKILL.md")
         write(path, LESSON % ("now-shipped", "Steps."))
         write(os.path.join(self.upstream, "skills", "now-shipped", "SKILL.md"), LESSON % ("now-shipped", "Steps."))
         self.commit("ship the skill")
-        self.assertExit(self.update(), 0)
-        self.assertFalse(os.path.exists(self.box.skill_dir("now-shipped", "user")))
+        proc = self.update()
+        self.assertExit(proc, 0)
+        self.assertEqual(read(path), LESSON % ("now-shipped", "Steps."))
+        self.assertNotIn("removed", proc.stdout)
 
     def test_a_user_skill_that_is_a_link_into_the_package_is_not_removed(self):
         write(os.path.join(self.upstream, "skills", "linked", "SKILL.md"), LESSON % ("linked", "Steps."))

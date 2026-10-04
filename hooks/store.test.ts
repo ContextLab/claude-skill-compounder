@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, seconds, type Event } from './store'
+import { bodyOf, debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -43,7 +43,25 @@ const FOUND = JSON.stringify({
 test('earlier requests drop this session\'s own prompts and repeats, and stop at the cap', async () => {
   const earlier = parseEarlier(FOUND, 's1', ['the prompt typed just now'], 3)
   expect(earlier?.map(e => e.id)).toEqual(['p1', 'p4', 'p5'])
-  expect(earlier?.[0]).toEqual({ id: 'p1', date: '2026-09-30', project: 'alpha', session: '', text: 'write a release script' })
+  expect(earlier?.[0]).toEqual({ id: 'p1', date: '2026-09-30', project: 'alpha', session: '', text: 'write a release script', score: 1 })
+})
+
+test('a logged prompt that shares fewer words than asked is not a candidate; one with no score is kept', async () => {
+  const out = JSON.stringify({ prompts: [
+    { id: 'a', score: 1, prompt: 'shares one word' },
+    { id: 'b', score: 3, prompt: 'shares three words' },
+    { id: 'c', prompt: 'the CLI gave no score' },
+    { id: 'd', score: 2, prompt: 'shares two words' },
+  ] })
+  expect(parseEarlier(out, 's1', [], 5, 2)?.map(e => e.id)).toEqual(['b', 'c', 'd'])
+  expect(parseEarlier(out, 's1', [], 5)?.map(e => e.id)).toEqual(['a', 'b', 'c', 'd'])
+  expect(parseEarlier(out, 's1', [], 5, 2)?.[0]?.score).toBe(3)
+})
+
+test('the lessons whose pattern the check gave up on are read as names or as rows', async () => {
+  expect(parseTimedOut('{"hits":[],"timed_out":["slow-one",{"name":"slow-two"},7,{}]}')).toEqual(['slow-one', 'slow-two'])
+  expect(parseTimedOut('{"hits":[]}')).toEqual([])
+  expect(parseTimedOut('not json')).toEqual([])
 })
 
 test('a row that names its session is dropped when it is the current one', async () => {
@@ -107,14 +125,17 @@ test('other projects\' lessons come from learn events, newest project first, min
   expect(otherProjects([], new Set(), 6)).toEqual([])
 })
 
-test('a long turn is asked only when nothing was recorded in it and the last nudge is old', async () => {
-  const at = (type: string, s: number): Event => ({ type, ts: s })
-  expect(mayNudge([], 1000, 2000, 1800)).toBe(true)
-  expect(mayNudge([at('learn', 900)], 1000, 2000, 1800)).toBe(true)
-  expect(mayNudge([at('learn', 1500)], 1000, 2000, 1800)).toBe(false)
-  expect(mayNudge([at('skip', 1500)], 1000, 2000, 1800)).toBe(false)
-  expect(mayNudge([at('capture', 1500)], 1000, 2000, 1800)).toBe(false)
-  expect(mayNudge([at('nudge', 500)], 1000, 2000, 1800)).toBe(false)
-  expect(mayNudge([at('nudge', 100)], 1000, 2000, 1800)).toBe(true)
-  expect(mayNudge([at('nudge', 1999)], 1000, 2000, 0)).toBe(true)
+test('a long turn is asked only when nothing was recorded in it and the last nudge anywhere is old', async () => {
+  const at = (type: string, s: number, session = 's1'): Event => ({ type, ts: s, session })
+  expect(mayNudge([], 1000, 2000, 1800, [])).toBe(true)
+  expect(mayNudge([at('learn', 900)], 1000, 2000, 1800, [])).toBe(true)
+  expect(mayNudge([at('learn', 1500)], 1000, 2000, 1800, [])).toBe(false)
+  expect(mayNudge([at('skip', 1500)], 1000, 2000, 1800, [])).toBe(false)
+  expect(mayNudge([at('capture', 1500)], 1000, 2000, 1800, [])).toBe(false)
+  // The cooldown is global: a nudge in ANOTHER session, which this session's rows do not hold, counts.
+  expect(mayNudge([], 1000, 2000, 1800, [at('nudge', 500, 'another-session')])).toBe(false)
+  expect(mayNudge([], 1000, 2000, 1800, [at('nudge', 100, 'another-session')])).toBe(true)
+  expect(mayNudge([], 1000, 2000, 0, [at('nudge', 1999, 'another-session')])).toBe(true)
+  // Only `nudge` rows count there, whatever the CLI was asked for.
+  expect(mayNudge([], 1000, 2000, 1800, [at('reuse', 1999)])).toBe(true)
 })

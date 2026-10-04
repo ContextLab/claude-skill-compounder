@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -239,6 +240,9 @@ class FindPromptLogTest(Case):
         ])
         self.assertEqual(data["prompts"][0]["project"], box.project)
         self.assertTrue(all(hit["id"] and hit["ts"] for hit in data["prompts"]))
+        self.assertEqual([hit["session"] for hit in data["prompts"]], ["s1", "s2", "s2"],
+                         "each row carries the session it was typed in, so a caller can leave out its own")
+        self.assertTrue(all(re.match(r"^\d{4}-\d\d-\d\dT", hit["ts"]) for hit in data["prompts"]))
 
         named = box.json("find", "changelog", "--json", COMPOUND_SURFER=surfer, PATH="/usr/bin:/bin")
         self.assertEqual([hit["prompt"] for hit in named["prompts"]], ["now write the changelog"])

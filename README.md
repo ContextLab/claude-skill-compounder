@@ -166,9 +166,11 @@ Environment variables, read by the mod. Set them in the `env` block of
 ## Cost
 
 The mod asks a small model one question per substantial prompt, one per failed tool
-call, and one per success that follows a failure. Measured on Claude Code 2.1.289, the
-prompt check adds about one second to a prompt, and the guard adds about 30 ms to a tool
-call when any lesson carries a pattern and nothing otherwise. The calls use the same
+call, and one for each of the next successes of the same tool, five at most, until one
+is the fix. Measured on Claude Code 2.1.289, the prompt check (a search of the prompt log
+and the model call) adds about one second to a prompt. The guard adds about 30 ms to a
+tool call when any lesson carries a pattern and nothing otherwise; a check that has not
+answered within 1.5 seconds is abandoned and the call runs. The calls use the same
 account as the session.
 
 ## How it works

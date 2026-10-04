@@ -2,10 +2,14 @@
 """Moment 5, the stop. Real `claude -p` sessions; run by hand.
 
   refuse    a session fixes a failed build and is told to finish at once, recording
-            nothing. Its stop is refused once (the mod's `stop-<call>` claim), and the
-            session then settles the debt with a `learn` or a `skip` before it ends.
+            nothing. Its stop is refused once (one `refuse` event, why "debt"), the
+            session settles the debt with a `learn` or a `skip`, and its final message
+            still carries the answer the user asked for.
   nudge     with COMPOUND_TURN_MIN_CALLS=3, a turn of four tool calls that recorded nothing
-            is asked once: a `nudge` event carries the count, and the session still ends.
+            is asked once: a `nudge` event carries the count, a `refuse` event says why
+            "nudge", and the session ends with its answer.
+  cooldown  a second session straight after, same threshold: the nudge another session
+            was just given counts, and nothing is asked.
   quiet     the same turn under the default threshold (25 calls) writes no `nudge`.
 
 usage: journey_stop.py [--model haiku] [--keep]
@@ -29,12 +33,16 @@ def main():
     w.show("event", events)
     kinds = [e["type"] for e in events]
     w.check("refuse", "the session owed a lesson (a capture event)", "capture" in kinds, ", ".join(kinds))
-    refused = [c for c in w.claims(s.sid) if c.startswith("stop-")]
-    w.check("refuse", "its stop was refused once", len(refused) == 1, w.claims(s.sid))
+    refused = [e for e in events if e["type"] == "refuse"]
+    w.check("refuse", "its stop was refused once, for the debt", len(refused) == 1 and refused[0].get("why") == "debt",
+            refused)
+    w.check("refuse", "the claim that keeps it to once exists", any(c.startswith("stop-") for c in w.claims(s.sid)),
+            w.claims(s.sid))
     after = kinds[kinds.index("capture") + 1:] if "capture" in kinds else []
     w.check("refuse", "after the refusal it settled the debt with a learn or a skip",
             any(k in ("learn", "skip") for k in after), ", ".join(after) or "nothing after the capture")
     w.check("refuse", "the session then ended normally", s.returncode == 0 and s.result != "", s.result[-200:])
+    w.check("refuse", "its final message still carries the answer", "build ok" in s.result, s.result[-300:])
 
     quiet = w.project("beta")
     s = w.session(quiet, FOUR, args.model, COMPOUND_TURN_MIN_CALLS="3", **QUIET)
@@ -42,7 +50,18 @@ def main():
     w.show("nudge", rows)
     w.check("nudge", "a turn of four calls over a threshold of three was asked once",
             len(rows) == 1 and rows[0].get("calls", 0) >= 3, "%d nudge events, %d Bash calls" % (len(rows), len(s.bash())))
+    refused = w.events(quiet, session=s.sid, kind="refuse")
+    w.show("refuse", refused)
+    w.check("nudge", "one refuse event says why", len(refused) == 1 and refused[0].get("why") == "nudge", refused)
     w.check("nudge", "the session still ended", s.returncode == 0 and s.result != "", s.result[-200:])
+    w.check("nudge", "its final message still carries the answer",
+            all(word in s.result.lower() for word in ("one", "two", "three", "four")), s.result[-300:])
+
+    other = w.project("gamma")
+    s = w.session(other, FOUR, args.model, COMPOUND_TURN_MIN_CALLS="3", **QUIET)
+    w.check("cooldown", "another session's nudge a moment ago counts: nothing was asked",
+            w.events(other, session=s.sid, kind="nudge") == [] and w.events(other, session=s.sid, kind="refuse") == [],
+            w.events(other, session=s.sid))
 
     s = w.session(quiet, FOUR, args.model, COMPOUND_NUDGE_COOLDOWN="0", **QUIET)
     w.check("quiet", "under the default threshold nothing was asked", w.events(quiet, session=s.sid, kind="nudge") == [])

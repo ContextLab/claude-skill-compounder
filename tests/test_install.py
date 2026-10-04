@@ -278,11 +278,16 @@ class UninstallTest(Case):
         self.assertExit(self.box.run("uninstall"), 0)
         self.assertEqual(json.loads(read(self.box.settings)), {"env": {}})
 
-    def test_an_element_that_was_there_before_install_stays(self):
+    def test_an_element_that_was_there_before_install_goes_too(self):
+        """Until the review of 2026-10-03 it stayed. The element that names this package
+        is this package's, whoever the record says added it: a record written after a
+        failed install said "not us" and the element then outlived every uninstall."""
         write(self.box.settings, json.dumps({"env": {PLUGIN_ENV: self.box.pkg}}))
         self.install()
+        self.assertFalse(json.loads(read(self.box.manifest))["plugin_dir_added"])
         self.assertExit(self.box.run("uninstall"), 0)
-        self.assertEqual(json.loads(read(self.box.settings)), {"env": {PLUGIN_ENV: self.box.pkg}})
+        self.assertEqual(json.loads(read(self.box.settings)), {"env": {}},
+                         "the env object was there before install, so it stays")
 
     def test_settings_added_after_install_survive_uninstall(self):
         self.install()

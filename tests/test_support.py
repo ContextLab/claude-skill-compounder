@@ -63,6 +63,8 @@ class Sandbox(object):
             "GH_CONFIG_DIR": os.path.join(self.home, "gh-config"),
             "GIT_CONFIG_NOSYSTEM": "1",
             "LC_ALL": "C",
+            # `created` and `updated` are LOCAL dates, so the zone is pinned with the clock.
+            "TZ": "UTC",
         }
         for key, value in extra.items():
             if value is None:

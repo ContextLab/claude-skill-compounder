@@ -4,6 +4,8 @@
   match     a substantial prompt, with a lesson recorded that covers it and an earlier
             request like it in the prompt log: a `reuse` event names the lesson and the
             earlier request, and the session can say what it was told to reuse.
+  other     a substantial prompt about something else, with a lesson and an earlier
+            request that only share words with it: nothing is added, and no `reuse` event.
   trivial   a short prompt in the same project: no `reuse` event.
   command   a slash command long enough to pass the length test: no `reuse` event.
 
@@ -15,6 +17,9 @@ LESSON = "release-tagging"
 PROMPT = ("I need a shell script for this project that tags a new release, updates the changelog and pushes the tag "
           "to the remote. Before doing anything else, and without running any tool, tell me in one sentence whether "
           "you were told about existing work that covers this, and name it exactly.")
+OTHER = ("Add a dark mode toggle to the settings page of the web app and remember the user's choice in local storage. "
+         "Before doing anything else, and without running any tool, tell me in one sentence whether you were told "
+         "about existing work that covers this.")
 
 
 def main():
@@ -26,16 +31,27 @@ def main():
     w.seed_prompt("/Users/someone/older-project", "older-session-1",
                   "write a release script that tags the version, updates the changelog and pushes the tag")
 
+    w.add(project, "settings-page-cache", "Use when the settings page shows stale values after a deploy.",
+          "Clear the CDN cache for /settings after every deploy.\n")
+    w.seed_prompt("/Users/someone/older-project", "older-session-2", "centre the login button on the settings page of the web app")
+
     s = w.session(project, PROMPT, args.model)
     rows = w.events(project, session=s.sid, kind="reuse")
     w.show("reuse", rows)
     w.check("match", "one reuse event was written for the substantial prompt", len(rows) == 1, "%d events" % len(rows))
-    w.check("match", "it names the recorded lesson", bool(rows) and LESSON in rows[0].get("lessons", []))
+    w.check("match", "it names the recorded lesson and no other", bool(rows) and rows[0].get("lessons") == [LESSON],
+            rows[0].get("lessons") if rows else "")
     w.check("match", "it names the earlier request from the prompt log",
             bool(rows) and "older-session-1:1" in rows[0].get("prompts", []), rows[0].get("prompts") if rows else "")
     w.check("match", "the session was told: its answer names the lesson", LESSON in s.result, s.result[:200])
     w.check("match", "nothing in the mod failed", w.events(project, session=s.sid, kind="error") == [],
             w.events(project, session=s.sid, kind="error"))
+
+    s = w.session(project, OTHER, args.model)
+    rows = w.events(project, session=s.sid)
+    w.show("event", rows)
+    w.check("other", "a prompt that only shares words with the store and the log got nothing", rows == [],
+            ", ".join(e["type"] for e in rows))
 
     s = w.session(project, "Say the single word hi.", args.model)
     w.check("trivial", "a short prompt wrote no reuse event", w.events(project, session=s.sid, kind="reuse") == [])

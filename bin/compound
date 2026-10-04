@@ -15,11 +15,16 @@ LEVELS
     really lives in (the installed `compound` is a symlink to it).
 
 LESSON FORMAT
-    <dir>/SKILL.md: a `---` line, flat `key: value` lines, a `---` line, the body.
-    Keys written here: name, description, match, created, updated, origin. `match` is a
-    JSON array of Python regular expressions on ONE line; each is tested with
-    re.search() against the text of a tool call (the `command` for Bash, otherwise the
-    JSON of the input). A lesson with `match` is a guard.
+    <dir>/SKILL.md: a `---` line, `key: value` lines, a `---` line, the body.
+    Keys written here: name, description, match, created, updated, origin. A string
+    value that is not a plain YAML scalar is written as a JSON string, which is a
+    valid YAML double-quoted one; both forms, YAML single quotes and a folded or
+    literal block (`description: >`) are read. `--update` edits only the keys it
+    changes and leaves every other frontmatter line as it is. `match` is a JSON array
+    of Python regular expressions on ONE line; each is tested with re.search()
+    against the first 20000 characters of the text of a tool call (the `command` for
+    Bash, otherwise the JSON of the input). A lesson with `match` is a guard.
+    `created` and `updated` are local dates.
 
 EVENT LOG
     <COMPOUND_HOME>/events.jsonl, append-only, one JSON object per line, one write()
@@ -61,15 +66,27 @@ EVENT LOG
                                     path     string    the lesson's directory
                                     guard    bool      it has a match
                                     update   bool      --update rewrote it
+        skill     CLI `skill`       lesson*  string
+                                    level    string    project | user
+                                    path     string    the skill's directory
+        rm        CLI `rm`          lesson*  string
+                                    level    string    project | user
         skip      CLI `skip`        why*     string
+        refuse    mod               why*     string    debt | nudge: why a stop was
+                                                       refused
         nudge     mod               calls    int       tool calls in the turn
         promote   CLI `promote`     lesson*  string
                                     from     string    level it left
                                     to       string    user | general
                                     path     string    where it is now
                                     url      string    the pull request (general only)
-        error     mod               where*   string    hook or step that failed
+        error     mod, `check`      where*   string    hook or step that failed
                                     message* string
+                                    lesson   string    `check` only: the guard that
+                                                       did not finish in the budget
+
+    A line that does not parse is skipped by every reader and counted by `status`.
+    An append to a log whose last line has no newline starts on a new line.
 
     Counting. `counts` for a name is {reuse, guard, recall, learn}: the number of
     events of that type whose `lesson` equals the name or whose `lessons` list
@@ -86,6 +103,7 @@ ENVIRONMENT
     COMPOUND_CLAUDE_DIR  the Claude Code directory (default ~/.claude)
     COMPOUND_PROJECT     the project root, overriding git
     COMPOUND_NOW         pins the clock: epoch seconds or an ISO 8601 time
+    COMPOUND_CHECK_BUDGET_MS  wall-clock budget of one `check`, default 500
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
     COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
     COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
@@ -95,7 +113,11 @@ ENVIRONMENT
 
 EXIT STATUS
     0 success; 2 usage or validation error (an unknown lesson name included);
-    1 any other failure. Errors go to stderr.
+    1 any other failure. Errors go to stderr. No command ends in a traceback: an
+    unexpected exception is one line, `compound: internal error: <type>: <message>`,
+    and exit 1. `check` is the exception: it runs before every tool call, so on any
+    internal failure it prints {"hits": [], "error": "..."} and exits 0, and a guard
+    that does not finish inside the budget is named in "timed_out".
 """
 
 import json
@@ -113,6 +135,15 @@ PLUGIN_ENV = "CLAUDE_CODE_PLUGIN_DIRS"
 SCRIPT_DIRS = ("scripts", "bin", "tools")
 SCRIPT_CAP = 200
 WEEK = 7 * 86400
+CHECK_BUDGET_MS = 500
+CHECK_TEXT_CAP = 20000
+# A match that hits every one of these would refuse nearly every tool call.
+MATCH_PROBES = ("a", "ls", "git status")
+# The package's own procedures: listed, never offered by `find` as reusable work.
+OWN_SKILLS = ("learn", "reuse")
+# What COMPOUND_HOME holds when it is ours; `uninstall --purge` removes nothing else.
+HOME_NAMES = ("lessons", "events.jsonl", "install.json", "app", "history-surfer", "claims")
+MAX_EPOCH = 253402300799  # 9999-12-31T23:59:59Z
 # Prompt-log rows that begin like this were not typed by the user.
 NOT_TYPED = ("<agent-message", "<task-notification", "<system-reminder",
              "This session is being continued from a previous conversation")
@@ -146,14 +177,17 @@ def parse_ts(value):
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        try:
+            return _finite(float(value))
+        except OverflowError:
+            return None
     if not isinstance(value, str):
         return None
     text = value.strip()
     if not text:
         return None
     if re.match(r"^\d+(\.\d+)?$", text):
-        return float(text)
+        return _finite(float(text))
     import datetime
 
     iso = text
@@ -162,11 +196,18 @@ def parse_ts(value):
     iso = re.sub(r"(\.\d{6})\d+", r"\1", iso)
     try:
         dt = datetime.datetime.fromisoformat(iso)
-    except ValueError:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return _finite(dt.timestamp())
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
-    return dt.timestamp()
+
+
+def _finite(number):
+    """`number`, or None for NaN and the infinities."""
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
 
 
 def now():
@@ -174,13 +215,19 @@ def now():
     if pinned:
         value = parse_ts(pinned)
         if value is None:
-            raise usage("COMPOUND_NOW is neither epoch seconds nor an ISO 8601 time: %r" % pinned)
+            raise usage("COMPOUND_NOW is neither epoch seconds nor an ISO 8601 time: %r" % pinned[:80])
+        if not 0 <= value <= MAX_EPOCH:
+            raise usage("COMPOUND_NOW is outside the years 1970 to 9999: %r" % pinned[:80])
         return value
     return time.time()
 
 
 def iso(epoch):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def local_date(epoch):
+    return time.strftime("%Y-%m-%d", time.localtime(epoch))
 
 
 def age_text(seconds):
@@ -297,7 +344,7 @@ def atomic_write(path, text, mode=None):
     os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -332,7 +379,8 @@ def atomic_copy(src, dst):
 
 
 def read_text(path):
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+    """The file's text with its line endings as they are."""
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
         return handle.read()
 
 
@@ -343,48 +391,174 @@ def one_line(value):
     return " ".join(str(value).split())
 
 
+KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$")
+BLOCK_RE = re.compile(r"^[>|][+-]?[0-9]?[+-]?$")
+PLAIN_FIRST = "\"'[]{}>|#&*!%@`,"
+YAML_WORDS = frozenset("true false null yes no on off y n ~".split())
+UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f  ﻿\ud800-\udfff]")
+
+
+def is_plain(value):
+    """Whether `value` means itself, as a string, when written bare after `key: `."""
+    if not value or value != value.strip():
+        return False
+    if value[0] in PLAIN_FIRST or value[:2] in ("- ", "? ", ": ") or value in ("-", "?", ":"):
+        return False
+    if ": " in value or " #" in value or value.endswith(":"):
+        return False
+    if UNSAFE_CHARS.search(value):
+        return False
+    if value.lower() in YAML_WORDS or value in ("=", "<<", "---", "..."):
+        return False
+    if re.match(r"^[-+.0-9]", value) and re.match(r"^[-+]?(\.?[0-9][0-9_.,:eExXoOa-fA-F+-]*|\.inf|\.nan)$", value, re.I):
+        return False  # a number, a date or a time to a YAML reader
+    return True
+
+
+def yaml_string(value):
+    """`value` as YAML: bare when that is safe, else a JSON string (which YAML reads as
+    a double-quoted scalar)."""
+    value = str(value)
+    if is_plain(value):
+        return value
+    quoted = json.dumps(value, ensure_ascii=False)
+    return UNSAFE_CHARS.sub(lambda found: "\\u%04x" % ord(found.group(0)), quoted)
+
+
 def _unquote(value):
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+    """The string a frontmatter value stands for: a JSON or YAML double-quoted string,
+    a YAML single-quoted one, or the bare text."""
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, str):
+            return decoded
+        if '"' not in value[1:-1]:
+            return value[1:-1]
+        return value
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
         inner = value[1:-1]
-        if value[0] not in inner:
-            return inner
+        if "'" not in inner.replace("''", ""):
+            return inner.replace("''", "'")
     return value
+
+
+def split_frontmatter(text):
+    """(bom, lines with their endings, index of the closing `---` or None, problem)."""
+    bom = ""
+    if text.startswith("﻿"):
+        bom, text = "﻿", text[1:]
+    lines = text.splitlines(True)
+    if not lines or lines[0].strip() != "---":
+        return bom, lines, None, "no frontmatter"
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return bom, lines, index, None
+    return bom, lines, None, "frontmatter is not closed"
+
+
+def frontmatter_blocks(lines, end):
+    """([(key or None, first line index, one past its last line)], problem). A key's
+    block is its line and the continuation lines under it: indented lines, list items
+    at column zero under a key with no value, and blank lines between those. A
+    comment or a blank line at column zero belongs to no key."""
+    blocks = []
+    problem = None
+    index = 1
+    while index < end:
+        line = lines[index].rstrip("\r\n")
+        found = KEY_RE.match(line)
+        if not found:
+            if line.strip() and not line.lstrip().startswith("#"):
+                problem = problem or "frontmatter line is not `key: value`: %r" % line
+            blocks.append((None, index, index + 1))
+            index += 1
+            continue
+        bare = not (found.group(2) or "").strip()
+        stop = index + 1
+        probe = index + 1
+        while probe < end:
+            nxt = lines[probe].rstrip("\r\n")
+            if not nxt.strip():
+                probe += 1
+                continue
+            if nxt[0] in " \t" or (bare and (nxt.startswith("- ") or nxt == "-")):
+                probe += 1
+                stop = probe
+                continue
+            break
+        blocks.append((found.group(1), index, stop))
+        index = stop
+    return blocks, problem
 
 
 def parse_skill(text):
     """(frontmatter dict in file order, body, problem). `problem` is None when the
-    frontmatter block is well formed."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}, text, "no frontmatter"
-    end = None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            end = index
-            break
+    frontmatter block is well formed. A value spread over continuation lines (a folded
+    or literal block, a nested mapping, a list) is those lines joined by one space."""
+    bom, lines, end, problem = split_frontmatter(text)
     if end is None:
-        return {}, text, "frontmatter is not closed"
+        return {}, text[len(bom):], problem
+    blocks, problem = frontmatter_blocks(lines, end)
     fields = {}
-    problem = None
-    last = None
-    for line in lines[1:end]:
-        if not line.strip() or line.lstrip().startswith("#"):
+    for key, start, stop in blocks:
+        if key is None:
             continue
-        if line[0] in " \t":
-            if last is not None:
-                fields[last] = (fields[last] + " " + line.strip()).strip()
-            continue
-        found = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
-        if not found:
-            problem = problem or "frontmatter line is not `key: value`: %r" % line
-            continue
-        last = found.group(1)
-        value = found.group(2).strip()
-        if value in (">", "|", ">-", "|-", ">+", "|+"):
+        value = (KEY_RE.match(lines[start].rstrip("\r\n")).group(2) or "").strip()
+        if BLOCK_RE.match(value):
             value = ""
-        fields[last] = value
-    body = "\n".join(lines[end + 1:])
+        rest = [lines[index].strip() for index in range(start + 1, stop)]
+        rest = [part for part in rest if part and not part.startswith("#")]
+        if rest:
+            value = " ".join([value] + rest).strip()
+        if key in fields:
+            problem = problem or "frontmatter gives %r twice" % key
+            continue
+        fields[key] = value
+    body = "".join(lines[end + 1:])
     return fields, body, problem
+
+
+def edit_frontmatter(text, changes, removals=(), body=None, first=()):
+    """`text` with the frontmatter keys in `changes` set to those (already rendered)
+    values, the keys in `removals` gone and, when `body` is given, the body replaced.
+    Every line it is not asked to change is kept byte for byte: a changed key's whole
+    block becomes one line where the block was, a new key goes last (or first when it
+    is named in `first`). Raises Fail(2) when that cannot be done safely."""
+    bom, lines, end, problem = split_frontmatter(text)
+    if end is None:
+        raise usage("its frontmatter cannot be edited safely (%s); nothing was changed" % problem)
+    blocks, problem = frontmatter_blocks(lines, end)
+    if problem:
+        raise usage("its frontmatter cannot be edited safely (%s); nothing was changed" % problem)
+    keys = [key for key, _start, _stop in blocks if key is not None]
+    for key in list(changes) + list(removals):
+        if keys.count(key) > 1:
+            raise usage("its frontmatter cannot be edited safely (%r is given %d times); "
+                        "nothing was changed" % (key, keys.count(key)))
+    eol = "\r\n" if lines[end].endswith("\r\n") else "\n"
+    out = [lines[0]]
+    out.extend("%s: %s%s" % (key, changes[key], eol) for key in first if key in changes and key not in keys)
+    for key, start, stop in blocks:
+        if key is not None and key in removals and key not in changes:
+            continue
+        if key is not None and key in changes:
+            out.append("%s: %s%s" % (key, changes[key], eol))
+            continue
+        out.extend(lines[start:stop])
+    if out and not out[-1].endswith("\n"):
+        out[-1] += eol
+    out.extend("%s: %s%s" % (key, value, eol) for key, value in changes.items()
+               if key not in keys and key not in first)
+    closing = lines[end] if lines[end].endswith("\n") else lines[end] + eol
+    out.append(closing)
+    if body is None:
+        out.extend(lines[end + 1:])
+    else:
+        out.append(body.strip("\n").replace("\r\n", "\n").replace("\n", eol) + eol)
+    return bom + "".join(out)
 
 
 def parse_match(value):
@@ -408,10 +582,14 @@ def match_problem(pattern):
         return "does not compile: %s" % exc
     if compiled.search("") is not None:
         return "matches the empty string, so it would refuse every tool call"
+    if all(compiled.search(probe) is not None for probe in MATCH_PROBES):
+        return "matches %s alike, so it would refuse nearly every tool call" % ", ".join(
+            repr(probe) for probe in MATCH_PROBES)
     return None
 
 
 def render_skill(fields, body):
+    """A new SKILL.md. `fields` values are already rendered (see yaml_string)."""
     out = ["---"]
     for key, value in fields.items():
         out.append("%s: %s" % (key, value))
@@ -439,8 +617,8 @@ def _load_item(level, kind, directory, with_body):
     item["_fields"] = fields
     item["_text"] = text
     if with_body:
-        item["_body"] = body.strip("\n")
-    item["description"] = _unquote(fields.get("description", ""))
+        item["_body"] = body.strip("\r\n")
+    item["description"] = one_line(_unquote(fields.get("description", "")))
     patterns, match_issue = parse_match(fields.get("match"))
     usable = []
     for pattern in patterns:
@@ -487,15 +665,16 @@ def scan(project, with_body=False):
                 skill_md = os.path.join(directory, "SKILL.md")
                 if not os.path.isfile(skill_md):
                     if kind == "lesson":
-                        broken.append({"level": level, "name": name, "path": directory,
-                                       "problem": "no SKILL.md"})
+                        broken.append({"level": level, "kind": kind, "name": name, "path": directory,
+                                       "problem": "no SKILL.md", "unparseable": True})
                     continue
                 item = _load_item(level, kind, directory, with_body)
                 real = os.path.realpath(skill_md)
                 issue = item["_problem"] or (item["_match_issue"] if kind == "lesson" else None)
                 if issue and real not in reported:
                     reported.add(real)
-                    broken.append({"level": level, "name": name, "path": directory, "problem": issue})
+                    broken.append({"level": level, "kind": kind, "name": name, "path": directory,
+                                   "problem": issue, "unparseable": bool(item["_problem"])})
                 if item["_problem"]:
                     continue  # a lesson that does not read is reported, never listed
                 previous = found.get(real)
@@ -509,7 +688,7 @@ def find_item(project, name, with_body=True):
     items, _ = scan(project, with_body=with_body)
     hits = [item for item in items if item["name"] == name]
     if not hits:
-        raise usage("no lesson or skill named %r (see `compound list`)" % name)
+        raise usage("no lesson or skill named %r (see `compound list`)" % one_line(name)[:80])
     if len(hits) > 1:
         sys.stderr.write("compound: %r exists at %s; using the %s one\n" % (
             name, ", ".join(h["level"] for h in hits), hits[0]["level"]))
@@ -612,16 +791,77 @@ def read_events():
     return events, bad
 
 
+def clean_json(value, depth=0):
+    """`value` with NaN and the infinities as strings, so what is printed is JSON every
+    parser reads."""
+    if isinstance(value, float):
+        return value if _finite(value) is not None else str(value)
+    if depth > 200:
+        return str(value)[:200]
+    if isinstance(value, dict):
+        return {str(key): clean_json(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean_json(item, depth + 1) for item in value]
+    return value
+
+
+def dumps(data, **options):
+    """JSON text that is strict JSON and encodes as UTF-8: non-ASCII is kept, a lone
+    surrogate (which no UTF-8 stream can carry) makes the whole text ASCII-escaped."""
+    try:
+        text = json.dumps(data, ensure_ascii=False, allow_nan=False, **options)
+    except ValueError:
+        text = json.dumps(clean_json(data), ensure_ascii=False, allow_nan=False, **options)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(clean_json(data), ensure_ascii=True, allow_nan=False, **options)
+    return text
+
+
 def append_event(event):
-    """One event, one line, one write()."""
+    """One event, one line, one write(). A log whose last line was cut short (no
+    newline) gets one first, in that same write, so this event is not lost with it."""
     path = events_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    line = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    line = (dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
+        size = os.fstat(fd).st_size
+        if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
+            line = b"\n" + line
         os.write(fd, line)
     finally:
         os.close(fd)
+
+
+def events_problem():
+    """Why the event log cannot take an append, or None."""
+    path = events_path()
+    home = os.path.dirname(path)
+    if os.path.lexists(path):
+        if not os.path.isfile(path):
+            return "%s is not a regular file" % path
+        if not os.access(path, os.W_OK | os.R_OK):
+            return "%s is not readable and writable" % path
+        return None
+    if os.path.lexists(home):
+        if not os.path.isdir(home):
+            return "%s is not a directory, so %s cannot be written" % (home, path)
+        if not os.access(home, os.W_OK | os.X_OK):
+            return "%s is not writable, so %s cannot be written" % (home, path)
+    return None
+
+
+def log_soft(event_type, project, **fields):
+    """log_event for a command whose work is already done: a log that cannot be
+    appended to is a warning, never the command's failure."""
+    try:
+        return log_event(event_type, project, **fields)
+    except OSError as exc:
+        sys.stderr.write("compound: warning: the event log %s could not be written (%s); "
+                         "the %s itself was done\n" % (events_path(), exc.strerror or exc, event_type))
+        return None
 
 
 def log_event(event_type, project, **fields):
@@ -703,8 +943,13 @@ def annotate(items, events):
 def event_summary(event):
     kind = event.get("type")
     names = event_names(event)
-    if kind == "skip":
+    if kind in ("skip", "refuse"):
         return one_line(event.get("why", ""))
+    if kind == "skill":
+        return "%s (%s) -> %s" % (", ".join(names), one_line(event.get("level", "?")),
+                                  one_line(event.get("path", "?")))
+    if kind == "rm":
+        return "%s (%s)" % (", ".join(names), one_line(event.get("level", "?")))
     if kind == "error":
         where = one_line(event.get("where", ""))
         message = one_line(event.get("message", ""))
@@ -730,15 +975,15 @@ def event_line(event):
     session = str(event.get("session") or "")[:8] or "-"
     project = os.path.basename(str(event.get("project") or "")) or "-"
     return "%-20s %-8s %-8s %-20s %s" % (
-        event.get("ts", "?"), event.get("type", "?"), session, project[:20],
-        event_summary(event)[:100])
+        one_line(event.get("ts", "?"))[:32], one_line(event.get("type", "?"))[:32], session, project[:20],
+        event_summary(event)[:240 if event.get("type") == "skill" else 100])
 
 
 # ----------------------------------------------------------------------------- output
 
 
 def emit(data):
-    sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    sys.stdout.write(dumps(data, indent=2) + "\n")
 
 
 def table(rows, header):
@@ -802,28 +1047,36 @@ def cmd_add(args):
         if item["level"] == "general":
             raise usage("%r is in the general pool, which changes through a pull request "
                         "(`compound promote`), not in place" % name)
-        fields = dict(item["_fields"])
+        changes = {}
         if description is not None:
             if not description:
                 raise usage("--when is empty")
-            fields["description"] = description
-        if not _unquote(fields.get("description", "")):
+            changes["description"] = yaml_string(description)
+        elif not item["description"]:
             raise usage("--when is required: the lesson has no description")
-        if "name" not in fields:
-            fields = dict([("name", name)] + list(fields.items()))
+        if "name" not in item["_fields"]:
+            changes["name"] = yaml_string(name)
+        removals = []
+        guard = bool(item["_fields"].get("match"))
         if args.match:
-            fields["match"] = json.dumps(args.match, ensure_ascii=False)
+            changes["match"] = json.dumps(args.match, ensure_ascii=False)
+            guard = True
         elif args.no_match:
-            fields.pop("match", None)
-        if args.origin:
-            fields["origin"] = one_line(args.origin)
-        text = body if body.strip() else item["_body"]
-        if not text.strip():
+            removals.append("match")
+            guard = False
+        if args.origin and one_line(args.origin):
+            changes["origin"] = yaml_string(one_line(args.origin))
+        if not body.strip() and not item["_body"].strip():
             raise usage("the body is empty: write the lesson on stdin")
         stamp = now()
-        fields["updated"] = time.strftime("%Y-%m-%d", time.gmtime(stamp))
+        changes["updated"] = local_date(stamp)
         directory = item["path"]
-        atomic_write(item["_file"], render_skill(fields, text))
+        try:
+            text = edit_frontmatter(item["_text"], changes, removals,
+                                    body=body if body.strip() else None, first=("name",))
+        except Fail as exc:
+            raise usage("%s was not updated: %s" % (item["_file"], exc.message))
+        atomic_write(item["_file"], text)
         for source in attachments:
             atomic_copy(source, os.path.join(directory, os.path.basename(source)))
         _pin_mtime(item["_file"], stamp)
@@ -837,25 +1090,33 @@ def cmd_add(args):
             raise usage("--when is required and cannot be empty: it says when the lesson applies")
         if not body.strip():
             raise usage("the body is empty: write the lesson on stdin")
+        if args.level == "project":
+            issue = project_level_problem(project)
+            if issue:
+                raise usage(issue)
         stamp = now()
-        fields = {"name": name, "description": description}
+        fields = {"name": yaml_string(name), "description": yaml_string(description)}
+        guard = bool(args.match)
         if args.match:
             fields["match"] = json.dumps(args.match, ensure_ascii=False)
-        fields["created"] = time.strftime("%Y-%m-%d", time.gmtime(stamp))
+        fields["created"] = local_date(stamp)
         session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-        origin = args.origin or "project %s%s" % (
+        origin = one_line(args.origin or "") or "project %s%s" % (
             os.path.basename(project) or project, (", session " + session[:8]) if session else "")
-        fields["origin"] = one_line(origin)
+        fields["origin"] = yaml_string(one_line(origin))
         lessons, _skills = dirs_of(project, args.level)
         directory = os.path.join(lessons, name)
+        if os.path.lexists(directory):
+            raise usage("%s exists and is not a lesson that reads (see `compound list`); remove it with "
+                        "`compound rm %s` first" % (directory, name))
         _create_dir(lessons, name, render_skill(fields, body), attachments)
         _pin_mtime(os.path.join(directory, "SKILL.md"), stamp)
         level, kind = args.level, "lesson"
 
-    log_event("learn", project, lesson=name, level=level, kind=kind, path=directory,
-              guard=bool(fields.get("match")), update=bool(args.update))
+    log_soft("learn", project, lesson=name, level=level, kind=kind, path=directory,
+             guard=guard, update=bool(args.update))
     result = {"name": name, "level": level, "kind": kind, "path": directory,
-              "updated": bool(args.update), "guard": bool(fields.get("match"))}
+              "updated": bool(args.update), "guard": guard}
     if args.json:
         emit(result)
     else:
@@ -863,6 +1124,21 @@ def cmd_add(args):
             "updated" if args.update else "recorded", "guard" if result["guard"] else kind,
             name, level, directory))
     return 0
+
+
+def project_level_problem(project):
+    """Why a NEW lesson must not be written at the project level of `project`, or None.
+    From the home directory (or the directory the Claude directory sits in) the
+    'project' store is <home>/.claude/compound/lessons, which is the user store under
+    another name."""
+    real = os.path.realpath(project)
+    reserved = [(os.path.realpath(os.path.expanduser("~")), "the home directory"),
+                (os.path.realpath(os.path.dirname(claude_dir())), "the directory that holds the Claude directory")]
+    for path, label in reserved:
+        if real == path:
+            return ("the project root is %s (%s), not a project, so a project-level lesson would land in "
+                    "the user's own .claude. Pass --level user, or run inside a project" % (label, project))
+    return None
 
 
 def _pin_mtime(path, stamp):
@@ -900,20 +1176,29 @@ def _create_dir(parent, name, text, attachments):
 
 def cmd_list(args):
     project = project_root()
-    items, _ = scan(project)
+    items, broken = scan(project)
     if args.scripts:
         items = items + scan_scripts(project)
+    unreadable = [row for row in broken if row.get("unparseable")]
     if args.level:
         items = [item for item in items if item["level"] == args.level]
+        unreadable = [row for row in unreadable if row["level"] == args.level]
     events, _ = read_events()
     rows = annotate(items, events)
     if args.json:
+        # The list stays a list of what reads; what does not is said on stderr.
+        for row in unreadable:
+            sys.stderr.write("compound: unparseable %s %s: %s (remove it with `compound rm %s`)\n" % (
+                row["level"], row["path"], row["problem"], row["name"]))
         emit(rows)
         return 0
-    if not rows:
+    if not rows and not unreadable:
         sys.stdout.write("nothing recorded yet\n")
         return 0
     lines = []
+    for row in unreadable:
+        lines.append([row["level"], "unparseable", row["name"], "-", "",
+                      "%s: %s" % (row["path"], one_line(row["problem"])[:120])])
     for row in rows:
         counts = row["counts"]
         kind = "guard" if (row["kind"] == "lesson" and row["match"]) else row["kind"]
@@ -921,6 +1206,7 @@ def cmd_list(args):
         lines.append([row["level"], kind, row["name"],
                       "%d/%d/%d" % (counts["reuse"], counts["guard"], counts["recall"]),
                       flag, row["description"][:70]])
+    lines = [row for row in lines if row[1] != "unparseable"] + [row for row in lines if row[1] == "unparseable"]
     sys.stdout.write(table(lines, ["LEVEL", "KIND", "NAME", "USE/GRD/RCL", "FLAG", "WHEN"]))
     return 0
 
@@ -1013,6 +1299,7 @@ def prompt_hits(words, project, cap=5):
             seen.add(key)
             seen.add(one_line(prompt))
             hits.append({"id": str(row.get("id") or ""), "ts": str(row.get("ts") or ""),
+                         "session": str(row.get("session_id") or row.get("session") or ""),
                          "project": str(row.get("cwd") or ""), "scope": scope,
                          "score": score, "prompt": one_line(prompt)[:300]})
             if len(hits) >= cap:
@@ -1026,6 +1313,9 @@ def cmd_find(args):
         raise usage("give at least one word to search for")
     project = project_root()
     items, _ = scan(project, with_body=True)
+    # The package's own procedures are how lessons are made and reused, not reusable work.
+    items = [item for item in items
+             if not (item["kind"] == "skill" and item["level"] == "general" and item["name"] in OWN_SKILLS)]
     candidates = items + scan_scripts(project)
     events, _ = read_events()
     scored = []
@@ -1067,8 +1357,99 @@ def cmd_find(args):
 # ----------------------------------------------------------------------------- check
 
 
+def check_budget():
+    value = os.environ.get("COMPOUND_CHECK_BUDGET_MS", "")
+    if re.match(r"^\d{1,6}$", value) and int(value) >= 1:
+        return int(value) / 1000.0
+    return CHECK_BUDGET_MS / 1000.0
+
+
+def _match_inline(guards, text, report):
+    for index, patterns in enumerate(guards):
+        report("S", index)
+        hit = False
+        for pattern in patterns:
+            try:
+                if re.search(pattern, text):
+                    hit = True
+                    break
+            except (re.error, RecursionError, MemoryError, OverflowError):
+                continue
+        report("H" if hit else "M", index)
+
+
+def run_guards(guards, text, deadline):
+    """(indexes that hit, indexes that did not finish, indexes never started).
+
+    The matching runs in a forked child that reports each guard as it starts and as it
+    ends; the parent waits until `deadline` (time.monotonic) and then kills it. A
+    regular expression that backtracks without end cannot be interrupted from inside
+    the process that runs it, so it is run in one that can be abandoned."""
+    started, ended, hits = [], [], []
+
+    def note(kind, index):
+        (started if kind == "S" else ended).append(index)
+        if kind == "H":
+            hits.append(index)
+
+    if not guards:
+        return hits, [], []
+    if not hasattr(os, "fork"):
+        _match_inline(guards, text, note)
+        return hits, [], []
+    reader, writer = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    child = os.fork()
+    if child == 0:
+        code = 0
+        try:
+            os.close(reader)
+            _match_inline(guards, text, lambda kind, index: os.write(writer, ("%s%d\n" % (kind, index)).encode()))
+        except BaseException:
+            code = 1
+        finally:
+            os._exit(code)
+    os.close(writer)
+    os.set_blocking(reader, False)
+    pending = b""
+    try:
+        while True:
+            try:
+                chunk = os.read(reader, 65536)
+            except BlockingIOError:
+                chunk = None
+            except InterruptedError:
+                continue
+            if chunk == b"":
+                break
+            if chunk:
+                pending += chunk
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.001)
+    finally:
+        try:
+            os.kill(child, 9)  # SIGKILL
+        except OSError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except OSError:
+            pass
+        os.close(reader)
+    for line in pending.decode("ascii", "replace").split("\n"):
+        if line[:1] in ("S", "H", "M") and line[1:].isdigit() and int(line[1:]) < len(guards):
+            note(line[0], int(line[1:]))
+    unfinished = [index for index in started if index not in ended]
+    never = [index for index in range(len(guards)) if index not in started]
+    return hits, unfinished, never
+
+
 def cmd_check(_args=None):
-    raw = sys.stdin.read() if sys.stdin is not None and not sys.stdin.isatty() else ""
+    began = time.monotonic()
+    raw = read_stdin()
     try:
         call = json.loads(raw)
     except ValueError:
@@ -1084,20 +1465,37 @@ def cmd_check(_args=None):
         text = ""
     else:
         text = json.dumps(payload, ensure_ascii=False)
-    hits = []
+    text = text[:CHECK_TEXT_CAP]
+    result = {"hits": []}
     if text:
-        items, _ = scan(project_root(fast=True), with_body=True)
-        for item in items:
-            for pattern in item["match"]:
+        budget = check_budget()
+        project = project_root(fast=True)
+        items, _ = scan(project, with_body=True)
+        guarded = [item for item in items if item["match"]]
+        hits, unfinished, never = run_guards([item["match"] for item in guarded], text, began + budget)
+        for index in sorted(hits):
+            item = guarded[index]
+            result["hits"].append({"name": item["name"], "level": item["level"],
+                                   "path": item["path"], "text": item["_body"].strip()})
+        if unfinished or never:
+            result["timed_out"] = [guarded[index]["name"] for index in unfinished]
+            result["unchecked"] = [guarded[index]["name"] for index in never]
+            for index in unfinished:
                 try:
-                    found = re.search(pattern, text)
-                except re.error:
-                    continue
-                if found:
-                    hits.append({"name": item["name"], "level": item["level"],
-                                 "path": item["path"], "text": item["_body"].strip()})
-                    break
-    sys.stdout.write(json.dumps({"hits": hits}, ensure_ascii=False) + "\n")
+                    log_event("error", project, where="check", lesson=guarded[index]["name"],
+                              message="the guard %s did not finish matching within %d ms and was abandoned; "
+                                      "rewrite its match (%s)" % (guarded[index]["name"], int(budget * 1000),
+                                                                  guarded[index]["path"]))
+                except Exception:  # the log is the report of this failure; it cannot fail the check
+                    pass
+            if not unfinished:
+                try:
+                    log_event("error", project, where="check",
+                              message="the %d ms budget ran out with %d guard(s) not yet tested: %s" % (
+                                  int(budget * 1000), len(never), ", ".join(result["unchecked"])[:300]))
+                except Exception:
+                    pass
+    sys.stdout.write(dumps(result) + "\n")
     return 0
 
 
@@ -1126,6 +1524,7 @@ def cmd_skill(args):
     _lessons, skills = dirs_of(project, item["level"])
     target = os.path.join(skills, item["name"])
     _move(item["path"], target)
+    log_soft("skill", project, lesson=item["name"], level=item["level"], path=target)
     result = {"name": item["name"], "level": item["level"], "kind": "skill", "path": target}
     if args.json:
         emit(result)
@@ -1135,14 +1534,39 @@ def cmd_skill(args):
 
 
 def _lesson_files(directory):
+    """(relative paths to publish, relative paths left out). Dotfiles, dot-directories
+    and symbolic links are left out and named; bytecode caches are left out silently."""
     out = []
+    excluded = []
     for root, dirnames, filenames in os.walk(directory):
-        dirnames[:] = sorted(d for d in dirnames if d not in ("__pycache__", ".git"))
-        for filename in sorted(filenames):
-            if filename == ".DS_Store" or filename.endswith(".pyc"):
+        keep = []
+        for name in sorted(dirnames):
+            path = os.path.join(root, name)
+            if name == "__pycache__":
                 continue
-            out.append(os.path.relpath(os.path.join(root, filename), directory))
-    return out
+            if name.startswith(".") or os.path.islink(path):
+                excluded.append(os.path.relpath(path, directory))
+                continue
+            keep.append(name)
+        dirnames[:] = keep
+        for filename in sorted(filenames):
+            path = os.path.join(root, filename)
+            if filename.endswith(".pyc"):
+                continue
+            if filename.startswith(".") or os.path.islink(path) or not os.path.isfile(path):
+                excluded.append(os.path.relpath(path, directory))
+                continue
+            out.append(os.path.relpath(path, directory))
+    return out, sorted(excluded)
+
+
+def published_text(item):
+    """The SKILL.md that is proposed: the local one without its `origin`, which names
+    the project and session the lesson came from."""
+    try:
+        return edit_frontmatter(item.get("_text", ""), {}, removals=("origin",))
+    except Fail as exc:
+        raise usage("%s cannot be published: %s" % (item["_file"], exc.message))
 
 
 def _run(argv, cwd=None, timeout=300):
@@ -1174,7 +1598,7 @@ def cmd_promote(args):
         lessons, skills = dirs_of(project, "user")
         target = os.path.join(lessons if item["kind"] == "lesson" else skills, name)
         _move(item["path"], target)
-        log_event("promote", project, lesson=name, to="user", path=target, **{"from": "project"})
+        log_soft("promote", project, lesson=name, to="user", path=target, **{"from": "project"})
         result = {"name": name, "from": "project", "to": "user", "kind": item["kind"], "path": target}
         if args.json:
             emit(result)
@@ -1189,7 +1613,8 @@ def cmd_promote(args):
         raise usage("COMPOUND_UPSTREAM is not owner/repo: %r" % upstream)
     subdir = "lessons" if item["kind"] == "lesson" else "skills"
     branch = "compound/%s-%s" % (item["kind"], name)
-    files = _lesson_files(item["path"])
+    files, excluded = _lesson_files(item["path"])
+    skill_md = published_text(item)
     title = "Add %s: %s" % (item["kind"], name)
     body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
         item["kind"], name, item["description"])
@@ -1201,6 +1626,7 @@ def cmd_promote(args):
         "name": name, "from": item["level"], "to": "general", "upstream": upstream,
         "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
         "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
+        "skill_md": skill_md, "excluded": excluded,
     }
     if not args.yes:
         if args.json:
@@ -1209,12 +1635,15 @@ def cmd_promote(args):
             sys.stdout.write(
                 "Plan (nothing has been written; run again with --yes to do it):\n"
                 "  upstream : %s\n  branch   : %s\n  from     : %s (%s level)\n  files    :\n%s"
+                "  excluded : %s\n%s"
                 "  PR title : %s\n  PR body  :\n%s\n"
                 "  SKILL.md as it will be published:\n%s\n" % (
                     upstream, branch, item["path"], item["level"],
-                    "".join("    %s\n" % path for path in plan["files"]), title,
+                    "".join("    %s\n" % path for path in plan["files"]),
+                    "dotfiles and links, never published" if excluded else "nothing",
+                    "".join("    %s\n" % path for path in excluded), title,
                     "".join("    %s\n" % line for line in body.splitlines()),
-                    "".join("    %s\n" % line for line in item.get("_text", "").splitlines())))
+                    "".join("    %s\n" % line for line in skill_md.splitlines())))
         return 0
 
     import shutil
@@ -1239,8 +1668,13 @@ def cmd_promote(args):
         if os.path.exists(target):
             raise failure("%s/%s already exists in %s" % (subdir, name, upstream))
         _must(["git", "checkout", "-b", branch], cwd=clone)
-        shutil.copytree(item["path"], target,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", ".git"))
+        for rel in files:
+            os.makedirs(os.path.dirname(os.path.join(target, rel)), exist_ok=True)
+            if rel == "SKILL.md":
+                with open(os.path.join(target, rel), "w", encoding="utf-8", newline="") as handle:
+                    handle.write(skill_md)
+            else:
+                shutil.copy2(os.path.join(item["path"], rel), os.path.join(target, rel))
         _must(["git", "add", "--", os.path.join(subdir, name)], cwd=clone)
         _must(["git", "commit", "-m", title], cwd=clone, what="git commit")
         helper = ["-c", "credential.helper=", "-c", "credential.helper=!%s auth git-credential" % gh]
@@ -1257,8 +1691,8 @@ def cmd_promote(args):
         url = url.splitlines()[-1].strip() if url else ""
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    log_event("promote", project, lesson=name, to="general", path=item["path"], url=url,
-              **{"from": item["level"]})
+    log_soft("promote", project, lesson=name, to="general", path=item["path"], url=url,
+             **{"from": item["level"]})
     plan["url"] = url
     if args.json:
         emit(plan)
@@ -1271,7 +1705,17 @@ def cmd_rm(args):
     import shutil
 
     project = project_root()
-    item = find_item(project, args.name)
+    try:
+        item = find_item(project, args.name)
+    except Fail:
+        # A directory whose SKILL.md does not parse is no item; it is removed by its
+        # directory name, at the project and user levels only.
+        _items, broken = scan(project)
+        wrecks = [row for row in broken if row["name"] == args.name and row.get("unparseable")
+                  and row["level"] != "general"]
+        if not wrecks:
+            raise
+        item = wrecks[0]
     if item["level"] == "general":
         raise usage("%r is in the general pool and ships with the package; it is not removed here" % args.name)
     if item["kind"] != "lesson" and not args.force:
@@ -1282,6 +1726,7 @@ def cmd_rm(args):
         os.unlink(path)
     else:
         shutil.rmtree(path)
+    log_soft("rm", project, lesson=item["name"], level=item["level"])
     result = {"name": item["name"], "level": item["level"], "kind": item["kind"], "removed": path}
     if args.json:
         emit(result)
@@ -1397,12 +1842,44 @@ def load_settings(path):
 def write_settings(path, data):
     """Atomically, and through the symlink when `path` is one."""
     real = os.path.realpath(path)
+    issue = settings_write_problem(path)
+    if issue:
+        raise failure(issue)
     mode = None
     try:
         mode = os.stat(real).st_mode & 0o777
     except OSError:
         pass
-    atomic_write(real, json.dumps(data, ensure_ascii=False, indent=2) + "\n", mode=mode)
+    atomic_write(real, dumps(data, indent=2) + "\n", mode=mode)
+
+
+def settings_write_problem(path):
+    """Why the settings file must not be written, or None. A file its owner made
+    read-only is refused: a rename over it would replace it all the same."""
+    real = os.path.realpath(path)
+    if os.path.lexists(real):
+        if not os.path.isfile(real):
+            return "%s is not a regular file; it was left untouched" % path
+        if not os.access(real, os.W_OK):
+            return "%s is read-only; it was left untouched. Make it writable and run again" % path
+        return None
+    return dir_problem(os.path.dirname(real), "the directory of %s" % path)
+
+
+def dir_problem(path, label):
+    """Why the directory `path` cannot be made or written into, or None: its nearest
+    existing ancestor must be a directory that can be written."""
+    here = path
+    while not os.path.lexists(here):
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    if not os.path.isdir(here):
+        return "%s cannot be used: %s is not a directory" % (label, here)
+    if not os.access(here, os.W_OK | os.X_OK):
+        return "%s cannot be used: %s is not writable" % (label, here)
+    return None
 
 
 def plugin_dirs(settings):
@@ -1424,6 +1901,12 @@ def read_manifest():
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def is_our_manifest(data):
+    """Whether `data` is an install record this tool wrote."""
+    return (isinstance(data, dict) and isinstance(data.get("package"), str)
+            and isinstance(data.get("settings"), str) and "plugin_dir_added" in data)
 
 
 # ----------------------------------------------------------------------------- install
@@ -1494,61 +1977,141 @@ def cmd_install(args):
         if not (os.path.islink(link) and _same_path(link, script)):
             raise failure("%s exists and is not a link to this package; it was left alone. "
                           "Remove it or pass --bin-dir" % link)
-    report = []
-
-    env_created = False
-    added = False
-    if not mod_enabled(settings, package):
-        if not isinstance(settings.get("env"), dict):
-            settings["env"] = {}
-            env_created = True
-        parts = plugin_dirs(settings) + [package]
-        settings["env"][PLUGIN_ENV] = os.pathsep.join(parts)
-        write_settings(spath, settings)
-        added = True
-        report.append("mod      enabled: added %s to env.%s in %s" % (package, PLUGIN_ENV, spath))
-    else:
-        report.append("mod      already enabled in %s" % spath)
-
-    link_created = False
-    if link:
-        if os.path.lexists(link):
-            report.append("cli      %s already links here" % link)
-        else:
-            os.makedirs(bin_dir, exist_ok=True)
-            os.symlink(script, link)
-            link_created = True
-            report.append("cli      linked %s" % link)
-    else:
-        report.append("cli      not linked: neither ~/.local/bin nor ~/bin is on PATH "
-                      "(add one and run install again, or pass --bin-dir)")
-
-    surfer = install_surfer(claude, bin_dir, previous.get("surfer"))
-    report.append("prompts  history-surfer %s%s" % (
-        surfer["status"], (": " + surfer["detail"]) if surfer.get("detail") else
-        (" at " + surfer["home"]) if surfer.get("home") else ""))
+    home = home_dir()
+    mpath = manifest_path()
+    needs_settings = not mod_enabled(settings, package)
+    needs_link = bool(link) and not os.path.lexists(link)
+    for issue in (
+        dir_problem(home, "COMPOUND_HOME (%s)" % home),
+        "%s is not a regular file" % mpath if os.path.lexists(mpath) and not os.path.isfile(mpath) else None,
+        settings_write_problem(spath) if needs_settings else None,
+        dir_problem(bin_dir, "--bin-dir %s" % bin_dir) if needs_link else None,
+    ):
+        if issue:
+            raise failure("nothing was installed: %s" % issue)
 
     same_target = previous.get("settings") == spath and previous.get("package") == package
+    env_created = needs_settings and not isinstance(settings.get("env"), dict)
     manifest = {
         "package": package,
         "claude_dir": claude,
         "settings": spath,
-        "plugin_dir_added": added or bool(same_target and previous.get("plugin_dir_added")),
-        "settings_created": (added and not existed) or bool(same_target and previous.get("settings_created")),
-        "env_created": (added and env_created) or bool(same_target and previous.get("env_created")),
+        "plugin_dir_added": needs_settings or bool(same_target and previous.get("plugin_dir_added")),
+        "settings_created": (needs_settings and not existed) or bool(same_target and previous.get("settings_created")),
+        "env_created": env_created or bool(same_target and previous.get("env_created")),
         "link": link,
-        "link_created": link_created or bool(previous.get("link") == link and previous.get("link_created")),
-        "surfer": surfer,
+        "link_created": needs_link or bool(previous.get("link") == link and previous.get("link_created")),
+        "surfer": previous.get("surfer") or {"status": "pending", "detail": "install did not finish"},
         "installed_at": previous.get("installed_at") or iso(now()),
     }
-    text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+
+    def record():
+        text = dumps(manifest, indent=2) + "\n"
+        try:
+            unchanged = read_text(mpath) == text
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            atomic_write(mpath, text)
+
+    # What a failure has to put back.
+    undo = []
+    made_dirs = []
+
+    def make_dirs(path):
+        missing = []
+        here = path
+        while here and not os.path.lexists(here):
+            missing.append(here)
+            here = os.path.dirname(here)
+        made_dirs.extend(missing)
+        os.makedirs(path, exist_ok=True)
+
     try:
-        unchanged = read_text(manifest_path()) == text
+        old_manifest = read_text(mpath)
     except OSError:
-        unchanged = False
-    if not unchanged:
-        atomic_write(manifest_path(), text)
-    report.append("record   %s" % manifest_path())
+        old_manifest = None
+    real_settings = os.path.realpath(spath)
+    try:
+        with open(real_settings, "rb") as handle:
+            old_settings = handle.read()
+    except OSError:
+        old_settings = None
+
+    def restore(path, data):
+        if data is None:
+            if os.path.lexists(path):
+                os.unlink(path)
+        else:
+            mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else None
+            text = data if isinstance(data, str) else data.decode("utf-8", "surrogateescape")
+            import tempfile
+
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".restore.", suffix=".tmp")
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(text.encode("utf-8", "surrogateescape"))
+            if mode is not None:
+                os.chmod(tmp, mode)
+            os.replace(tmp, path)
+
+    report = []
+    try:
+        # The record goes first: from here on, whatever is done is written down.
+        make_dirs(home)
+        undo.append(lambda: restore(mpath, old_manifest))
+        record()
+
+        if needs_settings:
+            if not isinstance(settings.get("env"), dict):
+                settings["env"] = {}
+            parts = plugin_dirs(settings) + [package]
+            settings["env"][PLUGIN_ENV] = os.pathsep.join(parts)
+            make_dirs(os.path.dirname(real_settings))
+            undo.append(lambda: restore(real_settings, old_settings))
+            write_settings(spath, settings)
+            report.append("mod      enabled: added %s to env.%s in %s" % (package, PLUGIN_ENV, spath))
+        else:
+            report.append("mod      already enabled in %s" % spath)
+
+        if link:
+            if os.path.lexists(link):
+                report.append("cli      %s already links here" % link)
+            else:
+                make_dirs(bin_dir)
+                os.symlink(script, link)
+                undo.append(lambda: os.unlink(link))
+                report.append("cli      linked %s" % link)
+        else:
+            report.append("cli      not linked: neither ~/.local/bin nor ~/bin is on PATH "
+                          "(add one and run install again, or pass --bin-dir)")
+
+        surfer = install_surfer(claude, bin_dir, previous.get("surfer"))
+        report.append("prompts  history-surfer %s%s" % (
+            surfer["status"], (": " + surfer["detail"]) if surfer.get("detail") else
+            (" at " + surfer["home"]) if surfer.get("home") else ""))
+        manifest["surfer"] = surfer
+        record()
+    except BaseException as exc:
+        left = []
+        for step in reversed(undo):
+            try:
+                step()
+            except Exception as problem:
+                left.append(one_line(problem)[:200])
+        for path in made_dirs:
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
+        if not isinstance(exc, Exception):
+            raise
+        why = exc.message if isinstance(exc, Fail) else (
+            "%s: %s" % (exc.strerror, exc.filename) if isinstance(exc, OSError) and exc.strerror
+            else "%s: %s" % (type(exc).__name__, exc))
+        raise failure("install failed and was rolled back: %s%s" % (
+            one_line(why)[:300], ("; could not undo: " + "; ".join(left)) if left else ""))
+
+    report.append("record   %s" % mpath)
     if args.json:
         emit(manifest)
     else:
@@ -1565,41 +2128,45 @@ def cmd_uninstall(args):
     if args.claude_dir:
         os.environ["COMPOUND_CLAUDE_DIR"] = _expand(args.claude_dir)
     manifest = read_manifest()
+    recorded_here = is_our_manifest(manifest)
     report = []
     problems = []
     if manifest is None:
         report.append("no install record at %s; nothing to reverse" % manifest_path())
     else:
-        package = manifest.get("package") or pkg_root()
-        spath = manifest.get("settings") or settings_path()
-        if manifest.get("plugin_dir_added"):
-            try:
-                settings, existed = load_settings(spath)
-            except Fail as exc:
-                problems.append("settings not edited: " + exc.message)
-            else:
-                env = settings.get("env") if isinstance(settings.get("env"), dict) else None
-                parts = plugin_dirs(settings)
-                kept = [part for part in parts if not _same_path(part, package)]
-                if existed and env is not None and len(kept) != len(parts):
-                    if kept:
-                        env[PLUGIN_ENV] = os.pathsep.join(kept)
-                    else:
-                        del env[PLUGIN_ENV]
-                        if not env and manifest.get("env_created"):
-                            del settings["env"]
-                    if not settings and manifest.get("settings_created"):
-                        os.unlink(os.path.realpath(spath))
-                        report.append("mod      removed %s, which install had created" % spath)
-                    else:
-                        write_settings(spath, settings)
-                        report.append("mod      removed %s from env.%s in %s" % (package, PLUGIN_ENV, spath))
+        package = manifest.get("package") if isinstance(manifest.get("package"), str) else pkg_root()
+        spath = manifest.get("settings") if isinstance(manifest.get("settings"), str) else settings_path()
+        # The element that names this package is ours whatever the record says about
+        # who added it: a record written after a failed install said "not us" about an
+        # element an earlier run had added, and the element then stayed for ever.
+        ours = [package, pkg_root()]
+        try:
+            settings, existed = load_settings(spath)
+            env = settings.get("env") if isinstance(settings.get("env"), dict) else None
+            parts = plugin_dirs(settings)
+            kept = [part for part in parts if not any(_same_path(part, mine) for mine in ours)]
+            if existed and env is not None and len(kept) != len(parts):
+                if kept:
+                    env[PLUGIN_ENV] = os.pathsep.join(kept)
                 else:
-                    report.append("mod      %s was not in %s" % (package, spath))
-        else:
-            report.append("mod      the settings element was there before install; left in place")
+                    del env[PLUGIN_ENV]
+                    if not env and manifest.get("env_created"):
+                        del settings["env"]
+                if not settings and manifest.get("settings_created"):
+                    issue = settings_write_problem(spath)
+                    if issue:
+                        raise failure(issue)
+                    os.unlink(os.path.realpath(spath))
+                    report.append("mod      removed %s, which install had created" % spath)
+                else:
+                    write_settings(spath, settings)
+                    report.append("mod      removed %s from env.%s in %s" % (package, PLUGIN_ENV, spath))
+            else:
+                report.append("mod      %s was not in %s" % (package, spath))
+        except Fail as exc:
+            problems.append("settings not edited: " + exc.message)
         link = manifest.get("link")
-        if link and manifest.get("link_created"):
+        if isinstance(link, str) and link and manifest.get("link_created") and not problems:
             script = os.path.join(package, "bin", "compound")
             if os.path.islink(link) and (_same_path(link, script) or os.readlink(link) == script):
                 os.unlink(link)
@@ -1608,8 +2175,8 @@ def cmd_uninstall(args):
                 report.append("cli      %s no longer links to this package; left alone" % link)
             else:
                 report.append("cli      %s was already gone" % link)
-        surfer = manifest.get("surfer") or {}
-        if surfer.get("status") == "installed" and surfer.get("home"):
+        surfer = manifest.get("surfer") if isinstance(manifest.get("surfer"), dict) else {}
+        if surfer.get("status") == "installed" and isinstance(surfer.get("home"), str) and surfer["home"]:
             setup = os.path.join(surfer["home"], "scripts", "setup.py")
             if args.purge and os.path.isfile(setup):
                 code, out, err = _run([sys.executable, setup, "--uninstall",
@@ -1634,9 +2201,20 @@ def cmd_uninstall(args):
         protected = [os.path.realpath(p) for p in ("/", os.path.expanduser("~"), claude_dir())]
         if real in protected or any(p.startswith(real.rstrip(os.sep) + os.sep) for p in protected):
             problems.append("--purge refused: %s is not a directory of compound's own" % home)
+        elif os.path.islink(home):
+            problems.append("--purge refused: %s is a symbolic link; remove what it points at by hand" % home)
         elif os.path.isdir(home):
-            shutil.rmtree(home)
-            report.append("purged   %s (user lessons and the event log)" % home)
+            # Ours when install's own record was in it, or when it holds nothing but
+            # the names this tool and its mod put there.
+            strangers = sorted(name for name in os.listdir(home) if name not in HOME_NAMES)
+            if strangers and not recorded_here:
+                problems.append(
+                    "--purge refused: %s holds %s, which compound did not put there, and no install record "
+                    "of compound's; nothing was removed" % (home, ", ".join(strangers[:8]) + (
+                        " and %d more" % (len(strangers) - 8) if len(strangers) > 8 else "")))
+            else:
+                shutil.rmtree(home)
+                report.append("purged   %s (user lessons and the event log)" % home)
         else:
             report.append("purged   nothing: %s does not exist" % home)
     elif not args.purge:
@@ -1660,42 +2238,46 @@ def cmd_update(args):
     code, old, err = _run(["git", "-C", package, "rev-parse", "--short", "HEAD"], timeout=30)
     if code != 0:
         raise failure("%s is not a git checkout: %s" % (package, one_line(err)[:200]))
+    code, _branch, _err = _run(["git", "-C", package, "symbolic-ref", "-q", "HEAD"], timeout=30)
+    if code != 0:
+        raise failure("%s is on a detached HEAD (at %s), not on a branch, so there is nothing to pull; "
+                      "check out a branch there (git -C %s switch main) and run update again" % (package, old, package))
+    _code, changed, _err = _run(["git", "-C", package, "status", "--porcelain", "--untracked-files=no"], timeout=60)
+    dirty = bool(changed.strip())
+    if dirty and not args.json:
+        sys.stdout.write("%s has uncommitted changes (%d file(s)); pulling anyway, and git stops if they are "
+                         "in the way\n" % (package, len(changed.strip().splitlines())))
+        sys.stdout.flush()
     code, out, err = _run(["git", "-C", package, "pull", "--ff-only"], timeout=300)
     if code != 0:
         raise failure("git pull --ff-only failed in %s: %s" % (package, one_line(err or out)[:300]))
     _code, new, _err = _run(["git", "-C", package, "rev-parse", "--short", "HEAD"], timeout=30)
 
-    general = {}
-    for base in (os.path.join(package, "lessons"), os.path.join(package, "skills")):
-        try:
-            names = os.listdir(base)
-        except OSError:
-            continue
-        for name in names:
-            skill_md = os.path.join(base, name, "SKILL.md")
-            if os.path.isfile(skill_md):
-                general[name] = skill_md
+    # Only a lesson under the user lessons directory is ever a candidate, and only
+    # against the general LESSON of its name; nothing under <claude dir>/skills is
+    # touched. It goes when its whole tree is the general one: same files, same bytes.
     removed = []
     differing = []
-    user_lessons, user_skills = dirs_of(project_root(), "user")
-    for base in (user_lessons, user_skills):
-        try:
-            names = sorted(os.listdir(base))
-        except OSError:
+    user_lessons, _user_skills = dirs_of(project_root(), "user")
+    try:
+        names = sorted(os.listdir(user_lessons))
+    except OSError:
+        names = []
+    for name in names:
+        directory = os.path.join(user_lessons, name)
+        theirs = os.path.join(package, "lessons", name)
+        if name.startswith(".") or os.path.islink(directory) or not os.path.isdir(directory):
             continue
-        for name in names:
-            directory = os.path.join(base, name)
-            skill_md = os.path.join(directory, "SKILL.md")
-            if name not in general or os.path.islink(directory) or not os.path.isfile(skill_md):
-                continue
-            if os.path.realpath(skill_md) == os.path.realpath(general[name]):
-                continue
-            if read_text(skill_md) == read_text(general[name]):
-                shutil.rmtree(directory)
-                removed.append({"name": name, "path": directory})
-            else:
-                differing.append({"name": name, "path": directory, "general": os.path.dirname(general[name])})
-    result = {"package": package, "old": old, "new": new, "changed": old != new,
+        if not os.path.isfile(os.path.join(theirs, "SKILL.md")):
+            continue
+        if os.path.realpath(directory) == os.path.realpath(theirs):
+            continue
+        if same_tree(directory, theirs):
+            shutil.rmtree(directory)
+            removed.append({"name": name, "path": directory})
+        else:
+            differing.append({"name": name, "path": directory, "general": theirs})
+    result = {"package": package, "old": old, "new": new, "changed": old != new, "dirty": dirty,
               "removed": removed, "differing": differing}
     if args.json:
         emit(result)
@@ -1705,11 +2287,35 @@ def cmd_update(args):
     else:
         sys.stdout.write("updated %s -> %s\n" % (old, new))
     for row in removed:
-        sys.stdout.write("removed user lesson %s: the general pool now carries the same text\n" % row["name"])
+        sys.stdout.write("removed user lesson %s: the general pool now carries the same files\n" % row["name"])
     for row in differing:
-        sys.stdout.write("kept user lesson %s: the general pool has the name with different text "
+        sys.stdout.write("kept user lesson %s: the general pool has the name with different text or files "
                          "(%s vs %s)\n" % (row["name"], row["path"], row["general"]))
     return 0
+
+
+def tree_of(top):
+    """{relative path: ("dir",) | ("link", target) | ("file", bytes)} under `top`."""
+    out = {}
+    for root, dirnames, filenames in os.walk(top):
+        for name in list(dirnames) + filenames:
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, top)
+            if os.path.islink(path):
+                out[rel] = ("link", os.readlink(path))
+            elif os.path.isdir(path):
+                out[rel] = ("dir",)
+            else:
+                with open(path, "rb") as handle:
+                    out[rel] = ("file", handle.read())
+    return out
+
+
+def same_tree(left, right):
+    try:
+        return tree_of(left) == tree_of(right)
+    except OSError:
+        return False
 
 
 # ----------------------------------------------------------------------------- status
@@ -1730,6 +2336,8 @@ def build_status():
         health.append({"check": name, "status": state, "detail": detail})
 
     version = "%d.%d.%d" % sys.version_info[:3]
+    unparseable = [{"name": row["name"], "level": row["level"], "path": row["path"], "problem": row["problem"]}
+                   for row in broken if row.get("unparseable")]
     check("python", "PASS" if sys.version_info >= (3, 8) else "FAIL",
           version if sys.version_info >= (3, 8) else version + " is older than 3.8")
 
@@ -1769,8 +2377,14 @@ def build_status():
 
     stamps = [parse_ts(event.get("ts")) for event in events]
     stamps = [stamp for stamp in stamps if stamp is not None]
-    if bad_lines:
-        check("last event", "FAIL", "%d line(s) of %s do not parse" % (bad_lines, events_path()))
+    log_issue = events_problem()
+    if log_issue:
+        check("last event", "FAIL", "the event log cannot be written: %s" % log_issue)
+    elif bad_lines:
+        check("last event", "WARN", "%d line(s) of %s do not parse and are skipped%s" % (
+            bad_lines, events_path(),
+            "; the last event that does was %s ago (%d events)" % (age_text(clock - max(stamps)), len(events))
+            if stamps else ""))
     elif not stamps:
         check("last event", "WARN", "no events yet in %s" % events_path())
     else:
@@ -1842,6 +2456,7 @@ def build_status():
             "skips": skips,
             "errors": errors,
         },
+        "unparseable": unparseable,
         "project": project,
         "package": package,
     }
@@ -1876,16 +2491,20 @@ def cmd_status(args):
         out("  no events yet\n")
     out("\nOpen\n")
     opened = data["open"]
-    if not (opened["ineffective"] or opened["skips"] or opened["errors"]):
+    if not (opened["ineffective"] or opened["skips"] or opened["errors"] or data["unparseable"]):
         out("  nothing open\n")
+    for row in data["unparseable"]:
+        out("  unparseable  %s (%s): %s. Fix %s or remove it: compound rm %s\n" % (
+            row["name"], row["level"], one_line(row["problem"])[:120], row["path"], row["name"]))
     for row in opened["ineffective"]:
         out("  ineffective  %s (%s): recalled %d times and the failure came back. Add a match, "
             "attach a script or rewrite the description: compound add --update --name %s\n"
             % (row["name"], row["level"], row["recall"], row["name"]))
     for row in opened["skips"]:
-        out("  skipped      %s %s: %s\n" % (row["ts"], str(row["session"])[:8] or "-", row["why"]))
+        out("  skipped      %s %s: %s\n" % (one_line(row["ts"])[:32], str(row["session"])[:8] or "-", row["why"]))
     for row in opened["errors"]:
-        out("  error        %s %s%s\n" % (row["ts"], (row["where"] + ": ") if row["where"] else "", row["message"]))
+        out("  error        %s %s%s\n" % (one_line(row["ts"])[:32], (row["where"] + ": ") if row["where"] else "",
+                                         row["message"]))
     return 0 if data["ok"] else 1
 
 
@@ -1969,8 +2588,16 @@ def build_parser():
 
 
 def main(argv):
+    checking = argv[:1] == ["check"]
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            # UTF-8 whatever the locale, and a character that cannot be encoded (a lone
+            # surrogate out of the event log) is escaped instead of raising.
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
     try:
-        if argv[:1] == ["check"] and len(argv) == 1:
+        if checking and len(argv) == 1:
             return cmd_check()
         parser = build_parser()
         args = parser.parse_args(argv)
@@ -1985,8 +2612,19 @@ def main(argv):
         return 0
     except KeyboardInterrupt:
         return 1
-    except OSError as exc:
-        sys.stderr.write("compound: %s\n" % exc)
+    except Exception as exc:  # no command ends in a traceback
+        detail = "%s: %s" % (type(exc).__name__, one_line(exc)[:300])
+        if checking:
+            # check runs before every tool call: failing closed would block them all.
+            try:
+                sys.stdout.write(json.dumps({"hits": [], "error": detail}) + "\n")
+            except Exception:
+                pass
+            return 0
+        if isinstance(exc, OSError):
+            sys.stderr.write("compound: %s\n" % exc)
+        else:
+            sys.stderr.write("compound: internal error: %s\n" % detail)
         return 1
 
 
