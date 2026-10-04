@@ -114,6 +114,12 @@ saying it is context and not a task for that agent.
 
 `<state>/mod/mission.jsonl`, the mission half: `ts`, `session`, `moment`, `agent`, `chars`.
 
+`<state>/mod/claims/<session>/` holds one empty directory per event an instance acted on.
+The repository can be loaded twice at once, as a plugin whose `hooks/hooks.json` names this
+module and through `CLAUDE_CODE_PLUGIN_DIRS`, and then every hook runs in two environments.
+Each instance claims an event with an atomic `mkdir` and the loser does nothing. Before the
+claim, one fail-then-fix loaded that way wrote two lessons. Nothing prunes that directory.
+
 `tools/report.py` prints the lessons log as counts and, for each lesson, how many later
 failures were matched to it.
 
@@ -140,6 +146,7 @@ files on disk:
 |X|a command carrying a secret: the secret is in no note, log or ledger|
 |D|the shell has `cd`'d into a subdirectory: the note is at the repository root|
 |G|a lesson removed by hand is not stated back, and the second project gets its own note|
+|W|with the mod loaded twice at once, one fail-then-fix writes one lesson|
 
 `journey_mission.py` labels each step as an outcome or as delivery only:
 

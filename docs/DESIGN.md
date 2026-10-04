@@ -551,6 +551,10 @@ carries and what it cannot carry is recorded in
 [CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md#what-the-plugin-path-can-and-cannot-carry).
 The line that decides this package: a plugin cannot install a `statusLine`.
 
+Since 2026-10-03 both paths also enable the mod in `mod/compound`, each in its own way:
+the plugin's `hooks/hooks.json` names the mod's module under `modules`, and the installer
+adds the mod's folder to `env.CLAUDE_CODE_PLUGIN_DIRS`.
+
 **The decision: the installer stays the primary path.** A one-line install is a
 requirement, and the animation is the most visible thing the package does; losing it
 to gain a version pin is a bad trade. The plugin manifest ships alongside so the repo
@@ -1016,9 +1020,12 @@ byte-identical rule exists to prevent, arriving one level up.
 
 ## Five hooks can refuse, and each refuses where its evidence is
 
-Four of the five are wired. `hooks/repeat-gate.sh` has not been since 2026-10-03, when the
-lesson moved to the function hooks in `mod/compound`; what this section says of it
-describes the script, which is still in the repository.
+Three of the five are wired: `hooks/apply-gate.sh`, `hooks/claim-gate.sh` and
+`hooks/doc-gate.sh`. `hooks/repeat-gate.sh` and `hooks/mission.sh` have not been since
+2026-10-03, when their jobs moved to the function hooks in `mod/compound`
+([why](#why-the-lesson-and-the-mission-moved-to-a-mod)); what this section says of those
+two describes the scripts, which are still in the repository. The mod refuses no tool call.
+Its mission half declines one stop per typed request.
 
 `hooks/claim-gate.sh` was for a long time the one component here that refused anything, and
 its own header argued that a refusal is a different mechanism from a reminder rather than a
@@ -1320,8 +1327,9 @@ The payload this is all built on, and the probe that captured it, are in
 
 ## The mission reads a store this package does not own
 
-`hooks/mission.sh` states the user's own prompts back, and the only place those exist as
-data is claude-history-surfer's per-project JSONL. The obvious alternative is to capture
+This was decided for `hooks/mission.sh` and carried over to the mod's mission half, which
+reads the same store. The script states the user's own prompts back, and the only place
+those exist as data is claude-history-surfer's per-project JSONL. The obvious alternative is to capture
 them here, on `UserPromptSubmit`, into a file of our own. That is refused by the first
 principle the design was written under, and stated in
 [the design note](../notes/2026-09-03-mission-and-lessons-design.md):
@@ -1330,20 +1338,23 @@ They drift the moment either one gains a filter, and the harness already emits p
 that one of them would learn to drop before the other did.
 
 So history-surfer is a dependency rather than a design to imitate. Install clones it when
-`surfer` is absent, and the price of the choice is paid in the one place a missing
-dependency can be paid honestly: `skillforge doctor`. Its `surfer` row is FAIL when
-`settings.json` wires the hook and nothing can be found to read the store, because then
-five wirings deliver nothing and say nothing. It is WARN when nothing wires the hook,
-because a checkout nobody has installed is not a machine that is broken. That split is
-doctor's own definition of a fault, which is this package failing to do something it says
-it does; a hook made inert by a missing dependency is exactly that, and an uninstalled
-package is not.
+no checkout of it is on the machine, and what a missing store costs is reported by
+`skillforge doctor`. While the shell hook was wired, its `surfer` row was FAIL when
+`settings.json` wired the hook and nothing could be found to read the store, because the
+hook then emitted nothing at all. The mod does not go silent without the store: it falls
+back to the prompts the running process saw submitted, which do not survive a resume or a
+compaction in a new process. So the row is now WARN when `surfer` is not on `PATH`, and
+its text says which of the two cases applies, the mod enabled or not.
 
 Uninstall never removes it, on the same judgement that leaves the state directory alone.
 The checkout holds every prompt the user has typed at Claude Code, which this package did
 not create and could not put back, so uninstall says where it is and how to remove it.
 
 ## The mission's sweep is paid for by the event that emits nothing
+
+This section is about `hooks/mission.sh`, which nothing wires since 2026-10-03. The mod
+keeps no per-session tree under the state directory, so it has nothing to sweep; its one
+mission file is the append-only `<state>/mod/mission.jsonl`.
 
 `<state>/mission/<sid>/` is one directory per session that has ever reached this hook,
 holding one byte per tool call and one empty directory per claimed event, and no other
@@ -1372,6 +1383,11 @@ directories, and that is a file.
 
 ## The subagent channel is `SubagentStart`, and the writable one was declined
 
+The mod's mission half makes the same choice on `classic.SubagentStart`. The closing
+sentence quoted below belongs to `hooks/mission.sh`. The mod replaced it with an opening
+line saying the block is context and not that agent's task, after its red team saw one
+subagent in five take the block for its own task and redo the user's whole request.
+
 A subagent starts with the parent's instructions and none of the user's. Two channels reach
 it, and both were measured:
 [`SubagentStart` context](CLAUDE-CODE-BEHAVIOR.md#subagentstart-context-reaches-the-subagent-only-and-the-parents-reaches-the-parent-only)
@@ -1393,6 +1409,11 @@ join than a rewrite would have made. It is the one that leaves a record two part
 read.
 
 ## Why the `Stop` arm blocks once, and states rather than instructs
+
+The reasoning was written for `hooks/mission.sh`, whose cap is one block per `prompt_id`.
+The mod's `classic.Stop` hook keeps the cap and counts it differently: once per request
+the user typed, with the tool count running from that prompt, because a background task's
+notice starts a new engine turn in the middle of one request.
 
 Two constraints, both out of
 [the nine-block probe](CLAUDE-CODE-BEHAVIOR.md#a-stop-block-was-accepted-nine-times-running-and-the-reason-is-read-as-untrusted-text),
@@ -1418,6 +1439,11 @@ that gets refused is worse than one that is merely ignored, because it teaches t
 that this channel carries prompt injection.
 
 ## A same-tool recovery is not evidence when the tool is a shell
+
+This section and the next three describe `hooks/repeat-gate.sh`, which nothing wires since
+2026-10-03. They are kept as the record of how the binding and the refusals were arrived
+at. The mod binds nothing by token overlap: it puts the failure and each of the next two
+successes to a model.
 
 The recovery rule binds a failed call to the success that fixed it, and its same-tool half
 used to bind on the tool name alone: a `Bash` failure was recovered by the next `Bash`
@@ -1474,6 +1500,10 @@ the refusal then says that no recovery was ever recorded, which is true. A misse
 costs a fix nobody wrote down; a wrong one is announced to the session as a fact.
 
 ## The lesson refusal ships on, and the repeat refusal does not
+
+Both arms are in `hooks/repeat-gate.sh`, and neither reaches a session since 2026-10-03,
+because the script is not wired. "Ships on" below is the script's own default when it is
+driven.
 
 Two arms of one script, one refusing by default and one not, is the kind of asymmetry that
 looks like an oversight. It is the population each arm can reach.
@@ -1561,6 +1591,10 @@ signature per session rather than per tool call, because the marker is removed t
 its signature is judged unable to qualify.
 
 ## The head exemption fails closed, where the splitter it borrows fails open
+
+The head rules are the part of `hooks/repeat-gate.sh` still in use: `bin/skillrepeat` and
+`bin/skillreport` ask the script through `--eligible-of`. The refusals they exempted a
+command from no longer reach a session.
 
 Two hooks now split a command into segments with the same walk and disagree about what to do
 when the walk cannot model the text, and the disagreement is the design rather than an
@@ -1689,6 +1723,10 @@ pin, and both name the flag that overrides them.
 
 ## The learning events widened to `mcp__.*`, and the refusing one dropped its matcher
 
+History: all three entries this section describes were removed from both install paths on
+2026-10-03. The mod's one `tool.call` hook is registered with no matcher and sees every
+tool; it skips failures of `Read`, `Edit`, `Write` and `NotebookEdit`.
+
 The failure issue #19 names by example is an MCP tool dying and the session finishing the
 job with `gh`, and the cross-tool recovery rule is written for exactly that pair. Under the
 `Bash|Skill` matcher the MCP half of it was never delivered to the hook at all, so the rule
@@ -1753,7 +1791,7 @@ without one is recorded as it is and counted as UNATTRIBUTED rather than guessed
 Habit 1 of `SKILL.md` sends a session looking for an existing skill, and `surfer search
 "<keyword>" --all` is the level B half of that search: has this user hit this before, in
 some other project. The tempting next step is to run it for them: show a related past prompt
-unasked, the way `hooks/mission.sh` states this session's own requests back.
+unasked, the way the mission states this session's own requests back.
 
 It was measured before it was built and it does not clear the bar. Under a rare-token rule
 (tokens appearing in at least two prompts and in under 1% of the store), at its best-behaved
@@ -1775,3 +1813,75 @@ unrelated prompt roughly three times in four, and a channel that is wrong that o
 a session learns to skip — which is the cost the mission's own wording rules exist to avoid.
 So the command stays where it is, in the skill, to be run by a session that has a keyword
 worth searching for.
+
+## Why the lesson and the mission moved to a mod
+
+On 2026-10-03 the package's two in-session jobs moved from shell hooks to one Claude Code
+mod, a plugin of TypeScript function hooks, in `mod/compound`. `hooks/repeat-gate.sh` and
+`hooks/mission.sh` stayed in the repository and left both wirings. The measurements are in
+[`notes/2026-10-03-mod-exploration.md`](../notes/2026-10-03-mod-exploration.md) and
+[`mod/compound/README.md`](../mod/compound/README.md); the platform findings the mod rests
+on are in [CLAUDE-CODE-BEHAVIOR.md](CLAUDE-CODE-BEHAVIOR.md), each recorded on 2.1.288.
+
+**What the shell lesson was measured doing.** On the live state that day, archive plus
+live, the repeat store held 1222 fail rows and 1071 recover rows, and the ledger held 17
+lesson notes. The refusal that was meant to force the write-down needs a signature that
+recurs across sessions: 17 of 754 distinct signatures in the archive recurred across two
+or more, and 0 of 393 in the live week of 09-25 to 10-02. 379 of 398 live fail rows
+carried an `agent_id`, so most failures happened inside subagents. The global `CLAUDE.md`
+held one lesson, the zsh `===` one, three times. Three lesson statements fired in the
+session that took these measurements: one was a false binding, a for-loop whose last
+`[ -n ] &&` returned 1, one was a real lesson, and one was a one-off typo.
+
+Two properties of the shell design produced those numbers. The binding was text overlap
+between two normalised commands, which cannot tell a corrected attempt from the next step
+of the work. And the write-down was a command the session had to run, so it depended on
+the session choosing to.
+
+**What a function hook has that a shell hook did not.** A spike on 2.1.288 observed one
+`tool.call` hook seeing the failure and the later success, and `$.model.complete`
+answering in-process. That is one place holding both halves of a fail-then-fix, with a
+model to ask whether the pair is a lesson, and it runs inside subagents with the agent's
+id. The mod therefore asks a model and writes the note itself through `skillnote add`; the
+session runs no command and nothing is refused.
+
+**What the judge scored.** On 40 stored pairs it was tuned on and 40 held out, labelled by
+Claude and not reviewed by a person, the first judge prompt, with no checks and a
+1200-character truncation, found 3 of 5 real lessons and 14 of 33 false ones; the false
+ones mostly read a truncated command as a broken one. The judge as shipped, on `sonnet`,
+found 4 of 5 and 1 of 33 on the tuned set and 4 of 5 and 0 of 32 on the held-out set. Haiku
+scored 3 of 5 and 2 of 33, then 4 of 5 and 6 of 32, which is why the default is `sonnet`.
+One judge call took a median of 2.4 s over 80 calls run four at a time, and the slowest
+took 7.5 s. A tool call waits for it, which the shell hook's four process starts did not
+cost.
+
+**Why the mission moved with it.** The shell mission's log held 1857 deliveries across all
+five moments, and no outcome measure existed. The mod's mission half delivers on the same
+events and reaches one the shell hook could not: on `session.compact` it tells the
+summarizer to keep the requests word for word. It also needs two facts from the tool-call
+stream, how many calls the main loop has made since the user last typed and which calls
+are inside a subagent. A plugin gets one unmatched `tool.call` hook, the lessons half owns
+it, and `hooks/calls.ts` passes those two facts across. That is why the two halves are one
+mod and not two.
+
+**What two red-team rounds reproduced.** Two cold reviewers took one half each, in real
+sessions. Over 19 sessions the lessons half reproduced a secret being copied into
+`CLAUDE.md`, a removed lesson still being stated back, a note landing in a subdirectory,
+and comment markers hiding notes from `skillnote list`; injected instructions in error
+text were not recorded as advice in 3 of 3 attempts. Over 15 sessions the mission half
+reproduced the cleared session's request being stated after `/clear`, one subagent in five
+taking the mission block for its own task and redoing the user's whole request, a prompt
+quoted twice from the store, a request that begins with a path being dropped, and a
+completion statement firing on a negated or interim message. The fixes are the masking in
+`hooks/safe.ts`, the note carrying no command text, the `skillnote` refusal of comment
+markers, and the journey steps and unit tests the mod's README names. Neither half has
+been reviewed again since its fixes.
+
+**What the move costs and leaves open.** The function-hook API is marked early access in
+its own type declarations, and the mod was built and run on 2.1.288 only. Without
+history-surfer the mission falls back to prompts held in the running process. The mod has
+run in ordinary work for less than a day, so whether lessons stop recurrences, and whether
+the mission changes what a session does, are not known. The labels behind the judge's
+scores have not been reviewed by a person. The repeat store stops growing, and
+`bin/skillrepeat`, the `REPEAT_*` knobs and `tests/test_repeat_gate.py` remain for a
+script nothing wires; whether to retire them is undecided.

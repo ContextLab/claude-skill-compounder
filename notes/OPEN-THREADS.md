@@ -1,5 +1,8 @@
 # Open threads
 
+**2026-10-03: read the first section below before anything else in this file; the rest
+was written on 2026-09-06 and has not been re-audited since the mod landed.**
+
 What is actually open, as of **2026-09-06**, on `resume/after-v0.3.1` at HEAD `cb110a9`
 with this session's wave -- the response to the external review of that commit, in
 `2026-09-06-review-response-session.md` -- on the working tree and not yet committed. Tags
@@ -13,6 +16,22 @@ The GitHub issues are the other half of this picture and they do not duplicate i
 `gh issue list --repo ContextLab/claude-skill-compounder --state open` is the authority on
 what is scoped as work. This file is for what is known and unresolved, including the parts
 nobody has opened an issue for.
+
+## Open: the mod, live since 2026-10-03, with no real-use evidence yet
+
+The lesson and the mission moved to `mod/compound` on 2026-10-03 and both shell hooks were
+unwired; `2026-10-03-mod-exploration.md` has the measurements, the test record and the list
+of what is not done. This section supersedes every statement below that describes
+`hooks/repeat-gate.sh` or `hooks/mission.sh` as wired. What is open:
+
+- No real session had produced a row in `<state>/mod/events.jsonl` when the work closed.
+  The figure that matters is failures matched to a lesson after it was written:
+  `python3 mod/compound/tools/report.py`.
+- The judge's scores rest on 80 pairs labelled by Claude and not reviewed.
+- Neither half was red-teamed again after its fixes.
+- The function-hook API is early access; the mod was run on 2.1.288 only.
+- Retiring `bin/skillrepeat`, the `REPEAT_*`/`MISSION_*` knobs and the two unwired scripts
+  is undecided.
 
 ## Open: the review of 2026-09-06
 

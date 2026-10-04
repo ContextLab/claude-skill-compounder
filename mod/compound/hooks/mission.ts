@@ -77,6 +77,34 @@ async function rows($: EngineInterface): Promise<Row[]> {
   return stored.length >= mine.length ? stored : mine
 }
 
+// ONE INSTANCE ACTS. The repository can be loaded twice at once -- as a plugin, whose
+// hooks.json names this module, and through CLAUDE_CODE_PLUGIN_DIRS -- and then every hook
+// here runs twice in two separate environments. Measured 2026-10-03: one fail-then-fix
+// produced two lessons under two wordings. `mkdir` without -p is atomic, so whichever
+// instance creates <state>/mod/claims/<session>/<key> first owns that event.
+async function claim($: EngineInterface, key: string): Promise<boolean> {
+  const safe = (t: string) => t.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || '_'
+  const dir = `${await stateDir($)}/claims/${safe(await $.session.id())}`
+  const ran = await $.process.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$1/$2" 2>/dev/null', 'sh', dir, safe(key)], { timeoutMs: 10000 })
+  return ran.exitCode === 0
+}
+
+// Events that carry no id of their own are claimed by the 20-second window they fall in:
+// two instances see the same event milliseconds apart.
+function windowOf(): number {
+  return Math.floor(now() / 20)
+}
+
+// Claim an event for this instance. Losing the claim means the other instance stated it,
+// so this one's clocks move as if it had: otherwise the loser stays "due" and states the
+// mission on the very next call, which nobody else is competing for.
+async function own($: EngineInterface, key: string): Promise<boolean> {
+  if (await claim($, key)) return true
+  lastDelivery = now()
+  lastStated = lastDelivery
+  return false
+}
+
 async function delivered($: EngineInterface, moment: string, text: string, agent?: string): Promise<void> {
   lastDelivery = now()
   lastStated = lastDelivery
@@ -95,7 +123,7 @@ export const registerMission: Register = on => {
     seen.set(sid, [...(seen.get(sid) ?? []), { text }])
     if (substantive(text) || now() - lastStated < RESTATE_GAP_S) return next(e)
     const prior = lastSubstantive(before.filter(r => r.text !== text))
-    if (prior === '') return next(e)
+    if (prior === '' || !(await own($, `ambiguity-${before.length}-${windowOf()}`))) return next(e)
     await delivered($, 'ambiguity', prior)
     return next({ ...e, context: [...(e.context ?? []), prior] })
   })
@@ -105,7 +133,7 @@ export const registerMission: Register = on => {
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined || (await off($))) return next(e)
     const text = mission(await rows($))
-    if (text === '') return next(e)
+    if (text === '' || !(await own($, `compact-${windowOf()}`))) return next(e)
     await delivered($, 'compact', text)
     const keep = `Keep the user's own requests in the summary word for word. They are:\n\n${text}`
     return next({ ...e, instructions: e.instructions ? `${e.instructions}\n\n${keep}` : keep })
@@ -115,7 +143,7 @@ export const registerMission: Register = on => {
     const result = await next(e)
     if ((e.source !== 'compact' && e.source !== 'resume') || (await off($))) return result
     const text = mission(await rows($))
-    if (text === '') return result
+    if (text === '' || !(await own($, `resume-${windowOf()}`))) return result
     await delivered($, 'resume', text)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
   })
@@ -124,7 +152,7 @@ export const registerMission: Register = on => {
     const result = await next(e)
     if (await off($)) return result
     const text = mission(await rows($))
-    if (text === '') return result
+    if (text === '' || !(await own($, `subagent-${e.agent_id}`))) return result
     // The frame comes FIRST and says what the block is not. With a closing line that read
     // "the parent's instructions to this agent are above this block", one subagent in five
     // took the user's requests for its own task and redid them, a nested dispatch included.
@@ -141,7 +169,7 @@ export const registerMission: Register = on => {
     const due = now() - lastDelivery >= numeric(await $.env.get('COMPOUND_MISSION_INTERVAL'), INTERVAL_S)
     if (!dispatch && !due) return result
     const text = mission(await rows($))
-    if (text === '') return result
+    if (text === '' || !(await own($, `pre-${e.tool_use_id}`))) return result
     await delivered($, dispatch ? 'dispatch' : 'periodic', text)
     return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
   })
@@ -155,6 +183,7 @@ export const registerMission: Register = on => {
     const text = mission(await rows($))
     if (text === '') return result
     request.blocked = true
+    if (!(await own($, `stop-${windowOf()}`))) return result
     const reason = `${text}\n\nThe message that ends this turn is the one the user will read against those requests. This is stated at most once per request.`
     await delivered($, 'completion', reason)
     return { ...result, block: reason }

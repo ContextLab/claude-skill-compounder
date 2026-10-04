@@ -1419,3 +1419,265 @@ which is what the two runs differ in.
 set by the turn budget and not a measured ceiling. The refusal arm rests on the two blocked
 turns of a single run and cannot separate a rate from a rule. Both runs were headless
 `claude -p`, where nobody is watching the loop; an interactive session was not tried.
+
+---
+
+## A plugin of function hooks loads under `claude -p --plugin-dir`
+
+**Finding.** A plugin whose `hooks/hooks.json` names a TypeScript module under `modules`
+is loaded by a headless run started with `--plugin-dir <dir>`, and the function hooks the
+module registers run there. `session.start`, `prompt.submit`, `tool.call` and
+`turn.complete` hooks all fired in one such run. The single `tool.call` hook saw a failed
+call, with `isError: true` on its result, and the successful call after it.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. A spike plugin run
+with `printf '%s' "<prompt>" | claude -p --model haiku --plugin-dir <mod dir>
+--allowedTools Bash`. The record, `notes/2026-10-03-mod-exploration.md`, lists what was
+observed: the mod loaded, the four events fired, and one `tool.call` hook saw the failure
+and the later success. The spike was replaced the same day by the mod in `mod/compound`,
+whose two journeys load it with `--plugin-dir` in every session they start.
+
+**What it means.** A function hook does not need an interactive session or an installed
+plugin to be exercised, so a hooks module can be driven end to end from a script. One hook
+around a tool call holds both the call and its result, which a `PreToolUse` and
+`PostToolUse` pair of command hooks hold in two separate processes.
+
+**Limits.** One machine and one CLI build. The four events named are the ones the probe
+registered; `prompt.compose` and `$.ui.status` were not tried. The type declarations
+that ship with the CLI label function hooks early access.
+
+---
+
+## One `hooks/hooks.json` carries both `modules` and classic `hooks`, and the module may live outside `hooks/`
+
+**Finding.** A single `hooks/hooks.json` may hold a `modules` list and a classic `hooks`
+object side by side. In a headless run both a command hook from the `hooks` object and the
+module's function hooks fired. A `modules` path may point outside the plugin's `hooks/`
+directory: `../mod/compound/hooks/register.ts` is accepted, and `claude plugin validate
+--strict` passes on a plugin written that way.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. The firing: the same
+spike, whose `hooks.json` carried a module and a classic command hook; the record says the
+file validated and both fired. The path: this repository's own
+`hooks/hooks.json`, which names `../mod/compound/hooks/register.ts` beside twelve command
+hook entries. `claude plugin validate --strict .` at the repository root printed the
+module's registered hooks, the `$` calls it makes and the environment names it reads, and
+ended `✔ Validation passed`.
+
+**What it means.** A plugin can move one job to function hooks and leave the rest as
+command hooks, in one file. The module need not be copied under `hooks/`, so a mod kept in
+its own directory, with its own `plugin.json`, can also be named by a parent plugin.
+
+**Limits.** Validation and one headless run. Whether a module named by a parent plugin and
+the same directory loaded as a plugin of its own run their hooks twice in one session was
+not measured.
+
+---
+
+## `CLAUDE_CODE_PLUGIN_DIRS` in the settings `env` block is honoured under `--setting-sources project`
+
+**Finding.** A plugin directory named in `CLAUDE_CODE_PLUGIN_DIRS`, in the `env` block of
+`~/.claude/settings.json`, is loaded by a session started with `--setting-sources project`
+and no `--plugin-dir`. Setting the variable to the empty string in the process environment
+of the `claude` command keeps the plugin out.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. The user settings file
+named `mod/compound` in that variable. The control step of
+`mod/compound/tools/journey_lessons.py` started `claude -p --setting-sources project` with
+no `--plugin-dir`, expecting no mod; the mod loaded and wrote a lesson, which the control
+exists to rule out. With `CLAUDE_CODE_PLUGIN_DIRS=""` added to the environment the journey
+passes to each `claude` process, the control ran without it. Both journeys now set it that
+way for every session they start.
+
+**What it means.** `--setting-sources` does not isolate a run from plugins enabled through
+that variable. A test that needs a session with no plugin has to empty the variable itself,
+and a control session that inherits it is not a control.
+
+**Limits.** One machine. Only the value `project` was tried for `--setting-sources`. Where
+in the CLI the variable is read was not examined; the finding is the observed load.
+
+---
+
+## A plugin gets one unmatched `tool.call` hook, and validation refuses two other shapes
+
+**Finding.** `claude plugin validate` refuses a plugin that registers `tool.call` twice
+with no matcher, with `on("tool.call") is registered twice without a matcher`. It also
+refuses `$.env.get(<variable>)`, saying the call takes a literal name, and refuses `$`
+passed to a function that is not declared at the top level of the file.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. `claude plugin
+validate` printed each refusal while `mod/compound` was being built from two plugins that
+each had a `tool.call` hook; the first is quoted above as printed, and the probes were not
+kept. What can be re-run is the result: the merged module registers one unmatched
+`tool.call` hook, reads every environment name as a literal, and `claude plugin validate
+mod/compound` ends `✔ Validation passed`.
+
+**What it means.** Two features that both need every tool call cannot each register their
+own hook in one plugin. One owns the hook and passes what the other needs through shared
+module state, which is what `hooks/calls.ts` in the mod is. An environment name cannot be
+computed, so a table of names read in a loop has to be written out call by call.
+
+**Limits.** These are validator refusals. What the runtime does with a plugin loaded
+without validation was not tried. Two `tool.call` hooks that each carry a matcher were not
+tried either.
+
+---
+
+## `classic.*` events reach a function hook with no settings hook configured
+
+**Finding.** A function hook registered on `classic.SessionStart`, `classic.SubagentStart`,
+`classic.PreToolUse` or `classic.Stop` runs when no command hook is configured for that
+event in any settings file. A `classic.Stop` hook that returns `{block}` gets the session
+another turn. The input of `classic.PreToolUse` is the tool-call envelope and carries no
+agent id; the `tool.call` hook around the same call does carry one when the call is inside
+a subagent.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03.
+`mod/compound/tools/journey_mission.py` runs each session with `--setting-sources project`
+against a scratch project whose only settings hook is history-surfer's `UserPromptSubmit`
+capture, and loads the mod with `--plugin-dir`. The mod's `classic.SessionStart`,
+`classic.SubagentStart`, `classic.PreToolUse` and `classic.Stop` hooks each append a row
+to its log when they deliver, and the journey's steps check for those rows; its completion
+step also checks that the session went on after the block. The agent id is recorded in the
+mod's source: `hooks/calls.ts` notes each call's agent id in the `tool.call` hook, which
+runs first, so that the `classic.PreToolUse` hook can look the call up by `tool_use_id`.
+
+**What it means.** A plugin can act at the classic hook moments without writing a settings
+hook entry. A plugin that needs to know whether a `PreToolUse` belongs to a subagent has to
+learn it from `tool.call`.
+
+**Limits.** Four classic events, one machine, headless runs. Other `classic.*` events were
+not tried. The block was observed once per run and no repeat limit was probed.
+
+---
+
+## A `tool.call` hook's returned `context` reaches the model
+
+**Finding.** A `tool.call` hook may return its result with a `context` field, an array of
+strings, and the model receives those strings with the tool result. A session quoted one
+back as `tool.call hook additional context: ...`.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. The mod's `tool.call`
+hook returns `{...result, context: [...]}` holding a recorded lesson when a failed call
+matches one. A session that received one quoted it back under that label. Step C of
+`mod/compound/tools/journey_lessons.py` rests on the same channel: a session in a second
+project fails a build once and gets the lesson recorded in the first project back beside
+the error.
+
+**What it means.** A function hook can put text beside a tool result, a failed one
+included, in the same call, without a separate `PostToolUse` or `PostToolUseFailure`
+command hook. The label the model sees names the hook as the source.
+
+**Limits.** Observed on `Bash` results. How much text the field accepts, and whether the
+model treats an instruction in it differently from a statement, were not measured here.
+
+---
+
+## `$.model.complete` from inside a hook: a median of 2.4 s on `sonnet`
+
+**Finding.** A function hook can ask a model a question in-process with
+`$.model.complete({model: "sonnet", ...})`. Over 80 calls, issued in batches of four, the
+median was 2.4 s and the maximum 7.5 s.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. The mod's replay mode
+(`COMPOUND_REPLAY=<pairs file> claude -p --plugin-dir mod/compound <<< hi`) puts each
+stored pair to the model from its `session.start` hook, four at a time, and writes the
+milliseconds each call took. Two replays of 40 pairs each gave the 80 calls. Each reply
+was capped at 500 tokens.
+
+**What it means.** A hook that waits on a model call adds seconds to the event it wraps. A
+`tool.call` hook that does so holds the tool result back for that long.
+
+**Limits.** One model alias, one prompt shape, one afternoon, calls made four at a time
+and not singly. No cost figure was recorded.
+
+---
+
+## `/clear` starts a new session id in the same process, and a module's variables persist across it
+
+**Finding.** Under `claude -p --input-format stream-json`, a user turn whose text is
+`/clear` starts a new session id inside the same process. Variables at the top level of a
+hooks module keep their values across it.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. The mod's mission half
+kept the prompts it had seen in one module-level list, and its red team saw a request
+from before `/clear` quoted into the session that followed. The `clear` step of
+`mod/compound/tools/journey_mission.py` is the re-runnable form: it feeds three
+stream-json user turns to one process, a request, `/clear` and `continue`, checks that the
+stream carries at least two session ids, and checks that nothing was delivered to the
+second. The list is now a map keyed on session id.
+
+**What it means.** Module state is per process and not per session. Anything a hooks
+module remembers about a session has to be keyed on the session id, or `/clear` carries it
+into the next one.
+
+**Limits.** Headless stream-json input only; an interactive `/clear` was not tried. A
+module reload was not part of the probe.
+
+---
+
+## A subagent's hand-back and a background task's notice arrive on the prompt channel
+
+**Finding.** When a subagent finishes or a background task reports, the text the harness
+injects reaches a `prompt.submit` hook like a prompt the user typed. history-surfer's
+`UserPromptSubmit` capture stored a subagent hand-back as a prompt. It also stores one
+typed prompt twice, once with source `stdin` and once with source `transcript`.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03, in the sessions run
+while the mod's mission half was built and red-teamed. history-surfer's per-project
+`prompts.jsonl` held a subagent's hand-back as a prompt row, and held one typed prompt as
+two rows with the two sources; the red team reproduced a prompt quoted twice from the
+store. The injected text opens with a hyphenated lowercase tag such as
+`<task-notification` or a bracketed notice, which is what `typedByUser` in the mod's
+`hooks/render.ts` filters on, and `storeRows` there drops the immediate repeat.
+
+**What it means.** A hook on the prompt channel cannot assume a person typed what it
+receives. Anything that counts or quotes user prompts has to drop harness frames, and
+anything reading history-surfer's store has to drop the immediate repeat.
+
+**Limits.** The list of frame openings the mod filters was collected from observed
+sessions and is not a specification. The double row belongs to history-surfer's capture
+and not to Claude Code.
+
+---
+
+## `--allowedTools` is variadic and takes a trailing prompt argument
+
+**Finding.** `claude -p --allowedTools <tools> "<prompt>"` fails with `Input must be
+provided either through stdin or as a prompt argument`. The flag takes every following
+word, the prompt included.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. The command in that
+form printed the error. `printf '%s' "<prompt>" | claude -p --allowedTools Bash`, with the
+prompt on stdin, ran the session.
+
+**What it means.** A headless run that restricts tools passes its prompt on stdin, or puts
+the prompt before the flag.
+
+**Limits.** Only the trailing-prompt order and the stdin form were run. `--disallowed-tools`
+was not checked for the same shape.
+
+---
+
+## A module named by two loaded plugins runs twice
+
+**Finding.** When one hooks module is reachable through two loaded plugins, it is loaded
+once per plugin and every hook in it runs twice, in two separate environments that share
+no variables.
+
+**How established.** Claude Code 2.1.288, macOS 25.6.0, 2026-10-03. One headless session
+was started with `--plugin-dir <repository root>`, whose `hooks/hooks.json` names
+`../mod/compound/hooks/register.ts`, and `--plugin-dir <repository root>/mod/compound`,
+whose own `hooks/hooks.json` names the same file. One failed `Bash` call followed by its
+fix produced two `fail` rows and two `lesson` rows in the mod's log and two note lines,
+worded differently, because each instance asked the judge on its own. After each instance
+was made to claim the event with `mkdir <state>/mod/claims/<session>/<key>` before acting,
+the same session produced one `fail` row, one `lesson` row and one note, and a periodic
+mission delivery on each of its two tool calls rather than two.
+
+**What it means.** A module that may be loaded through more than one plugin has to be
+idempotent per event on something outside its own variables. A module variable cannot
+serve, because the two instances do not share one.
+
+**Limits.** One session before the claim and one after. Whether the engine de-duplicates
+a module named twice by the SAME plugin was not tried.

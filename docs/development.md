@@ -50,16 +50,19 @@ command rather than a quote, and `--selftest` builds a fixture on disk and asser
 count. [measurement.md](measurement.md) is where its output is read.
 
 The suite never spends a model call. The acceptance journey that does — one pass through
-install, note, reminder, capture, forge, route, apply, report, the mission, the lesson gate
-and uninstall against a throwaway Claude config — is a script you run by hand, never in CI:
+install, note, reminder, capture, forge, route, apply, report and uninstall against a
+throwaway Claude config — is a script you run by hand, never in CI:
 `python3 tests/e2e/journey.py --out <a fresh dir>`. That default is `--config-dir ambient`,
 which isolates the *configuration* and leaves the credential alone; `--config-dir fresh`
 isolates both, pointing `CLAUDE_CONFIG_DIR` at the throwaway directory and taking the
 credential from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and refusing before it
 spends anything if neither is set — [e2e.md](e2e.md) documents both modes and what each
-one's isolation is worth. Seventeen steps
-(`grep -c '^def step' tests/e2e/journey.py`); the run of 2026-09-03 spent thirteen
-`claude -p` calls on the author's own subscription and took 150.9 s, every step PASS. Both
+one's isolation is worth. Twelve steps
+(`grep -c '^def step' tests/e2e/journey.py`); the run of 2026-10-03 against CLI 2.1.288
+spent six `claude -p` calls on the author's own subscription and took 37.8 s, every step
+PASS. The mission and the lesson are covered by the mod's own journeys,
+`mod/compound/tools/journey_mission.py` and `journey_lessons.py`, which are also run by
+hand. Both
 figures move with the scenario — it was six calls over twelve steps before the mission and
 lesson steps existed — so read them off [e2e.md](e2e.md), which records what the last run
 actually cost, rather than from this paragraph. `--no-model` rehearses the whole thing for

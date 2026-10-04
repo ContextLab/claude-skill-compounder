@@ -143,7 +143,7 @@ your own ledger; the shape below is the instrument, not a result.
   reach. The general form is worth carrying: a sweep written as "everything of this *type*"
   silently acquires each new file that lands in its directory, and the loss shows up as a
   measurement reading zero rather than as an error.
-- **`GATES`.** The repeat gate's store — how many failure signatures are known, how many
+- **`GATES`.** The store `hooks/repeat-gate.sh` kept while it was wired, which nothing adds to since 2026-10-03 — how many failure signatures are known, how many
   reached the deny threshold, and how many of those the gate's head rules exempt — and the
   documentation gate's overrides, counted rather than only permitted, because an escape
   nobody counts is indistinguishable from a gate nobody has.
@@ -223,101 +223,77 @@ ledger row, and it labels that a sequence rather than a cause.
 
 ## What the mission counts
 
-`hooks/mission.sh` appends one row to `<state>/mission/hits.jsonl` for every delivery, and
-that file is the whole instrument. Each row carries `ts`, `session`, `moment`, `agent_id`
-(the subagent it was addressed to, or `null`), `chars` of rendered mission, and
-`prompt_count`, the number of the user's own requests it was rendered from. The log is
-trimmed to `MISSION_MAX_ROWS` lines on write, through a `mktemp` in its own directory, so it
-cannot grow without bound and cannot be truncated in place.
+The mission half of [mod/compound](../mod/compound/README.md) appends one row to
+`<state>/mod/mission.jsonl` for every delivery, and that file is the whole instrument. Each
+row carries `ts`, `session`, `moment`, `agent` (the subagent it was addressed to, or
+`null`) and `chars`, the length of the delivered text.
 
 ```bash
-jq -r .moment ~/.claude/skill-compounder/mission/hits.jsonl | sort | uniq -c
+jq -r .moment ~/.claude/skill-compounder/mod/mission.jsonl | sort | uniq -c
+jq -r .session ~/.claude/skill-compounder/mod/mission.jsonl | sort -u | wc -l
 ```
 
-**The log is the instrument and the session directories are not, now that they age out.**
-`<state>/mission/<sid>/` holds one byte per tool call and one empty directory per claimed
-event, and a sampled sweep removes other sessions' trees once they are `MISSION_PRUNE_TTL`
-behind. So a count of directories under `<state>/mission/` answers "how many sessions have
-been active lately" and never "how many sessions this has reached". The count that does
-answer the second question is a count of rows, and the sweep cannot touch those: it lists
-directories, and `hits.jsonl` is a file.
+A session that received no delivery has no row at all, which is the correct answer to
+"delivered to" and the wrong one to "sessions that ran the mod". Nothing trims the file.
 
-```bash
-jq -r .session ~/.claude/skill-compounder/mission/hits.jsonl | sort -u | wc -l
-```
-
-Two things bound that number. `MISSION_MAX_ROWS` trims the log on write, so a store past the
-trim under-reports every session whose rows fell off the front; and a session that received
-no delivery has no row at all, which is the correct answer to "delivered to" and the wrong
-one to "sessions that ran this hook".
-
-**Six labels for five moments.** `resume`, `dispatch`, `subagent`, `periodic`, `ambiguity`
-and `completion`. The expensive-task moment writes two of them, because the parent being
-told before it dispatches and the subagent being told at its own start are two deliveries to
-two readers. The `mission` row of `skillforge doctor` folds `dispatch` and `subagent` into
-one before it counts, so an install that has exercised every arm reports five of five; count
-the labels yourself with the recipe above when you want the two readers apart.
+**Seven labels.** `ambiguity`, `compact`, `resume`, `dispatch`, `subagent`, `periodic` and
+`completion`. The `mission` row of `skillforge doctor` folds `subagent` into `dispatch` and
+`compact` into `resume` before it counts, so it reports out of five; count the labels
+yourself with the recipe above when you want them apart.
 
 **A delivery is not an effect, and this file cannot become one.** A row says the text was
-emitted and, for `SessionStart`, `SubagentStart`, `UserPromptSubmit` and `PostToolUse`, that
-the channel it went down was measured as reaching the model on CLI 2.1.259. It says nothing
-about whether the turn that received it went on to do what the user asked. That is the same
-distinction the 10.5% figure below is a warning about, and it is why the rows carry
-`session` and `agent_id`: joining a delivery to what the session did next is the measurement
-that would settle it, and nothing here has run it yet.
+handed to the engine at that moment. It says nothing about whether the turn that received
+it went on to do what the user asked. `mod/compound/tools/journey_mission.py` labels each
+of its steps as an outcome or as delivery only, and its README says which is which: the
+subagent step is an outcome with a control, the compaction step's control also passes, and
+the ambiguity, dispatch, completion and periodic steps check delivery only. The mod has run
+in ordinary work for less than a day, and nothing has joined a delivery to what a session
+did next.
 
-Two other figures about the mission are of a different kind, and neither says whether any
-of it works.
-
-The first is cost. The suite prints it on a 200-prompt store, median of five runs, and every
-arm has to come in under the 150 ms budget `tests/test_mission.py` asserts; run
-`python3 tests/test_mission.py 2>&1 | tail -8` for the figures on your own machine and your
-own `jq`. An ordinary `PreToolUse` is the cheapest of them, because it renders nothing until
-the cooldown has expired.
-
-The second is two new `skillforge doctor` rows. The `surfer` row reports `FAIL` when the
-hook is wired and the CLI is absent, and `WARN` when it is not wired; the `mission` row
-reports the delivery count and refuses to call an unparseable `hits.jsonl` a pass. Both
-measure whether this is running at all, which is the question that had no answer before.
+The shell hook this replaced, `hooks/mission.sh`, logged to `<state>/mission/hits.jsonl`.
+On the live state on 2026-10-03 that log held 1857 deliveries across all five of its
+moments, and no outcome measure existed for any of them
+(`notes/2026-10-03-mod-exploration.md`). `tests/test_mission.py` still drives that script
+and prints its cost on a 200-prompt store.
 
 ## What the lesson counts
 
-The lesson arm counts in two files, and the split matters because only one of them is
-durable.
+The lessons half of the mod appends one row per event to `<state>/mod/events.jsonl`. The
+`ev` values and what each row carries are the Logs table in
+[the mod's README](../mod/compound/README.md): a failure and the lesson recalled for it, a
+judged success that held no lesson and the reason, a lesson written, a recurrence, a
+promotion, a withdrawn lesson, a failed write. Rows that involve a model call carry `ms`,
+the time that call took.
 
-**`<state>/repeats/index.jsonl`** holds the observations: a `fail` row per learned failure
-signature, a `recover` row when a success was bound to one (carrying `cross_tool: true` when
-the success came from a different tool), a `dismiss` row when somebody decided the signature
-needs no lesson (carrying `actor`, `human` or `model`), and a `forget` row that cuts off the fail rows before it. **`ledger.jsonl`**
-holds the answer: a `note` row carrying `lesson_sig`, and a later `remove` row that withdraws
-it. Adds minus removed ids is what counts as a lesson, on both the gate's side and the CLI's,
-because both files are append-only and matching on `lesson_sig` alone would go on reporting a
-withdrawn lesson as standing.
+```bash
+jq -r .ev ~/.claude/skill-compounder/mod/events.jsonl | sort | uniq -c
+python3 mod/compound/tools/report.py
+```
 
-`skillrepeat list` joins the two into a `LESSON` column, and its five values are the
-population the gate acts on. `open` is a fail-then-fix whose fix exists nowhere but the
-store, which is what the gate declines a call over. `recorded` and `dismissed` are the two
-ways that ends — a note carrying the signature, or a dismissal a **person** wrote.
-`dismissed-by-model` is the fifth and it is not a variant of the fourth: the dismissal is on
-the record, `show` prints its `actor=model`, and it lifts nothing, so the gate goes on
-declining calls over that signature. Collapsing the two would hide exactly the finding that
-produced the split — both of two refused sessions ran the dismissal the deny text printed,
-with a reason they invented. And `-` is a signature no session ever recovered from, so there
-is no fix to write down and nothing is owed.
-`skillreport`'s `GATES` block reports the older repeat arm's population the same way, and
-both ask `hooks/repeat-gate.sh --eligible-of` rather than keeping a second copy of its head
-rules.
+`tools/report.py` prints the counts and, for each lesson, how many later failures were
+matched to it. That per-lesson count is the outcome instrument, and it has less than a day
+of rows behind it. The note itself is on the ledger as an ordinary `note` row written by
+`skillnote add`, with source `session`.
 
-**The refusals themselves are not counted, and that is a gap rather than a design.** Every
-refusal claims a directory at `<state>/repeats/lessons/<session>/deny/<sig>/<tuid>`, which is
-what stops the double delivery emitting one deny twice, and — where somebody has set
-`REPEAT_LESSON_MAX_DENIES` to a number — what counts it against the budget. At the shipped
-`unlimited` there is no budget to count against, so those directories are a record and
-nothing else, and `prune_lessons` sweeps that tree after two days either way. So "how often
-did this gate refuse anything" is answerable for about 48 hours and not afterwards. Every
-figure about the lesson gate's false-positive rate needs that fixed first, and the arm ships
-on — and now ships without an expiry, so a false positive costs one lesson line rather than
-two attempts' patience.
+**What has been measured is the judge, on stored pairs.** Two sets of 40 pairs from the
+store `hooks/repeat-gate.sh` kept, labelled by Claude and not reviewed by a person; the
+prompt was tuned on the first and the second was labelled before the judge saw it. On
+`sonnet` the judge found 4 of 5 real lessons and 1 of 33 false ones on the tuned set, and 4
+of 5 and 0 of 32 on the held-out set. The table, the Haiku figures and the replay commands
+are in the mod's README. Five real lessons per set is the whole positive class, so each
+"4 of 5" moves by twenty points on one pair.
+
+**What the shell hook's store shows.** `<state>/repeats/index.jsonl` and its archive are
+what `hooks/repeat-gate.sh` wrote while it was wired: a `fail` row per failure signature, a
+`recover` row when a success was bound to one, a `dismiss` row carrying `actor`, and a
+`forget` row. Nothing wired adds to it now. Measured on 2026-10-03, archive plus live, it
+held 1222 fail rows and 1071 recover rows against 17 lesson notes on the ledger; 17 of 754
+distinct signatures in the archive recurred across two or more sessions, and 0 of 393 in
+the live week; and 379 of 398 live fail rows carried an `agent_id`
+(`notes/2026-10-03-mod-exploration.md`). `skillrepeat list` still joins that store to the
+ledger into a `LESSON` column (`open`, `recorded`, `dismissed`, `dismissed-by-model`, `-`),
+and `skillreport`'s `GATES` block reports its population; both ask `hooks/repeat-gate.sh
+--eligible-of` and keep no second copy of its head rules.
 
 ## What the first two forges under the diet actually cost
 
@@ -508,20 +484,17 @@ The two hook thresholds, `CI_EDIT_EVERY` and `CI_PROMPT_COOLDOWN`, are unvalidat
 same reason and should not move before that data exists:
 [Tuning](operations.md#tuning) says so where a reader would go to change them.
 
-**All three limits apply to the mission and the lesson, and neither has any usage behind it
-at all.** Both landed on 2026-09-03, so every constant in them was picked by judgement in
-one sitting and none has been checked against a session that was not this one:
+**All three limits apply to the mission and the lesson, and the mod that does both has
+less than a day of usage behind it.** It was enabled on 2026-10-03, and every constant in
+it was picked by judgement:
 
 |Constant|What it decides|What would settle it|
 |-|-|-|
-|`MISSION_FIRST_CHARS`, `MISSION_RECENT`, `MISSION_EACH_CHARS`, `MISSION_MAX_CHARS`|how much of the request survives the budget|the rate at which a delivery elides the sentence the session needed|
-|`MISSION_INTERVAL`|how often a long session is told again|the same conversion question `CI_PROMPT_COOLDOWN` has, and it will need the same data|
-|`MISSION_SHORT_WORDS`|which prompts count as leaning on memory|a false-positive rate for the short-prompt proxy, which is the only reason a better ambiguity detector was not built|
-|`MISSION_STOP_MIN_TOOLS`|how much work a turn must have done before a completion claim is worth blocking|the block rate on real closing messages, replayed the way the claim gate's 3.4% was|
-|`REPEAT_RECOVERY_MIN_TOKENS`|how much a different tool's call must share to bind as the fix|how often a cross-tool binding is the wrong pair, which needs recoveries nobody has yet|
-|`REPEAT_LESSON_MAX_DENIES`|whether the refusal expires at all. It ships `unlimited`, so it does not: only a standing lesson or a human's dismissal ends it. The 2 it shipped at was outwaited by both of two red-teamed sessions on 2026-09-05|a refusal count, which the two-day sweep above currently throws away|
+|`FIRST_CHARS` (1200), `RECENT` (3), `EACH_CHARS` (400) in `hooks/render.ts`|how much of the request is quoted|the rate at which a delivery elides the sentence the session needed|
+|`COMPOUND_MISSION_INTERVAL` (1200)|how often a long session is told again|the same conversion question `CI_PROMPT_COOLDOWN` has; the default interval has not been observed in a long real session|
+|`SHORT_WORDS` (6) in `hooks/render.ts`|which prompts count as leaning on memory|a false-positive rate for the short-prompt proxy|
+|`COMPOUND_MISSION_STOP_MIN_TOOLS` (8)|how much work a request must have done before a completion claim is answered|the rate on real closing messages, replayed the way the claim gate's 3.4% was|
+|`FIX_ATTEMPTS` (2) in `hooks/lessons.ts`|how many successes after a failure are put to the judge|how often the fix is the third or a later success|
+|`COMPOUND_JUDGE_MODEL` (`sonnet`)|which model answers both lesson questions|the replay on labels a person has reviewed|
 
-Every right-hand cell there names an instrument nobody has run. That is the honest state of
-both mechanisms, and it is the reason none of these numbers should move yet: a threshold
-tuned before its instrument exists is a guess with a version number on it.
-
+No right-hand cell there has been measured.

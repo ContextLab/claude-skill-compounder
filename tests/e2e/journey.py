@@ -55,10 +55,11 @@ external API key`, where no credential at all answers `Not logged in · Please r
 a real token has been made yet, is in docs/e2e.md.
 
 `--check-auth` spends ONE call answering whether the chosen mode can authenticate, and
-exits. The journey is seven calls; six of them are wasted discovering a stale token
-at step 2.
+exits. The journey is six calls, seven when step 5's fallback runs; all but one are
+wasted discovering a stale token at step 2.
 
-COST. Seven `claude -p` calls, all `--model sonnet` with a small `--max-turns`.
+COST. Six `claude -p` calls (the run of 2026-10-03: 37.8 s), seven when step 5's fallback
+runs, all `--model sonnet` with a small `--max-turns`.
 The forge step drives the CLI half only -- no builder agents, no red-team agents -- which
 is what keeps step 7 to seconds rather than the median 3.3 hours a real forge takes.
 
@@ -570,7 +571,7 @@ def auth_probe(j, config_dir=None, *, label="claude-auth-probe"):
 def check_auth_only(j):
     """`--check-auth`: spend ONE call on the question, print the CLI's own answer, stop.
 
-    The full journey is seven calls. Six of them are spent before anything would
+    The full journey is six or seven calls. All but one are spent before anything would
     reveal a stale token, and a run that dies at step 2 has still spent step 0's call and
     built a report full of FAILs that all say the same thing. This is that one call, on
     its own, in whichever mode was asked for.
@@ -1607,7 +1608,7 @@ def main(argv=None):
                     help="spend ONE claude -p call answering whether the chosen "
                          "--config-dir can authenticate, print the CLI's own answer, "
                          "and exit (0 authenticated, 3 not). Run it before a real "
-                         "journey: the journey is seven calls and none of the other "
+                         "journey: the journey is six or seven calls and none of the other "
                          "six would tell you anything new about a stale token.")
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--timeout", type=float, default=180.0,

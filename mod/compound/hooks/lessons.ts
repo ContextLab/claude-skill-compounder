@@ -55,6 +55,18 @@ async function record($: EngineInterface, row: Row): Promise<void> {
   })
 }
 
+// ONE INSTANCE ACTS. The repository can be loaded twice at once -- as a plugin, whose
+// hooks.json names this module, and through CLAUDE_CODE_PLUGIN_DIRS -- and then every hook
+// here runs twice in two separate environments. Measured 2026-10-03: one fail-then-fix
+// produced two lessons under two wordings. `mkdir` without -p is atomic, so whichever
+// instance creates <state>/mod/claims/<session>/<key> first owns that event.
+async function claim($: EngineInterface, key: string): Promise<boolean> {
+  const safe = (t: string) => t.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || '_'
+  const dir = `${await stateDir($)}/claims/${safe(await $.session.id())}`
+  const ran = await $.process.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$1/$2" 2>/dev/null', 'sh', dir, safe(key)], { timeoutMs: 10000 })
+  return ran.exitCode === 0
+}
+
 // Where a project note belongs: the repository's root, or where the session started. Never
 // the shell's current directory, which moves with every `cd` and would make one repository
 // look like several projects.
@@ -184,6 +196,9 @@ export const registerLessons: Register = on => {
     const root = await projectRoot($)
 
     if (ran.isError === true) {
+      // The instance that claims the failure holds it, and so is the only one that will
+      // judge the fix: the other has nothing pending for this loop.
+      if (!(await claim($, `fail-${e.tool_use_id}`))) return ran
       const error = redact(String(ran.text ?? ''))
       const known = await lessons($, root)
       const reply = known.length > 0 ? await ask($, recallPrompt(call, error, known)) : undefined

@@ -2,7 +2,7 @@
 
 **Make Claude Code get permanently better at the things you do repeatedly.**
 
-![A fail-then-fix written down as a lesson, then a skill being forged under the two-round cap: the builder/red-team loop, with live progress in the status line](docs/media/forge.gif)
+![A real `gh pr edit` failure fixed with `gh api -X PATCH`, and the lesson written down by the mod with no command run by the session; then a skill being forged under the two-round cap: the builder/red-team loop, with live progress in the status line](docs/media/forge.gif)
 
 Knowledge that costs a session real effort to acquire dies with that session. You and
 Claude work out a debugging sequence, a deploy-and-verify loop, or a non-obvious API
@@ -14,27 +14,29 @@ surfacing, human-approved promotion, and assisted skill construction**: hooks ca
 session learned and say it back at the moments it is needed, a person decides what is
 promoted, and the tooling helps build a skill rather than building one unattended. It
 installs the forging protocol as a skill, a pool of seed skills that are useful on day one,
-hooks that keep asking the question, and a live status-line animation.
+hooks that keep asking the question, a mod that carries back what a session lost, and a
+live status-line animation.
 
-Two of those hooks carry back the content a session lost.
+The mod is [mod/compound](mod/compound/README.md), a Claude Code plugin of TypeScript
+function hooks with two halves. It was built and run on Claude Code 2.1.288 only.
 
-**The mission** states your own requests back, verbatim, at five moments where a session
-has most likely drifted from them: after a compaction or a resume, before it dispatches a
-subagent or a workflow, once every twenty minutes of a long session, on a prompt too short
-to stand on its own ("continue", "yes, do that"), and on a completion claim the turn has
-not earned. It reaches the subagent as well as the thread that dispatched it, so an agent
-working three levels down is handed what you actually asked for. Handed is the measured
-claim: delivery is recorded on every moment, and whether the agent then acts on it is
-not, which `docs/measurement.md` says at more length. The prompts are read from
+**The mission** states your own requests back, verbatim: after a compaction or a resume,
+before the session dispatches a subagent or a workflow, to the subagent when it starts,
+on a tool call once twenty minutes have passed since the last delivery, on a prompt too
+short to stand on its own ("continue", "yes, do that"), and once when a long turn ends on
+a completion claim. At a
+compaction the summarizer is also told to keep the requests word for word. Delivery is
+what is recorded. Whether the session then acts on it is not, which
+[docs/measurement.md](docs/measurement.md) says at more length. The prompts are read from
 [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which install
-sets up for you; this package keeps no second copy of them.
+sets up for you, and otherwise from the prompts the running process saw submitted.
 
-**The lesson** watches for a tool call that failed and then worked, including when the fix
-came from a different tool. The first time, it states the failure, the fix, and the one
-command that records both. The second time that same signature comes round, it declines the
-next call until the lesson is written down. A person can dismiss the signature instead; a
-model cannot, and its dismissal is recorded rather than refused. Neither answer deletes
-anything: both are rows.
+**The lesson** watches for a tool call that failed and a later call that fixed it, in the
+main session and in subagents. A model is asked whether the pair is a mistake in how the
+call was written that a later session would repeat. When it is, the mod writes one line
+into the project's `.claude/CLAUDE.md` through `skillnote add`, and the session runs no command.
+When a later failure matches a recorded lesson, the lesson is returned beside the error,
+and a lesson that matches in a second project is moved to the global notes.
 
 All of it serves one principle:
 
@@ -51,15 +53,15 @@ the command that re-derives it, because every one of these answers moves.
 
 |Area|Where it stands|
 |-|-|
-|The package|Implemented and in use. There is no runtime service: what ships is the set of skills, hooks, CLIs and the status line that `install.sh` wires into `~/.claude/`. It wires **17 hook entries over 9 scripts and 8 events**; count them yourself with `jq '[.hooks\|to_entries[]\|.value[].hooks[]]\|length' hooks/hooks.json`|
+|The package|Implemented and in use. There is no runtime service: what ships is the set of skills, hooks, CLIs and the status line that `install.sh` wires into `~/.claude/`. It wires **12 hook entries over 8 scripts and 6 events**; count them yourself with `jq '[.hooks\|to_entries[]\|.value[].hooks[]]\|length' hooks/hooks.json`. It also enables one mod, [mod/compound](mod/compound/README.md), by adding its folder to `env.CLAUDE_CODE_PLUGIN_DIRS` in `settings.json`|
 |Releases|`v0.3.1` is the latest tag. The plain one-liner still takes `main`, so pin a ref to get the same code twice. `git ls-remote --tags https://github.com/ContextLab/claude-skill-compounder.git` lists what exists right now|
 |CI|`.github/workflows/ci.yml` runs the suite on ubuntu and macos, `shellcheck` on both, and `claude plugin validate --strict`. All five jobs passed on run `34005231297` (2026-09-05), against `ac8d503`, the tree that carries the four-tier doctrine, `skillnote skill`, the day's production-run fixes and the re-recorded screencast. Read the current one rather than this line: `gh run list --repo ContextLab/claude-skill-compounder --limit 1`|
-|Dependencies|`jq` and `python3`, plus [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which the mission hook reads its prompts from. Install fetches and wires it when `surfer` is not already on your `PATH`, never fails the install if it cannot, and uninstall leaves it where it is: [Install](#install)|
-|End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report, three of the mission's five moments, and uninstall against a throwaway config. Fifteen steps (`grep -c '^def step' tests/e2e/journey.py`). The run of 2026-09-05 against CLI 2.1.260 was thirteen `claude -p` calls in 130.5 s, every step PASS, and had seventeen steps: the two lesson steps left on 2026-10-03 with the hook they tested, and the fifteen-step journey has not been run. The six-call, twelve-step figure this row used to carry was the same scenario without the mission and lesson steps. Since 2026-09-05 it also takes `--config-dir fresh`, a throwaway `CLAUDE_CONFIG_DIR` that needs a token handed in through `CLAUDE_CODE_OAUTH_TOKEN`, and that mode has not yet been run with a real token. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
+|Dependencies|`jq` and `python3`, plus [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), which the mod's mission half reads its prompts from. Install clones it when no checkout of it is on the machine and wires it into the target config, never fails the install if it cannot, and uninstall leaves it where it is: [Install](#install)|
+|End to end|`tests/e2e/journey.py` walks install, note, reminder, capture, forge, route, apply, report and uninstall against a throwaway config. Twelve steps (`grep -c '^def step' tests/e2e/journey.py`) and six `claude -p` calls, seven when step 5 takes its fallback. The run of 2026-10-03 against CLI 2.1.288 was six calls in 37.8 s, every step PASS. The full run before it, on 2026-09-05 against CLI 2.1.260, was of an earlier seventeen-step journey: thirteen calls in 130.5 s, every step PASS. The five steps that drove the shell mission and lesson hooks were removed on 2026-10-03, and the mod has journeys of its own, `mod/compound/tools/journey_lessons.py` and `mod/compound/tools/journey_mission.py`. `--config-dir fresh`, a throwaway `CLAUDE_CONFIG_DIR` that needs a token handed in through `CLAUDE_CODE_OAUTH_TOKEN`, has not been run with a real token. Run by hand, never in CI: [docs/e2e.md](docs/e2e.md)|
 |Automatic session review|Ships **off**, and switching it on spends your quota: [What runs against the API](#what-runs-against-the-api). Stage 1 has been paid for six times. Stage 2, which would forge from a `CANDIDATE` verdict, is off for a structural reason rather than a price: a dispatched forge cannot finish its own routing gate, because `claude --version` inside one came back "This command requires approval" at the permission layer|
 |Usage evidence|One machine. `skillreport` counts genuine reuse and reports probe and test traffic on a separate line, and on this repository that traffic is most of the total. What each figure is and is not evidence for: [docs/measurement.md](docs/measurement.md)|
 |The two hook thresholds|`CI_EDIT_EVERY=12` and `CI_PROMPT_COOLDOWN=1200` were picked by judgement, and `skillreport` needs usage across several repositories before either should move|
-|The mission and the lesson|Landed 2026-09-03, verified live against the installed package on 2026-09-05, and **every constant in both is unvalidated**, the two hook thresholds included: the mission's budget, its twenty-minute interval, its six-word ambiguity proxy and its eight-tool completion floor, and the lesson gate's two-token overlap. The lesson refusal has no expiry since 2026-09-05: three live red-team rounds showed the model taking every exit the deny text offered, so only a written lesson or a person's dismissal ends it. What each one counts, and why none of it is a result yet: [docs/measurement.md](docs/measurement.md)|
+|The mission and the lesson|Both are done by [mod/compound](mod/compound/README.md) since 2026-10-03, and the shell hooks that did them before, `hooks/mission.sh` and `hooks/repeat-gate.sh`, are wired by neither install path. The mod was built and run on CLI 2.1.288 only, and has run in ordinary work for less than a day. Its judge found 4 of 5 real lessons and 0 of 32 false ones on a held-out set of 40 stored pairs, labelled by Claude and not reviewed by a person. Its constants are unvalidated: the twenty-minute interval, the six-word ambiguity proxy and the eight-tool completion floor. What was measured and what is not covered: [mod/compound/README.md](mod/compound/README.md)|
 |The forge under the diet|Two real forges ran on 2026-09-05 and both closed with `fail` at the hard cap, on the same subsystem from two endpoints; the cap refused, granted and refused again exactly as written, and the candidate became a note with a script. `done`, `apply` and `verdict` on a successful diet forge remain unexercised: [docs/measurement.md](docs/measurement.md)|
 
 Everything known and unresolved, including the parts with no issue open for them, is in
@@ -127,29 +129,28 @@ cd claude-skill-compounder && ./install.sh
 Requires `python3` (installer only), `jq` (hooks, CLIs, and status line), and
 `~/.local/bin` on your `PATH` for the CLIs.
 
-**It also installs one thing it did not write.** The mission hook states your own prompts
-back, and the only place those exist as data is
+**It also installs one thing it did not write.** The mission states your own prompts back,
+and the place those are stored is
 [claude-history-surfer](https://github.com/ContextLab/claude-history-surfer), a sibling
 project that records every prompt once per project as JSONL and searches it from a `surfer`
-CLI. Keeping a second copy here would break the rule the whole package is built on, so it
-is a dependency: when `surfer` is not already on your `PATH`, install
-clones it beside its own checkout and runs its installer. Four things that follows from.
-It never fails the install. No network, no `git`, a `python3` that errors, and you get one
-line in the report and everything else wired as usual, with only the mission gone quiet.
-It never clones twice, so a `surfer` you already have is left to be the one you have.
-Uninstall never removes it, because it holds every prompt you have ever typed and this
+CLI. This package keeps no second copy of them, so when no checkout of it is on the
+machine, install clones it beside its own checkout and runs its installer. That step never
+fails the install: with no network, no `git`, or a `python3` that errors, you get one line
+in the report and everything else is wired as usual. Without the store the mod falls back
+to the prompts the running process saw submitted, which do not survive a resume or a
+compaction in a new process. It never clones twice: a checkout you already have is reused.
+Uninstall never removes it, because it holds every prompt you have typed and this
 package neither created that data nor can put it back; it prints where the checkout is and
-the command that removes it. And `skillforge doctor` has a `surfer` row, which is where a
-mission hook wired against a store that is not there stops being silent.
-`SKILL_COMPOUNDER_NO_SURFER=1` on the install command declines all of it.
+the command that removes it. `skillforge doctor` has a `surfer` row that reports which case
+you are in. `SKILL_COMPOUNDER_NO_SURFER=1` on the install command declines all of it.
 
 Hooks and skills are picked up **without restarting Claude Code**, though `/hooks` forces
 a config reload if you want to be certain. Install also appends the three habits to
 `~/.claude/CLAUDE.md`, between a pair of comments that render as nothing, and
 `--no-doctrine` declines that:
 [what the installer writes into your `CLAUDE.md`](docs/operations.md#what-the-installer-writes-into-your-claudemd).
-The repo is also a valid Claude Code plugin, which gets you the skills and the hooks
-without installing anything but not the forge animation:
+The repo is also a valid Claude Code plugin, which gets you the skills, the hooks and the
+mod without installing anything but not the forge animation:
 [as a plugin](docs/architecture.md#as-a-plugin).
 
 ### Five-minute quickstart
@@ -183,29 +184,22 @@ skillnote add --remind --scope project "run the migration before the seed script
 one. Removing a lesson note withdraws the reminder written beside it as well, so neither
 outlives the other; `--keep-reminder` leaves it armed.
 
-**Since 2026-10-03 the lesson gate is not wired.** `hooks/repeat-gate.sh` is still in the
-repository and `install.sh` no longer adds it; the write-down after a fail-then-fix is done
-by the function hooks in [mod/compound](mod/compound/README.md), which
-write the note themselves. What follows describes the gate as it behaves when the script
-is driven.
-
-When the lesson gate declines a call, it hands you the signature and the one command that
-answers it. That command writes both cheap tiers at once:
+A lesson that comes with a script or a file takes it along:
 
 ```bash
-skillnote add --lesson <sig> "gh needs --json headSha to find a run for a commit" \
+skillnote add --scope project "gh needs --json headSha to find a run for a commit" \
   --attach scripts/watch-ci.sh
 ```
 
-The dated line goes in the `CLAUDE.md` for the scope, the reminder is keyed on the failing
-call's own signature so the fix arrives before that command runs again, and the ledger gets
-one `note` row tying the two together. `--attach` copies the script or file beside the note
-and links it from the line, which is the "and any associated code" half; it works without
-`--lesson` too. `skillrepeat dismiss <sig> --why "..."` is the answer for a person who has
-decided the signature needs no lesson, and it is **not** the other half of a pair: the
-refusal names only the `skillnote` command, and a dismissal written from inside a session is
-recorded and lifts nothing. Two of two model sessions handed the older refusal ran the
-dismissal it printed with a reason they had invented, so the row now carries who wrote it.
+`--attach` copies the file beside the note and links it from the line. `skillnote add`
+refuses note text or a `--why` that contains `<!--` or `-->`, and turns a newline into a
+space, so a note stays one line.
+
+After a failed call is fixed, [the mod](mod/compound/README.md) writes a note like the
+first one itself. `skillnote add --lesson <sig>` is the older, manual form of that: it
+writes the note and a command-keyed reminder together for a failure signature in the store
+`hooks/repeat-gate.sh` kept, which `skillrepeat list` prints. Nothing wired adds to that
+store any more.
 
 A lesson that turns out to apply beyond one repository moves up a level:
 
@@ -240,9 +234,9 @@ Eleven checks, one line each, and exit 1 if any of them failed: `jq`, the state 
 the hook entries in your `settings.json`, the status line marker, the skill and CLI
 symlinks, `surfer`, the ledger, the counters, any forge left running, the mission's
 delivery log, and which way the paid review is switched. Run it first whenever something
-seems not to be firing. The `surfer` row is the one that turns a silent mission hook into a
-`FAIL`: wired against a store that is not there, all five moments deliver nothing and
-nothing else says so.
+seems not to be firing. The `mission` row warns when `settings.json` does not enable the
+mod, and the `surfer` row warns when `surfer` is not on your `PATH` and says what the
+mission falls back to.
 
 Forging is the expensive tier and it is no longer the way to get a skill. It is the
 hardening a skill is owed when it goes upstream, or when a real session has shown its steps
@@ -253,7 +247,7 @@ wrong:
 
 |What|What is supported|Where that comes from|
 |-|-|-|
-|Claude Code CLI|2.1.241 through 2.1.260|the range every entry in `docs/CLAUDE-CODE-BEHAVIOR.md` was measured against: `grep -ohE '2\.1\.2[0-9]+' docs/CLAUDE-CODE-BEHAVIOR.md \| sort -uV \| sed -n '1p;$p'`|
+|Claude Code CLI|2.1.241 through 2.1.260 for the shell hooks and the CLIs; 2.1.288 for the mod|the versions the entries in `docs/CLAUDE-CODE-BEHAVIOR.md` were measured against: `grep -ohE '2\.1\.2[0-9]+' docs/CLAUDE-CODE-BEHAVIOR.md \| sort -uV`. The shell hooks were measured on 2.1.241 through 2.1.260. The mod was built and run on 2.1.288 only, which is the last line that command prints, and nothing here has been measured on a version between the two|
 |`bash`|3.2 and newer|macOS ships 3.2 (`/bin/bash --version`), and the shell rules in `docs/DESIGN.md` are written against it. The ubuntu runner ships a much newer one; both print theirs in the `bash --version \| head -1` step of `.github/workflows/ci.yml`|
 |`zsh`|parsed, not pinned|every shipped script must pass `zsh -n` as well as `bash -n`, on both runners, in that same step|
 |`jq`|1.6 and newer|`skillforge doctor` fails below it and says why: `skillforge backfill` passes `--rawfile`, which jq did not have before 1.6|
@@ -308,11 +302,23 @@ yours, and moving it would discard whatever you had in it.
 
 ## What runs against the API
 
-**One part of this package can call the Anthropic API through your own `claude` CLI
-and your own account, and it is off until you switch it on.** Everything else here is
-shell and `jq` over files already on your disk, and runs either way. The advertised
-install is a `curl | bash` one-liner, which is why: a command pasted from a web page
-should not start spending your quota on its own.
+Two parts of this package call a model on your own account. Everything else here is
+shell and `jq` over files already on your disk.
+
+**The mod's lessons half is on once the package is installed.** It asks a model, `sonnet`
+by default, through the session's own `$.model.complete`: once when a tool call fails and
+recorded lessons exist, and once for each of the next two successful calls after a failure
+that was held. `Read`, `Edit`, `Write` and `NotebookEdit` failures are skipped. What is
+sent is the failed call, its error, the later call and the recorded lessons, with the
+call and error text masked and cut to an excerpt first; the masking is a lower bound, and
+[mod/compound/README.md](mod/compound/README.md) says what it recognises. One such call
+took a median of 2.4 s over 80 calls, and the tool call waits for it. Its cost in dollars
+has not been measured. `COMPOUND_LESSONS=0` switches that half off, and the mission half
+makes no model call.
+
+**The session review is off until you switch it on.** It runs through your own `claude`
+CLI, and the advertised install is a `curl | bash` one-liner, so the review does not start
+spending your quota without being asked.
 
 That part is `hooks/session-review.sh`. It is not wired into `settings.json` as a hook:
 `hooks/insight-capture.sh` starts it detached on `Stop`, and only when
@@ -434,24 +440,24 @@ line in a `CLAUDE.md` or a memory file. A **reminder** is a match rule that a ho
 back at the moment it applies. A **skill** is a `SKILL.md` plus its scripts, written from a
 note in one command, which a router can see and a session can call. A **forged skill** is
 that same file put through the builder/red-team loop, which is what a skill going upstream
-is owed. `skillnote` writes the first three in one command each, the first two at once with
-`--lesson` and the third with `skillnote skill`; `skillforge` drives the fourth.
+is owed. `skillnote` writes the first three in one command each, the third with `skillnote skill`;
+`skillforge` drives the fourth. The mod writes a note itself after a fail-then-fix.
 Nine seed skills ship, so a fresh install is useful before you have forged anything. A
 lesson moves up a level with `skillnote promote`, and a skill goes the last level with
 `skillcontrib propose`, which opens the pull request.
 
-The nine wired scripts divide into three kinds. Three carry something into the session and
-can be read past: the checkpoint that asks whether a skill already covers this, the
-reminder hook, and four of the mission's five moments. Four can refuse: the claim gate and
-the documentation gate outright, the apply gate once per session, and the mission once per
-prompt on a completion claim. The lesson gate and the repeat gate's older arm are in
-`hooks/repeat-gate.sh`, which is not wired. Three only record: a ledger row per skill
-invocation, and a queue row per candidate, written at the end of a session and again from
-whatever a compaction is about to discard.
+The eight wired scripts divide into three kinds. Two carry something into the session and
+can be read past: the checkpoint that asks whether a skill already covers this, and the
+reminder hook. Three can refuse: the claim gate and the documentation gate outright, and
+the apply gate once per session. Three only record: a ledger row per skill invocation, and
+a queue row per candidate, written at the end of a session and again from whatever a
+compaction is about to discard. The mod is the ninth wired component: its mission half
+delivers at the seven moments its README lists, one of which declines a stop once per
+typed request, and its lessons half adds a line beside a tool result and writes notes.
 
 |Where to look|What is there|
 |-|-|
-|[docs/architecture.md](docs/architecture.md)|What gets installed, the seed pool, the mission, the lesson, the three levels a lesson can live at, the forging protocol and the doctrine it is pinned to, the claim gate, the status line, and what the ledger records|
+|[docs/architecture.md](docs/architecture.md)|What gets installed, the seed pool, the mod's mission and lesson, the three levels a lesson can live at, the forging protocol and the doctrine it is pinned to, the claim gate, the status line, and what the ledger records|
 |[docs/operations.md](docs/operations.md)|`skillforge doctor` and `reap`, the weekly candidate queue, the state directory and how to recover it, proposing a skill upstream, and the tuning table with every knob, its default and which component reads it|
 |[docs/measurement.md](docs/measurement.md)|What is counted, what each block of `skillreport` prints, and the limits on every figure here|
 |[docs/development.md](docs/development.md)|The suite, the rules it is written under, the end-to-end journey, and releasing|

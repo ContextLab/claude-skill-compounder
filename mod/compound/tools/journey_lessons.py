@@ -20,8 +20,10 @@ the mod having merely fired.
             at the repository root.
   G         a lesson removed by hand is not stated back in a second project, and that
             project gets a note of its own.
+  W         both install paths load the mod at once (the repository as a plugin, and the mod
+            folder): one fail-then-fix still writes ONE lesson.
 
-S, N, X, D and G each run in a state of their own, so nothing one wrote is recalled in another.
+S, N, X, D, G and W each run in a state of their own, so nothing one wrote is recalled in another.
 
 usage: journey.py [--model haiku] [--keep]
 
@@ -67,7 +69,7 @@ def make_project(path):
     os.chmod(script, 0o755)
 
 
-def session(cwd, env, model, with_mod, save, task=TASK, tools=("Bash",), extra=()):
+def session(cwd, env, model, with_mod, save, task=TASK, tools=("Bash",), extra=(), twice=False):
     """Run one headless session; return its Bash calls as [(command, errored, result text)].
 
     The raw stream is kept at SAVE, so a failed check can be read back rather than re-run.
@@ -82,6 +84,9 @@ def session(cwd, env, model, with_mod, save, task=TASK, tools=("Bash",), extra=(
     env = dict(env, CLAUDE_CODE_PLUGIN_DIRS="", COMPOUND_MISSION="0")
     if with_mod:
         argv += ["--plugin-dir", MOD]
+        if twice:
+            # The repository root is a plugin whose hooks.json names the same module.
+            argv += ["--plugin-dir", REPO]
     else:
         env["COMPOUND_LESSONS"] = "0"
     done = subprocess.run(argv, input=task, cwd=cwd, env=env, capture_output=True, text=True, timeout=600)
@@ -308,6 +313,18 @@ def main():
     check("G", "the removed lesson was not stated back", not any(e["ev"] == "fail" and e.get("recalled") for e in new_g),
           ", ".join(e["ev"] for e in new_g))
     check("G", "the second project got a note of its own", len(notes(env_g, "project", proj_g2)) == 1)
+
+    # W: the mod loaded twice
+    state_w, env_w = world("w")
+    proj_w = os.path.join(root, "iota")
+    make_project(proj_w)
+    calls, _ = session(proj_w, env_w, args.model, True, os.path.join(root, "W.stream"), twice=True)
+    bw = builds(calls)
+    check("W", "the session failed and then fixed the build", len(bw) >= 2 and bw[0][1] is True and any(c[1] is False for c in bw[1:]))
+    rows_w = [e["ev"] for e in events(state_w)]
+    check("W", "loaded twice, the mod logged one failure and wrote one lesson",
+          rows_w.count("fail") == 1 and rows_w.count("lesson") == 1 and len(notes(env_w, "project", proj_w)) == 1,
+          ", ".join(rows_w))
 
     print("\n%d of %d checks passed; root %s" % (sum(results), len(results), root))
     if not args.keep and all(results):
