@@ -404,7 +404,8 @@ export function boardFrom(status: string, events: string, session: string, now: 
     .filter(l => l.name !== '')
     .sort((a, b) => b.reuse + b.guards + b.recall - (a.reuse + a.guards + a.recall) || a.name.localeCompare(b.name))
     .slice(0, 12)
-  const rows = Array.isArray(parsed(events)) ? list(parsed(events)) : list(s.recent)
+  // The judge's verdicts are in the log to be measured, not to be read as what happened.
+  const rows = (Array.isArray(parsed(events)) ? list(parsed(events)) : list(s.recent)).filter(e => str(e.type) !== 'judge')
   const recent: CompoundRecent[] = rows.slice(-20).map(e => ({ at: Math.floor(Date.parse(str(e.ts)) / 1000) || 0, type: str(e.type), text: eventText(e) }))
   const open = record(s.open) ?? {}
   return {

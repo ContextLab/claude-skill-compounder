@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, learnedSince, mayNudge, parseGuards, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -80,10 +80,14 @@ test('a shown lesson is its body, its recall count and the CLI\'s verdict', asyn
   expect(bodyOf(skill)).toBe('Do the thing.\nSecond line.')
   expect(bodyOf('no frontmatter here')).toBe('no frontmatter here')
   const shown = parseShow(JSON.stringify({ name: 'a', level: 'user', path: '/u/a', text: skill, counts: { reuse: 0, guard: 0, recall: 3, learn: 1 }, ineffective: true }))
-  expect(shown).toEqual({ text: 'Do the thing.\nSecond line.', path: '/u/a', level: 'user', recalls: 3, ineffective: true, since: undefined, limit: undefined })
-  expect(parseShow('a (user lesson)\n/u/a\n')).toEqual({ text: 'a (user lesson)\n/u/a', path: '', level: '', recalls: 0, ineffective: undefined, since: undefined, limit: undefined })
+  expect(shown).toEqual({ text: 'Do the thing.\nSecond line.', path: '/u/a', level: 'user', recalls: 3, ineffective: true, since: undefined, limit: undefined, guarded: undefined })
+  expect(parseShow('a (user lesson)\n/u/a\n')).toEqual({ text: 'a (user lesson)\n/u/a', path: '', level: '', recalls: 0, ineffective: undefined, since: undefined, limit: undefined, guarded: undefined })
   const counted = parseShow(JSON.stringify({ text: 'x', counts: { recall: 4 }, recalls_since: 1, recur_limit: 2 }))
   expect([counted.since, counted.limit]).toEqual([1, 2])
+  // Whether the lesson's guard refused a call in this session is the CLI's to say.
+  expect(counted.guarded).toBe(undefined)
+  expect(parseShow(JSON.stringify({ text: 'x', guarded_in_session: true })).guarded).toBe(true)
+  expect(parseShow(JSON.stringify({ text: 'x', guarded_in_session: false })).guarded).toBe(false)
 })
 
 test('events are read from a list or from one object per line', async () => {
@@ -221,4 +225,13 @@ test('`check --guards` says how many lessons carry a pattern; a reply without th
   expect(parseGuards('{"hits": []}')).toBe(undefined)
   expect(parseGuards('{"hits": [], "guards": "none"}')).toBe(undefined)
   expect(parseGuards('not json')).toBe(undefined)
+})
+
+test('`check --guards` names the tools the guards apply to; a reply without them says nothing', async () => {
+  expect(parseGuardTools('{"hits": [], "guards": 2, "tools": ["Bash", "Edit"]}')).toEqual(['Bash', 'Edit'])
+  expect(parseGuardTools('{"hits": [], "guards": 0, "tools": []}')).toEqual([])
+  expect(parseGuardTools('{"hits": [], "guards": 1}')).toBe(undefined)
+  expect(parseGuardTools('{"hits": [], "tools": "Bash"}')).toBe(undefined)
+  expect(parseGuardTools('{"hits": [], "tools": ["Bash", 3]}')).toBe(undefined)
+  expect(parseGuardTools('not json')).toBe(undefined)
 })

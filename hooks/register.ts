@@ -5,13 +5,13 @@ import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
   BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli,
-  heldStep, inputOf, isCommand, judged, knownContext, newsKey, promotedText, ranOut, recallContext, reportsEvents, reusable, reuseContext, reuseStatus,
-  stopDebt, stopNudge, stopStrengthen, storeNews, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
+  heldStep, inputOf, isCommand, judged, knownContext, newsKey, promotedText, ranOut, recallContext, refusal, reportsEvents, reusable, reuseContext, reuseStatus,
+  shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  learnedSince, mayNudge, otherProjects, parseEarlier, parseEvents, parseGuards, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
+  learnedSince, mayNudge, otherProjects, parseEarlier, parseEvents, parseGuards, parseGuardTools, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
   parseTimedOut, parseUnsettled, settlers,
   type Earlier, type Event, type Item,
 } from './store'
@@ -27,6 +27,8 @@ import {
 //   1 reuse    prompt.submit   a typed, substantial prompt gets the existing work that covers it
 //   2 guard    tool.call       a call matching a lesson's `match` is refused once per session
 //   3 recall   tool.call       a failed call gets the recorded lesson that describes it
+//                              (a call refused before it ran is not a failed call, and a Bash
+//                              call that exited 0 with a shell error in its output is one)
 //   4 capture  tool.call       a success after a held failure makes the session owe a lesson
 //   5 stop     classic.Stop    an owed lesson, or an owed strengthening of one, refuses the stop
 //                              once; a long turn is asked once
@@ -91,6 +93,9 @@ const UNSETTLED_SHOWN = 5
 const PANE = 'compound'
 const BOARD_AFTER_MS = 400
 const BOARD_EVENTS = 20
+// The log also holds one `judge` event per question, which the pane does not draw: this
+// many rows are read so that twenty of the others are among them.
+const BOARD_READ = 80
 // The rows the pane asks for where it opens above the prompt.
 const PANE_ROWS = 34
 
@@ -123,6 +128,9 @@ const stalled = new Map<string, Set<string>>()
 // so no call is made before a tool call. Forgotten at each typed prompt and whenever the
 // session runs a CLI command that changes the store.
 const noGuards = new Set<string>()
+// The tools some guard applies to, as a session's last `check` said: before a call of any
+// other tool nothing can hit, so no call is made. Forgotten when `noGuards` is.
+const guardTools = new Map<string, Set<string>>()
 // The events of a session's own CLI calls that were already toasted, per session.
 const told = new Map<string, Set<string>>()
 // What each session owes, as the CLI last said: the ids of its unsettled captures, the
@@ -321,7 +329,7 @@ async function refreshBoard($: EngineInterface): Promise<void> {
     if (!(await $.ui.panes()).some(pane => pane.id === PANE)) return
     // Exit 1 is a health check that failed: the report is still the answer.
     const status = await spawn($, ['status', '--json'], undefined, undefined, BUDGET.command, false)
-    const recent = await spawn($, ['events', '--json', '--limit', String(BOARD_EVENTS)], undefined, undefined, BUDGET.prompt, false)
+    const recent = await spawn($, ['events', '--json', '--limit', String(BOARD_READ)], undefined, undefined, BUDGET.prompt, false)
     const now = await $.clock.now()
     const board: CompoundBoard | undefined = status.code === 0 || status.code === 1 ? boardFrom(status.stdout, recent.code === 0 ? recent.stdout : '', sid, now) : undefined
     const problem = status.code === 0 || status.code === 1 ? 'compound status --json printed something unreadable' : `compound status ${why(status)}`
@@ -516,6 +524,14 @@ function forgetInventory(sid: string): void {
   listed = undefined
   elsewhere = undefined
   noGuards.delete(sid)
+  guardTools.delete(sid)
+}
+
+// One `judge` event for a question put to the model, whatever it answered: the verdict and
+// the milliseconds the call took. What the question led to (a `reuse`, a `recall`, a
+// `capture`) is logged where it happens.
+async function ruled($: EngineInterface, moment: 'reuse' | 'recall' | 'fix', verdict: string, reply: Reply, more: Record<string, unknown> = {}): Promise<void> {
+  await log($, { type: 'judge', moment, verdict, ms: reply.ms, ...more })
 }
 
 // One question to the judge model, bounded by COMPOUND_JUDGE_TIMEOUT. Never rejects.
@@ -677,16 +693,23 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
   if (items.length === 0 && candidates.length === 0) return ''
   const gathered = Date.now() - began
   const reply = await ask($, reusePrompt(request, items, candidates), k)
+  const asked = { prompt_id: digest(text) }
   if (reply.text === undefined) {
+    await ruled($, 'reuse', 'unanswered', reply, { ...asked, reason: oneLine(reply.reason, 200) })
     await fail($, 'reuse.judge', `${k.model} gave no answer: ${reply.reason}`)
     return ''
   }
   const answer = parseReuse(reply.text, items, candidates)
   if (answer === undefined) {
+    await ruled($, 'reuse', 'unreadable', reply, asked)
     await fail($, 'reuse.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return ''
   }
   const context = answer.substantial ? reuseContext(answer.items, answer.earlier, await cliPath($)) : ''
+  await ruled($, 'reuse', !answer.substantial ? 'not-substantial' : context === '' ? 'nothing' : 'named', reply, {
+    ...asked,
+    ...(context === '' ? {} : { named: [...answer.items.map(i => i.name), ...answer.earlier.map(e => e.id)] }),
+  })
   if (context === '') return ''
   await log($, {
     type: 'reuse',
@@ -719,6 +742,7 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
     // A new turn: a subcommand that ran out of time is tried again, and so is the check.
     stalled.delete(sid)
     noGuards.delete(sid)
+    guardTools.delete(sid)
   }
   await registerCommand($)
   const out: string[] = []
@@ -753,6 +777,10 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
 // follow are not held for a process start at all.
 async function guard($: EngineInterface, sid: string, tool: string, input: Record<string, unknown>): Promise<string | undefined> {
   if (noGuards.has(sid)) return undefined
+  // A lesson's patterns are tested against the calls of the tools it names (Bash, unless it
+  // says otherwise): before a call of a tool no guard applies to, nothing is asked.
+  const applies = guardTools.get(sid)
+  if (applies !== undefined && !applies.has(tool)) return undefined
   const began = Date.now()
   // The call waits for this child, so it gets a short time. A check that does not answer,
   // or fails, is killed and the call runs: the guard fails open, and `check` is not
@@ -786,6 +814,8 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
     return undefined
   }
   if (parseGuards(ran.stdout) === 0) noGuards.add(sid)
+  const tools = parseGuardTools(ran.stdout)
+  if (tools !== undefined) guardTools.set(sid, new Set(tools))
   const slow = parseTimedOut(ran.stdout)
   if (slow.length > 0) await failOnce($, sid, 'guard.pattern', `compound check gave up on the match pattern of: ${slow.join(', ')}; rewrite the pattern so it cannot backtrack`)
   const hits = parseHits(ran.stdout)
@@ -815,7 +845,7 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
 // level, and does so only when git does not track it there: a tracked lesson stays, is read
 // from where it is, and is offered to the user as a move. The recurrence is logged, marked
 // ineffective when this one makes it so. Answers the text Claude reads beside the result.
-async function recurred($: EngineInterface, sid: string, found: Item, tool: string, call: string, error: string, k: Knobs, known: boolean): Promise<string[]> {
+async function recurred($: EngineInterface, sid: string, found: Item, tool: string, call: string, error: string, k: Knobs, known: boolean, ms: number): Promise<string[]> {
   const cliAt = await cliPath($)
   const out: string[] = []
   let lesson = found
@@ -846,9 +876,14 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   if (read !== undefined && read.path !== '') lesson = { ...lesson, path: read.path }
   // The CLI's counts are from before this recurrence is logged: this one is added.
   const count = (read?.recalls ?? 0) + 1
+  // A guard refuses once per session, and the call sent again runs. A failure after the
+  // lesson's guard refused in this session is the session going ahead, not the lesson
+  // failing to stop it: it is recalled, and it does not count toward "ineffective". The CLI
+  // says whether that refusal is in the log, and leaves such a recall out of its own count.
+  const afterGuard = read?.guarded === true
   // A lesson left in another project is that project's to rewrite: this session is not
   // asked to strengthen it, and owes nothing for it.
-  const ineffective = asProject === undefined && (read?.since === undefined ? count >= k.recurLimit : read.since + 1 >= (read.limit ?? k.recurLimit))
+  const ineffective = asProject === undefined && !afterGuard && (read?.since === undefined ? count >= k.recurLimit : read.since + 1 >= (read.limit ?? k.recurLimit))
   await log($, {
     type: 'recall',
     lesson: lesson.name,
@@ -857,7 +892,9 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
     error: error.slice(-LOGGED_ERROR),
     at: known ? 'fix' : 'failure',
     guard: lesson.match.length > 0,
+    after_guard: afterGuard,
     ineffective,
+    ms,
   })
   if (ineffective) {
     owes(sid, [], [lesson.name])
@@ -881,14 +918,22 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   const known = await lessons($)
   const k = await knobs($)
   let hit: Item | undefined
+  let ms = 0
   if (known.length > 0) {
     const reply = await during($, 'recall', () => ask($, recallPrompt(call, error, known), k))
+    ms = reply.ms
     if (reply.text === undefined) {
+      await ruled($, 'recall', 'unanswered', reply, { tool, reason: oneLine(reply.reason, 200) })
       await fail($, 'recall.judge', `${k.model} gave no answer: ${reply.reason}`)
     } else {
       const answer = parseRecall(reply.text, known)
-      if (answer === undefined) await fail($, 'recall.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
-      else hit = answer.lesson
+      if (answer === undefined) {
+        await ruled($, 'recall', 'unreadable', reply, { tool })
+        await fail($, 'recall.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
+      } else {
+        hit = answer.lesson
+        await ruled($, 'recall', hit === undefined ? 'none' : 'named', reply, { tool, ...(hit === undefined ? {} : { named: [hit.name] }) })
+      }
     }
   }
   if (hit === undefined) {
@@ -898,7 +943,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   }
   // A failure answered with a recorded lesson is not held: the fix teaches nothing new.
   held.delete(key)
-  return recurred($, sid, hit, tool, call, error, k, false)
+  return recurred($, sid, hit, tool, call, error, k, false, ms)
 }
 
 async function onSuccess($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
@@ -915,15 +960,22 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   const reply = await during($, 'fix', () => ask($, fixPrompt({ failed: was.call, error: was.error, worked: call }, known), k))
   if (reply.text === undefined) {
     await paint($, band => unfixed(band))
+    await ruled($, 'fix', 'unanswered', reply, { tool, reason: oneLine(reply.reason, 200) })
     await fail($, 'capture.judge', `${k.model} gave no answer: ${reply.reason}`)
     return []
   }
   const answer = parseFix(reply.text, known, was.error)
   if (answer === undefined) {
     await paint($, band => unfixed(band))
+    await ruled($, 'fix', 'unreadable', reply, { tool })
     await fail($, 'capture.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return []
   }
+  await ruled($, 'fix', answer.verdict.toLowerCase(), reply, {
+    tool,
+    ...(answer.verdict === 'KNOWN' ? { named: [answer.lesson.name] } : {}),
+    ...(answer.verdict === 'NONE' ? { reason: answer.reason } : {}),
+  })
   if (answer.verdict === 'NONE') {
     await paint($, band => unfixed(band))
     return []
@@ -938,7 +990,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
       await paint($, band => unfixed(band))
       return []
     }
-    return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true)
+    return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true, reply.ms)
   }
   const id = digest(`${sid}:${callId}`)
   await log($, {
@@ -1238,10 +1290,18 @@ export const register: Register = on => {
       if (!judged(tool)) return ran
       const key = `${sid}:${e.agentId ?? 'main'}`
       const call = callText(tool, input)
+      const text = String(ran.text ?? '')
+      // A call that was refused before it ran (a permission, a safety check, the harness, a
+      // hook) is not a failed call: no judge is asked, nothing is held, nothing is watched.
+      if (ran.isError === true && refusal(text) !== undefined) return ran
+      // A Bash call that exited 0 with the shell's own error in its output did fail.
+      const shell = ran.isError !== true && tool === 'Bash' ? shellError(text) : undefined
       const extra =
         ran.isError === true
-          ? await onFailure($, sid, key, tool, e.tool_use_id, call, String(ran.text ?? ''))
-          : await onSuccess($, sid, key, tool, e.tool_use_id, e.agentId, call)
+          ? await onFailure($, sid, key, tool, e.tool_use_id, call, text)
+          : shell !== undefined
+            ? await onFailure($, sid, key, tool, e.tool_use_id, call, shellFailure(shell, text))
+            : await onSuccess($, sid, key, tool, e.tool_use_id, e.agentId, call)
       return extra.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...extra] }
     } catch (err) {
       await fail($, ran.isError === true ? 'recall' : 'capture', err)

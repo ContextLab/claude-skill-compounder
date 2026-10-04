@@ -100,7 +100,7 @@ A lesson is a directory holding a `SKILL.md` and any scripts it needs:
 ---
 name: zsh-equals-word
 description: Use when a zsh command line has a bare word starting with "=" (a ===== separator after ";").
-match: ["(^|[;&|]\\s*)echo\\s+=+"]
+match: ["(^\\s*|[;&|(]\\s*|\\b(?:do|then|else)\\s+)echo\\s+=+"]
 created: 2026-10-03
 origin: project claude-skill-compounder, session 1a2b3c4d
 ---
@@ -122,6 +122,9 @@ Quote it or use printf '%s\n' '====='.
   relevance, so it is written as a trigger.
 - `match` is optional: a JSON array of Python regular expressions tested against the text
   of a tool call before it runs. A lesson with `match` is a **guard**.
+- `match-tools` is optional: a JSON array of the tool names whose calls the patterns are
+  tested against (`compound add --tool`). Without it they are tested against Bash calls
+  only.
 - The body is the lesson. Attached files sit beside it and are named by relative path.
 
 Because the format is a skill's format, turning a lesson into a routable skill is a move:
@@ -171,21 +174,59 @@ The compound:reuse skill has the procedure. `<cli> show <name>` prints a lesson.
 
 ### 2. Guard: a tool call is about to run
 
-The call's text is tested against every lesson's `match`. On a hit the call is refused
-once per session per lesson, with the lesson quoted as the reason. The same call sent
-again runs. A mistake already made is stopped before it is repeated.
+The call is tested against the `match` of every lesson that applies to its tool. On a hit
+the call is refused once per session per lesson, with the lesson quoted as the reason. The
+same call sent again runs. A mistake already made is stopped before it is repeated.
+
+**Guards match commands, not prose.** A lesson's patterns are tested against the command
+of a Bash call and against nothing else, unless the lesson names other tools in
+`match-tools`: then they are tested against the JSON of the input of exactly the tools
+named. So the content of a file being written, the prompt of an agent and the text of a
+hand-back, which may all mention a mistake without making it, are never refused by a
+lesson written about a command. A Bash command that carries the mistake's text inside a
+quoted argument (`grep '; git commit' notes.md`) is still a command, and a pattern that
+does not anchor itself to where a command starts will match it.
+
+**Where a command starts.** Each pattern is compiled with `re.MULTILINE`, so `^` and `$`
+match at the start and end of every line of a command and not only of the whole call. The
+anchor the `learn` skill teaches for "a command starts here" is
+`(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)`: the start of a line, after `;`, `&&`, `||`, `|`
+or `(` (which covers `$(`), and after `do`, `then` or `else`.
 
 Before a call the mod makes exactly one CLI call, `compound check --guards`, and needs no
-listing. The reply also says how many lessons carry a `match`. When it says none (or the
-listing the reuse check made for that prompt showed none), the mod makes no call at all
-before the tool calls that follow, until the next typed prompt or until the session runs
-a `compound` command that changes the store.
+listing. The reply also says how many lessons carry a `match`, and the tools those lessons
+apply to. When it says none (or the listing the reuse check made for that prompt showed
+none), the mod makes no call at all before the tool calls that follow, and it makes none
+before a call of a tool no guard applies to, until the next typed prompt or until the
+session runs a `compound` command that changes the store.
 
 The call waits for `compound check`, so the check gets 1500 ms. A check that has not
 answered by then is killed and the call runs unguarded; an `error` is logged for it once
 per session, and `check` is not called again in that turn (see "The CLI's time").
 
 ### 3. Recall: a tool call failed
+
+**What counts as a failed call.** A call the tool reported as an error, with two
+corrections, each one function in `hooks/render.ts` (`refusal`, `shellError`):
+
+- A call that was **refused before it ran** is not a failed call: a permission denial
+  (the auto mode classifier, a permission not granted, the user rejecting the call), a
+  safety check, the harness refusing a command (a tool-use error, an agent held to its
+  worktree), or a hook's refusal, this mod's own guard included. Nothing was run, so
+  there is no mistake in how the call was written and nothing to fix: no model is asked,
+  the failure is not held, and the band does not say it is watching for a fix. A refusal
+  is recognised by the opening of its text, and a text that begins with `Exit code` is
+  always a command that ran.
+- A Bash call that **exited 0 with a shell error in its output** is a failed call. Under
+  Claude Code a pipeline's status is its last command's, so `timeout 5 x | tail` and a
+  glob that matches nothing come back as successes. Such a result is recognised by a line
+  of its output that begins with the shell's own prefix: `(eval):N: ` with any message,
+  or `zsh: `, `zsh:N: `, `bash: `, `bash: line N: `, `sh: `, `sh: N: ` followed by one of
+  the shell's own messages (`command not found`, `no matches found`, `read-only
+  variable`, `parse error`, `syntax error`, `bad substitution`, `permission denied`, `no
+  such file or directory`, `unbound variable`, `not found`). The prefix must start a
+  line, so a program's output that only contains those words is not a failure; a command
+  that prints an earlier log holding such a line is taken for one.
 
 A model is asked whether a recorded lesson describes this failure. The lessons it is
 shown are the ones the session can see and the project lessons of the other projects the
@@ -360,6 +401,11 @@ for the lesson: one that was removed, made a skill or moved under a new name is 
 rewrite. A recall is not counted against a lesson the session first recorded after the
 failing call: a lesson younger than the failure it matches is that failure's own lesson,
 written before the fixing call was sent, and meeting it at the fix writes no `recall`.
+A recall is not counted either when the lesson's guard already refused a call in the same
+session: a guard refuses once per session and the call sent again runs, so a failure
+after the refusal is the session going ahead, not the lesson failing to stop it. The
+`recall` event is written with `after_guard: true` and `ineffective: false`, and the CLI,
+which holds the one definition, leaves every such recall out of the count.
 A lesson that already carries a `match` and still recurs
 gets a different message: its pattern is not catching the failing call, which is quoted
 beside the pattern. `compound status` lists ineffective lessons until they are rewritten.
@@ -451,8 +497,16 @@ or recorded. Every new failure is reported, each one once.
   prints a plan, writes no event and raises nothing.
 - **Event log**: `~/.claude/compound/events.jsonl`, one JSON object per line: `ts`,
   `type` (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `learn`, `skip`,
-  `nudge`, `promote`, `candidate`, `skill`, `rm`, `error`), `session`, `project`, and the
-  fields of that type. `compound log` refuses any other type.
+  `nudge`, `judge`, `promote`, `candidate`, `skill`, `rm`, `error`), `session`, `project`,
+  and the fields of that type. `compound log` refuses any other type.
+- **Verdicts**: every question the mod puts to the model writes one `judge` event,
+  whatever the answer: `moment` (`reuse`, `recall` or `fix`), `verdict` (`named`,
+  `nothing` or `not-substantial` for reuse; `named` or `none` for recall; `fix`, `known`
+  or `none` for a fix; `unanswered` or `unreadable` for any), `ms` (the milliseconds the
+  model call took), and where there are any `named`, `reason`, `tool` and `prompt_id`.
+  `ms` means the same on a `recall` and a `capture` event. The rate of each verdict, the
+  timeouts and the model's latency are read from these. They are left out of Recent, in
+  `compound status` and in the pane, and are counted for no lesson.
 - **Claims**: `~/.claude/compound/claims/<session id>/`, one empty directory per thing
   the mod did once in that session: `guard-<lesson>` (a guard's refusal),
   `stop-<call id>` (a stop refused for an owed lesson), `strengthen-<lesson>` (a stop
@@ -476,7 +530,7 @@ The health checks, in order:
 |-|-|
 | `python` | the interpreter is 3.9 or later |
 | `mod` | the package is in `env.CLAUDE_CODE_PLUGIN_DIRS` of `settings.json`, and that directory holds `.claude-plugin/plugin.json`, `hooks/hooks.json`, the module file it names, and every file that module and the files it imports name in a relative import (FAIL when one is missing). WARN "switched off" when `COMPOUND_OFF` resolves to `1` (see Environment variables). |
-| `mod last fired` | the newest event of a type the mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `error`) is at most 7 days old. WARN when there is none or it is older. |
+| `mod last fired` | the newest event of a type the mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `judge`, `error`) is at most 7 days old. WARN when there is none or it is older. |
 | `cli` | `compound` on `PATH` is this package's. WARN with the line to add to the shell profile when the installed link's directory is not on `PATH`. |
 | `prompt log` | history-surfer answers; the row reads `N prompts in this project`, or `reachable` when its answer holds no count |
 | `last event` | the event log can be written and every line of it parses |
@@ -492,11 +546,11 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--no-match`, with `--update`, drops the lesson's guard patterns. `--settles ID` settles that capture. Logs `learn`. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. |
-| `compound show N` | One lesson's path and text. |
+| `compound show N` | One lesson's path and text. With `--json` also its counts, `recalls_since` (the recalls that count toward ineffective), `recur_limit`, and `guarded_in_session` (its guard refused a call in the caller's session). |
 | `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. |
-| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for matching guards. `--guards` adds `"guards"`, the number of lessons that carry a `match`. |
+| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards that apply to that tool and match. `--guards` adds `"guards"`, the number of lessons that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote` when it moved or proposed something. |
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed. Logs `rm`. |

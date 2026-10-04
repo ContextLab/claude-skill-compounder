@@ -3,7 +3,7 @@ import {
   AGAIN, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, heldStep,
   inputOf, isCommand, judged, knownContext, NOTE_RULE, quotedNote, recallContext, reusable, reuseContext, reuseStatus, simpleCommands,
   promotedText, stopDebt, stopNudge, stopStrengthen, unsettledContext, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, userOrigin, worthChecking,
-  BUDGET, ranOut, reportsEvents, storeNews,
+  BUDGET, ranOut, refusal, reportsEvents, shellError, shellFailure, storeNews,
   type Held, mentionsCli
 } from './render'
 import type { Earlier, Event, Item } from './store'
@@ -337,7 +337,7 @@ test('an ineffective lesson that already has a match is told its pattern missed 
   expect(plain.includes('did not catch')).toBe(false)
   expect(plain.includes(`${CLI} add --update --name build-needs-profile --match`)).toBe(true)
   // A pattern is matched against the call, so the call is shown and the error is ruled out.
-  for (const text of [weak, plain]) expect(text.includes('tested against the text of the call (for Bash, the command), never against its output or error')).toBe(true)
+  for (const text of [weak, plain]) expect(text.includes('tested against the command of a Bash call (for a lesson that names other tools with --tool, the JSON of their input), never against output or error')).toBe(true)
   expect(plain.includes('THE CALL THAT FAILED AGAIN:\n./build.sh')).toBe(true)
 })
 
@@ -354,7 +354,7 @@ test('a stop is refused for a strengthening owed: the lesson named, the four opt
   const guard = stopStrengthen([{ name: 'a', guard: true, call: 'cd x && ./build.sh' }, { name: 'b', guard: false, call: '' }], CLI)
   expect(guard.includes('owes 2 stronger lessons: a, b')).toBe(true)
   expect(guard.includes('a already has a match pattern that did not catch this call')).toBe(true)
-  expect(text.includes('tested against the text of the call (for Bash, the command), never against its output or error')).toBe(true)
+  expect(text.includes('tested against the command of a Bash call (for a lesson that names other tools with --tool, the JSON of their input), never against output or error')).toBe(true)
 })
 
 // ---- what an earlier session left unsettled ----
@@ -479,4 +479,100 @@ test('the CLI named through a variable or a path is seen, and an ordinary word i
   expect(mentionsCli('compound skip --why no')).toBe(true)
   expect(mentionsCli('echo compounding interest')).toBe(false)
   expect(mentionsCli('ls compound-demo')).toBe(false)
+})
+
+// ---- what counts as a failed call ----
+
+// Refusals as the harness words them. The first five are texts met on this machine on
+// 2026-10-04 (the audit's replay, this package's transcripts, and refusals handed to the
+// session that wrote this test). The sixth is the audit's quote of the one organic capture,
+// cut where the audit cut it. The last two carry the phrases the audit lists for a user's
+// rejection and an approval prompt; their full wording was not on record.
+const REFUSALS = [
+  'Permission for this action was denied by the Claude Code auto mode classifier. Reason: Blocked by classifier.',
+  "Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Irreversible Local Destruction]. If you have other tasks that don't depend on this action, continue working on those.",
+  "This agent is isolated in the worktree /Users/me/proj/.claude/worktrees/agent-ab04c55fbee53eabd, but this command is too complex to verify that it stays inside the worktree. Refusing to run it — a worktree-isolated agent's git operations must target its own worktree. Split it into plain, separate commands and run them from /Users/me/proj/.claude/worktrees/agent-ab04c55fbee53eabd.",
+  "Claude requested permissions to write to /private/var/folders/tp/T/compound-journey-measure-bbife0g2/alpha/parseDuration.js, but you haven't granted it yet.",
+  '<tool_use_error>[compound] This call was stopped before it ran, because it matches a recorded lesson.\n\nLesson no-bare-build (project) at /p/.claude/compound/lessons/no-bare-build:\nA bare ./build.sh may be intended; check first.',
+  "...Do not work around the check by splitting, scripting, or re-issuing the removal through another tool or shell ... What was flagged: Dangerous rm operation detected: '/Users/jmanning/claude-skill-compounder/lessons/*'",
+  "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+  'This command requires explicit approval before it can run.',
+]
+
+test('a call that was refused before it ran is not a failed call', async () => {
+  for (const text of REFUSALS) expect(refusal(text), text.slice(0, 60)).toBeDefined()
+  // The mod's own guard refusal, as it words it now, reaching a second copy of the mod.
+  const own = guardReason([{ name: 'zsh-equals-word', level: 'user', path: '/u/zsh-equals-word', text: 'Quote it.' }], CLI)
+  expect(refusal(own)).toBe('hook')
+  expect(refusal(REFUSALS[0]!)).toBe('permission')
+  expect(refusal(REFUSALS[2]!)).toBe('harness')
+  expect(refusal(REFUSALS[5]!)).toBe('safety')
+})
+
+test('a command that ran and failed is a failed call, whatever its output quotes', async () => {
+  for (const text of [
+    'Exit code 1\n(eval):1: command not found: timeout',
+    'Exit code 1\nerror: a profile is required',
+    'Exit code 128\nfatal: Needed a single revision',
+    'Exit code 2\ngrep: notes.md: Permission for this action was denied by the Claude Code auto mode classifier.',
+    "Exit code 1\nAssertionError: 'The user doesn't want to proceed with this tool use' not found in reply",
+    'Exit code 1\n<tool_use_error> is not a tag this parser knows',
+    'deploy.sh: error: a target is required',
+    'Command timed out after 2m 0s',
+    'Error: connect ECONNREFUSED 127.0.0.1:8080',
+    '',
+  ]) {
+    expect(refusal(text), text.slice(0, 60)).toBe(undefined)
+  }
+})
+
+test('a shell error at the start of an output line is a failure, though the call exited 0', async () => {
+  // The lines zsh printed under Claude Code on this machine, which the audit counted.
+  for (const [output, line] of [
+    ['(eval):1: no matches found: --include=*.jsonl', '(eval):1: no matches found: --include=*.jsonl'],
+    ['(eval):1: command not found: timeout\n', '(eval):1: command not found: timeout'],
+    ['(eval):1: no matches found: /usr/local/bin/python3*\n', '(eval):1: no matches found: /usr/local/bin/python3*'],
+    ['building...\n(eval):3: read-only variable: status\ndone\n', '(eval):3: read-only variable: status'],
+    ['(eval):1: ==== not found', '(eval):1: ==== not found'],
+    ['a\r\n(eval):12: parse error near `)\'\r\n', "(eval):12: parse error near `)'"],
+    ['zsh: command not found: gtimeout', 'zsh: command not found: gtimeout'],
+    ['zsh:1: no matches found: *.txt', 'zsh:1: no matches found: *.txt'],
+    ['bash: line 1: timeout: command not found', 'bash: line 1: timeout: command not found'],
+    ['bash: foo: command not found', 'bash: foo: command not found'],
+    ['sh: 1: foo: not found', 'sh: 1: foo: not found'],
+    ['bash: line 3: syntax error near unexpected token `fi\'', "bash: line 3: syntax error near unexpected token `fi'"],
+  ] as const) {
+    expect(shellError(output), output).toBe(line)
+  }
+})
+
+test('output that only contains a shell error\'s words is not a failure', async () => {
+  for (const output of [
+    '',
+    'ok',
+    'README.md:12:(eval):1: no matches found: x',
+    '  (eval):1: no matches found: x',
+    '+(eval):1: command not found: timeout',
+    '> (eval):1: command not found: timeout',
+    'The shell printed "(eval):1: no matches found" when the glob was bare.',
+    'grep: command not found in the docs',
+    'error: no matches found for query "timeout"',
+    '3 tests: command not found handling, no matches found handling',
+    'zsh: the Z shell',
+    'bash: the Bourne again shell',
+    'zsh 5.9 (arm64-apple-darwin25.0)',
+    'npm warn deprecated sh: 2 packages',
+    'eval:1: command not found: timeout',
+    '(eval): command not found',
+  ]) {
+    expect(shellError(output), output).toBe(undefined)
+  }
+})
+
+test('a shell error that exited 0 is put to the judge with the line first, then the output', async () => {
+  const text = shellFailure('(eval):1: command not found: timeout', 'a\n(eval):1: command not found: timeout\nb')
+  expect(text.startsWith('The call exited with status 0, and its output carries a shell error: (eval):1: command not found: timeout\n')).toBe(true)
+  expect(text.endsWith('a\n(eval):1: command not found: timeout\nb')).toBe(true)
+  // It is not read back as a refusal.
+  expect(refusal(text)).toBe(undefined)
 })

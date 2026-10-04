@@ -16,14 +16,19 @@ LEVELS
 
 LESSON FORMAT
     <dir>/SKILL.md: a `---` line, `key: value` lines, a `---` line, the body.
-    Keys written here: name, description, match, created, updated, origin. A string
+    Keys written here: name, description, match, match-tools, created, updated, origin. A string
     value that is not a plain YAML scalar is written as a JSON string, which is a
     valid YAML double-quoted one; both forms, YAML single quotes and a folded or
     literal block (`description: >`) are read. `--update` edits only the keys it
     changes and leaves every other frontmatter line as it is. `match` is a JSON array
-    of Python regular expressions on ONE line; each is tested with re.search()
-    against the first 20000 characters of the text of a tool call (the `command` for
-    Bash, otherwise the JSON of the input). A lesson with `match` is a guard.
+    of Python regular expressions on ONE line; each is compiled with re.MULTILINE (so
+    `^` and `$` match at the start and end of every line of a command) and tested with
+    search() against the first 20000 characters of the text of a tool call (the
+    `command` for Bash, otherwise the JSON of the input). A lesson with `match` is a
+    guard. `match-tools` is a JSON array of tool names on ONE line: the tools whose
+    calls the patterns are tested against. Without it the patterns are tested against
+    Bash calls only, so text that is not a command (a file's content, an agent's
+    prompt) is never guarded by accident.
     `created` and `updated` are local dates.
 
 EVENT LOG
@@ -59,6 +64,13 @@ EVENT LOG
                                     error    string    the failure's text
                                     at       string    failure | fix: when it was met
                                     guard    bool      the lesson has a match
+                                    after_guard bool   the lesson's guard had refused
+                                                       a call in this session before
+                                                       (see Ineffective); the CLI
+                                                       works this out from the
+                                                       `guard` events and does not
+                                                       read the field
+                                    ms       int       milliseconds the judge took
                                     ineffective bool   this recurrence made or found
                                                        the lesson ineffective, and
                                                        the session can rewrite it
@@ -89,6 +101,26 @@ EVENT LOG
                                     settles* string    --settles: the capture it settles
         refuse    mod               why*     string    debt | strengthen | nudge: why a
                                                        stop was refused
+        judge     mod               moment   string    reuse | recall | fix: which of
+                                                       the three questions was asked
+                                    verdict  string    what the model answered. reuse:
+                                                       named | nothing | not-substantial.
+                                                       recall: named | none. fix:
+                                                       fix | known | none. Any of
+                                                       them: unanswered (no reply in
+                                                       time) | unreadable
+                                    ms       int       milliseconds the model call
+                                                       took. THE one definition of
+                                                       `ms` for a verdict: `recall`
+                                                       and `capture` carry the same
+                                                       number for theirs
+                                    named    [string]  the lessons, skills or earlier
+                                                       requests the answer named
+                                    reason   string    for none, unanswered and
+                                                       unreadable: why, a few words
+                                    tool     string    recall, fix: the tool whose
+                                                       call was judged
+                                    prompt_id string   reuse: the digest of the prompt
         nudge     mod               calls    int       tool calls in the turn
         promote   CLI `promote`     lesson*  string
                                     from     string    level it left; for an automatic
@@ -151,11 +183,20 @@ EVENT LOG
     waiting there is exit 2, so a body is never dropped in silence.
 
     Last fired. The types the mod writes are reuse, guard, recall, capture, remind,
-    refuse, nudge and error; `status` reports the age of the newest of them.
+    refuse, nudge, judge and error; `status` reports the age of the newest of them.
+
+    Verdicts. A `judge` event is written for every question put to the model, whatever
+    the answer, so the rate of each verdict and the model's latency can be read from
+    the log. They are many and say nothing by themselves: `status` leaves them out of
+    Recent, and they are counted for no lesson.
 
     Ineffective. A lesson is ineffective when at least COMPOUND_RECUR_LIMIT (default
     2) `recall` events naming it have a `ts` later than its SKILL.md's modification
-    time. Rewriting the lesson (`compound add --update`) clears the flag.
+    time. Rewriting the lesson (`compound add --update`) clears the flag. A `recall`
+    that follows a `guard` event of the same lesson in the same (non-empty) session
+    is not one of them: a guard refuses once per session and the call sent again
+    runs, so a failure after the refusal is not the lesson failing to prevent it.
+    `show --json` says so for the caller's session as `guarded_in_session`.
 
     One lesson in two places. Two lesson directories of one name whose trees are byte
     for byte the same are one lesson. A project copy identical to the user-level
@@ -203,9 +244,14 @@ LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn")
 # Every type the table in the docstring names; `compound log` takes no other.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "promote", "candidate", "error")
+               "nudge", "judge", "promote", "candidate", "error")
 # The types the mod writes: the newest of them is when the mod last fired.
-MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "error")
+MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "error")
+# Written for every question put to the model: left out of `status`'s Recent.
+VERDICT_TYPES = ("judge",)
+# The tools a lesson's patterns are tested against when it names none.
+MATCH_TOOLS = ("Bash",)
+TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 UNSETTLED_DAYS = 14
 # How long a plain `add` waits for stdin to speak, or to go on, before it gives up.
 STDIN_WAIT = 2
@@ -655,10 +701,29 @@ def parse_match(value):
     return data, None
 
 
+def parse_tools(value):
+    """The tools a frontmatter `match-tools` value names: MATCH_TOOLS when the key is
+    absent, empty, or not a JSON array of tool names."""
+    if value is None or value == "":
+        return list(MATCH_TOOLS)
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return list(MATCH_TOOLS)
+    if not isinstance(data, list) or not data or not all(isinstance(one, str) and TOOL_RE.match(one) for one in data):
+        return list(MATCH_TOOLS)
+    return data
+
+
+def compile_match(pattern):
+    """A guard pattern as every reader compiles it: `^` and `$` at every line."""
+    return re.compile(pattern, re.MULTILINE)
+
+
 def match_problem(pattern):
     """Why `pattern` cannot be a guard, or None."""
     try:
-        compiled = re.compile(pattern)
+        compiled = compile_match(pattern)
     except re.error as exc:
         return "does not compile: %s" % exc
     if compiled.search("") is not None:
@@ -686,7 +751,7 @@ def _load_item(level, kind, directory, with_body):
     skill_md = os.path.join(directory, "SKILL.md")
     item = {
         "level": level, "kind": kind, "name": name, "description": "",
-        "path": directory, "match": [],
+        "path": directory, "match": [], "_tools": list(MATCH_TOOLS),
         "_file": skill_md, "_problem": None, "_match_issue": None, "_fields": {}, "_body": "",
     }
     try:
@@ -709,6 +774,7 @@ def _load_item(level, kind, directory, with_body):
         else:
             usable.append(pattern)
     item["match"] = usable
+    item["_tools"] = parse_tools(fields.get("match-tools"))
     if kind == "lesson":
         if problem is None and not fields.get("name"):
             problem = "frontmatter has no name"
@@ -969,6 +1035,10 @@ def log_event(event_type, project, **fields):
     return event
 
 
+def _text(value):
+    return value if isinstance(value, str) else ""
+
+
 def event_names(event):
     names = []
     one = event.get("lesson")
@@ -986,18 +1056,31 @@ def tally(events):
     """({name: {reuse, guard, recall, learn}}, {name: [recall epochs]})."""
     counts = {}
     recalls = {}
+    guarded = set()
     for event in events:
         kind = event.get("type")
         if kind not in COUNT_TYPES:
             continue
+        session = _text(event.get("session"))
         for name in event_names(event):
             row = counts.setdefault(name, dict.fromkeys(COUNT_TYPES, 0))
             row[kind] += 1
-            if kind == "recall":
+            if kind == "guard" and session:
+                guarded.add((session, name))
+            # See Ineffective: a recall after the lesson's guard refused in that session
+            # is a recall, and is not a recurrence the lesson failed to prevent.
+            if kind == "recall" and (session, name) not in guarded:
                 stamp = parse_ts(event.get("ts"))
                 if stamp is not None:
                     recalls.setdefault(name, []).append(stamp)
     return counts, recalls
+
+
+def guarded_in(events, name, session):
+    """Whether the guard of lesson `name` refused a call in `session`."""
+    return bool(session) and any(
+        event.get("type") == "guard" and event.get("session") == session and name in event_names(event)
+        for event in events)
 
 
 _settings_env = []
@@ -1063,10 +1146,6 @@ def capture_id(event):
     if isinstance(given, str) and given:
         return given
     return short_hash("\n".join(str(event.get(key) or "") for key in ("session", "call", "failed", "fixed")))
-
-
-def _text(value):
-    return value if isinstance(value, str) else ""
 
 
 def settled_by(debt, event):
@@ -1245,6 +1324,11 @@ def event_summary(event):
                               ", updated" if event.get("update") else "")
     if kind == "nudge":
         return "%s calls" % event.get("calls", "?")
+    if kind == "judge":
+        named = event.get("named")
+        named = ", ".join(str(one) for one in named) if isinstance(named, list) else ""
+        return "%s: %s, %s ms%s" % (one_line(event.get("moment", "?")), one_line(event.get("verdict", "?")),
+                                    event.get("ms", "?"), (" (%s)" % named) if named else "")
     if names:
         return ", ".join(names)
     if kind == "capture":
@@ -1381,6 +1465,14 @@ def cmd_add(args):
         raise usage("a lesson reaches general only through `compound promote %s --to general`" % name)
     if args.match and args.no_match:
         raise usage("--match and --no-match cannot both be given")
+    tools = []
+    for tool in args.tool or []:
+        if not TOOL_RE.match(tool):
+            raise usage("--tool %r is not a tool name such as Bash, Edit or mcp__server__tool" % tool)
+        if tool not in tools:
+            tools.append(tool)
+    if tools and args.no_match:
+        raise usage("--tool and --no-match cannot both be given")
     for pattern in args.match or []:
         issue = match_problem(pattern)
         if issue:
@@ -1428,8 +1520,13 @@ def cmd_add(args):
             changes["match"] = json.dumps(args.match, ensure_ascii=False)
             guard = True
         elif args.no_match:
-            removals.append("match")
+            removals.extend(["match", "match-tools"])
             guard = False
+        if tools:
+            if not guard:
+                raise usage("--tool names the tools a --match pattern is tested against, and %r has no pattern: "
+                            "pass --match too" % name)
+            changes["match-tools"] = json.dumps(tools, ensure_ascii=False)
         if args.origin and one_line(args.origin):
             changes["origin"] = yaml_string(one_line(args.origin))
         if not body.strip() and not item["_body"].strip():
@@ -1471,8 +1568,12 @@ def cmd_add(args):
         stamp = now()
         fields = {"name": yaml_string(name), "description": yaml_string(description)}
         guard = bool(args.match)
+        if tools and not guard:
+            raise usage("--tool names the tools a --match pattern is tested against: pass --match too")
         if args.match:
             fields["match"] = json.dumps(args.match, ensure_ascii=False)
+        if tools:
+            fields["match-tools"] = json.dumps(tools, ensure_ascii=False)
         fields["created"] = local_date(stamp)
         session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         origin = one_line(args.origin or "") or "project %s%s" % (
@@ -1595,6 +1696,7 @@ def cmd_show(args):
         events, _ = read_events()
         row = annotate([item], events)[0]
         row["recalls_since"] = recalls_since(item, tally(events)[1])
+        row["guarded_in_session"] = guarded_in(events, item["name"], os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
         row["recur_limit"] = recur_limit()
         row["text"] = text
         row["files"] = files
@@ -1747,7 +1849,7 @@ def _match_inline(guards, text, report):
         hit = False
         for pattern in patterns:
             try:
-                if re.search(pattern, text):
+                if compile_match(pattern).search(text):
                     hit = True
                     break
             except (re.error, RecursionError, MemoryError, OverflowError):
@@ -1835,7 +1937,8 @@ def cmd_check(args=None, count=False):
     if not isinstance(call, dict):
         raise usage("check reads one JSON object {\"tool\":...,\"input\":...} on stdin")
     payload = call.get("input")
-    if call.get("tool") == "Bash" and isinstance(payload, dict) and isinstance(payload.get("command"), str):
+    tool = call.get("tool") if isinstance(call.get("tool"), str) else ""
+    if tool == "Bash" and isinstance(payload, dict) and isinstance(payload.get("command"), str):
         text = payload["command"]
     elif isinstance(payload, str):
         text = payload
@@ -1852,6 +1955,10 @@ def cmd_check(args=None, count=False):
         guarded = [item for item in items if item["match"]]
         if count:
             result["guards"] = len(guarded)
+            result["tools"] = sorted(set(one for item in guarded for one in item["_tools"]))
+        # A lesson's patterns are tested against the calls of the tools it names: Bash alone
+        # unless its `match-tools` says otherwise.
+        guarded = [item for item in guarded if tool in item["_tools"]]
     if text:
         hits, unfinished, never = run_guards([item["match"] for item in guarded], text, began + budget)
         for index in sorted(hits):
@@ -3107,7 +3214,7 @@ def build_status():
         "health": health,
         "store": store,
         "lessons": lessons,
-        "recent": events[-10:],
+        "recent": [event for event in events if event.get("type") not in VERDICT_TYPES][-10:],
         "open": {
             "ineffective": [{"name": row["name"], "level": row["level"], "path": row["path"],
                              "recall": row["counts"]["recall"]} for row in rows if row["ineffective"]],
@@ -3210,6 +3317,8 @@ def build_parser():
     one.add_argument("--level", choices=LEVELS, default="project")
     one.add_argument("--match", action="append", metavar="RE", help="a guard pattern; repeatable")
     one.add_argument("--no-match", action="store_true", help="with --update: drop the guard patterns")
+    one.add_argument("--tool", action="append", metavar="TOOL",
+                     help="a tool whose calls the patterns are tested against (default Bash); repeatable")
     one.add_argument("--attach", action="append", metavar="FILE", help="a file to keep beside the lesson; repeatable")
     one.add_argument("--origin")
     one.add_argument("--update", action="store_true",

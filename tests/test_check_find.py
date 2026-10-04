@@ -29,17 +29,22 @@ class CheckTest(Case):
         carries a pattern at all, and it never needs a listing before a tool call."""
         proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": "ls"}))
         self.assertExit(proc, 0)
-        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 0})
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 0, "tools": []})
         self.box.add("plain-lesson")
         self.box.add("a-guard", "Use when.", "Body.\n", "--match", "echo\\s+GUARDED")
         self.box.add("another", "Use when.", "Body.\n", "--level", "user", "--match", "rm -rf /tmp/x")
         proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": "ls"}))
-        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 2})
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 2, "tools": ["Bash"]})
         proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": "echo  GUARDED"}))
         data = json.loads(proc.stdout)
         self.assertEqual(([hit["name"] for hit in data["hits"]], data["guards"]), (["a-guard"], 2))
         proc = self.box.run("check", "--guards", stdin=call("Bash", {"command": ""}))
-        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 2}, "an empty call is still counted")
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 2, "tools": ["Bash"]},
+                         "an empty call is still counted")
+        self.box.add("no-env-edit", "Use when.", "Body.\n", "--match", "\\.env", "--tool", "Edit", "--tool", "Write")
+        proc = self.box.run("check", "--guards", stdin=call("Read", {"file_path": "/x"}))
+        self.assertEqual(json.loads(proc.stdout), {"hits": [], "guards": 3, "tools": ["Bash", "Edit", "Write"]},
+                         "the tools any guard applies to, so the mod need not ask before a call of another tool")
         self.assertEqual(self.hits("Bash", {"command": "ls"}), [], "without the flag the answer is the hits alone")
 
     def test_a_guard_matches_a_bash_command(self):
@@ -67,10 +72,66 @@ class CheckTest(Case):
         self.assertEqual(hits, [])
 
     def test_other_tools_are_tested_on_the_json_of_the_input(self):
-        self.box.add("no-env-edit", "Use when.", "Never edit .env.\n", "--match", r'"file_path": "[^"]*\.env"')
+        self.box.add("no-env-edit", "Use when.", "Never edit .env.\n", "--match", r'"file_path": "[^"]*\.env"',
+                     "--tool", "Edit")
         hits = self.hits("Edit", {"file_path": "/repo/.env", "old_string": "a", "new_string": "b"})
         self.assertEqual([hit["name"] for hit in hits], ["no-env-edit"])
         self.assertEqual(self.hits("Edit", {"file_path": "/repo/main.py", "old_string": "a", "new_string": "b"}), [])
+
+    def test_a_guard_is_for_bash_commands_unless_its_lesson_names_other_tools(self):
+        """Text that is not a command is not guarded: a file's content, an agent's prompt
+        and a hand-back that merely mention the mistake run. The calls are the ones the
+        audit of 2026-10-04 reproduced."""
+        self.box.add("chain-commit-with-and", "Use when.", "Chain the commit with &&.\n",
+                     "--match", r";\s*git\s+commit\b")
+        self.assertEqual(len(self.hits("Bash", {"command": "pytest -q; git commit -m done"})), 1)
+        for tool, payload in (
+                ("Write", {"file_path": "/repo/notes.md", "content": "Run the tests; git commit -m done"}),
+                ("SubagentHandback", {"message": "I ran pytest; git commit was not run."}),
+                ("Agent", {"prompt": "run the suite; git commit only if green"}),
+                ("Edit", {"file_path": "/repo/a.md", "old_string": "x", "new_string": "ok; git commit"})):
+            self.assertEqual(self.hits(tool, payload), [], tool)
+        # A lesson that names a tool is tested on that tool's input, and on no other's.
+        self.box.add("no-commit-in-notes", "Use when.", "Body.\n", "--match", r";\s*git\s+commit\b", "--tool", "Write")
+        hits = self.hits("Write", {"file_path": "/repo/notes.md", "content": "Run the tests; git commit -m done"})
+        self.assertEqual([hit["name"] for hit in hits], ["no-commit-in-notes"])
+        self.assertEqual([hit["name"] for hit in self.hits("Bash", {"command": "pytest -q; git commit -m done"})],
+                         ["chain-commit-with-and"])
+        self.assertEqual(self.hits("Agent", {"prompt": "run the suite; git commit only if green"}), [])
+
+    def test_a_call_that_names_no_tool_is_tested_against_nothing(self):
+        self.box.add("danger", "Use when.", "Body.\n", "--match", "danger")
+        proc = self.box.run("check", stdin=json.dumps({"input": "danger"}))
+        self.assertExit(proc, 0)
+        self.assertEqual(json.loads(proc.stdout), {"hits": []})
+
+    def test_a_caret_matches_at_the_start_of_every_line(self):
+        """Patterns are compiled with re.MULTILINE: a command on the second line of a call
+        starts a line. The commands are the audit's."""
+        self.box.add("macos-no-timeout", "Use when.", "Body.\n", "--match", r"(^|[;&|]\s*)timeout\s+\d")
+        for command in ("timeout 5 ls", "cd /tmp\ntimeout 5 ls", "cd /tmp &&\n  ls;\ntimeout 5 ls", "ls; timeout 5 ls"):
+            self.assertEqual(len(self.hits("Bash", {"command": command})), 1, command)
+        for command in ("echo timeout 5", "cd /tmp\necho no timeout 5 here", "grep -c timeout 5.log"):
+            self.assertEqual(self.hits("Bash", {"command": command}), [], command)
+        self.box.add("brew-doctor-exits-1", "Use when.", "Body.\n", "--match", r"brew doctor\s*$")
+        self.assertEqual(len(self.hits("Bash", {"command": "brew doctor\necho done"})), 1, "$ is a line's end")
+
+    def test_the_anchor_the_learn_skill_teaches_finds_a_command_wherever_one_starts(self):
+        repo = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        anchor = r"(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)"
+        for rel in (os.path.join("skills", "learn", "SKILL.md"), os.path.join("docs", "guide.md")):
+            with open(os.path.join(repo, rel)) as handle:
+                text = handle.read()
+            self.assertIn("--match '%secho\\s+=+'" % anchor, text, rel)
+            self.assertNotIn(r"(^|[;&|]\s*)", text, rel)
+        self.box.add("macos-no-timeout", "Use when.", "Body.\n", "--match", anchor + r"timeout\s+\d")
+        for command in ("timeout 5 ls", "cd /tmp\ntimeout 5 ls", "cd /tmp\n  timeout 5 ls",
+                        "for f in a b; do timeout 5 ls $f; done", "x=$(timeout 5 ls)",
+                        "if true; then timeout 5 ls; else timeout 6 ls; fi", "ls && timeout 5 ls", "ls | timeout 5 cat"):
+            self.assertEqual(len(self.hits("Bash", {"command": command})), 1, command)
+        for command in ("echo timeout 5", "grep -n 'timeout 5' run.sh", "git commit -m 'undo timeout 5'",
+                        "gtimeout 5 ls", "./timeout 5"):
+            self.assertEqual(self.hits("Bash", {"command": command}), [], command)
 
     def test_guards_at_all_three_levels_are_tested(self):
         self.box.add("p-guard", "Use when.", "P.\n", "--match", "danger")

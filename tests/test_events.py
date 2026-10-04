@@ -48,6 +48,15 @@ class LogTest(Case):
         with open(self.box.events) as handle:
             self.assertEqual(len(handle.read().splitlines()), 1)
 
+    def test_a_judge_event_is_a_known_type_and_keeps_its_ms(self):
+        proc = self.box.run("log", "--json", stdin=json.dumps(
+            {"type": "judge", "moment": "recall", "verdict": "none", "ms": 812, "tool": "Bash"}))
+        self.assertExit(proc, 0)
+        event = self.box.read_events()[-1]
+        self.assertEqual((event["type"], event["moment"], event["verdict"], event["ms"]), ("judge", "recall", "none", 812))
+        line = self.box.run("events").stdout.strip().splitlines()[-1]
+        self.assertIn("recall: none, 812 ms", line)
+
     def test_refusals_write_nothing(self):
         for text in ("", "not json", "[]", '"text"', "{}", '{"type": 3}', '{"type": ""}', '{"type": "Has Space"}'):
             proc = self.box.run("log", stdin=text)
@@ -257,6 +266,34 @@ class IneffectiveTest(Case):
         self.recall(90, "steady")
         self.assertFalse(self.row("flaky")["ineffective"])
         self.assertFalse(self.row("steady")["ineffective"])
+
+    def test_a_recall_after_the_lessons_guard_refused_in_that_session_does_not_count(self):
+        """A guard refuses once per session and the call sent again runs: a failure after
+        that is not the lesson failing to prevent it."""
+        self.box.add("flaky", "Use when.", "Body.\n", "--match", "the-bad-command")
+        self.box.log({"type": "guard", "lesson": "flaky", "tool": "Bash", "text": "the-bad-command"}, COMPOUND_NOW=NOW + 50)
+        self.recall(60)
+        self.recall(120)
+        row = self.row()
+        self.assertFalse(row["ineffective"])
+        self.assertEqual(row["counts"]["recall"], 2, "they are still recalls")
+        shown = self.box.json("show", "flaky", "--json")
+        self.assertEqual((shown["recalls_since"], shown["guarded_in_session"]), (0, True))
+        other = self.box.json("show", "flaky", "--json", CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
+        self.assertFalse(other["guarded_in_session"])
+        self.assertFalse(self.box.json("show", "flaky", "--json", CLAUDE_CODE_SESSION_ID=None)["guarded_in_session"])
+        # In a session the guard did not refuse in, the failure got past the lesson.
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 130, CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 140, CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
+        self.assertTrue(self.row()["ineffective"])
+        self.assertEqual(self.box.json("show", "flaky", "--json")["recalls_since"], 2)
+
+    def test_a_guard_refusal_without_a_session_excuses_nothing(self):
+        self.box.add("flaky", "Use when.", "Body.\n", "--match", "the-bad-command")
+        self.box.log({"type": "guard", "lesson": "flaky"}, COMPOUND_NOW=NOW + 50, CLAUDE_CODE_SESSION_ID=None)
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 60, CLAUDE_CODE_SESSION_ID=None)
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 70, CLAUDE_CODE_SESSION_ID=None)
+        self.assertTrue(self.row()["ineffective"])
 
     def test_a_skill_can_be_ineffective_too(self):
         self.box.add("flaky")

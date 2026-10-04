@@ -217,6 +217,29 @@ class UpdateTest(Case):
         self.assertNotIn("match:", read(os.path.join(self.box.lesson_dir("was-guard"), "SKILL.md")))
         self.assertEqual(self.box.json("list", "--json")[0]["match"], [])
 
+    def test_tool_names_the_tools_a_guard_applies_to(self):
+        self.box.add("no-env-edit", "Use when.", "Body.\n", "--match", "\\.env", "--tool", "Edit", "--tool", "Write")
+        path = os.path.join(self.box.lesson_dir("no-env-edit"), "SKILL.md")
+        self.assertIn('match-tools: ["Edit", "Write"]\n', read(path))
+        # --update keeps the tools unless it names new ones, and --no-match drops them with the patterns.
+        self.assertExit(self.box.run("add", "--name", "no-env-edit", "--update", "--when", "Use when editing."), 0)
+        self.assertIn('match-tools: ["Edit", "Write"]\n', read(path))
+        self.assertExit(self.box.run("add", "--name", "no-env-edit", "--update", "--tool", "Bash"), 0)
+        self.assertIn('match-tools: ["Bash"]\n', read(path))
+        self.assertExit(self.box.run("add", "--name", "no-env-edit", "--update", "--no-match"), 0)
+        self.assertNotIn("match", read(path).split("---")[1])
+
+    def test_tool_without_a_pattern_is_refused(self):
+        proc = self.box.run("add", "--name", "x-lesson", "--when", "Use when.", "--tool", "Edit", stdin="Body.\n")
+        self.assertExit(proc, 2)
+        self.assertIn("--tool", proc.stderr)
+        self.box.add("plain")
+        proc = self.box.run("add", "--name", "plain", "--update", "--tool", "Edit")
+        self.assertExit(proc, 2)
+        proc = self.box.run("add", "--name", "y-lesson", "--when", "Use when.", "--match", "x", "--tool", "not a tool",
+                            stdin="Body.\n")
+        self.assertExit(proc, 2)
+
     def test_update_refuses_a_bad_match_and_leaves_the_lesson(self):
         self.box.add("stays", "Use when.", "Body.\n")
         before = read(os.path.join(self.box.lesson_dir("stays"), "SKILL.md"))

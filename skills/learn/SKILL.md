@@ -68,9 +68,22 @@ not add a second lesson for the same mistake. `compound show <name>` prints one 
 | script | The fix is a procedure worth running, not retyping. | add `--attach <file>` and say in the body to run it |
 | skill | There are steps to follow in order AND a trigger that can route to them. | record the lesson, then `compound skill <name>` |
 
-A `--match` value is a Python regular expression, tested with `re.search` against the
-command of a Bash call (or the JSON of another tool's input). Make it match the wrong form
-and not the right one. Test it on both before you rely on it.
+A `--match` value is a Python regular expression, searched for in the command of a Bash
+call. Make it match the wrong form and not the right one, and test it on both before you
+rely on it: `printf '%s' '{"tool":"Bash","input":{"command":"<the call>"}}' | compound check`
+prints the lessons whose pattern hits.
+
+- **Start the pattern with the command anchor**, `(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)`,
+  when the mistake is a command: it matches wherever a command starts, which is the start
+  of any line (`^` matches at every line of the command), after `;`, `&&`, `||`, `|` or
+  `(` (so inside `$(`), and after `do`, `then` or `else`. A pattern without it also fires
+  on the command's name inside an argument (`grep timeout run.log`).
+- **A pattern guards Bash calls only.** It is never tested against a file being written,
+  an agent's prompt or any other tool's input, so prose that mentions the mistake is not
+  stopped. When the mistake is a call of another tool, name the tool with `--tool`
+  (repeatable): the pattern is then tested against the JSON of that tool's input, and not
+  against Bash commands unless `--tool Bash` is given too.
+  `--match '"file_path": "[^"]*\.env"' --tool Edit --tool Write`
 
 ## 5. Choose the level.
 
@@ -116,7 +129,7 @@ A guard, at the user level (the call is stopped once before it runs):
 ```bash
 compound add --name zsh-equals-word --level user \
   --when 'Use when a zsh command line has a bare word starting with "=" (a ===== separator after ";").' \
-  --match '(^|[;&|]\s*)echo\s+=+' <<'EOF'
+  --match '(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)echo\s+=+' <<'EOF'
 zsh expands a bare word starting with "=" as a command lookup and fails with "not found".
 Quote it or use printf '%s\n' '====='.
 EOF
@@ -151,7 +164,7 @@ the new body from the here-document:
 ```bash
 compound add --update --name build-needs-profile \
   --when "Use when running ./build.sh or make build in this repository." \
-  --match '(^|[;&|]\s*)\./build\.sh\s*($|[;&|])' --body - <<'EOF'
+  --match '(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)\./build\.sh\s*($|[;&|)])' --body - <<'EOF'
 Run `./build.sh --profile dev` (or `make build PROFILE=dev`). Without a profile
 both fail with "error: a profile is required".
 EOF
@@ -173,7 +186,7 @@ value you do not give. Do not add a second lesson.
 - Add a `--match` so the call is stopped before it runs. This is the strongest form:
 
   ```bash
-  compound add --update --name build-needs-profile --match '(^|[;&|]\s*)\./build\.sh\s*($|[;&|])'
+  compound add --update --name build-needs-profile --match '(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)\./build\.sh\s*($|[;&|)])'
   ```
 
 - If the message says the lesson already has a match pattern that did not catch the call,

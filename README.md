@@ -131,11 +131,14 @@ a later one fixes it, compound tells Claude to record the lesson. From then on t
 works in two ways:
 
 - A **guard** is a lesson that carries a **pattern**: a regular expression that describes
-  the wrong command. compound tests every tool call against the patterns before the call
-  runs. On a match it refuses the call once and quotes the lesson, so Claude corrects the
-  call first.
+  the wrong command. compound tests every Bash command against the patterns before it
+  runs (and the calls of another tool only for a lesson that names that tool). On a match
+  it refuses the call once and quotes the lesson, so Claude corrects the call first.
 - A lesson without a pattern is **recalled**: when a call fails, compound hands Claude
-  the lesson that describes that failure, beside the error.
+  the lesson that describes that failure, beside the error. A call that was refused
+  before it ran (a permission denied, a safety check, a hook) is not a failed call, and a
+  Bash call that exits 0 with a shell error in its output (`command not found` ahead of
+  `| tail`) is one.
 
 > Session one: `import tomllib` fails on Python 3.9. Claude finds the fix and records the
 > lesson `python3-no-tomllib-use-tomli`. The lesson is about your machine, so it is kept for all
@@ -369,9 +372,9 @@ the same account as your session.
 | When | Model calls | Added time |
 |-|-|-|
 | a substantial prompt | one | about 1 second |
-| a tool call, when any lesson has a pattern | none | about 45 ms |
-| a tool call, when no lesson has a pattern | none | the first call of a turn pays about 45 ms; the rest pay nothing |
-| a failed tool call | one | none before the call |
+| a call of a tool some guard applies to (Bash, unless a lesson names another) | none | about 45 ms |
+| a call of any other tool, or any call when no lesson has a pattern | none | the first call of a turn pays about 45 ms; the rest pay nothing |
+| a failed tool call (not one refused before it ran) | one | none before the call |
 | each later success of the same tool, until one is the fix | one each, five at most | none before the call |
 
 The times were measured on Claude Code 2.1.289. compound never holds your work for long:

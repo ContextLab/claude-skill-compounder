@@ -83,6 +83,14 @@ export function parseGuards(stdout: string): number | undefined {
   return o !== undefined && typeof o.guards === 'number' ? o.guards : undefined
 }
 
+// `compound check --guards`: the tool names under "tools", the tools some guard applies
+// to. undefined when the reply does not say, and then every tool is asked about.
+export function parseGuardTools(stdout: string): string[] | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined || !Array.isArray(o.tools) || !o.tools.every(t => typeof t === 'string')) return undefined
+  return o.tools as string[]
+}
+
 // `compound check`: {"hits":[{name,level,path,text}]}.
 export function parseHits(stdout: string): Hit[] | undefined {
   const o = record(parsed(stdout))
@@ -125,8 +133,10 @@ export function parseEarlier(stdout: string, session: string, mine: readonly str
 }
 
 // `since` is how many recalls are later than the lesson's last rewrite, and `limit` how many
-// make it ineffective; both are undefined when the CLI did not say.
-export type Shown = { text: string; path: string; level: string; recalls: number; ineffective: boolean | undefined; since: number | undefined; limit: number | undefined }
+// make it ineffective; both are undefined when the CLI did not say. `guarded` is whether
+// the lesson's guard refused a call in this session, which is the CLI's to say too: a
+// recall after that is not counted against the lesson.
+export type Shown = { text: string; path: string; level: string; recalls: number; ineffective: boolean | undefined; since: number | undefined; limit: number | undefined; guarded: boolean | undefined }
 
 // A SKILL.md without its frontmatter: the lesson as it is read.
 export function bodyOf(text: string): string {
@@ -138,7 +148,7 @@ export function bodyOf(text: string): string {
 // whether the CLI now counts it ineffective. Output that is not JSON is taken as the text.
 export function parseShow(stdout: string): Shown {
   const o = record(parsed(stdout))
-  if (o === undefined) return { text: bodyOf(stdout), path: '', level: '', recalls: 0, ineffective: undefined, since: undefined, limit: undefined }
+  if (o === undefined) return { text: bodyOf(stdout), path: '', level: '', recalls: 0, ineffective: undefined, since: undefined, limit: undefined, guarded: undefined }
   const counts = record(o.counts)
   const recalls = counts !== undefined && typeof counts.recall === 'number' ? counts.recall : 0
   return {
@@ -149,6 +159,7 @@ export function parseShow(stdout: string): Shown {
     ineffective: typeof o.ineffective === 'boolean' ? o.ineffective : undefined,
     since: typeof o.recalls_since === 'number' ? o.recalls_since : undefined,
     limit: typeof o.recur_limit === 'number' ? o.recur_limit : undefined,
+    guarded: typeof o.guarded_in_session === 'boolean' ? o.guarded_in_session : undefined,
   }
 }
 

@@ -195,6 +195,15 @@ class StatusTest(Case):
         recent = proc.stdout.split("Recent\n")[1].split("\nOpen")[0].strip().splitlines()
         self.assertEqual(len(recent), 10)
 
+    def test_recent_leaves_the_judges_verdicts_out(self):
+        self.box.log({"type": "guard", "lesson": "a-guard"}, COMPOUND_NOW=NOW + 1)
+        for index in range(12):
+            self.box.log({"type": "judge", "moment": "fix", "verdict": "none", "ms": 700 + index}, COMPOUND_NOW=NOW + 2 + index)
+        data = self.status(COMPOUND_NOW=NOW + 20)
+        self.assertEqual([event["type"] for event in data["recent"]], ["guard"])
+        fired = [row for row in data["health"] if row["check"] == "mod last fired"][0]
+        self.assertIn("(judge)", fired["detail"], "a verdict is still the mod firing")
+
     def test_skips_are_listed_with_their_reasons(self):
         self.assertExit(self.box.run("skip", "--why", "a typo, nothing to keep"), 0)
         data = self.status()
