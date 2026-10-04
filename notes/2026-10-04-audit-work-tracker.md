@@ -34,9 +34,9 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
 
 | Track | From | Scope | Status |
 |-|-|-|-|
-| G1 | #19 point 4 | a `use` event when a skill made from a lesson (or any recorded skill) is invoked, with its notice on the band and its count in `status` and the pane | dispatched (track G) |
-| G2 | #19 point 1 | notice a repeated request (the same procedure asked for several times, from the prompt log) and propose making it a skill | dispatched (track G) |
-| G3 | #19 point 3 | a skill in the shipped pool that composes other skills. The owner chose (2026-10-04): BOTH `finish-task` (review the change, run every check, update docs and notes, commit; calls compound:learn when something failed and was fixed) and `verify-assumptions-first` (check base assumptions with real calls before a large effort, then an MVP, then the full build; calls compound:reuse first) | dispatched (track G) |
+| G1 | #19 point 4 | a `use` event when a skill made from a lesson (or any recorded skill) is invoked, with its notice on the band and its count in `status` and the pane | MERGED (75e55e0, merge 2ae8d96); notes in `2026-10-04-track-g-skills.md` |
+| G2 | #19 point 1 | notice a repeated request (the same procedure asked for several times, from the prompt log) and propose making it a skill | MERGED (75e55e0, merge 2ae8d96); notes in `2026-10-04-track-g-skills.md` |
+| G3 | #19 point 3 | a skill in the shipped pool that composes other skills. The owner chose (2026-10-04): BOTH `finish-task` (review the change, run every check, update docs and notes, commit; calls compound:learn when something failed and was fixed) and `verify-assumptions-first` (check base assumptions with real calls before a large effort, then an MVP, then the full build; calls compound:reuse first) | MERGED (75e55e0, merge 2ae8d96); notes in `2026-10-04-track-g-skills.md` |
 | H | #30 | after some weeks of ordinary use, a sweep of the log: capture to lesson / skip / unsettled rates, guard refusals corrected vs re-sent, recall precision, reuse relevance. A `compound` report that prints them | MERGED (bb49a91, merge 21552d4): `compound report`; a `retry` event after a guard refusal. Notes in `2026-10-04-track-h-report.md`. The sweep itself needs weeks of data |
 | I | #42 | a credential for sessions in a throwaway `CLAUDE_CONFIG_DIR` (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`), then prove the marketplace install route and run the journeys fully isolated. ONLY THE OWNER can create the token | blocked on the owner |
 
@@ -113,3 +113,10 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
   agents failing 1 s apart made `zsh-nomatch-glob` ineffective; one lesson is 7 of 19
   reuse offers.
 - Running: G. Then media, docs pass, release.
+- 2026-10-04: track G merged, all checks green: 19 test files, 242 plugin tests, tsc clean
+  (main 2ae8d96). The pool now ships 4 skills (learn, reuse, finish-task,
+  verify-assumptions-first) and 6 lessons. Known: haiku did not route to
+  verify-assumptions-first (0 of 1; sonnet 4 of 4); `measure_reuse.py` still offers
+  `brew-doctor-exit` wrongly for the LaTeX prompt.
+- 2026-10-04: track M dispatched: docs pass (README Cost table re-measured, guide examples
+  regenerated from real output) and re-recorded README media. Then the release (v0.5.0).
