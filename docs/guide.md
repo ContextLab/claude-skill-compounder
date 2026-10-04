@@ -331,7 +331,7 @@ and for the `finish-task` and `verify-assumptions-first` skills compound ships.
 
 ## When a request keeps coming back
 
-When you ask for something substantial, compound's reuse check reads your earlier
+At every typed request of some length, compound's reuse check reads your earlier
 requests. If the same kind of request was made in three sessions, this one included, and
 no lesson, skill or script covers it, the note Claude gets says so and offers to make it
 a skill: once the work is done, record how it was done (`compound add`) and turn the

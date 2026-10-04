@@ -215,7 +215,8 @@ works in this order:
    of the prompt (at least two words, or one of five letters or more, in the prompt's
    order) is dropped, and the `judge` event counts those under `unquoted`. Whatever is
    left is added to the prompt as context. A prompt that is not a substantial build
-   task, or for which nothing is left, adds nothing at all.
+   task, or for which nothing is left, is given no existing work; the one thing it can
+   still be given is the offer described under "A request that keeps coming back".
 4. **Remember the verdict.** The mod gives the verdict to the CLI (`compound memo`),
    which keeps it under a key made of the project, the prompt's text, the floor and the
    content of everything the prompt was ranked against. The same prompt in the same
