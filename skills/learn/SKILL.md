@@ -37,7 +37,8 @@ if you have it, with the candidates as options; otherwise ask in plain text and 
 Do not guess, and do not record several lessons to cover the possibilities.
 
 When the evidence shows nothing worth keeping (a one-off typo, a check that correctly
-failed, a file that was simply missing), decline and say why:
+failed, a file that was simply missing), decline and say why. Run in the session that owes
+it, this settles the debt:
 
 ```bash
 compound skip --why "the failure was a typo in a file name, not a recurring mistake"
@@ -84,9 +85,21 @@ A lesson exists once, at one level. It is moved when its reach grows, never copi
 
 ## 6. Write it.
 
-The body is read on stdin. Lead with what to do, then the wrong way and the error it
+The body is the lesson's text. Lead with what to do, then the wrong way and the error it
 gives, so a reader gets it right the first time. Name the command and the error, nothing
 about this session. Never put a password, token or key in a lesson.
+
+There are three ways to pass the body:
+
+| Way | Use it for |
+|-|-|
+| a here-document on stdin, as in the examples below | a new lesson |
+| `--body "<text>"` | a body of one line |
+| `--body-file <path>` | a body already in a file |
+
+A new lesson reads its body on stdin when no body flag is given. `--update` never reads
+stdin on its own: it keeps the body the lesson has, and takes a new one only from `--body
+"<text>"`, `--body-file <path>`, or `--body -` with a here-document.
 
 A lesson:
 
@@ -132,12 +145,13 @@ EOF
 ```
 
 Improving a lesson that already exists (it is rewritten where it is; flags you leave out
-keep their value):
+keep their value, and the body stays unless a body flag gives a new one). `--body -` takes
+the new body from the here-document:
 
 ```bash
 compound add --update --name build-needs-profile \
   --when "Use when running ./build.sh or make build in this repository." \
-  --match '(^|[;&|]\s*)\./build\.sh\s*($|[;&|])' <<'EOF'
+  --match '(^|[;&|]\s*)\./build\.sh\s*($|[;&|])' --body - <<'EOF'
 Run `./build.sh --profile dev` (or `make build PROFILE=dev`). Without a profile
 both fail with "error: a profile is required".
 EOF
@@ -165,15 +179,16 @@ value you do not give. Do not add a second lesson.
 - If the message says the lesson already has a match pattern that did not catch the call,
   it quotes the call and the pattern. Write a pattern that matches that call and not the
   right form, and pass it the same way (`--match` replaces the patterns the lesson has).
-- Or attach a script that does the step correctly (`--attach <file>`, with a body on stdin
-  that says to run it), or rewrite `--when` so it names the situation.
+- Or attach a script that does the step correctly (`--attach <file>`, with `--body
+  "<text that says to run it>"`), or rewrite `--when` so it names the situation.
 - If none is worth doing, decline: `compound skip --why "<reason>"`.
 
 ## 8. When told a lesson moved, or could move, to the user level
 
 A `[compound]` message that says a lesson was moved to the user level asks you to reword
 it if its text speaks of "this repository": it is now read from every project. Use
-`compound add --update --name <name>` with the new `--when` or body.
+`compound add --update --name <name>` with the new `--when`, and the new body as `--body
+"<text>"`.
 
 A message that says a lesson of another project is a candidate for the user level gives a
 command that moves it. Do not run it. Tell the user and run it only if they say yes.

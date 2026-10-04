@@ -163,7 +163,7 @@ class WordingTest(unittest.TestCase):
         readme = read("README.md")
         for term in ("mod", "lesson", "guard", "pattern", "status entry"):
             self.assertIn("**%s**" % term, readme, "%r is not defined" % term)
-        for term in ("level", "recalled", "general pool", "prompt log"):
+        for term in ("level", "recalled", "general pool", "prompt log", "band", "pane"):
             bold = "**%s**" % term
             self.assertIn(bold, readme, "%r is not defined" % term)
             first = re.search(r"(?<![A-Za-z])%s(?![A-Za-z])" % re.escape(term), readme)

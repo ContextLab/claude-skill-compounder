@@ -1,6 +1,6 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test, type TestBody } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { BUSY, ERROR, FRAME_MS, FRAMES, GONE_MS, NOTES, OWED } from './view'
+import { BUSY, ERROR, FRAME_MS, FRAMES, GONE_MS, NOTES, OWED, WEAK } from './view'
 
 // The band and the pane, drawn through the mod's own hooks on every surface that draws
 // them. The world beneath the mod is the test's: the CLI's replies, the judge's answer,
@@ -25,12 +25,15 @@ const STATUS = JSON.stringify({
 })
 const EVENTS = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'guard', lesson: 'no-marker-echo' }])
 
-type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; opened: string[]; isLost: boolean }
+// `owed` is what the CLI answers `events --unsettled --session S`: the log's own account of
+// what the session owes. The world keeps it as the log would: a capture or an ineffective
+// recall the mod logs is owed from then on, until the test says the log holds its settlement.
+type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, opened: [], isLost: false }
+  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -41,7 +44,10 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('session.messages', () => ({ value: [] }))
   on('fs.exists', () => ({ value: true }))
   on('command.register', () => ({ value: undefined }) as never)
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', (_$, e) => {
+    w.statuses.push((e as unknown as { text?: string }).text)
+    return { value: undefined }
+  })
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', (_$, e) => {
     w.opened.push(e.id)
@@ -54,12 +60,16 @@ function world(on: On, env: Record<string, string> = {}): World {
     const verb = argv[0]?.endsWith('/compound') ? argv[1] : argv[0]
     const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (verb === 'log') {
-      w.logged.push(JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>)
+      const event = JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>
+      w.logged.push(event)
+      if (event.type === 'capture' || (event.type === 'recall' && event.ineffective === true)) {
+        w.owed.push({ ts: '2026-10-03T12:00:00Z', session: 'session-under-test', ...event })
+      }
       return done('')
     }
     if (verb === 'list') return done(ITEMS)
     if (verb === 'status') return done(STATUS)
-    if (verb === 'events') return done(argv.includes('--unsettled') ? '[]' : w.events)
+    if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(w.owed) : '[]') : w.events)
     if (verb === 'find') return done('{"words":[],"items":[],"prompts":[],"surfer":"ok"}')
     if (verb === 'check') return done(w.check)
     return done('')
@@ -320,4 +330,198 @@ test('/compound status, and a run nobody typed, print the report as text and ope
   expect(sdk.text).toContain('"health"')
   expect(w.opened).toEqual([])
   expect(w.calls.some(c => c[1] === 'status' && !c.includes('--json'))).toBe(true)
+})
+
+// ---- settled is what the log says, however the CLI was run ---------------------------------
+
+// A failed call and its fix: the session owes a lesson, and the band and the status entry say so.
+async function owe($: Parameters<TestBody>[0], w: World, agentId?: string): Promise<void> {
+  const agent = agentId === undefined ? {} : { agentId }
+  w.judge = async () => '{"name":null}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh', ...agent } as never)
+  w.judge = async () => FIX
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+}
+
+const ADD = 'add --name deploy-needs-target --when "Use when deploying." --body "Pass --target."'
+// Every way a session has been seen to run the CLI. None of them is read by the mod.
+const RECORDING_FORMS = [
+  `compound find deploy && compound ${ADD}`,
+  `/opt/compound/bin/compound find deploy; /opt/compound/bin/compound ${ADD}`,
+  `(compound ${ADD})`,
+  `out=$(compound ${ADD})`,
+  `echo \`compound ${ADD}\``,
+  `C=/opt/compound/bin/compound; $C ${ADD}`,
+  `"/opt/with space/bin/compound" ${ADD}`,
+  `env COMPOUND_HOME=/tmp/h compound ${ADD}`,
+  `bash -c 'compound ${ADD}'`,
+  `( cd /tmp && compound ${ADD} )`,
+  `./record-the-lesson.sh`,
+]
+
+test('a lesson recorded settles the band and the status entry, however the command that recorded it was written', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  const clock = mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  let n = 0
+  for (const command of RECORDING_FORMS) {
+    n += 1
+    await owe($, w)
+    expect(await shown(), command).toContain(OWED.label)
+    expect(w.statuses[w.statuses.length - 1], command).toBe('lesson owed')
+    // The call writes the lesson: the log now holds its `learn`, and nothing is owed.
+    w.owed = []
+    w.events = JSON.stringify([{ ts: `2026-10-03T12:${String(n).padStart(2, '0')}:00Z`, type: 'learn', lesson: 'deploy-needs-target', update: false, session: 'session-under-test' }])
+    await $.tool.call({ tool: 'Bash', command })
+    expect(await shown(), command).toContain(`${NOTES.recorded.label} · deploy-needs-target`)
+    expect(await shown(), command).not.toContain('● owed')
+    expect(await shown(), command).not.toContain('1 owed')
+    expect(await shown(), command).not.toContain(OWED.label)
+    expect(w.statuses[w.statuses.length - 1], command).toBe(undefined)
+    // The result fades, and with nothing owed the band is the engine's again.
+    await clock.advance(GONE_MS)
+    expect(await ui.find({ type: 'Text', text: BENEATH }), command).toBeDefined()
+  }
+  await ui.unmount()
+})
+
+test('a lesson declined settles them too: after another command in the same call, from a subagent, and from a terminal', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  const clock = mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  const skip = (minute: number, more: Record<string, unknown>) => JSON.stringify([{ ts: `2026-10-03T13:0${minute}:00Z`, type: 'skip', why: 'a typo', ...more }])
+
+  await owe($, w)
+  w.owed = []
+  w.events = skip(1, { session: 'session-under-test' })
+  await $.tool.call({ tool: 'Bash', command: 'compound show deploy-needs-target; compound skip --why "a typo"' })
+  expect(await shown()).toContain(NOTES.declined.label)
+  expect(await shown()).not.toContain(OWED.label)
+  expect(w.statuses[w.statuses.length - 1]).toBe(undefined)
+  await clock.advance(GONE_MS)
+
+  // A subagent fixes a call and declines the lesson in its own loop.
+  await owe($, w, 'agent-7')
+  expect(await shown()).toContain(OWED.label)
+  w.owed = []
+  w.events = skip(2, { session: 'session-under-test' })
+  await $.tool.call({ tool: 'Bash', command: '$COMPOUND skip --why "a typo"', agentId: 'agent-7' } as never)
+  expect(await shown()).toContain(NOTES.declined.label)
+  expect(await shown()).not.toContain(OWED.label)
+  await clock.advance(GONE_MS)
+
+  // Declined in a terminal, by its id: the row belongs to no session, and the next call of
+  // any tool finds the debt gone.
+  await owe($, w)
+  const id = String(w.owed[0]?.id)
+  await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md' } as never)
+  expect(await shown(), 'still owed while the log says so').toContain(OWED.label)
+  w.owed = []
+  w.events = skip(3, { session: '', settles: id })
+  await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md' } as never)
+  expect(await shown()).toContain(NOTES.declined.label)
+  expect(await shown()).not.toContain(OWED.label)
+  expect(w.statuses[w.statuses.length - 1]).toBe(undefined)
+
+  // Nothing is owed now: a call asks the CLI nothing about debts.
+  await clock.advance(GONE_MS)
+  const asked = () => w.calls.filter(c => c.includes('--unsettled') && c.includes('--session')).length
+  const before = asked()
+  await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(asked()).toBe(before)
+  await ui.unmount()
+})
+
+const KNOWN = JSON.stringify({ verdict: 'KNOWN', name: 'release-notes-format' })
+
+test('with a lesson and a strengthening both owed, rewriting the weak lesson leaves the band what the log holds: nothing', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_RECUR_LIMIT: '1' })
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  await owe($, w)
+  // The same call fails again, and this time a recorded lesson describes it: it did not prevent it.
+  w.judge = async () => '{"name":"release-notes-format"}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(w.logged.filter(e => e.type === 'recall').map(e => e.ineffective)).toEqual([true])
+  expect(w.owed.map(e => e.type)).toEqual(['capture', 'recall'])
+  expect(await shown()).toContain('owed')
+  // `add --update` of that lesson, from this session: the log holds no debt after it.
+  w.owed = []
+  w.events = JSON.stringify([{ ts: '2026-10-03T14:00:00Z', type: 'learn', lesson: 'release-notes-format', update: true, session: 'session-under-test' }])
+  await $.tool.call({ tool: 'Bash', command: 'compound add --update --name release-notes-format --match "deploy\\.sh$"' })
+  expect(await shown()).toContain(`${NOTES.rewritten.label} · release-notes-format`)
+  expect(await shown()).not.toContain('owed')
+  expect(await shown()).not.toContain('to strengthen')
+  expect(w.statuses[w.statuses.length - 1]).toBe(undefined)
+  await ui.unmount()
+})
+
+test('a strengthening whose lesson was removed is no longer owed, on the band or at the stop', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_RECUR_LIMIT: '1' })
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  w.judge = async () => '{"name":"release-notes-format"}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(await shown()).toContain('release-notes-format')
+  expect(w.owed.map(e => e.type)).toEqual(['recall'])
+  w.owed = []
+  w.events = JSON.stringify([{ ts: '2026-10-03T15:00:00Z', type: 'rm', lesson: 'release-notes-format', level: 'project', session: 'session-under-test' }])
+  await $.tool.call({ tool: 'Bash', command: 'compound rm release-notes-format' })
+  expect(await shown()).not.toContain(WEAK.label)
+  expect(await shown()).not.toContain('to strengthen')
+  const stop = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(stop.block).toBe(undefined)
+  expect(w.logged.filter(e => e.type === 'refuse')).toEqual([])
+  await ui.unmount()
+})
+
+test('the stop asks the CLI what the session owes, and refuses for exactly that', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  await owe($, w)
+  // The session's own events hold a capture and nothing after it: declined in a terminal,
+  // the row that settles it is in no session's events. The CLI's answer is what counts.
+  w.events = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'capture', session: 'session-under-test', call: 'c1', failed: './deploy.sh', fixed: './deploy.sh --target staging' }])
+  const kept = w.owed
+  w.owed = []
+  const free = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(free.block).toBe(undefined)
+  expect(w.calls.some(c => c.includes('--unsettled') && c.includes('--session') && c.includes('session-under-test'))).toBe(true)
+  // And while the CLI says it is owed, the stop is refused, once.
+  w.owed = kept
+  const refused = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(refused.block).toContain('This session owes a lesson')
+  expect(refused.block).toContain('./deploy.sh --target staging')
+  expect(w.logged.filter(e => e.type === 'refuse').map(e => e.why)).toEqual(['debt'])
+  const again = await $.classic.Stop({ stop_hook_active: true } as never)
+  expect(again.block).toBe(undefined)
+})
+
+test('a lesson recorded between a failure and its fix is that failure\'s lesson, not a recurrence of it', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  const agent = { agentId: 'agent-9' }
+  w.judge = async () => '{"name":null}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh', ...agent } as never)
+  // The subagent records the lesson before it sends the call that works.
+  w.events = JSON.stringify([{ ts: '2026-10-03T16:00:00Z', type: 'learn', lesson: 'release-notes-format', update: false, session: 'session-under-test' }])
+  await $.tool.call({ tool: 'Bash', command: `compound add --name release-notes-format --when w --body b`, ...agent } as never)
+  w.judge = async () => KNOWN
+  const fixed = await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+  expect(w.logged.filter(e => e.type === 'recall')).toEqual([])
+  expect(w.logged.filter(e => e.type === 'capture')).toEqual([])
+  expect(JSON.stringify(fixed)).not.toContain('already recorded')
+
+  // A lesson that was there before the failure, met again at the fix, is a recurrence.
+  w.events = '[]'
+  w.judge = async () => '{"name":null}'
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh', ...agent } as never)
+  w.judge = async () => KNOWN
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+  expect(w.logged.filter(e => e.type === 'recall').map(e => [e.lesson, e.at])).toEqual([['release-notes-format', 'fix']])
 })

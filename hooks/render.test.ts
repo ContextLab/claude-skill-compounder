@@ -164,7 +164,7 @@ test('a subagent\'s calls do not count toward the main turn', async () => {
 
 test('a held failure waits for five successes of its own tool, and other tools cost nothing', async () => {
   expect(FIX_ATTEMPTS).toBe(5)
-  const held: Held = { tool: 'Bash', call: './build.sh', error: 'a profile is required', left: FIX_ATTEMPTS, turn: 3 }
+  const held: Held = { tool: 'Bash', call: './build.sh', error: 'a profile is required', left: FIX_ATTEMPTS, turn: 3, at: 0 }
   expect(heldStep(undefined, 'Bash', 3)).toBe('none')
   // Two, three, four intervening successes: the fifth same-tool success is still judged.
   for (let used = 0; used < FIX_ATTEMPTS; used += 1) {
@@ -175,7 +175,7 @@ test('a held failure waits for five successes of its own tool, and other tools c
 })
 
 test('a held failure lasts through the turn after its own, and no longer', async () => {
-  const held: Held = { tool: 'Bash', call: './build.sh', error: 'e', left: 5, turn: 3 }
+  const held: Held = { tool: 'Bash', call: './build.sh', error: 'e', left: 5, turn: 3, at: 0 }
   expect(heldStep(held, 'Bash', 3)).toBe('judge')
   expect(heldStep(held, 'Bash', 4)).toBe('judge')
   expect(heldStep(held, 'Bash', 5)).toBe('expired')

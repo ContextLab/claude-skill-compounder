@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, debts, mayNudge, parseGuards, parseLeft, parseMoved, parseUnsettled, strengthenings, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, learnedSince, mayNudge, parseGuards, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -105,18 +105,28 @@ test('an event time is read from ISO text, seconds or milliseconds', async () =>
 
 const cap = (call: string): Event => ({ type: 'capture', tool: 'Bash', failed: `f-${call}`, error: `e-${call}`, fixed: `x-${call}`, call })
 
-test('a capture is owed until a learn or a skip comes after it', async () => {
-  expect(debts([])).toEqual([])
-  expect(debts([cap('1')]).map(d => d.key)).toEqual(['1'])
-  expect(debts([cap('1'), { type: 'learn', lesson: 'a' }])).toEqual([])
-  expect(debts([cap('1'), { type: 'skip', why: 'typo' }])).toEqual([])
-  expect(debts([{ type: 'learn', lesson: 'a' }, cap('1')]).map(d => d.key)).toEqual(['1'])
-  expect(debts([cap('1'), { type: 'learn', lesson: 'a' }, cap('2'), { type: 'reuse' }, cap('3')]).map(d => d.key)).toEqual(['2', '3'])
-  expect(debts([cap('1')])[0]).toEqual({ key: '1', tool: 'Bash', failed: 'f-1', error: 'e-1', fixed: 'x-1' })
+// What settles a debt is decided by the CLI and tested there (tests/test_settle.py,
+// tests/test_reach.py): a debt the CLI no longer lists is settled, and one it lists is owed
+// whatever else the reply holds.
+const owedOf = (events: Event[]) => parseOwed(JSON.stringify(events))
+
+test('what a session owes is exactly the captures and the recalls the CLI lists', async () => {
+  expect(owedOf([])).toEqual({ debts: [], weak: [], since: 0 })
+  expect(owedOf([cap('1')])?.debts.map(d => d.key)).toEqual(['1'])
+  expect(owedOf([cap('2'), { type: 'reuse' }, cap('3')])?.debts.map(d => d.key)).toEqual(['2', '3'])
+  expect(owedOf([{ ...cap('1'), id: 'abcd1234' }])?.debts[0]).toEqual({ id: 'abcd1234', key: '1', tool: 'Bash', failed: 'f-1', error: 'e-1', fixed: 'x-1' })
+  // The mod reads no settlement out of a reply: a row of another type changes nothing.
+  expect(owedOf([cap('1'), { type: 'learn', lesson: 'a' }, { type: 'skip', why: 'typo' }])?.debts.map(d => d.key)).toEqual(['1'])
+  expect(parseOwed('compound: error')).toBe(undefined)
 })
 
 test('a capture with no call id is keyed on its time', async () => {
-  expect(debts([{ type: 'capture', ts: '2026-10-03T00:00:00Z' }])[0]?.key).toBe('2026-10-03T00:00:00Z')
+  expect(owedOf([{ type: 'capture', ts: '2026-10-03T00:00:00Z' }])?.debts[0]?.key).toBe('2026-10-03T00:00:00Z')
+})
+
+test('what is owed dates from its oldest row', async () => {
+  const at = Date.UTC(2026, 9, 3, 12) / 1000
+  expect(owedOf([{ ...cap('1'), ts: '2026-10-03T12:00:05Z' }, { type: 'recall', lesson: 'a', ineffective: true, ts: '2026-10-03T12:00:00Z' }])?.since).toBe(at)
 })
 
 test('other projects\' lessons come from learn events, newest project first, minus what is already here', async () => {
@@ -142,18 +152,36 @@ test('a long turn is asked only when nothing was recorded in it and the last nud
   expect(mayNudge([], 1000, 2000, 1800, [at('reuse', 1999)])).toBe(true)
 })
 
-test('a strengthening is owed for an ineffective recall until that lesson is updated or the session declines', async () => {
-  const recall = (lesson: string, ineffective: boolean, call = './build.sh', guard = false): Event => ({ type: 'recall', lesson, ineffective, call, guard })
-  expect(strengthenings([])).toEqual([])
-  expect(strengthenings([recall('a', false)])).toEqual([])
-  expect(strengthenings([recall('a', true)])).toEqual([{ name: 'a', guard: false, call: './build.sh' }])
-  expect(strengthenings([recall('a', true), recall('a', true, 'second call', true)])).toEqual([{ name: 'a', guard: true, call: 'second call' }])
-  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'a', update: true }])).toEqual([])
-  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'a', update: false }]).length).toBe(1)
-  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'b', update: true }]).length).toBe(1)
-  expect(strengthenings([recall('a', true), recall('b', true), { type: 'skip', why: 'x' }])).toEqual([])
-  expect(strengthenings([{ type: 'skip', why: 'x' }, recall('a', true)]).map(s => s.name)).toEqual(['a'])
-  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'a', update: true }, recall('a', true)]).length).toBe(1)
+test('a strengthening is owed for each lesson whose recall the CLI lists, with its newest failing call', async () => {
+  const recall = (lesson: string, call = './build.sh', guard = false): Event => ({ type: 'recall', lesson, ineffective: true, call, guard })
+  expect(owedOf([recall('a')])?.weak).toEqual([{ name: 'a', guard: false, call: './build.sh' }])
+  expect(owedOf([recall('a'), recall('a', 'second call', true)])?.weak).toEqual([{ name: 'a', guard: true, call: 'second call' }])
+  expect(owedOf([recall('a'), recall('b')])?.weak.map(s => s.name)).toEqual(['a', 'b'])
+  expect(owedOf([{ type: 'recall', ineffective: true }])?.weak).toEqual([])
+  // Listed is owed: the rewrite, the decline, the removal that settle one are the CLI's to apply.
+  expect(owedOf([recall('a'), { type: 'learn', lesson: 'a', update: true }, { type: 'skip', why: 'x' }, { type: 'rm', lesson: 'a' }])?.weak.length).toBe(1)
+})
+
+test('what settled a debt is shown from the session\'s own events, a settlement by id, and what became of a weak lesson', async () => {
+  const at = (type: string, more: Record<string, unknown>): Event => ({ type, ts: '2026-10-03T12:00:00Z', session: 'other', ...more })
+  const mine = at('learn', { lesson: 'x', session: 'me' })
+  const byId = at('skip', { why: 'no', session: '', settles: 'abcd1234' })
+  const gone = at('rm', { lesson: 'weak-one', session: '' })
+  const renamed = at('promote', { lesson: 'weak-anywhere', was: 'weak-one', to: 'user' })
+  const rewritten = at('learn', { lesson: 'weak-one', update: true })
+  const rows = [mine, byId, gone, renamed, rewritten, at('skip', { why: 'theirs' }), at('learn', { lesson: 'theirs' }), at('capture', { session: 'me' }), at('recall', { lesson: 'weak-one', session: 'me' })]
+  expect(settlers(rows, 'me', ['abcd1234'], ['weak-one'])).toEqual([mine, byId, gone, renamed, rewritten])
+  expect(settlers(rows, 'me', [], [])).toEqual([mine])
+  expect(settlers(rows, '', [], [])).toEqual([])
+})
+
+test('a lesson first recorded since the failure was held is that failure\'s own', async () => {
+  const learn = (lesson: string, update: boolean): Event => ({ type: 'learn', lesson, update })
+  expect(learnedSince([learn('a', false)], 'a')).toBe(true)
+  expect(learnedSince([learn('a', true)], 'a')).toBe(false)
+  expect(learnedSince([learn('b', false), { type: 'recall', lesson: 'a' }], 'a')).toBe(false)
+  expect(learnedSince([], 'a')).toBe(false)
+  expect(learnedSince([learn('', false)], '')).toBe(false)
 })
 
 test('unsettled captures are read from the CLI, leaving out this session\'s own', async () => {

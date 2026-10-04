@@ -164,12 +164,14 @@ class AddRefusalTest(Case):
         self.assertIn("SKILL.md", err)
 
     def test_update_of_a_name_that_does_not_exist(self):
-        err = self.refused("add", "--name", "not-there", "--when", "Use when.", "--update", stdin="Body.\n")
+        err = self.refused("add", "--name", "not-there", "--when", "Use when.", "--update", "--body", "-",
+                           stdin="Body.\n")
         self.assertIn("no lesson named", err)
 
     def test_update_of_a_general_lesson(self):
         self.box.write_lesson(self.box.lesson_dir("shipped", "general"), "shipped")
-        err = self.refused("add", "--name", "shipped", "--when", "Use when.", "--update", stdin="Body.\n")
+        err = self.refused("add", "--name", "shipped", "--when", "Use when.", "--update", "--body", "-",
+                           stdin="Body.\n")
         self.assertIn("general pool", err)
 
     def test_match_and_no_match_together(self):
@@ -181,7 +183,7 @@ class AddRefusalTest(Case):
 class UpdateTest(Case):
     def test_update_rewrites_the_lesson_where_it_is(self):
         self.box.add("moves-not", "Use when old.", "Old body.\n", "--level", "user", "--match", "old-cmd")
-        proc = self.box.run("add", "--name", "moves-not", "--when", "Use when new.", "--update",
+        proc = self.box.run("add", "--name", "moves-not", "--when", "Use when new.", "--update", "--body", "-",
                             stdin="New body.\n", COMPOUND_NOW=NOW + 86400 * 3)
         self.assertExit(proc, 0)
         self.assertFalse(os.path.exists(self.box.lesson_dir("moves-not")),
@@ -234,7 +236,7 @@ class UpdateTest(Case):
         directory = self.box.skill_dir("routable", "user")
         self.box.write_lesson(directory, "routable", extra="allowed-tools: Bash\n")
         self.assertExit(self.box.run("add", "--name", "routable", "--update", "--when", "Use when routed.",
-                                     stdin="Step one.\n"), 0)
+                                     "--body", "-", stdin="Step one.\n"), 0)
         text = read(os.path.join(directory, "SKILL.md"))
         self.assertIn("allowed-tools: Bash\n", text)
         self.assertIn("description: Use when routed.\n", text)

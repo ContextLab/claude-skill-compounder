@@ -90,8 +90,9 @@ You can also say what you mean:
 /compound:learn the build needs --profile dev
 ```
 
-From a terminal, use `compound add`. The lesson's text is read from standard input.
-`--when` says when the lesson applies. Write it as a trigger: "Use when ...".
+From a terminal, use `compound add`. `--when` says when the lesson applies. Write it as a
+trigger: "Use when ...". The lesson's text is read from standard input, as below, or given
+with `--body "<text>"` or `--body-file <path>`.
 
 ```bash
 compound add --name build-needs-profile \
@@ -119,8 +120,8 @@ compound find toml python
 ```
 
 ```
-lesson toml-needs-tomllib (project) [2/2 words]: Use when reading a TOML file with Python older than 3.11.
-  -> /Users/me/proj/.claude/compound/lessons/toml-needs-tomllib
+lesson python39-no-tomllib (project) [2/2 words]: Use when reading a TOML file with Python older than 3.11.
+  -> /Users/me/proj/.claude/compound/lessons/python39-no-tomllib
 prompt log: no earlier request matches
 ```
 
@@ -133,7 +134,7 @@ compound list
 
 ```
 LEVEL    KIND    NAME                USE/GRD/RCL  FLAG  WHEN
-project  lesson  toml-needs-tomllib  0/0/0              Use when reading a TOML file with Python older than 3.11.
+project  lesson  python39-no-tomllib  0/0/0              Use when reading a TOML file with Python older than 3.11.
 user     guard   zsh-equals-word     0/0/0              Use when a zsh command line has a bare word starting with "=".
 general  skill   learn               0/0/0              Use when a "[compound]" message says the session owes a lesson, says a
 general  skill   reuse               0/0/0              Use when starting a substantial task (building a script, tool, skill,
@@ -145,15 +146,15 @@ one level.
 Read one lesson:
 
 ```bash
-compound show toml-needs-tomllib
+compound show python39-no-tomllib
 ```
 
 ```
-toml-needs-tomllib (project lesson)
-/Users/me/proj/.claude/compound/lessons/toml-needs-tomllib
+python39-no-tomllib (project lesson)
+/Users/me/proj/.claude/compound/lessons/python39-no-tomllib
 
 ---
-name: toml-needs-tomllib
+name: python39-no-tomllib
 description: Use when reading a TOML file with Python older than 3.11.
 created: 2026-10-04
 origin: project proj
@@ -210,11 +211,26 @@ updated guard build-needs-profile (project)
   /Users/me/proj/.claude/compound/lessons/build-needs-profile
 ```
 
-Change the text by giving new text on standard input. Change when it applies with
-`--when`. Remove the patterns with `--no-match`:
+Change when it applies with `--when`. Remove the patterns with `--no-match`:
 
 ```bash
 compound add --update --name build-needs-profile --no-match
+```
+
+The text stays as it is unless you give new text. `--update` does not read standard input
+on its own, so give the new text in one of these ways:
+
+| Way | Command |
+|-|-|
+| one line | `compound add --update --name <name> --body "<text>"` |
+| a file | `compound add --update --name <name> --body-file <path>` |
+| standard input | `compound add --update --name <name> --body -`, then the text |
+
+```bash
+compound add --update --name build-needs-profile --body - <<'EOF'
+Run `./build.sh --profile dev` (or `make build PROFILE=dev`). Without a profile
+both fail with "error: a profile is required".
+EOF
 ```
 
 ## Turn a lesson into a skill
@@ -243,12 +259,12 @@ compound moves a project lesson to the user level on its own, when the lesson ma
 failure in a second project. To move one yourself:
 
 ```bash
-compound promote toml-needs-tomllib --to user
+compound promote python39-no-tomllib --to user
 ```
 
 ```
-moved toml-needs-tomllib from project to user
-  /Users/me/.claude/compound/lessons/toml-needs-tomllib
+moved python39-no-tomllib from project to user
+  /Users/me/.claude/compound/lessons/python39-no-tomllib
 ```
 
 Two cases need your decision. `compound status` lists both under `Open`, with the exact
@@ -271,18 +287,18 @@ ask for it: Claude is told to offer it to you and not to run it.
 First look at the plan. This writes nothing:
 
 ```bash
-compound promote toml-needs-tomllib --to general
+compound promote python39-no-tomllib --to general
 ```
 
 ```
 Plan (nothing has been written; run again with --yes to do it):
   upstream : ContextLab/claude-skill-compounder
-  branch   : compound/lesson-toml-needs-tomllib
-  from     : /Users/me/.claude/compound/lessons/toml-needs-tomllib (user level)
+  branch   : compound/lesson-python39-no-tomllib
+  from     : /Users/me/.claude/compound/lessons/python39-no-tomllib (user level)
   files    :
-    lessons/toml-needs-tomllib/SKILL.md
+    lessons/python39-no-tomllib/SKILL.md
   excluded : nothing
-  PR title : Add lesson: toml-needs-tomllib
+  PR title : Add lesson: python39-no-tomllib
   ...
 ```
 
@@ -290,7 +306,7 @@ The plan prints every file and the full pull request text. Read it. Then, to for
 a branch and open the pull request:
 
 ```bash
-compound promote toml-needs-tomllib --to general --yes
+compound promote python39-no-tomllib --to general --yes
 ```
 
 ## Decline a lesson
@@ -308,6 +324,17 @@ declined: a one-off typo
 ```
 
 Declined lessons are listed by `compound status` under `Open`, with the reason.
+
+Which lesson a decline settles depends on where you run it:
+
+| Where | What `compound skip --why` settles |
+|-|-|
+| in a session (Claude runs it) | what that session owes |
+| in a terminal, with one unsettled lesson in the project | that lesson; the output names its id |
+| in a terminal, with several | nothing: it lists their ids, and you name one with `--settles <id>` |
+
+A session that owed the lesson sees it settled at its next tool call: the band stops
+showing `● lesson owed`, and the session can finish.
 
 ## Settle a lesson an earlier session left open
 
@@ -333,10 +360,11 @@ There are three ways to strengthen it, strongest first:
 | Way | Command |
 |-|-|
 | add a pattern, so the call is stopped before it runs | `compound add --update --name <name> --match '<regex>'` |
-| attach a script that does the step the right way | `compound add --update --name <name> --attach <file>`, with new text that says to run it |
+| attach a script that does the step the right way | `compound add --update --name <name> --attach <file> --body "<text that says to run it>"` |
 | rewrite when it applies | `compound add --update --name <name> --when "Use when ..."` |
 
-If none is worth doing, decline: `compound skip --why "<reason>"`.
+If none is worth doing, decline: `compound skip --why "<reason>"`. A lesson that is
+removed, turned into a skill or moved under a new name is no longer owed a strengthening.
 
 `COMPOUND_RECUR_LIMIT` sets how many recalls make a lesson ineffective. The default is 2.
 
@@ -423,13 +451,13 @@ Store
 
 Lessons
   name                level  kind    reuse  guard  recall  flag
-  toml-needs-tomllib  user   lesson  0      0      0       never used
+  python39-no-tomllib  user   lesson  0      0      0       never used
   zsh-equals-word     user   skill   0      0      0       never used
 
 Recent
-  2026-10-04T05:02:13Z learn    -        proj                 toml-needs-tomllib (project)
+  2026-10-04T05:02:13Z learn    -        proj                 python39-no-tomllib (project)
   2026-10-04T05:02:13Z learn    -        proj                 zsh-equals-word (user)
-  2026-10-04T05:02:13Z promote  -        proj                 toml-needs-tomllib project -> user
+  2026-10-04T05:02:13Z promote  -        proj                 python39-no-tomllib project -> user
   ...
 
 Open
@@ -468,9 +496,9 @@ compound events --limit 5
 ```
 
 ```
-2026-10-04T05:02:13Z learn    -        proj                 toml-needs-tomllib (project)
+2026-10-04T05:02:13Z learn    -        proj                 python39-no-tomllib (project)
 2026-10-04T05:02:13Z learn    -        proj                 zsh-equals-word (user)
-2026-10-04T05:02:13Z promote  -        proj                 toml-needs-tomllib project -> user
+2026-10-04T05:02:13Z promote  -        proj                 python39-no-tomllib project -> user
 2026-10-04T05:02:13Z skill    -        proj                 zsh-equals-word (user) -> /Users/me/.claude/skills/zsh-equals-word
 2026-10-04T05:02:14Z skip     -        proj                 a one-off typo
 ```

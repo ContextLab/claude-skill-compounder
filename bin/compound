@@ -127,10 +127,28 @@ EVENT LOG
     refuses a type that is not in the table above; a line of another type already in
     the log is shown by `events` and counted nowhere.
 
-    Settling. A `capture` is a lesson owed. It is settled by a later `learn` or `skip`
-    event that carries `settles` equal to its `id`, or that comes from the same
-    (non-empty) session. `events --unsettled` and `status` list the captures of the
-    last 14 days that nothing has settled.
+    Settling. There is one definition, in `unsettled`, and `status`, `events
+    --unsettled`, a bare `skip` and the mod's stop check all read it.
+    A `capture` is a lesson owed. It is settled by a later `learn` or `skip` event
+    that carries `settles` equal to its `id` (from any session, or from none), or that
+    comes from the same (non-empty) session.
+    A `recall` with `ineffective: true` is a strengthening its session owes for that
+    lesson (one per session and lesson: the newest). It is settled by a later `learn`
+    with `update: true` for the lesson, by a later `skip` from the same session, or by
+    a later `rm`, `skill` or `promote` event for the lesson (its `lesson`, or the
+    `was` of a move under a new name): a lesson that is gone or renamed is not owed a
+    rewrite.
+    `events --unsettled` lists both kinds for the last 14 days, and `status` lists the
+    captures under Open. `compound skip --why T` run outside a session (no
+    CLAUDE_CODE_SESSION_ID) settles the project's one unsettled capture; with several
+    it exits 2 and lists their ids.
+
+    The body of a lesson. `add` takes it from `--body TEXT`, from `--body-file PATH`,
+    or from stdin. `--body -` reads stdin to its end. Without a body flag a plain
+    `add` reads stdin but never waits for it longer than 2 seconds at a time: a stdin
+    that neither speaks nor ends (an open socket) is exit 2. `add --update` without a
+    body flag keeps the body and does not read stdin at all; text that is already
+    waiting there is exit 2, so a body is never dropped in silence.
 
     Last fired. The types the mod writes are reuse, guard, recall, capture, remind,
     refuse, nudge and error; `status` reports the age of the newest of them.
@@ -189,6 +207,8 @@ EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill"
 # The types the mod writes: the newest of them is when the mod last fired.
 MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "error")
 UNSETTLED_DAYS = 14
+# How long a plain `add` waits for stdin to speak, or to go on, before it gives up.
+STDIN_WAIT = 2
 OPEN_TEXT = 100
 UPSTREAM_DEFAULT = "ContextLab/claude-skill-compounder"
 SURFER_URL = "https://github.com/ContextLab/claude-history-surfer.git"
@@ -1045,28 +1065,62 @@ def capture_id(event):
     return short_hash("\n".join(str(event.get(key) or "") for key in ("session", "call", "failed", "fixed")))
 
 
-def unsettled_captures(events, clock=None):
-    """The `capture` events nothing has settled, in log order. With `clock`, only those
-    of the last UNSETTLED_DAYS days."""
+def _text(value):
+    return value if isinstance(value, str) else ""
+
+
+def settled_by(debt, event):
+    """Whether `event`, later in the log than `debt`, settles it. THE definition of
+    settled: every reader goes through `unsettled`, which asks this."""
+    kind = event.get("type")
+    session = _text(event.get("session"))
+    same_session = bool(session) and session == debt.get("session")
+    if debt.get("type") == "capture":
+        if kind not in ("learn", "skip"):
+            return False
+        settles = _text(event.get("settles"))
+        return same_session or (bool(settles) and settles == capture_id(debt))
+    # A strengthening: an ineffective recall of a lesson.
+    name = debt.get("lesson")
+    if kind == "skip":
+        return same_session
+    if kind == "learn":
+        return event.get("update") is True and event.get("lesson") == name
+    if kind in ("rm", "skill", "promote"):
+        return event.get("lesson") == name or event.get("was") == name
+    return False
+
+
+def unsettled(events, clock=None):
+    """What is owed and nothing has settled, in log order: the `capture` events, and for
+    each session and lesson the newest `recall` marked ineffective. With `clock`, only
+    those of the last UNSETTLED_DAYS days."""
     owed = []
     for event in events:
         kind = event.get("type")
         if kind == "capture":
             owed.append(event)
-        elif kind in ("learn", "skip") and owed:
-            session = event.get("session")
-            settles = event.get("settles")
-            owed = [cap for cap in owed
-                    if not ((isinstance(settles, str) and settles and settles == capture_id(cap))
-                            or (isinstance(session, str) and session and session == cap.get("session")))]
+        elif kind == "recall":
+            name, session = _text(event.get("lesson")), _text(event.get("session"))
+            if event.get("ineffective") is True and name and session:
+                owed = [one for one in owed if not (one.get("type") == "recall" and one.get("lesson") == name
+                                                    and one.get("session") == session)]
+                owed.append(event)
+        elif kind in ("learn", "skip", "rm", "skill", "promote") and owed:
+            owed = [one for one in owed if not settled_by(one, event)]
     if clock is None:
         return owed
     out = []
-    for cap in owed:
-        stamp = parse_ts(cap.get("ts"))
+    for one in owed:
+        stamp = parse_ts(one.get("ts"))
         if stamp is not None and clock - stamp <= UNSETTLED_DAYS * 86400:
-            out.append(cap)
+            out.append(one)
     return out
+
+
+def unsettled_captures(events, clock=None):
+    """The `capture` events nothing has settled, in log order."""
+    return [one for one in unsettled(events, clock) if one.get("type") == "capture"]
 
 
 def check_settles(value, events):
@@ -1237,6 +1291,87 @@ def read_stdin():
     return data.decode("utf-8", "replace")
 
 
+def _stdin_fd():
+    """stdin's descriptor, or None when there is no stdin to read or it is a terminal."""
+    try:
+        fd = sys.stdin.fileno()
+        return None if os.isatty(fd) else fd
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def read_stdin_briefly():
+    """stdin's text for a command nobody told to read it. A regular file is read whole.
+    Anything else (a pipe, a socket) is waited on for STDIN_WAIT seconds at a time: one
+    that neither speaks nor ends within that is Fail(2), never a hang."""
+    import select
+    import stat
+
+    fd = _stdin_fd()
+    if fd is None:
+        return ""
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return read_stdin()
+    except OSError:
+        return ""
+    chunks = []
+    while True:
+        try:
+            ready = select.select([fd], [], [], STDIN_WAIT)[0]
+        except (OSError, ValueError):
+            ready = []
+        if not ready:
+            raise usage("stdin %s within %d seconds, so no body was read from it. Pass the body with "
+                        "--body TEXT or --body-file PATH" % (
+                            "did not end" if chunks else "gave no body and did not end", STDIN_WAIT))
+        piece = os.read(fd, 65536)
+        if not piece:
+            return b"".join(chunks).decode("utf-8", "replace")
+        chunks.append(piece)
+
+
+def stdin_waiting():
+    """Whether text is waiting on stdin right now. Never waits."""
+    import select
+    import stat
+
+    fd = _stdin_fd()
+    if fd is None:
+        return False
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return os.fstat(fd).st_size > os.lseek(fd, 0, os.SEEK_CUR)
+        if not select.select([fd], [], [], 0)[0]:
+            return False
+        return bool(os.read(fd, 1))
+    except (OSError, ValueError):
+        return False
+
+
+def body_of(args):
+    """(the body `add` was given, whether a flag gave it). `--body TEXT`, `--body-file
+    PATH`, `--body -` for stdin to its end. With no flag a plain `add` reads stdin
+    briefly, and `--update` reads nothing: it keeps the body the lesson has."""
+    if args.body is not None and args.body_file is not None:
+        raise usage("--body and --body-file cannot both be given")
+    if args.body_file is not None:
+        try:
+            return read_text(args.body_file).replace("\r\n", "\n"), True
+        except OSError as exc:
+            raise usage("--body-file %s cannot be read: %s" % (args.body_file, exc.strerror or exc))
+    if args.body == "-":
+        return read_stdin(), True
+    if args.body is not None:
+        return args.body, True
+    if not args.update:
+        return read_stdin_briefly(), False
+    if stdin_waiting():
+        raise usage("text is waiting on stdin, and --update reads a new body only when asked to: pass --body - "
+                    "to take it as the new body (or --body TEXT, or --body-file PATH). Nothing was changed")
+    return "", False
+
+
 def cmd_add(args):
     name = args.name
     if not SLUG_RE.match(name):
@@ -1260,7 +1395,9 @@ def cmd_add(args):
     names = [os.path.basename(path) for path in attachments]
     if len(set(names)) != len(names):
         raise usage("two --attach files share a file name")
-    body = read_stdin()
+    body, body_given = body_of(args)
+    if body_given and not body.strip():
+        raise usage("the body is empty: --body and --body-file take the text of the lesson")
     description = one_line(args.when) if args.when is not None else None
 
     project = project_root()
@@ -1296,7 +1433,8 @@ def cmd_add(args):
         if args.origin and one_line(args.origin):
             changes["origin"] = yaml_string(one_line(args.origin))
         if not body.strip() and not item["_body"].strip():
-            raise usage("the body is empty: write the lesson on stdin")
+            raise usage("the body is empty: pass the lesson with --body TEXT, --body-file PATH, or --body - "
+                        "and stdin")
         stamp = now()
         changes["updated"] = local_date(stamp)
         directory = item["path"]
@@ -1318,7 +1456,8 @@ def cmd_add(args):
         if description is None or not description:
             raise usage("--when is required and cannot be empty: it says when the lesson applies")
         if not body.strip():
-            raise usage("the body is empty: write the lesson on stdin")
+            raise usage("the body is empty: write the lesson on stdin, or pass it with --body TEXT or "
+                        "--body-file PATH")
         if args.level == "project":
             issue = project_level_problem(project)
             if issue:
@@ -2089,12 +2228,28 @@ def cmd_skip(args):
         raise usage("--why cannot be empty: say why no lesson is being recorded")
     events, _bad = read_events()
     settles = check_settles(args.settles, events)
+    project = project_root()
+    if settles is None and not os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        # Outside a session nothing says which capture is meant: the project's one
+        # unsettled capture is, and with several the caller names it.
+        here = os.path.realpath(project)
+        mine = [cap for cap in unsettled_captures(events, now())
+                if _text(cap.get("project")) and os.path.realpath(cap["project"]) == here]
+        if len(mine) > 1:
+            raise usage("%d captures are unsettled in this project; name the one being declined with "
+                        "--settles ID:\n%s" % (len(mine), "\n".join(
+                            "  %s  `%s` worked" % (capture_id(cap), one_line(cap.get("fixed", ""))[:OPEN_TEXT])
+                            for cap in mine)))
+        if mine:
+            settles = capture_id(mine[0])
     extra = {"settles": settles} if settles else {}
-    event = log_event("skip", project_root(), why=why, **extra)
+    event = log_event("skip", project, why=why, **extra)
     if args.json:
         emit(event)
     else:
         sys.stdout.write("declined: %s\n" % why)
+        if settles:
+            sys.stdout.write("  settles capture %s\n" % settles)
     return 0
 
 
@@ -2136,7 +2291,8 @@ def cmd_events(args):
             raise usage("--since %r is neither epoch seconds nor an ISO 8601 time" % args.since)
     events, bad = read_events()
     if args.unsettled:
-        events = [dict(event, id=capture_id(event)) for event in unsettled_captures(events, now())]
+        events = [dict(event, id=capture_id(event)) if event.get("type") == "capture" else event
+                  for event in unsettled(events, now())]
     wanted = os.path.realpath(_expand(args.project)) if args.project else None
     out = []
     for event in events:
@@ -3047,7 +3203,7 @@ def build_parser():
             one.add_argument("--json", action="store_true", help="print JSON")
         return one
 
-    one = command("add", cmd_add, "Write a lesson; the body is read on stdin.")
+    one = command("add", cmd_add, "Write a lesson; the body is --body, --body-file, or stdin.")
     one.add_argument("--name", required=True)
     one.add_argument("--when", help="when the lesson applies (its description)")
     one.add_argument("--level", choices=LEVELS, default="project")
@@ -3058,6 +3214,8 @@ def build_parser():
     one.add_argument("--update", action="store_true",
                      help="rewrite the lesson where it is; flags left out keep their value")
     one.add_argument("--settles", metavar="ID", help="the id of the unsettled capture this lesson settles")
+    one.add_argument("--body", metavar="TEXT", help="the lesson's text; `-` reads stdin to its end")
+    one.add_argument("--body-file", metavar="PATH", help="a file holding the lesson's text")
 
     one = command("list", cmd_list, "Lessons and skills at every level.")
     one.add_argument("--level", choices=LEVELS)
@@ -3102,7 +3260,7 @@ def build_parser():
     one.add_argument("--session")
     one.add_argument("--project", metavar="P", help="only events of this project root")
     one.add_argument("--unsettled", action="store_true",
-                     help="only the captures of the last 14 days that no learn or skip has settled")
+                     help="only what is owed and unsettled in the last 14 days: captures, and ineffective recalls")
     one.add_argument("--limit", type=int, default=0)
 
     command("status", cmd_status, "Health, store counts, per-lesson use, recent events, what is open.")

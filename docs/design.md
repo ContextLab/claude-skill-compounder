@@ -52,8 +52,8 @@ it sits in, and the CLI decides (`compound promote <name> --to user --auto`):
 
 - **Not tracked** (untracked, ignored, or not in a repository): the mod moves it to
   `user`. The `promote` event belongs to the session's project and names the project the
-  lesson left as `from`. Claude is asked to reword the lesson with `compound add --update`
-  if its text speaks of "this repository".
+  lesson left as `from`. Claude is asked to reword the lesson with `compound add --update
+  --body` if its text speaks of "this repository".
 - **Tracked**: the lesson stays where it is. A session in one project never changes a
   committed file of another. The lesson is still returned beside the error, read from its
   own project in place, with no copy. The CLI exits 3 and logs a `candidate` event
@@ -208,18 +208,23 @@ the working call word for word, with the instruction to record the lesson now us
 `id`, a short stable hash.
 
 A capture is **settled** by a later `learn` or `skip` event that comes from the same
-session, or that carries `settles: <id>` (`compound add --settles ID`, `compound skip
---settles ID`). Until then it is a debt, and it does not disappear when its session ends:
-`compound status` lists every unsettled capture of the last 14 days under Open, with its
-id, age, project and the failed and working commands.
+session, or that carries `settles: <id>` from any session or from none (`compound add
+--settles ID`, `compound skip --settles ID`). `compound skip --why` run outside a session
+settles the one unsettled capture of the project it is run in; with several it exits 2 and
+lists their ids. Until then the capture is a debt, and it does not disappear when its
+session ends: `compound status` lists every unsettled capture of the last 14 days under
+Open, with its id, age, project and the failed and working commands.
+
+That definition exists once, in the CLI. `compound status`, `compound events --unsettled`
+and the mod all take what is owed from it, and the mod decides nothing about settling for
+itself (see "What a session owes").
 
 ### 5. Stop: Claude is about to finish
 
-If the session owes a lesson and none was recorded (`compound add`) or declined
-(`compound skip --why`), the stop is refused once and the debt is restated. If a lesson
-recalled in the session is ineffective (see "When a lesson does not work") and the session
-has neither rewritten it nor declined, the stop is refused once with the lesson named and
-the ways to settle it. Separately, a
+The mod asks the CLI what the session owes (`compound events --unsettled --session S`).
+If the answer holds a lesson owed, the stop is refused once and the debt is restated. If
+it holds a strengthening owed (see "When a lesson does not work"), the stop is refused
+once with the lesson named and the ways to settle it. Separately, a
 turn in which the main loop made at least `COMPOUND_TURN_MIN_CALLS` tool calls with no
 lesson recorded is asked once whether it learned anything worth keeping. A subagent's
 calls are not counted, a prompt typed while the turn is running does not restart the
@@ -229,6 +234,24 @@ all sessions.
 Each refusal writes a `refuse` event that says why: `debt`, `strengthen` or `nudge`. A
 refused stop takes the place of the answer Claude was giving, so every such message ends
 by asking for the final answer of the turn again.
+
+### What a session owes
+
+A session owes a lesson for each of its unsettled captures, and a strengthening for each
+lesson a `recall` of its own marked ineffective. While it owes either, the band and the
+status entry say so, and after every tool call in the session (any tool, in the main loop
+or in a subagent) the mod makes one CLI call, `compound events --unsettled --session S`,
+and shows what the answer says: a debt that is no longer listed is cleared, with `lesson
+recorded`, `lesson rewritten` or `lesson declined` for the event that settled it. With
+nothing owed, no such call is made.
+
+The text of a command settles nothing. A session can reach the CLI through `&&`, a
+subshell, `$(...)`, a variable, `bash -c` or a script, and a debt can be settled from a
+terminal; the log holds the settlement in every case, and the log is what the mod reads.
+A command's text is read for three things only: `compound add` as the program of a simple
+command turns the `recording the lesson` spinner, a command whose program is the CLI is
+not tested against the guards, and after a command that names the CLI the log is read for
+events to toast.
 
 ### The CLI's time
 
@@ -308,7 +331,8 @@ user wants recorded, it asks the user before writing anything.
    work from memory.
 2. If what to record is unclear, ask the user.
 3. Run `compound find "<keywords>"`. If a lesson or skill already covers it, update or
-   broaden that one (`compound add --update`). Do not add a second.
+   broaden that one (`compound add --update`, with `--body` for new text). Do not add a
+   second.
 4. Choose the form: a lesson; a guard, when the mistake is a recognizable command; a
    script attached to the lesson, when the fix is a procedure worth running; a skill,
    when there are steps and a routable trigger.
@@ -330,8 +354,13 @@ the lesson named and the options stated:
 - rewrite the description;
 - or decline with `compound skip --why`.
 
-The debt is settled by a `learn` event with `update: true` for that lesson, or by a
-`skip`, in the same session. A lesson that already carries a `match` and still recurs
+The strengthening is settled by a later `learn` event with `update: true` for that lesson,
+by a later `skip` from the same session, or by a later `rm`, `skill` or `promote` event
+for the lesson: one that was removed, made a skill or moved under a new name is not owed a
+rewrite. A recall is not counted against a lesson the session first recorded after the
+failing call: a lesson younger than the failure it matches is that failure's own lesson,
+written before the fixing call was sent, and meeting it at the fix writes no `recall`.
+A lesson that already carries a `match` and still recurs
 gets a different message: its pattern is not catching the failing call, which is quoted
 beside the pattern. `compound status` lists ineffective lessons until they are rewritten.
 A lesson left in another project (see Levels) is that project's to rewrite: the session
@@ -360,13 +389,13 @@ or recorded. Every new failure is reported, each one once.
   | `■` | red | `guard stopped a call` | a guard refused a call | 8 s |
   | `↺` | magenta | `lesson recalled` | a failed call was given its recorded lesson | 8 s |
   | `◌` | orange | `watching for the fix` | a call failed and no lesson describes it | 8 s |
-  | `●` | yellow | `lesson owed` | a fix was captured and the session owes its lesson | until it is recorded or declined |
-  | `✔` | green | `lesson recorded`, `lesson rewritten` | `compound add` wrote the lesson | 8 s |
-  | `○` | grey | `lesson declined` | `compound skip` declined it | 8 s |
+  | `●` | yellow | `lesson owed` | a fix was captured and the session owes its lesson | until the CLI no longer lists it as owed |
+  | `✔` | green | `lesson recorded`, `lesson rewritten` | the log holds a `learn` event of the session, or one that settles its debt | 8 s |
+  | `○` | grey | `lesson declined` | the log holds such a `skip` event | 8 s |
   | `⇡` | blue | `lesson moved to the user level`, `lesson proposed to the general pool` | a lesson moved, by the mod or by `compound promote` | 8 s |
   | `✦` | blue | `lesson made a skill` | `compound skill` | 8 s |
   | `−` | grey | `removed` | `compound rm` | 8 s |
-  | `▲` | yellow | `lesson ineffective`, then `strengthening owed` | a recalled lesson did not prevent its failure | until the lesson is rewritten or declined |
+  | `▲` | yellow | `lesson ineffective`, then `strengthening owed` | a recalled lesson did not prevent its failure | until the CLI no longer lists it as owed |
   | `●` | yellow | `unsettled from earlier sessions` | the session's first prompt was told of them | 8 s |
   | `?` | blue | `asked whether anything was learned` | the question after a long turn | 8 s |
   | `✖` | red | `N compound errors` | the mod itself failed | until Claude is told at the next typed prompt |
@@ -377,7 +406,7 @@ or recorded. Every new failure is reported, each one once.
   error`). The colours are theme colours and ANSI names, so they follow the terminal's
   theme.
 
-  From a failed call until its lesson is settled the row also carries the learn loop as a
+  After a failed call that no lesson describes the row also carries the learn loop as a
   track of four steps, `failed → fixed → owed → recorded` (the last reads `declined` when
   the lesson was declined). Steps passed are ticked and dim, the current one is bold in its
   colour, the ones ahead are dim: `✓ failed → ✓ fixed → ● owed → ○ recorded`. The track
@@ -412,8 +441,9 @@ or recorded. Every new failure is reported, each one once.
   it, so the status area reads `compound: 2 reusable`. A hook that the engine stopped (it
   threw, or ran out of its time) sets `N errors` from its `.catch` handler. A `compound`
   command the session runs sets one for what it did (`skill <name>`, `removed <name>`,
-  `moved <name>`). The entry is cleared when a debt is settled by `compound add` or
-  `compound skip`, and at the start of each new typed prompt.
+  `moved <name>`). While a lesson or a strengthening is owed the entry says so; it
+  is cleared when the CLI no longer lists the debt (see "What a session owes"), and at the
+  start of each new typed prompt.
 - **Toast**: a lesson recorded, rewritten, moved, proposed to the general pool, made a
   skill, removed or marked ineffective. A toast for a `compound` command the session ran
   follows the event that command wrote to the log (`learn`, `promote`, `skill`, `rm`),
@@ -462,7 +492,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--level L] [--match RE]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Body on stdin. Writes the lesson. Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--no-match`, with `--update`, drops the lesson's guard patterns. `--settles ID` settles that capture. Logs `learn`. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--no-match`, with `--update`, drops the lesson's guard patterns. `--settles ID` settles that capture. Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. |
 | `compound show N` | One lesson's path and text. |
 | `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. |
@@ -470,9 +500,9 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote` when it moved or proposed something. |
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed. Logs `rm`. |
-| `compound skip --why T [--settles ID]` | Declines an owed lesson, or with `--settles` the capture of that id. Logs `skip`. |
+| `compound skip --why T [--settles ID]` | Declines what the session owes, or with `--settles` the capture of that id. Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound log` | stdin: one event object of a known type. Appends it with `ts`, `session` and `project` filled in, and an `id` for a `capture`. |
-| `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only the captures of the last 14 days that nothing has settled. `--limit N`: the last `N` of what was selected. |
+| `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. Exit 1 when a health check fails. |
 | `compound install [--claude-dir D] [--bin-dir D]` | See below. `--claude-dir` names the Claude Code directory and `--bin-dir` the directory the link goes into. |
 | `compound update` | See below. |
@@ -534,7 +564,9 @@ run from) and runs `bin/compound install`, which:
   the shell profile (`export PATH="$HOME/.local/bin:$PATH"`). Its closing "Check it with"
   line gives the link's absolute path, so it runs either way;
 - installs [history-surfer](https://github.com/ContextLab/claude-history-surfer), the
-  prompt log, when it is not already present;
+  prompt log, when no `surfer` command is found and `COMPOUND_NO_SURFER` is not set: it
+  clones it to `~/.claude/compound/history-surfer` and runs its `scripts/setup.py` for the
+  same Claude Code directory and bin directory. A failure here never fails the install;
 - records what it did in `~/.claude/compound/install.json`.
 
 `settings.json` is written atomically, through a symlink if it is one, and only the one
@@ -545,9 +577,12 @@ name and text now exist at `general` is removed, so the pool stays the only copy
 
 `compound uninstall` removes the settings element, the link and `install.json`. Lessons
 are the user's knowledge and stay, and so does the clone at `~/.claude/compound/app` when
-`install.sh` made one: the output names its path. `compound uninstall --purge` also
-removes `~/.claude/compound`: the user-level lessons, the event log, the claims and that
-clone. A checkout elsewhere that the package was installed from is never removed. Both
+`install.sh` made one: the output names its path. A history-surfer that install fetched
+stays installed, and the output prints the command that removes it. `compound uninstall
+--purge` also runs that history-surfer's own `scripts/setup.py --uninstall`, and removes
+`~/.claude/compound`: the user-level lessons, the event log, the claims, the package clone
+and the history-surfer clone. The prompts history-surfer stored are kept, and a
+history-surfer that install found already present is never touched. A checkout elsewhere that the package was installed from is never removed. Both
 leave skills in `<claude dir>/skills` where they are, lessons that became skills
 included: they are the user's skills. Project lessons belong to their projects and are
 never touched.

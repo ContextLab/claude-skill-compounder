@@ -216,7 +216,7 @@ class UpdatePreservesFrontmatterTest(Case):
 
     def test_a_new_body_replaces_the_body_only(self):
         path = self.hand()
-        self.assertExit(self.box.run("add", "--name", "hand", "--update", stdin="New body.\n"), 0)
+        self.assertExit(self.box.run("add", "--name", "hand", "--update", "--body", "-", stdin="New body.\n"), 0)
         text = read(path)
         head = HAND.split("\n---\n")[0]
         self.assertTrue(text.startswith(head + "\nupdated: 2026-09-21\n---\n"), text)

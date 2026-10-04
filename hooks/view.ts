@@ -143,9 +143,9 @@ export function captured(band: CompoundBand, now: number): CompoundBand {
   return { ...band, owed: band.owed + 1, track: { step: 'owed', at: now } }
 }
 
-// What the session's own `compound` call wrote to the log, as the band takes it. One
-// `learn` or `skip` settles every lesson owed; a `learn --update` of a lesson that was
-// owed a strengthening settles that; a `skip` settles every strengthening too.
+// An event that settled something, as the band shows it: the result it flashes and where
+// the track ends. The counts it leaves are a first guess; `synced` then sets them to what
+// the CLI says is still owed.
 export function settledBy(band: CompoundBand, event: Record<string, unknown> & { type: string }, now: number): CompoundBand {
   const name = typeof event.lesson === 'string' ? event.lesson : ''
   const closes = band.owed > 0 || band.track !== null
@@ -166,11 +166,13 @@ export function weakened(band: CompoundBand, name: string, now: number): Compoun
   return { ...noted(band, 'ineffective', name, now), weak: band.weak.includes(name) ? band.weak : [...band.weak, name] }
 }
 
-// What the stop moment read from the log: the counts are the log's, not the band's guess.
+// What the CLI said the session owes: the counts are the log's, not the band's guess. A
+// band that already says so is answered as it is, so nothing is redrawn for it.
 export function synced(band: CompoundBand, owed: number, weak: readonly string[], now: number): CompoundBand {
   let track = band.track
   if (owed > 0 && track?.step !== 'owed') track = { step: 'owed', at: now }
   if (owed === 0 && track?.step === 'owed') track = null
+  if (band.owed === owed && track === band.track && band.weak.length === weak.length && band.weak.every((w, i) => w === weak[i])) return band
   return { ...band, owed, weak: [...weak], track }
 }
 

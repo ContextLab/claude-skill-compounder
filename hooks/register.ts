@@ -11,8 +11,8 @@ import {
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseGuards, parseHits, parseInventory, parseMoved, parseShow, parseTimedOut,
-  parseUnsettled, strengthenings,
+  learnedSince, mayNudge, otherProjects, parseEarlier, parseEvents, parseGuards, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
+  parseTimedOut, parseUnsettled, settlers,
   type Earlier, type Event, type Item,
 } from './store'
 import {
@@ -33,6 +33,13 @@ import {
 //
 // And once per session, at its first typed prompt, it tells the session what earlier
 // sessions in this project left unsettled.
+//
+// WHAT IS OWED, AND WHAT SETTLED IT, IS THE CLI'S TO SAY. While the session owes a lesson
+// or a strengthening, the mod asks `compound events --unsettled --session S` after EVERY
+// tool call (any tool, the main loop or a subagent) and at the stop, and the band, the
+// status entry and the refusal follow that answer. The text of a command settles nothing:
+// it is read only to turn the "recording" spinner, to leave the CLI's own calls unguarded,
+// and to know that a call may have written an event worth a toast.
 //
 // A REFUSAL HAPPENS AT MOST ONCE. A guard's deny and a stop's refusal each need a claim
 // (see `claim`), and a claim that cannot be made means the mod does not refuse.
@@ -118,6 +125,10 @@ const stalled = new Map<string, Set<string>>()
 const noGuards = new Set<string>()
 // The events of a session's own CLI calls that were already toasted, per session.
 const told = new Map<string, Set<string>>()
+// What each session owes, as the CLI last said: the ids of its unsettled captures, the
+// lessons it owes a strengthening for, and the time of the oldest of them in seconds.
+type Owing = { ids: string[]; weak: string[]; since: number }
+const owing = new Map<string, Owing>()
 let sweptClaims = false
 let ownCli: string | undefined
 let settings: { at: number; off: boolean; quiet: boolean; knobs: Knobs } | undefined
@@ -848,7 +859,10 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
     guard: lesson.match.length > 0,
     ineffective,
   })
-  if (ineffective) $.ui.toast(`compound: lesson ${lesson.name} is ineffective (recalled ${count} times)`)
+  if (ineffective) {
+    owes(sid, [], [lesson.name])
+    $.ui.toast(`compound: lesson ${lesson.name} is ineffective (recalled ${count} times)`)
+  }
   $.ui.status(ineffective ? `${lesson.name} ineffective` : `recalled ${lesson.name}`)
   await paint($, (band, now) => (ineffective ? weakened(band, lesson.name, now) : noted(unfixed(band), moved ? 'moved' : 'recall', lesson.name, now)))
   out.push(known ? knownContext(lesson, text, count, ineffective, cliAt, call) : recallContext(lesson, text, count, ineffective, cliAt, call))
@@ -878,7 +892,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
     }
   }
   if (hit === undefined) {
-    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0 })
+    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0, at: nowS() })
     await paint($, (band, now) => stepped(band, 'failed', now))
     return []
   }
@@ -915,10 +929,21 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     return []
   }
   held.delete(key)
-  if (answer.verdict === 'KNOWN') return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true)
+  if (answer.verdict === 'KNOWN') {
+    // A lesson this session first recorded AFTER the call failed is younger than the
+    // failure it matches: it is the lesson of this very failure, written before the fixing
+    // call was sent. Meeting it here is no recurrence, and nothing more is owed.
+    const learned = await events($, ['--session', sid, '--type', 'learn', '--since', String(was.at)])
+    if (learned !== undefined && learnedSince(learned, answer.lesson.name)) {
+      await paint($, band => unfixed(band))
+      return []
+    }
+    return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true)
+  }
+  const id = digest(`${sid}:${callId}`)
   await log($, {
     type: 'capture',
-    id: digest(`${sid}:${callId}`),
+    id,
     tool,
     failed: was.call.slice(0, LOGGED_CALL),
     error: was.error.slice(-LOGGED_ERROR),
@@ -928,30 +953,102 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     agent: agent ?? null,
     ms: reply.ms,
   })
+  owes(sid, [id], [])
   $.ui.status('lesson owed')
   await paint($, (band, now) => captured(band, now))
   return [captureContext({ failed: was.call, error: was.error, fixed: call }, await cliPath($))]
 }
 
-// The session ran the CLI itself: the store may have changed, and a lesson may now exist.
-// What is told to the user follows the EVENTS that call wrote, never the command's text: a
-// command that printed a plan, or failed, wrote none. `began` is when the call started.
+// Events the CLI wrote, told to the person once each: a toast, the status entry, the band's
+// result. An event that changed the store also empties what the mod had listed.
+async function tell($: EngineInterface, sid: string, rows: readonly Event[]): Promise<number> {
+  const seen = told.get(sid) ?? new Set<string>()
+  told.set(sid, seen)
+  const fresh = storeNews(rows, seen)
+  for (const news of fresh) {
+    seen.add(news.key)
+    if (news.toast !== undefined) $.ui.toast(news.toast)
+    $.ui.status(news.status)
+    const event = rows.find(row => newsKey(row) === news.key)
+    if (event === undefined) continue
+    if (event.type !== 'skip') forgetInventory(sid)
+    await paint($, (band, now) => settledBy(band, event, now))
+  }
+  if (fresh.length > 0) boardStale($)
+  return fresh.length
+}
+
+// The session ran a command that names the CLI: the store may have changed, and an event
+// may be worth a toast. What is told follows the EVENTS that call wrote, never the
+// command's text: a command that printed a plan, or failed, wrote none. `began` is when
+// the call started. No debt is settled here: see `settle`.
 async function onCliCall($: EngineInterface, sid: string, verb: string, began: number): Promise<void> {
   if (changesStore(verb)) forgetInventory(sid)
   if (!reportsEvents(verb)) return
   const rows = await events($, ['--session', sid, '--since', String(began - 1)])
-  if (rows === undefined) return
-  const seen = told.get(sid) ?? new Set<string>()
-  told.set(sid, seen)
-  for (const news of storeNews(rows, seen)) {
-    seen.add(news.key)
-    if (news.toast !== undefined) $.ui.toast(news.toast)
-    // A debt settled, by a lesson or by declining it: nothing is owed, and the entry goes.
-    $.ui.status(news.status)
-    const event = rows.find(row => newsKey(row) === news.key)
-    if (event !== undefined) await paint($, (band, now) => settledBy(band, event, now))
-  }
+  if (rows !== undefined) await tell($, sid, rows)
   boardStale($)
+}
+
+// The session now owes these: remembered so every later tool call asks the CLI about them.
+function owes(sid: string, ids: readonly string[], weak: readonly string[]): void {
+  const kept = owing.get(sid) ?? { ids: [], weak: [], since: nowS() }
+  owing.set(sid, {
+    ids: [...kept.ids, ...ids.filter(i => !kept.ids.includes(i))],
+    weak: [...kept.weak, ...weak.filter(w => !kept.weak.includes(w))],
+    since: kept.since,
+  })
+}
+
+// What the display holds as owed, or undefined when it holds nothing and no question is
+// worth a process. The module's own record first; after a reload that record is gone and
+// the band's state, which the session keeps, still says what it shows.
+async function shownOwed($: EngineInterface, sid: string): Promise<Owing | undefined> {
+  const kept = owing.get(sid)
+  if (kept !== undefined && kept.ids.length + kept.weak.length > 0) return kept
+  try {
+    const band = await read($, BAND)
+    if (band !== null && band.session === sid && (band.owed > 0 || band.weak.length > 0)) return { ids: [], weak: [...band.weak], since: 0 }
+  } catch {
+    // No band to read: the module's record was the answer.
+  }
+  return undefined
+}
+
+// After a tool call, while the display says something is owed: ONE question to the CLI,
+// `events --unsettled --session S`, and the band and the status entry are made to say what
+// it answered. A debt that is gone was settled, in whatever way the CLI counts as settling
+// (a lesson recorded or declined in this session, from a subagent, from a terminal by its
+// id, a weak lesson rewritten, removed, made a skill or moved); only then is the log read
+// once more, for the event to show as "recorded" or "declined".
+async function settle($: EngineInterface, sid: string, was: Owing): Promise<void> {
+  const ran = await cli($, ['events', '--unsettled', '--session', sid, '--json'])
+  if (ran === undefined) return
+  const now = parseOwed(ran.stdout)
+  if (now === undefined) {
+    await fail($, 'owed.parse', `compound events --unsettled --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
+    return
+  }
+  const ids = now.debts.map(d => d.id)
+  const weak = now.weak.map(w => w.name)
+  const goneIds = was.ids.filter(i => !ids.includes(i))
+  const goneWeak = was.weak.filter(w => !weak.includes(w))
+  const clear = ids.length + weak.length === 0
+  let said = 0
+  if ((goneIds.length > 0 || goneWeak.length > 0) && was.since > 0) {
+    const rows = await events($, ['--since', String(Math.floor(was.since) - 1)])
+    if (rows !== undefined) said = await tell($, sid, settlers(rows, sid, goneIds, goneWeak))
+  }
+  await paint($, (band, at) => synced(band, ids.length, weak, at))
+  if (clear) {
+    owing.delete(sid)
+    // Settled with nothing to show for it (a lesson removed in a terminal): the entry goes.
+    if (said === 0) $.ui.status(undefined)
+    boardStale($)
+    return
+  }
+  owing.set(sid, { ids, weak, since: now.since > 0 ? now.since : was.since })
+  if (goneIds.length > 0 || goneWeak.length > 0) $.ui.status(ids.length > 0 ? 'lesson owed' : `strengthen ${weak[0] ?? ''}`)
 }
 
 // ---- moment 5: stop -------------------------------------------------------------------
@@ -966,20 +1063,28 @@ function turnEnded(sid: string): undefined {
 async function onStop($: EngineInterface, followsBlock: boolean): Promise<string | undefined> {
   if (await off($)) return undefined
   const sid = await $.session.id()
-  const rows = await events($, ['--session', sid])
-  if (rows === undefined) return turnEnded(sid)
+  // What the session owes is asked of the CLI, whose definition of settled is the only one.
+  const asked = await cli($, ['events', '--unsettled', '--session', sid, '--json'])
+  if (asked === undefined) return turnEnded(sid)
+  const now = parseOwed(asked.stdout)
+  if (now === undefined) {
+    await fail($, 'owed.parse', `compound events --unsettled --json printed something unreadable: ${asked.stdout.slice(0, 200)}`)
+    return turnEnded(sid)
+  }
   const cliAt = await cliPath($)
   // A debt is refused once: the claim is the record, so a stop that follows a refusal for
   // one debt can still be refused for a newer one, and never twice for the same. A debt
   // whose claim cannot be put on record is not refused at all.
-  const owed = debts(rows)
+  const owed = now.debts
   const fresh: string[] = []
   for (const d of owed) {
     if (await mayRefuse($, sid, `stop-${d.key}`)) fresh.push(d.key)
   }
   // A recalled lesson that did not prevent its failure is owed a strengthening, on the
   // same terms: once per session per lesson, and only with the claim on record.
-  const weak = strengthenings(rows)
+  const weak = now.weak
+  if (owed.length + weak.length === 0) owing.delete(sid)
+  else owing.set(sid, { ids: owed.map(d => d.id), weak: weak.map(w => w.name), since: now.since > 0 ? now.since : (owing.get(sid)?.since ?? 0) })
   const weakFresh = []
   for (const w of weak) {
     if (await mayRefuse($, sid, `strengthen-${w.name}`)) weakFresh.push(w)
@@ -1001,7 +1106,10 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   const turn = turns.get(sid)
   const k = await knobs($)
   if (followsBlock || owed.length > 0 || weak.length > 0 || turn === undefined || turn.calls < k.turnMinCalls) return turnEnded(sid)
-  // The cooldown is the user's, not the session's: the last nudge anywhere counts.
+  // Nothing recorded, declined or captured in this turn; and the cooldown is the user's,
+  // not the session's: the last nudge anywhere counts.
+  const rows = await events($, ['--session', sid, '--since', String(turn.start)])
+  if (rows === undefined) return turnEnded(sid)
   const nudges = await events($, ['--type', 'nudge', '--limit', '1'])
   if (nudges === undefined || !mayNudge(rows, turn.start, nowS(), k.nudgeCooldown, nudges)) return turnEnded(sid)
   if (!(await mayRefuse($, sid, `nudge-${turn.n}`))) return turnEnded(sid)
@@ -1110,7 +1218,16 @@ export const register: Register = on => {
       const id = recording
       await paint($, band => checkEnded(band, id))
     }
-    if (sid === '' || ran.deny !== undefined) return ran
+    if (sid === '') return ran
+    try {
+      // While something is owed, every call may be the one that settled it, whatever its
+      // tool and its text: the CLI is asked. With nothing owed, nothing is asked.
+      const was = await shownOwed($, sid)
+      if (was !== undefined) await settle($, sid, was)
+    } catch (err) {
+      await fail($, 'settle', err)
+    }
+    if (ran.deny !== undefined) return ran
     try {
       if (verb !== undefined) {
         await onCliCall($, sid, verb, began)

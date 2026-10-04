@@ -17,7 +17,7 @@ submit a prompt, when Claude calls a tool, and when Claude is about to stop.
 ![Screencast: a request fails and then succeeds, the lesson is recorded, and a new session in another project is stopped before it repeats the mistake](docs/media/demo.gif)
 
 1. A request fails, then succeeds on a later attempt: converting a TOML file with a Python that lacks `tomllib`.
-2. compound has the lesson recorded. It shows in the band above the prompt and in the `/compound` pane.
+2. compound has the lesson recorded. It shows in the **band**, one row directly above the prompt that says what compound is doing, and in the **pane**, a dashboard that typing `/compound` opens.
 3. A new session in another project is stopped before it repeats the mistake, and gets it right.
 
 ## Install
@@ -80,8 +80,17 @@ acted in a session. [Troubleshooting](#troubleshooting) explains every row.
 
 Install changes three things: it adds one path to `env.CLAUDE_CODE_PLUGIN_DIRS` in
 `~/.claude/settings.json`, it links `compound` into `~/.local/bin` or `~/bin`, and it
-writes a record of both to `~/.claude/compound/install.json`. Uninstall reverses exactly
-those three.
+writes a record of what it did to `~/.claude/compound/install.json`.
+
+It does a fourth when it finds no `surfer` command: it clones history-surfer into
+`~/.claude/compound/history-surfer` and runs that project's own installer
+(`scripts/setup.py`) for the same Claude Code directory and the same bin directory.
+Setting `COMPOUND_NO_SURFER` before installing skips this.
+
+`compound uninstall` reverses the first three. A history-surfer that install fetched
+stays installed, and the output prints the command that removes it. `compound uninstall
+--purge` also runs history-surfer's own uninstaller for that copy and deletes its clone
+with the rest of `~/.claude/compound`. A history-surfer you already had is never touched.
 
 What each uninstall leaves behind:
 
@@ -91,6 +100,9 @@ What each uninstall leaves behind:
 | skills in `~/.claude/skills`, including ones you made with `compound skill` | kept | kept |
 | lessons you keep for all your projects, and the event log, in `~/.claude/compound` | kept | deleted |
 | the copy of this package at `~/.claude/compound/app` | kept | deleted |
+| history-surfer, when install fetched it: its clone at `~/.claude/compound/history-surfer` and what its installer set up | kept; the output prints the command that removes it | uninstalled by its own uninstaller, and the clone deleted |
+| the prompts history-surfer has stored, in `~/.claude/history-surfer` | kept | kept |
+| a history-surfer you installed yourself | kept | kept |
 
 ## What it does
 
@@ -124,7 +136,7 @@ works in two ways:
   the lesson that describes that failure, beside the error.
 
 > Session one: `import tomllib` fails on Python 3.9. Claude finds the fix and records the
-> lesson `toml-needs-tomllib`. The lesson is about your machine, so it is kept for all
+> lesson `python39-no-tomllib`. The lesson is about your machine, so it is kept for all
 > your projects.
 > Session two, another project: Claude is about to make the same call. compound stops it
 > and quotes the lesson. Claude uses the fix on its first try.
@@ -237,12 +249,15 @@ is empty when there is nothing to show.
 Results fade after 8 seconds. `lesson owed`, `lesson ineffective` and errors stay until
 they are dealt with. [The design](docs/design.md#seeing-it-work) lists every row.
 
-**2. The learn-loop track.** From a failed call until its lesson is settled, the band
-also shows four steps. The current step is bold:
+**2. The learn-loop track.** After a failed call that no lesson describes, the band also
+shows four steps. The current step is bold:
 
 ```
 ✓ failed → ✓ fixed → ● owed → ○ recorded
 ```
+
+The track stays for as long as a lesson is owed. At every other step it fades after 8
+seconds, like the result beside it.
 
 **3. The `/compound` pane.** Type `/compound` in a session to open a dashboard: health,
 what is open, lessons per level, the most used lessons, and recent events. `r` refreshes
@@ -300,7 +315,7 @@ each one with its output.
 | turn a lesson into a skill | `compound skill <name>` |
 | move a lesson to the user level | `compound promote <name> --to user` |
 | propose a lesson to the general pool | `compound promote <name> --to general` prints the plan and writes nothing. Add `--yes` to open the pull request. |
-| decline a lesson that is owed | tell Claude it is not worth keeping, or run `compound skip --why "<reason>"` |
+| decline a lesson that is owed | tell Claude it is not worth keeping, or run `compound skip --why "<reason>"` in a terminal in that project (with several owed, add `--settles <id>`) |
 | strengthen an ineffective lesson | add a pattern: `compound add --update --name <name> --match '<regex>'` |
 | remove a lesson | `compound rm <name>` (`--force` for a skill) |
 | hide the band | set `COMPOUND_QUIET` to `1` (see [Settings](#settings)) |

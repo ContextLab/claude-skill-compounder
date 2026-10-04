@@ -122,10 +122,15 @@ const CLI_VERBS = 'add|skip|promote|skill|rm|update|install|uninstall|find|list|
 // Assignments, then the program (quoted or bare), then the verb.
 const CLI_HEAD = new RegExp(`^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\\S*)\\s+)*(?:"([^"]+)"|'([^']+)'|(\\S+))\\s+(${CLI_VERBS})(?=\\s|$)`)
 
-// A Bash command that runs this package's CLI. Its own calls are never held or judged, and
-// a store-changing one empties the mod's cached inventory. The CLI counts only as the
-// program being run: the first word of a simple command, alone or after `&&` or `;`. Its
-// name inside an argument (`echo "compound add"`, `grep compound add.txt`) is not a call.
+// A Bash command that runs this package's CLI. Its own calls are never guarded, held or
+// judged, and `add` turns the "recording" spinner. The CLI counts only as the program being
+// run: the first word of a simple command, alone or after `&&` or `;`. Its name inside an
+// argument (`echo "compound add"`, `grep compound add.txt`) is not a call.
+//
+// THIS IS A HINT, AND NOTHING IS SETTLED BY IT. A command line can reach the CLI in more
+// ways than any reader of its text will follow (a subshell, `$(...)`, a variable, `bash
+// -c`, a script). Whether a debt is settled is asked of the CLI after every tool call
+// while one is owed (./register `settle`), whatever the call's text was.
 export function cliCall(command: string): string | undefined {
   for (const simple of simpleCommands(command)) {
     const m = CLI_HEAD.exec(simple)
@@ -138,7 +143,8 @@ export function cliCall(command: string): string | undefined {
 
 // A command that names the CLI anywhere, including through a variable (`C=/path/compound;
 // $C add ...`), which `cliCall` does not read as a call. It may have written events, so
-// the log is read after it; it is still guarded and judged like any other command.
+// the log is read after it for what to toast; it is still guarded and judged like any
+// other command.
 export function mentionsCli(command: string): boolean {
   return /(^|[\/\s="'])compound(?=$|[\s"';&|)])/.test(command)
 }
@@ -225,7 +231,8 @@ export function turnAfterCall(prev: Turn, agentId: string | undefined): Turn {
 // failure is dropped.
 export const FIX_ATTEMPTS = 5
 
-export type Held = { tool: string; call: string; error: string; left: number; turn: number }
+// `at` is when the call failed, in seconds.
+export type Held = { tool: string; call: string; error: string; left: number; turn: number; at: number }
 
 // What a success means for a held failure. Another tool's success is not an attempt at
 // the same thing: it costs no judge call and uses none of the window. A failure is held
@@ -374,7 +381,7 @@ export function ineffectiveText(name: string, count: number, cli: string, match:
 export function promotedText(name: string, from: string, cli: string, also: readonly string[] = []): string {
   const out = [
     `[compound] Lesson ${name} was recorded in another project (${from}) and has now applied in a second one, so it was moved to the user level. It is one lesson, moved, not copied.`,
-    `It is now read from every project. If its text speaks of "this repository", "this project" or a path of ${from}, reword it so it reads true anywhere: ${cli} add --update --name ${name} --when "<trigger>" <<'EOF' ... EOF`,
+    `It is now read from every project. If its text speaks of "this repository", "this project" or a path of ${from}, reword it so it reads true anywhere: ${cli} add --update --name ${name} --when "<trigger>" --body "<the lesson, reworded>"`,
   ]
   if (also.length > 0) out.push(`The same lesson stays committed in ${also.join(', ')}: that copy was not touched, and it is this lesson, not another.`)
   return out.join('\n')
@@ -433,7 +440,7 @@ export function knownContext(lesson: Item, text: string, count: number, ineffect
 export const AGAIN = 'After recording or declining, give the user your final answer for this turn again.'
 
 // Moment 5. Why a stop is refused: the debt, restated, and exactly what settles it.
-export function stopDebt(owed: readonly Debt[], cli: string): string {
+export function stopDebt(owed: readonly Omit<Debt, 'id'>[], cli: string): string {
   const out = [
     owed.length === 1
       ? '[compound] This session owes a lesson: a failed call was fixed and nothing was recorded or declined.'
@@ -481,7 +488,7 @@ export function stopStrengthen(owed: readonly Strengthening[], cli: string): str
   }
   out.push(
     `  ${MATCH_TESTS}`,
-    '- attach a script that does the step the right way: the same command with --attach <file>, and a body (on stdin) that says to run it',
+    '- attach a script that does the step the right way: the same command with --attach <file>, and --body "<text that says to run it>"',
     '- rewrite the description so it names the situation in the words a failing call would show: the same command with --when "<trigger>"',
     `- decline, saying why: ${cli} skip --why "<reason>"`,
     'The compound:learn skill has the procedure. This is asked once per lesson. The next stop is not refused.',

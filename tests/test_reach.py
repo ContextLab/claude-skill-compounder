@@ -639,7 +639,7 @@ class RecallsSinceTest(Case):
         self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 30)
         row = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 40)
         self.assertEqual((row["recalls_since"], row["ineffective"]), (2, True))
-        self.box.add("flaky", "Use when.", "Better.\n", "--update", COMPOUND_NOW=NOW + 50)
+        self.box.add("flaky", "Use when.", "Better.\n", "--update", "--body", "-", COMPOUND_NOW=NOW + 50)
         row = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 60)
         self.assertEqual((row["recalls_since"], row["counts"]["recall"], row["ineffective"]), (0, 2, False))
 

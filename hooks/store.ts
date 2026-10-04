@@ -191,19 +191,52 @@ export function seconds(event: Event): number {
   return 0
 }
 
-export type Debt = { key: string; tool: string; failed: string; error: string; fixed: string }
+// A lesson owed: `id` is the capture's, `key` is what its one refusal is claimed under.
+export type Debt = { id: string; key: string; tool: string; failed: string; error: string; fixed: string }
+export type Strengthening = { name: string; guard: boolean; call: string }
+// What a session owes, as the CLI says: `since` is the time of the oldest of them, in seconds.
+export type Owed = { debts: Debt[]; weak: Strengthening[]; since: number }
 
-// The lessons a session still owes: each `capture` with no `learn` or `skip` after it, in
-// the order the log holds them. One `learn` or `skip` settles every capture before it.
-export function debts(events: readonly Event[]): Debt[] {
-  let owed: Debt[] = []
+// `compound events --unsettled --session S --json`: what the session still owes. WHAT
+// SETTLES A DEBT IS THE CLI'S TO SAY, and nothing here decides it: a `capture` row is a
+// lesson owed, a `recall` row is a strengthening owed for its lesson, and a debt that was
+// settled is simply not in the reply. undefined when the reply is not a list of events.
+export function parseOwed(stdout: string): Owed | undefined {
+  const events = parseEvents(stdout)
+  if (events === undefined) return undefined
+  const out: Owed = { debts: [], weak: [], since: 0 }
   for (const e of events) {
-    if (e.type === 'learn' || e.type === 'skip') owed = []
-    else if (e.type === 'capture') {
-      owed.push({ key: str(e.call) || str(e.ts), tool: str(e.tool), failed: str(e.failed), error: str(e.error), fixed: str(e.fixed) })
-    }
+    const name = str(e.lesson)
+    if (e.type === 'capture') {
+      out.debts.push({ id: str(e.id), key: str(e.call) || str(e.ts), tool: str(e.tool), failed: str(e.failed), error: str(e.error), fixed: str(e.fixed) })
+    } else if (e.type === 'recall' && name !== '') {
+      out.weak = [...out.weak.filter(s => s.name !== name), { name, guard: e.guard === true, call: str(e.call) }]
+    } else continue
+    const at = seconds(e)
+    if (at > 0 && (out.since === 0 || at < out.since)) out.since = at
   }
-  return owed
+  return out
+}
+
+// The events to tell the person about once a debt is gone from the CLI's answer: what this
+// session wrote, a `learn` or `skip` of any session that names a capture that is gone, and
+// whatever happened to a lesson whose strengthening is gone. For the display only: the
+// debt was already settled, by the CLI's account, before this is asked.
+export function settlers(events: readonly Event[], session: string, goneIds: readonly string[], goneWeak: readonly string[]): Event[] {
+  return events.filter(e => {
+    if (e.type !== 'learn' && e.type !== 'skip' && e.type !== 'rm' && e.type !== 'skill' && e.type !== 'promote') return false
+    if (session !== '' && str(e.session) === session) return true
+    const settles = str(e.settles)
+    if ((e.type === 'learn' || e.type === 'skip') && settles !== '' && goneIds.includes(settles)) return true
+    return e.type !== 'skip' && (goneWeak.includes(str(e.lesson)) || goneWeak.includes(str(e.was)))
+  })
+}
+
+// Whether `events` (this session's `learn` events since a failure was held) hold the
+// first recording of the lesson `name`. Such a lesson is younger than the failure: it is
+// that failure's own lesson, and meeting it at the fix is no recurrence.
+export function learnedSince(events: readonly Event[], name: string): boolean {
+  return name !== '' && events.some(e => e.type === 'learn' && e.update !== true && str(e.lesson) === name)
 }
 
 // Whether a big turn may be asked about lessons: nothing was recorded or owed in this
@@ -219,24 +252,6 @@ export function mayNudge(events: readonly Event[], turnStart: number, now: numbe
   return true
 }
 
-export type Strengthening = { name: string; guard: boolean; call: string }
-
-// The lessons a session still owes a strengthening for: each one a `recall` marked
-// ineffective, until a later `learn` with `update` for that lesson, or a later `skip`.
-// One entry per lesson, carrying the newest failing call.
-export function strengthenings(events: readonly Event[]): Strengthening[] {
-  let owed: Strengthening[] = []
-  for (const e of events) {
-    const name = str(e.lesson)
-    if (e.type === 'skip') owed = []
-    else if (e.type === 'learn' && e.update === true) owed = owed.filter(s => s.name !== name)
-    else if (e.type === 'recall' && e.ineffective === true && name !== '') {
-      owed = [...owed.filter(s => s.name !== name), { name, guard: e.guard === true, call: str(e.call) }]
-    }
-  }
-  return owed
-}
-
 export type Unsettled = { id: string; age: string; failed: string; error: string; fixed: string }
 
 function ageText(s: number): string {
@@ -247,8 +262,8 @@ function ageText(s: number): string {
   return `${Math.floor(s / 86400)}d`
 }
 
-// `compound events --unsettled --json`: the captures no learn or skip has settled. This
-// session's own are left out (the stop moment handles those), and so is a row with no id.
+// `compound events --unsettled --json`: the captures nothing has settled. This session's
+// own are left out (the stop moment handles those), and so is a row with no id.
 export function parseUnsettled(stdout: string, session: string, now: number): Unsettled[] | undefined {
   const events = parseEvents(stdout)
   if (events === undefined) return undefined
