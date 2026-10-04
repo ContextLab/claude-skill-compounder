@@ -1,20 +1,12 @@
-# Local state written at runtime (never part of the repo).
-state/
+# Local state
 *.local
 
 # Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.venv/
-venv/
-*.egg-info/
 
 # OS
 .DS_Store
 
-# tooling state (not part of the project)
-.omc/
-
-# skillnote / installer backups of edited config files
-*.bak-skill-compounder-*
+# types the engine lays beside a loaded mod
+.claude-plugin/types/
