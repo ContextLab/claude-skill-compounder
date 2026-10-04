@@ -177,6 +177,22 @@ EVENT LOG
                                                        lesson of its name
                                     from*    string    the project root that holds it
                                     seen_in* string    the project root it applied in
+        use       CLI `use`         lesson*  string    the skill a session invoked, as
+                                                       `list` names it. The mod runs
+                                                       `use` when a skill's prompt is
+                                                       expanded (the Skill tool, a
+                                                       typed `/name`, a preload)
+                                    level    string    project | user | general
+                                    kind     string    skill
+                                    path     string    the skill's directory
+        repeat    mod               times    int       how many sessions made this
+                                                       kind of request, this one
+                                                       included, when the mod offered
+                                                       to make it a skill
+                                    prompts  [string]  prompt-log ids of the earlier
+                                                       requests it counted
+                                    prompt_id string   the digest of the prompt
+                                    memo     bool      the verdict came from the memo
         error     mod, `check`      where*   string    hook or step that failed
                                     message* string
                                     lesson   string    `check` only: the guard that
@@ -185,9 +201,9 @@ EVENT LOG
     A line that does not parse is skipped by every reader and counted by `status`.
     An append to a log whose last line has no newline starts on a new line.
 
-    Counting. `counts` for a name is {reuse, guard, recall, learn}: the number of
+    Counting. `counts` for a name is {reuse, guard, recall, learn, use}: the number of
     events of that type whose `lesson` equals the name or whose `lessons` list
-    contains it. Both fields are read on all four types, so a recall that matched two
+    contains it. Both fields are read on all five types, so a recall that matched two
     lessons may carry `lessons`. Events are selected by type NAME. `compound log`
     refuses a type that is not in the table above; a line of another type already in
     the log is shown by `events` and counted nowhere.
@@ -216,8 +232,8 @@ EVENT LOG
     waiting there is exit 2, so a body is never dropped in silence.
 
     Totals. `status` counts, one per event: `reuse` (reuses offered), `guard` (calls a
-    guard stopped), `recall` (lessons recalled) and `learn` without `update` (lessons
-    recorded), with the time of the oldest event. No duration of a failed call or of its
+    guard stopped), `recall` (lessons recalled), `use` (skills used) and `learn` without
+    `update` (lessons recorded), with the time of the oldest event. No duration of a failed call or of its
     fix is logged, so no time or tokens saved is ever reported.
 
     Words. Text output shows a person a word for each type (EVENT_WORDS: `capture` is
@@ -225,7 +241,14 @@ EVENT LOG
     the type names themselves, and `--json` the stored values.
 
     Last fired. The types the mod writes are reuse, guard, recall, capture, remind,
-    refuse, nudge, judge and error; `status` reports the age of the newest of them.
+    refuse, nudge, judge, repeat and error, and it has the CLI write use; `status`
+    reports the age of the newest of them.
+
+    Using. `use NAME` counts one use of a skill: NAME is what Claude Code calls the
+    skill a session invoked, a bare name for a skill of the project or the user level
+    (the project's first) and `compound:NAME` for a skill of this package. A name that is
+    no skill `list` shows, and the package's `learn` and `reuse` (UNCOUNTED_SKILLS),
+    write nothing; either way the exit status is 0 and `--json` says `used`.
 
     Verdicts. A `judge` event is written for every question put to the model, whatever
     the answer, so the rate of each verdict and the model's latency can be read from
@@ -242,15 +265,20 @@ EVENT LOG
     least the floor (--floor, else COMPOUND_REUSE_FLOOR, else 1.5) and at least a third
     of the best one's. The prompt log is searched for at most ten of the request's words
     (`search_words`), a logged prompt is matched on its first 300 characters, and for a
-    request a hit must hold two of the words and a third of their weight (`prompt_hits`).
+    request a hit must hold two of the words and a third of their weight (`prompt_hits`). One
+    text asked in several sessions is one hit, and its `sessions` names them (its own
+    first, at most 20).
 
     The memo. <COMPOUND_HOME>/memo.json: {"version": 1, "entries": {key: {"at": epoch
     seconds, "verdict": named | nothing | not-substantial, "items": [names], "prompts":
-    [{id, ts, project, session, prompt}]}}}. `find --request --json` prints the key of a
+    [{id, ts, project, session, prompt, sessions}], "repeats": [rows like those: the
+    earlier requests of the same kind], "asked": [session ids]}}}. `asked` is the sessions
+    that asked the request: the one that had it judged, and each one `find --request`
+    answered from the memo since, which it adds as it answers (at most 20). `find --request --json` prints the key of a
     request as `memo_key` (a digest of the project, the request's text, the floor, the
     limit and the content of everything it was ranked against, so any change to the
     store changes it) and the entry kept for it, if any, as `memo`. `compound memo`
-    reads {"key", "verdict", "items", "prompts"} on stdin and keeps it. An entry lives 7
+    reads {"key", "verdict", "items", "prompts", "repeats"} on stdin and keeps it. An entry lives 7
     days and the memo holds the newest 200. Two writers at once may lose one entry,
     which costs one model call the next time.
 
@@ -349,12 +377,13 @@ import time
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 LEVELS = ("project", "user", "general")
-COUNT_TYPES = ("reuse", "guard", "recall", "learn")
+COUNT_TYPES = ("reuse", "guard", "recall", "learn", "use")
 # Every type the table in the docstring names; `compound log` takes no other.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "judge", "promote", "candidate", "error")
-# The types the mod writes: the newest of them is when the mod last fired.
-MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "error")
+               "nudge", "judge", "promote", "candidate", "use", "repeat", "error")
+# The types the mod writes, or has the CLI write (`use`): the newest of them is when the
+# mod last fired.
+MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "use", "repeat", "error")
 # Written for every question put to the model: left out of `status`'s Recent.
 VERDICT_TYPES = ("judge",)
 # The tools a lesson's patterns are tested against when it names none.
@@ -394,8 +423,14 @@ LISTED_RE = re.compile(r"^[^\x00-\x1f\x7f-\x9f\u2028\u2029]{1,200}$")
 CONTROL_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 # A match that hits every one of these would refuse nearly every tool call.
 MATCH_PROBES = ("a", "ls", "git status")
-# The package's own procedures: listed, never offered by `find` as reusable work.
-OWN_SKILLS = ("learn", "reuse")
+# The package's own procedures: listed, never offered by `find` as reusable work. They are
+# how work is done, and a session is routed to them by their descriptions.
+OWN_SKILLS = ("learn", "reuse", "finish-task", "verify-assumptions-first")
+# The two of them that make and find lessons: invoking one is the mod at work, not a use of
+# recorded work, so `use` does not count it.
+UNCOUNTED_SKILLS = ("learn", "reuse")
+# The name Claude Code puts before a skill of this package: `compound:finish-task`.
+PLUGIN_NAME = "compound"
 # What COMPOUND_HOME holds when it is ours; `uninstall --purge` removes nothing else.
 HOME_NAMES = ("lessons", "events.jsonl", "install.json", "app", "history-surfer", "claims", "disabled.json", "memo.json")
 # The frontmatter keys that say where a lesson applies, and the shape of one name in them.
@@ -459,6 +494,9 @@ SEARCH_WORDS = 10
 REQUEST_CAP = 20000
 PROMPT_SHOWN = 300
 PROMPT_SHARE = 1.0 / 3
+# How many sessions a hit names as having asked its text, and how many the memo keeps as
+# having asked a request it holds a verdict for.
+PROMPT_SESSIONS = 20
 # The memo of judged requests: how many it holds, and for how many days.
 MEMO_MAX = 200
 MEMO_DAYS = 7
@@ -605,14 +643,15 @@ def when_text(stamp, clock):
 EVENT_WORDS = {
     "reuse": "reused", "guard": "guarded", "recall": "recalled", "capture": "owed", "remind": "reminded",
     "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
-    "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "error": "error",
+    "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "use": "used",
+    "repeat": "repeated", "error": "error",
 }
 
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
 EVENT_COLOURS = {
     "reuse": CYAN, "guard": RED, "recall": MAGENTA, "capture": YELLOW, "remind": YELLOW, "refuse": YELLOW,
     "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
-    "judge": DIM,
+    "judge": DIM, "use": BLUE, "repeat": CYAN,
     "error": RED,
 }
 STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
@@ -1691,7 +1730,7 @@ def event_names(event):
 
 
 def tally(events):
-    """({name: {reuse, guard, recall, learn}}, {name: [recall epochs]})."""
+    """({name: {reuse, guard, recall, learn, use}}, {name: [recall epochs]})."""
     counts = {}
     recalls = {}
     guarded = set()
@@ -1965,6 +2004,10 @@ def event_summary(event):
                               ", updated" if event.get("update") else "")
     if kind == "nudge":
         return "%s calls" % event.get("calls", "?")
+    if kind == "use":
+        return "%s (%s)" % (", ".join(names), one_line(event.get("level", "?")))
+    if kind == "repeat":
+        return "asked %s times: a skill was offered" % one_line(event.get("times", "?"))
     if kind == "judge":
         named = event.get("named")
         named = ", ".join(str(one) for one in named) if isinstance(named, list) else ""
@@ -2450,26 +2493,26 @@ def cmd_list(args):
         kind = "guard" if (row["kind"] == "lesson" and row["match"]) else row["kind"]
         flag = inactive_flag(row) or ("ineffective" if row["ineffective"] else "recurring" if row["recurring"] else "")
         lines.append([row["level"], kind, row["name"], counts["reuse"], counts["guard"], counts["recall"],
-                      flag, row["description"]])
+                      counts["use"], flag, row["description"]])
     for row in unreadable:
-        lines.append([row["level"], "unparseable", one_line(row["name"]), "-", "-", "-", "",
+        lines.append([row["level"], "unparseable", one_line(row["name"]), "-", "-", "-", "-", "",
                       "%s: %s" % (one_line(row["path"]), one_line(row["problem"])[:120])])
-    header = ["LEVEL", "KIND", "NAME", "REUSED", "GUARDED", "RECALLED", "FLAG", "WHEN"]
+    header = ["LEVEL", "KIND", "NAME", "REUSED", "GUARDED", "RECALLED", "USED", "FLAG", "WHEN"]
     # The description takes the room the terminal has left beside the columns; with too
     # little, it gets a line of its own under its row. Piped, it is cut at 70 characters.
     width = term_width()
     fixed = sum(max(len(str(row[index])) for row in lines + [header]) + 2 for index in range(len(header) - 1))
     room = 70 if width is None else width - fixed
-    counters = {3: CYAN, 4: RED, 5: MAGENTA}
+    counters = {3: CYAN, 4: RED, 5: MAGENTA, 6: BLUE}
 
     def style(number, index, cell):
         if index in counters:
             return (counters[index],) if cell not in ("0", "-") else (DIM,)
         if index == 1 and cell in ("guard", "unparseable"):
             return (RED,)
-        if index == 6:
-            return (YELLOW,)
         if index == 7:
+            return (YELLOW,)
+        if index == 8:
             return (DIM,)
         return None
 
@@ -2478,9 +2521,11 @@ def cmd_list(args):
         text = table([row[:-1] + [row[-1] if width is None and row[1] == "unparseable" else clip(row[-1], room)]
                       for row in lines], header, style)
     else:
-        under = iter([row[-1] for row in lines])
+        # With no room for the flag column either, the flag goes before the description.
+        keep = -1 if fixed <= (width or 80) else -2
+        under = iter([row[-1] if keep == -1 or not row[-2] else "%s: %s" % (row[-2], row[-1]) for row in lines])
         out = []
-        for number, line in enumerate(table([row[:-1] for row in lines], header[:-1], style).splitlines()):
+        for number, line in enumerate(table([row[:keep] for row in lines], header[:keep], style).splitlines()):
             out.append(line)
             if number > 0:
                 out.append("    " + paint(clip(next(under), max(10, (width or 80) - 4)), DIM))
@@ -2503,10 +2548,10 @@ def cmd_show(args):
         row["here"] = {"platform": this_platform(), "shell": this_shell()}
         row["text"] = text
         # What the pane's lesson view draws: the body without its frontmatter, and the
-        # newest reuse, guard or recall that names the lesson.
+        # newest reuse, guard, recall or use that names the lesson.
         row["body"] = item.get("_body", "")
         fired = [event for event in events
-                 if event.get("type") in ("reuse", "guard", "recall") and item["name"] in event_names(event)]
+                 if event.get("type") in ("reuse", "guard", "recall", "use") and item["name"] in event_names(event)]
         row["last"] = {"ts": fired[-1].get("ts"), "type": fired[-1].get("type")} if fired else None
         row["files"] = files
         emit(row)
@@ -2683,7 +2728,8 @@ def prompt_hits(query, project, cap=5, share=0.0):
     counts for its weight times its rarity among the prompts the search returned, so a
     word most of them carry tells little; a hit's `weight` is its share of the weight of
     all the words, and `score` how many of them it holds. With `share`, a hit must hold
-    two of the words (or the one there is) and that share of the weight."""
+    two of the words (or the one there is) and that share of the weight. One text asked in
+    several sessions is one hit, and `sessions` names them."""
     binary = surfer_bin()
     if not binary:
         return [], "missing"
@@ -2694,6 +2740,7 @@ def prompt_hits(query, project, cap=5, share=0.0):
                        for word, root, _weight in query)
     hits = []
     seen = set()
+    asked_in = {}
     state = "ok"
     for scope, extra in (("project", ["--project", project]), ("all", ["--all"])):
         if len(hits) >= cap:
@@ -2735,6 +2782,11 @@ def prompt_hits(query, project, cap=5, share=0.0):
                 continue
             ranked.append((part, score, str(row.get("ts") or ""), row, prompt))
         ranked.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+        for _part, _score, _ts, row, prompt in ranked:
+            # The same text asked in several sessions is one hit, which names them all.
+            session = one_line(str(row.get("session_id") or row.get("session") or ""))[:PROMPT_SHOWN]
+            if session and session not in asked_in.setdefault(one_line(prompt)[:PROMPT_SHOWN], []):
+                asked_in[one_line(prompt)[:PROMPT_SHOWN]].append(session)
         for part, score, _ts, row, prompt in ranked:
             key = str(row.get("id") or "") or prompt
             if key in seen or one_line(prompt) in seen:
@@ -2747,6 +2799,11 @@ def prompt_hits(query, project, cap=5, share=0.0):
                          "score": score, "weight": round(part, 2), "prompt": one_line(prompt)[:PROMPT_SHOWN]})
             if len(hits) >= cap:
                 break
+    for hit in hits:
+        # Its own session first, then the others that asked the same text.
+        mine = one_line(hit["session"])[:PROMPT_SHOWN]
+        others = [session for session in asked_in.get(hit["prompt"], []) if session != mine]
+        hit["sessions"] = (([mine] if mine else []) + others)[:PROMPT_SESSIONS]
     return hits, state
 
 
@@ -2814,7 +2871,43 @@ def remembered(key, clock):
     if entry is None or not (0 <= clock - entry["at"] <= MEMO_DAYS * 86400):
         return None
     return {"verdict": entry["verdict"], "items": _memo_items(entry.get("items")),
-            "prompts": _memo_prompts(entry.get("prompts")) or [], "ts": iso(entry["at"])}
+            "prompts": _memo_prompts(entry.get("prompts")) or [],
+            "repeats": _memo_prompts(entry.get("repeats")) or [],
+            "asked": _memo_sessions(entry.get("asked")), "ts": iso(entry["at"])}
+
+
+def _memo_sessions(value):
+    if not isinstance(value, list):
+        return []
+    out = []
+    for name in value:
+        if isinstance(name, str) and name.strip() and one_line(name)[:PROMPT_SHOWN] not in out:
+            out.append(one_line(name)[:PROMPT_SHOWN])
+    return out[-PROMPT_SESSIONS:]
+
+
+def write_memo(entries):
+    newest = sorted(entries.items(), key=lambda pair: pair[1]["at"])[-MEMO_MAX:]
+    atomic_write(memo_path(), dumps({"version": 1, "entries": dict(newest)}) + "\n")
+    return len(newest)
+
+
+def memo_asked(key, clock):
+    """The verdict kept for `key`, with the session asking now added to the sessions that
+    asked it: a request the memo answers is not searched for in the prompt log, so the memo
+    is what knows how often it was made since. None when no verdict is kept."""
+    found = remembered(key, clock)
+    session = one_line(os.environ.get("CLAUDE_CODE_SESSION_ID", ""))[:PROMPT_SHOWN]
+    if found is None or not session or session in found["asked"]:
+        return found
+    entries = read_memo()
+    entries[key]["asked"] = (found["asked"] + [session])[-PROMPT_SESSIONS:]
+    try:
+        write_memo(entries)
+    except OSError:
+        return found  # a memo that cannot be written still answers
+    found["asked"] = entries[key]["asked"]
+    return found
 
 
 def _memo_items(value):
@@ -2831,8 +2924,11 @@ def _memo_prompts(value):
     for row in value:
         if not isinstance(row, dict):
             return None
-        out.append({name: one_line(str(row.get(name) or ""))[:PROMPT_SHOWN]
-                    for name in ("id", "ts", "project", "session", "prompt")})
+        kept = {name: one_line(str(row.get(name) or ""))[:PROMPT_SHOWN]
+                for name in ("id", "ts", "project", "session", "prompt")}
+        if isinstance(row.get("sessions"), list):
+            kept["sessions"] = _memo_sessions(row["sessions"])
+        out.append(kept)
     return out[:MEMO_PROMPTS]
 
 
@@ -2848,23 +2944,24 @@ def cmd_memo(args):
         raise usage("\"key\" is the `memo_key` that `compound find --request --json` printed")
     if data.get("verdict") not in MEMO_VERDICTS:
         raise usage("\"verdict\" is one of: %s" % ", ".join(MEMO_VERDICTS))
-    for name in ("items", "prompts"):
+    for name in ("items", "prompts", "repeats"):
         if name in data and not isinstance(data[name], list):
             raise usage("%r is a list" % name)
     prompts = _memo_prompts(data.get("prompts"))
-    if prompts is None:
-        raise usage("\"prompts\" is a list of the rows `compound find --json` printed under \"prompts\"")
+    repeats = _memo_prompts(data.get("repeats"))
+    if prompts is None or repeats is None:
+        raise usage("\"prompts\" and \"repeats\" are lists of the rows `compound find --json` printed under \"prompts\"")
     clock = now()
     entries = {name: entry for name, entry in read_memo().items()
                if name != key and 0 <= clock - entry["at"] <= MEMO_DAYS * 86400}
     entries[key] = {"at": clock, "verdict": data["verdict"], "items": _memo_items(data.get("items")),
-                    "prompts": prompts}
-    newest = sorted(entries.items(), key=lambda pair: pair[1]["at"])[-MEMO_MAX:]
-    atomic_write(memo_path(), dumps({"version": 1, "entries": dict(newest)}) + "\n")
+                    "prompts": prompts, "repeats": repeats,
+                    "asked": _memo_sessions([os.environ.get("CLAUDE_CODE_SESSION_ID", "")])}
+    kept = write_memo(entries)
     if args.json:
-        emit({"key": key, "verdict": data["verdict"], "entries": len(newest)})
+        emit({"key": key, "verdict": data["verdict"], "entries": kept})
     else:
-        sys.stdout.write("remembered %s for %d days (%d in the memo)\n" % (data["verdict"], MEMO_DAYS, len(newest)))
+        sys.stdout.write("remembered %s for %d days (%d in the memo)\n" % (data["verdict"], MEMO_DAYS, kept))
     return 0
 
 
@@ -2904,7 +3001,7 @@ def cmd_find(args):
     memo = None
     if args.request:
         out["memo_key"] = memo_key(project, text, floor, args.limit, candidates)
-        memo = remembered(out["memo_key"], now())
+        memo = memo_asked(out["memo_key"], now())
     if memo is not None:
         # A request already judged against this store is not searched for again.
         prompts, state = [], "memo"
@@ -3145,6 +3242,39 @@ def cmd_skill(args):
         emit(result)
     else:
         sys.stdout.write("%s is now a skill (%s)\n  %s\n" % (item["name"], item["level"], target))
+    return 0
+
+
+def cmd_use(args):
+    """A session invoked a skill. When it is one this CLI lists (a skill of the project or
+    the user level under its bare name, a skill of the package as `compound:NAME`), a
+    `use` event is written for it. The two procedures that make and find lessons are not
+    counted. A name that is no such skill is not an error: most skills a session invokes
+    are someone else's."""
+    said = one_line(args.name)[:200]
+    plugin, colon, bare = said.rpartition(":")
+    project = project_root()
+    out = {"used": False, "name": said}
+    found = []
+    if LISTED_RE.match(bare) and (plugin == PLUGIN_NAME if colon else True):
+        levels = ("general",) if colon else ("project", "user")
+        items, _ = scan(project)
+        found = [item for item in items
+                 if item["kind"] == "skill" and item["name"] == bare and item["level"] in levels]
+    if not found:
+        out["reason"] = "no skill of that name is listed by compound (see `compound list`)"
+    elif found[0]["level"] == "general" and bare in UNCOUNTED_SKILLS:
+        out["reason"] = "the package's own procedure for lessons, which is not counted as a use of recorded work"
+    else:
+        item = found[0]
+        log_event("use", project, lesson=item["name"], level=item["level"], kind="skill", path=item["path"])
+        out = {"used": True, "name": item["name"], "level": item["level"], "path": item["path"]}
+    if args.json:
+        emit(out)
+    elif out["used"]:
+        sys.stdout.write("used %s (%s)\n" % (out["name"], out["level"]))
+    else:
+        sys.stdout.write("not counted: %s: %s\n" % (said, out["reason"]))
     return 0
 
 
@@ -4486,14 +4616,14 @@ def build_status():
     lessons = []
     for row in rows:
         counts = row["counts"]
-        used = counts["reuse"] + counts["guard"] + counts["recall"]
+        used = counts["reuse"] + counts["guard"] + counts["recall"] + counts["use"]
         if row["kind"] == "skill" and used == 0 and not row["match"]:
             continue
         flag = inactive_flag(row) or ("ineffective" if row["ineffective"] else "recurring" if row["recurring"]
                                       else "never used" if used == 0 else "")
         lessons.append({"name": row["name"], "level": row["level"], "kind": row["kind"],
                         "guard": bool(row["match"]), "reuse": counts["reuse"], "guard_hits": counts["guard"],
-                        "recall": counts["recall"], "flag": flag, "path": row["path"],
+                        "recall": counts["recall"], "use": counts["use"], "flag": flag, "path": row["path"],
                         "also_in": committed_copies(row, project, events)})
 
     unsettled = []
@@ -4544,7 +4674,7 @@ def build_status():
     # tokens are claimed saved.
     kinds = [event.get("type") for event in events if not (event.get("type") == "learn" and event.get("update"))]
     totals = {"reused": kinds.count("reuse"), "guarded": kinds.count("guard"), "recalled": kinds.count("recall"),
-              "recorded": kinds.count("learn"), "since": None}
+              "used": kinds.count("use"), "recorded": kinds.count("learn"), "since": None}
     # Since the oldest event with a time a calendar holds.
     dated = [stamp for stamp in stamps if 0 <= stamp <= MAX_EPOCH]
     if dated:
@@ -4602,10 +4732,11 @@ def cmd_status(args):
     if totals["since"] is None:
         out("  nothing yet: the log holds no reuse, guard, recall or lesson\n")
     else:
-        out("  %s \u00b7 %s \u00b7 %s \u00b7 %s \u00b7 %s\n" % (
+        out("  %s \u00b7 %s \u00b7 %s \u00b7 %s \u00b7 %s \u00b7 %s\n" % (
             paint(plural(totals["reused"], "reuse") + " offered", CYAN),
             paint(plural(totals["guarded"], "call") + " stopped by a guard", RED),
             paint(plural(totals["recalled"], "lesson") + " recalled", MAGENTA),
+            paint(plural(totals["used"], "skill") + " used", BLUE),
             paint(plural(totals["recorded"], "lesson") + " recorded", GREEN),
             paint("since " + date_text(parse_ts(totals["since"]), clock), DIM)))
 
@@ -4627,14 +4758,14 @@ def cmd_status(args):
     head("Lessons")
     used = [row for row in data["lessons"] if row["flag"] != "never used"]
     idle = len(data["lessons"]) - len(used)
-    counters = {3: CYAN, 4: RED, 5: MAGENTA}
+    counters = {3: CYAN, 4: RED, 5: MAGENTA, 6: BLUE}
     if used:
         out(lines_of(table(
             [[row["name"], row["level"], "guard" if row["guard"] and row["kind"] == "lesson" else row["kind"],
-              row["reuse"], row["guard_hits"], row["recall"], row["flag"]] for row in used],
-            ["name", "level", "kind", "reused", "guarded", "recalled", "flag"],
+              row["reuse"], row["guard_hits"], row["recall"], row["use"], row["flag"]] for row in used],
+            ["name", "level", "kind", "reused", "guarded", "recalled", "used", "flag"],
             lambda number, index, cell: ((counters[index],) if cell != "0" else (DIM,)) if index in counters
-            else ((YELLOW,) if index == 6 else None))))
+            else ((YELLOW,) if index == 7 else None))))
     if idle:
         # One line for the lessons nothing has touched: `compound list` has every row.
         out("  %s\n" % paint("%s never used (`compound list` shows %s)" % (
@@ -4763,6 +4894,9 @@ def build_parser():
     one.add_argument("--guards", action="store_true", help="add \"guards\": how many lessons carry a pattern")
 
     one = command("skill", cmd_skill, "Move a lesson to the skills directory of its level.")
+    one.add_argument("name")
+
+    one = command("use", cmd_use, "Count one use of a skill a session invoked (the mod runs this).")
     one.add_argument("name")
 
     one = command("promote", cmd_promote, "Move a lesson to the user level, or propose it to the general pool.")

@@ -274,7 +274,7 @@ class ListTest(Case):
             "level": "project", "kind": "lesson", "name": "guarded",
             "description": "Use when guarded.", "path": self.box.lesson_dir("guarded"),
             "match": ["danger"], "platform": [], "shell": [], "applies": True, "disabled": False,
-            "counts": {"reuse": 0, "guard": 0, "recall": 0, "learn": 1},
+            "counts": {"reuse": 0, "guard": 0, "recall": 0, "learn": 1, "use": 0},
             "ineffective": False, "recurring": False}])
 
     def test_all_three_levels_and_both_kinds_are_listed(self):
@@ -351,7 +351,7 @@ class ListTest(Case):
         ])
         self.assertEqual(rows[0]["path"], os.path.join(project, "scripts", "release.sh"))
         self.assertEqual(rows[0]["match"], [])
-        self.assertEqual(rows[0]["counts"], {"reuse": 0, "guard": 0, "recall": 0, "learn": 0})
+        self.assertEqual(rows[0]["counts"], {"reuse": 0, "guard": 0, "recall": 0, "learn": 0, "use": 0})
 
     def test_scripts_are_capped_at_two_hundred(self):
         os.makedirs(os.path.join(self.box.project, "scripts"))

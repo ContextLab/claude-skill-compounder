@@ -205,7 +205,7 @@ class StatusTest(Case):
         self.assertEqual([row["name"] for row in data["open"]["ineffective"]], ["flaky"])
         proc = self.box.run("status", COMPOUND_NOW=NOW + 50)
         self.assertExit(proc, 0)
-        self.assertRegex(proc.stdout, r"flaky\s+project\s+lesson\s+0\s+0\s+2\s+ineffective")
+        self.assertRegex(proc.stdout, r"flaky\s+project\s+lesson\s+0\s+0\s+2\s+0\s+ineffective")
         # The lessons never used are one line with their count; `compound list` has the rows.
         self.assertIn("\n  1 lesson never used (`compound list` shows it)\n", proc.stdout)
         self.assertNotRegex(proc.stdout.split("\nLessons\n")[1].split("\n\n")[0], r"\bunused\b")

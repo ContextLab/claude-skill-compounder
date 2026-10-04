@@ -191,8 +191,8 @@ class CountsTest(Case):
             handle.write(json.dumps({"ts": "2026-09-21T14:13:20Z", "type": "something-new", "session": "",
                                      "project": self.box.project, "lesson": "alpha"}) + "\n")
         self.assertEqual(len(self.box.json("events", "--type", "something-new", "--json")), 1)
-        self.assertEqual(self.counts("alpha"), {"reuse": 4, "guard": 1, "recall": 1, "learn": 1})
-        self.assertEqual(self.counts("beta"), {"reuse": 1, "guard": 0, "recall": 2, "learn": 1})
+        self.assertEqual(self.counts("alpha"), {"reuse": 4, "guard": 1, "recall": 1, "learn": 1, "use": 0})
+        self.assertEqual(self.counts("beta"), {"reuse": 1, "guard": 0, "recall": 2, "learn": 1, "use": 0})
 
     def test_a_script_is_counted_under_its_listed_name(self):
         os.makedirs(os.path.join(self.box.project, "scripts"))
