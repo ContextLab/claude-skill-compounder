@@ -5,8 +5,8 @@ import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
   BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli,
-  heldStep, inputOf, isCommand, judged, knownContext, newsKey, promotedText, ranOut, recallContext, refusal, reportsEvents, reusable, reuseContext, reuseStatus,
-  shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
+  heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, reportsEvents, reusable, reuseContext, reuseStatus,
+  shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
@@ -16,8 +16,8 @@ import {
   type Earlier, type Event, type Item,
 } from './store'
 import {
-  bandRow, began as checkBegan, boardFrom, boardLines, captured, ended as checkEnded, erred, forSession, FRAME_MS, GUARD_SHOW_MS, motion, newTurn, noted, phaseKey, reuseText,
-  settledBy, stepped, synced, unfixed, weakened,
+  bandRow, began as checkBegan, boardFrom, boardLines, captured, ended as checkEnded, erred, forSession, FRAME_MS, greeted, GUARD_SHOW_MS, inventoried, motion, newTurn, noted, phaseKey,
+  reuseFound, reuseIdle, settledBy, stepped, synced, unfixed, weakened,
   type Seg,
 } from './view'
 
@@ -668,8 +668,8 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   // The newest few: a long backlog is in `compound status`, not in every session's first prompt.
   const shown = open.slice(-UNSETTLED_SHOWN).map(c => ({ ...c, failed: redact(c.failed), error: redact(c.error), fixed: redact(c.fixed) }))
   await log($, { type: 'remind', captures: shown.map(c => c.id) })
-  $.ui.status(`${open.length} unsettled`)
-  await paint($, (band, now) => noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'} owed`, now))
+  $.ui.status(`${open.length} owed from earlier sessions`)
+  await paint($, (band, now) => noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'}`, now, shown[shown.length - 1]?.fixed ?? ''))
   return unsettledContext(shown, await cliPath($))
 }
 
@@ -679,13 +679,18 @@ async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knob
   const began = Date.now()
   const request = redact(text)
   if (!(await firstTime($, sid, `reuse-${digest(text)}-${Math.floor(nowS() / 20)}`))) return ''
-  return during($, 'reuse', () => reuseJudged($, sid, text, request, began, k))
+  const context = await during($, 'reuse', () => reuseJudged($, sid, text, request, began, k))
+  // The check ran and added nothing: the band says so, and the session's first is greeted.
+  if (context === '') await paint($, (band, now) => reuseIdle(band, now))
+  return context
 }
 
 async function reuseJudged($: EngineInterface, sid: string, text: string, request: string, began: number, k: Knobs): Promise<string> {
   const listing = await inventory($, BUDGET.prompt)
   // The listing also says whether any lesson carries a pattern, so the guard need not ask.
   if (listing !== undefined && !listing.some(i => i.match.length > 0)) noGuards.add(sid)
+  // The same listing gives the greeting its counts: no call is made for them.
+  if (listing !== undefined) await paint($, band => inventoried(band, listing.filter(i => i.kind === 'lesson').length, listing.filter(i => i.match.length > 0).length))
   const items = reusable(listing ?? [])
   const words = significantWords(request)
   const candidates = await earlierCandidates($, sid, text, words)
@@ -723,8 +728,8 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
     gather_ms: gathered,
     judge_ms: reply.ms,
   })
-  $.ui.status(reuseStatus(answer.items.length, answer.earlier.length))
-  await paint($, (band, now) => noted(band, 'reuse', reuseText(answer.items.length, answer.earlier.length), now))
+  $.ui.status(reuseStatus(answer.items.map(i => i.name), answer.earlier.length))
+  await paint($, (band, now) => reuseFound(band, answer.items.map(i => i.name), answer.earlier.length, now))
   return context
 }
 
@@ -760,7 +765,11 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
     await fail($, 'unsettled', err)
   }
   const k = await knobs($)
-  if (text.length < k.promptMinChars) return out
+  if (text.length < k.promptMinChars) {
+    // Too short for a reuse check: the session's first such prompt is still greeted.
+    await paint($, (band, now) => greeted(band, now))
+    return out
+  }
   try {
     const reuse = await reuseCheck($, sid, text, k)
     if (reuse !== '') out.push(reuse)
@@ -835,7 +844,7 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
   const ms = Date.now() - began
   for (const h of fresh) await log($, { type: 'guard', lesson: h.name, tool, text, ms })
   $.ui.status(`guard ${first.name}`)
-  await paint($, (band, now) => noted(band, 'guard', first.name, now))
+  await paint($, (band, now) => noted(band, 'guard', fresh.length > 1 ? `${first.name} +${fresh.length - 1}` : first.name, now, `${tool === 'Bash' ? '' : `${tool} `}${oneLine(redact(text), 60)}`))
   return guardReason(fresh, await cliPath($))
 }
 
@@ -861,7 +870,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
       moved = true
       forgetInventory(sid)
       out.push(promotedText(lesson.name, left?.from ?? asProject, cliAt, left?.also ?? []))
-      $.ui.toast(`lesson ${lesson.name} moved to the user level`)
+      $.ui.toast(toast('moved', lesson.name))
       lesson = { ...lesson, level: 'user', path: '' }
       asProject = undefined
     } else if (promoted !== undefined && promoted.code === 3) {
@@ -898,7 +907,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   })
   if (ineffective) {
     owes(sid, [], [lesson.name])
-    $.ui.toast(`lesson ${lesson.name} is ineffective (recalled ${count} times)`)
+    $.ui.toast(toast('ineffective', lesson.name, `recalled ${count} times`))
   }
   $.ui.status(ineffective ? `${lesson.name} ineffective` : `recalled ${lesson.name}`)
   await paint($, (band, now) => (ineffective ? weakened(band, lesson.name, now) : noted(unfixed(band), moved ? 'moved' : 'recall', lesson.name, now)))
@@ -1006,8 +1015,8 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     ms: reply.ms,
   })
   owes(sid, [id], [])
-  $.ui.status('lesson owed')
-  await paint($, (band, now) => captured(band, now))
+  $.ui.status(owedStatus(redact(call)))
+  await paint($, (band, now) => captured(band, now, redact(call)))
   return [captureContext({ failed: was.call, error: was.error, fixed: call }, await cliPath($))]
 }
 
@@ -1091,7 +1100,8 @@ async function settle($: EngineInterface, sid: string, was: Owing): Promise<void
     const rows = await events($, ['--since', String(Math.floor(was.since) - 1)])
     if (rows !== undefined) said = await tell($, sid, settlers(rows, sid, goneIds, goneWeak))
   }
-  await paint($, (band, at) => synced(band, ids.length, weak, at))
+  const newest = redact(now.debts[now.debts.length - 1]?.fixed ?? '')
+  await paint($, (band, at) => synced(band, ids.length, weak, at, newest))
   if (clear) {
     owing.delete(sid)
     // Settled with nothing to show for it (a lesson removed in a terminal): the entry goes.
@@ -1100,7 +1110,7 @@ async function settle($: EngineInterface, sid: string, was: Owing): Promise<void
     return
   }
   owing.set(sid, { ids, weak, since: now.since > 0 ? now.since : was.since })
-  if (goneIds.length > 0 || goneWeak.length > 0) $.ui.status(ids.length > 0 ? 'lesson owed' : `strengthen ${weak[0] ?? ''}`)
+  if (goneIds.length > 0 || goneWeak.length > 0) $.ui.status(ids.length > 0 ? owedStatus(newest) : `strengthen ${weak[0] ?? ''}`)
 }
 
 // ---- moment 5: stop -------------------------------------------------------------------
@@ -1141,7 +1151,8 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   for (const w of weak) {
     if (await mayRefuse($, sid, `strengthen-${w.name}`)) weakFresh.push(w)
   }
-  await paint($, (band, now) => synced(band, owed.length, weak.map(w => w.name), now))
+  const newest = redact(owed[owed.length - 1]?.fixed ?? '')
+  await paint($, (band, now) => synced(band, owed.length, weak.map(w => w.name), now, newest))
   const refusals: string[] = []
   if (fresh.length > 0) {
     await log($, { type: 'refuse', why: 'debt', debts: fresh })
@@ -1152,7 +1163,7 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
     refusals.push(stopStrengthen(weakFresh, cliAt))
   }
   if (refusals.length > 0) {
-    $.ui.status(fresh.length > 0 ? 'lesson owed' : `strengthen ${weakFresh[0]?.name ?? ''}`)
+    $.ui.status(fresh.length > 0 ? owedStatus(newest) : `strengthen ${weakFresh[0]?.name ?? ''}`)
     return refusals.join('\n\n')
   }
   const turn = turns.get(sid)

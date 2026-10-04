@@ -190,6 +190,43 @@ class WordingTest(unittest.TestCase):
         listed = set(re.findall(r"`([a-z]+)(?:-<[^`]+>)?`", text))
         self.assertEqual(sorted(listed - kinds), [], "listed in the design and made nowhere")
 
+    def test_one_word_for_each_event_type_in_the_cli_the_pane_and_the_design(self):
+        """The log's type names are the contract; what a person is shown for each is one
+        word, the same in `compound status`, on the pane and in the design's table."""
+        cli = read("bin", "compound")
+        types = re.findall(r'"([a-z]+)"', cli.split("EVENT_TYPES = (", 1)[1].split(")", 1)[0])
+        self.assertGreaterEqual(len(types), 14, types)
+        in_cli = dict(re.findall(r'"([a-z]+)": "([a-z]+)"', cli.split("EVENT_WORDS = {", 1)[1].split("}", 1)[0]))
+        in_pane = dict(re.findall(r"([a-z]+): '([a-z]+)'", read("hooks", "view.ts").split("export const WORDS", 1)[1].split("}", 1)[0]))
+        # The table sits in a list item, indented.
+        rows = table_rows("\n".join(line.strip() for line in read("docs", "design.md").splitlines()), "- **Words**")
+        in_design = {cells[0].strip("`"): cells[1].strip("`") for cells in rows}
+        self.assertEqual(sorted(in_cli), sorted(types), "EVENT_WORDS has a word for every type and no other")
+        self.assertEqual(in_pane, in_cli)
+        self.assertEqual(in_design, in_cli)
+        self.assertEqual(len(set(in_cli.values())), len(in_cli), "two types share a word")
+
+    def test_the_design_says_when_text_output_is_coloured_and_how_wide_it_is(self):
+        design = read("docs", "design.md")
+        section = design.split("- **Text output of the CLI**", 1)[1].split("\n- **", 1)[0]
+        for name in ("NO_COLOR", "COLUMNS", "TERM", "--json"):
+            self.assertIn(name, section)
+            self.assertIn(name, read("bin", "compound"))
+
+    def test_the_documents_use_the_words_the_code_shows(self):
+        """A label the band no longer draws is not in the documents."""
+        for rel in (("README.md",), ("docs", "design.md")):
+            text = read(*rel)
+            for gone in ("reusable`", "strengthening owed`", "unsettled from earlier sessions", "USE/GRD/RCL", "lesson or skill`"):
+                self.assertNotIn(gone, text, rel)
+        view = read("hooks", "view.ts")
+        design = read("docs", "design.md")
+        labels = re.findall(r"label: '([^']+)'", view.split("export const NOTES", 1)[1].split("export const HINT", 1)[0])
+        labels += re.findall(r"export const (?:OWED|WEAK): Look = \{[^}]*label: '([^']+)'", view)
+        self.assertGreaterEqual(len(labels), 17, labels)
+        for label in labels:
+            self.assertIn("`%s`" % label, design, "the band's label %r is not in the design's table" % label)
+
     def test_contributing_lists_every_journey_and_measurement_script(self):
         text = read("CONTRIBUTING.md")
         scripts = sorted(name for name in os.listdir(JOURNEYS)

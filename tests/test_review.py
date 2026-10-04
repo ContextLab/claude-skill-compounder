@@ -915,9 +915,10 @@ class NewEventsTest(Case):
         for line in recent:
             by_type.setdefault(line.split()[1], []).append(line)
         self.assertRegex(by_type["skill"][0], r"routed \(project\) -> .*/\.claude/skills/routed$")
-        self.assertRegex(by_type["rm"][0], r"doomed \(project\)$")
-        self.assertRegex(by_type["refuse"][0], r"debt$")
-        self.assertRegex(by_type["refuse"][1], r"nudge$")
+        # Recent shows the word a person reads for each type, not the log's type name.
+        self.assertRegex(by_type["removed"][0], r"doomed \(project\)$")
+        self.assertRegex(by_type["refused"][0], r"debt$")
+        self.assertRegex(by_type["refused"][1], r"nudge$")
 
     def test_counts_are_untouched_by_the_new_types(self):
         self.box.add("routed")

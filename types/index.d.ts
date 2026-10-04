@@ -20,7 +20,13 @@ export type CompoundNoteKind =
   | 'removed'
   | 'ineffective'
   | 'nudge'
-export type CompoundNote = { kind: CompoundNoteKind; text: string; at: number }
+  | 'ready'
+  | 'idle'
+// `text` names the thing (the lesson, the items found); `detail` is what else there is room
+// for (the call a guard stopped), and is the first to go in a narrow band. `names` are the
+// items `text` lists, so a band too narrow for the text lists as many as fit and counts the
+// rest.
+export type CompoundNote = { kind: CompoundNoteKind; text: string; at: number; detail?: string; names?: string[] }
 
 // Where the learn loop stands: a call failed, a later call fixed it, a lesson is owed, and
 // it was recorded or declined.
@@ -33,16 +39,26 @@ export type CompoundBand = {
   note: CompoundNote | null
   // Lessons this session owes, and the lessons it owes a strengthening for.
   owed: number
+  // What the newest of them is for: the call that worked, on one line.
+  owedText?: string
   weak: string[]
   // Failures of the mod itself that Claude was not yet told about.
   errors: number
   track: CompoundTrack | null
+  // The greeting a session gets once: the store's counts, known once the inventory was
+  // read at a prompt, and how much of the greeting was said.
+  counts?: { lessons: number; guards: number }
+  greeted?: 'bare' | 'full'
 }
 
 export type CompoundLevel = { level: string; lessons: number; skills: number; guards: number }
 export type CompoundLesson = { name: string; level: string; guard: boolean; reuse: number; guards: number; recall: number; flag: string }
-export type CompoundRecent = { at: number; type: string; text: string }
+// `text` is what the event was about; `tail` is what the row adds when it has the room.
+export type CompoundRecent = { at: number; type: string; text: string; tail?: string }
 export type CompoundCheck = { check: string; status: string; detail: string }
+// What the log holds of the mod helping, one per event, and the time of its oldest event
+// in seconds (0 when it holds none).
+export type CompoundTotals = { reused: number; guarded: number; recalled: number; recorded: number; since: number }
 
 // What the pane shows, as `compound status --json` and `compound events --json` gave it.
 export type CompoundBoard = {
@@ -51,6 +67,7 @@ export type CompoundBoard = {
   // The health checks that did not pass.
   health: CompoundCheck[]
   checks: number
+  totals?: CompoundTotals
   levels: CompoundLevel[]
   lessons: CompoundLesson[]
   recent: CompoundRecent[]

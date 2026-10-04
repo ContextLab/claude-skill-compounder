@@ -4,6 +4,7 @@
 
 import { excerpt, oneLine, redact } from './safe'
 import type { Debt, Earlier, Event, Hit, Item, Strengthening, Unsettled } from './store'
+import { base, listed, NOTES, OWED } from './view'
 
 export const EARLIER_MAX = 3
 const EARLIER_CHARS = 300
@@ -245,6 +246,12 @@ export function ranOut(elapsedMs: number, budgetMs: number): boolean {
 
 export type News = { key: string; toast: string | undefined; status: string | undefined }
 
+// A toast, in one word order: what happened, in the band's own label for it, then the
+// lesson's name, then anything more in brackets.
+export function toast(kind: 'recorded' | 'rewritten' | 'moved' | 'proposed' | 'skill' | 'removed' | 'ineffective', name: string, more = ''): string {
+  return `${NOTES[kind].label}: ${name}${more === '' ? '' : ` (${more})`}`
+}
+
 // What to tell the user about the events a session's own CLI calls wrote: a toast, and the
 // status entry (`undefined` clears it: a recorded or declined lesson settles the debt the
 // entry stood for). `told` holds the keys already reported. An automatic move is reported
@@ -261,12 +268,11 @@ export function storeNews(events: readonly Event[], told: ReadonlySet<string>): 
     if (told.has(key) || out.some(n => n.key === key)) continue
     if (e.type === 'skip') out.push({ key, toast: undefined, status: undefined })
     if (name === '') continue
-    if (e.type === 'learn') out.push({ key, toast: `lesson ${e.update === true ? 'rewritten' : 'recorded'}: ${name}`, status: undefined })
+    if (e.type === 'learn') out.push({ key, toast: toast(e.update === true ? 'rewritten' : 'recorded', name), status: undefined })
     else if (e.type === 'promote' && e.auto !== true) {
-      const where = e.to === 'general' ? 'proposed to the general pool' : 'moved to the user level'
-      out.push({ key, toast: `lesson ${name} ${where}`, status: `${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
-    } else if (e.type === 'skill') out.push({ key, toast: `lesson ${name} is now a skill`, status: `skill ${name}` })
-    else if (e.type === 'rm') out.push({ key, toast: `${name} removed`, status: `removed ${name}` })
+      out.push({ key, toast: toast(e.to === 'general' ? 'proposed' : 'moved', name), status: `${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
+    } else if (e.type === 'skill') out.push({ key, toast: toast('skill', name), status: `skill ${name}` })
+    else if (e.type === 'rm') out.push({ key, toast: toast('removed', name), status: `removed ${name}` })
   }
   return out
 }
@@ -374,9 +380,17 @@ export function reuseContext(items: readonly Item[], earlier: readonly Earlier[]
   return out.join('\n')
 }
 
-export function reuseStatus(items: number, earlier: number): string {
-  if (items > 0) return `${items} reusable`
+// The status entry of a reuse result: the first item found, by name (a script by its file
+// name), and how many more; with no item, how many earlier requests.
+export function reuseStatus(items: readonly string[], earlier: number): string {
+  if (items.length > 0) return `reuse ${listed(items.map(base), 24)}`
   return `${earlier} earlier request${earlier === 1 ? '' : 's'}`
+}
+
+// The status entry while a lesson is owed: for which fix, when that is known.
+export function owedStatus(fixed = ''): string {
+  const text = oneLine(fixed, 40)
+  return text === '' ? OWED.label : `${OWED.label}: ${text}`
 }
 
 // Moment 2. The reason a call is refused: what it matched, the note quoted, how to proceed.
