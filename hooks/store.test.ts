@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, memoOf, parseEarlier, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, askedTimes, memoOf, parseEarlier, parseUsed, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -290,9 +290,54 @@ test('a remembered verdict comes back with what it named, and is written as the 
   expect(memo?.items).toEqual(['release-tagging'])
   expect(memo?.earlier).toEqual([{ ...earlier, score: 0 }])
   for (const verdict of ['nothing', 'not-substantial']) {
-    expect(parseFound(JSON.stringify({ memo: { verdict } }), 's1', [], 5)?.memo).toEqual({ verdict, items: [], earlier: [] })
+    expect(parseFound(JSON.stringify({ memo: { verdict } }), 's1', [], 5)?.memo).toEqual({ verdict, items: [], earlier: [], repeats: [], asked: [] })
   }
   for (const bad of [{ verdict: 'unanswered' }, { items: [] }, 'named', null]) {
     expect(parseFound(JSON.stringify({ memo: bad }), 's1', [], 5)?.memo).toBe(undefined)
   }
+})
+
+test('an earlier request names the sessions that asked it, and this session is never one of them', async () => {
+  const row = (session: string, sessions: unknown, prompt = 'write the weekly digest') => ({ id: `${session}:1`, ts: '2026-09-01T00:00:00Z', project: '/w/alpha', session, prompt, score: 3, ...(sessions === undefined ? {} : { sessions }) })
+  const read = (rows: unknown[], mine: string[] = []) => parseEarlier(JSON.stringify({ prompts: rows }), 'now', mine, 5)!
+  expect(read([row('a', ['a', 'b', 'now'])])[0]!.sessions).toEqual(['a', 'b'])
+  // A CLI that names no sessions: the row's own is all there is.
+  expect(read([row('a', undefined)])[0]!.sessions).toBe(undefined)
+  // This session's own prompt is no earlier request, unless another session asked the same words.
+  expect(read([row('now', ['now'])])).toEqual([])
+  expect(read([row('now', undefined)])).toEqual([])
+  expect(read([row('a', undefined)], ['write the weekly digest'])).toEqual([])
+  expect(read([row('a', ['a', 'now'])], ['write the weekly digest']).map(e => [e.session, e.sessions])).toEqual([['a', ['a']]])
+  expect(read([row('now', ['now', 'b'])]).map(e => [e.session, e.sessions])).toEqual([['b', ['b']]])
+  // A session id is one printable line, or it is not one.
+  expect(read([row('a', ['a', 'b\nc', 7, ''])])[0]!.sessions).toEqual(['a'])
+})
+
+test('how often a kind of request was made is counted in sessions, this one included', async () => {
+  const e = (session: string, sessions?: string[]) => ({ id: `${session}:1`, date: '2026-09-01', project: 'alpha', session, text: 't', score: 1, ...(sessions === undefined ? {} : { sessions }) })
+  expect(askedTimes([], [], 'now')).toBe(0)
+  expect(askedTimes([e('a')], [], 'now')).toBe(2)
+  expect(askedTimes([e('a'), e('a')], [], 'now')).toBe(2)
+  expect(askedTimes([e('a', ['a', 'b']), e('c')], ['b', 'd', 'now'], 'now')).toBe(5)
+  // A row with no session says nothing about sessions.
+  expect(askedTimes([e('')], [], 'now')).toBe(0)
+  expect(askedTimes([e('now', ['now'])], ['now'], 'now')).toBe(0)
+})
+
+test('what `compound use` printed is a counted skill, a skill not counted, or unreadable', async () => {
+  expect(parseUsed('{"used":true,"name":"finish-task","level":"general","path":"/g"}')).toEqual({ used: true, name: 'finish-task', level: 'general' })
+  expect(parseUsed('{"used":false,"name":"x","reason":"no"}')).toEqual({ used: false, name: '', level: '' })
+  expect(parseUsed('{"used":true,"name":"a\nb","level":"user"}')).toBe(undefined)
+  expect(parseUsed('{"used":"yes"}')).toBe(undefined)
+  expect(parseUsed('nope')).toBe(undefined)
+})
+
+test('a verdict is kept with the requests of the same kind, and comes back with who asked', async () => {
+  const again = { id: 'p1', date: '2026-09-01', project: 'alpha', session: 's0', text: 'write the digest', score: 0, sessions: ['s0', 's7'] }
+  const written = JSON.parse(memoOf('k'.repeat(32), 'nothing', [], [], [again])) as Record<string, unknown>
+  expect(written.repeats).toEqual([{ id: 'p1', ts: '2026-09-01', project: 'alpha', session: 's0', prompt: 'write the digest', sessions: ['s0', 's7'] }])
+  expect('repeats' in (JSON.parse(memoOf('k'.repeat(32), 'nothing', [], [])) as Record<string, unknown>)).toBe(false)
+  const memo = parseFound(JSON.stringify({ memo: { verdict: 'nothing', items: [], prompts: [], repeats: written.repeats, asked: ['s1', 's2', 3, 'a\nb'] } }), 's9', [], 5)?.memo
+  expect(memo?.repeats).toEqual([again])
+  expect(memo?.asked).toEqual(['s1', 's2'])
 })

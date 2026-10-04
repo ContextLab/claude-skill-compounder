@@ -42,6 +42,8 @@ export const NOTES: Record<CompoundNoteKind, Look> = {
   removed: { glyph: '−', color: 'inactive', label: 'removed' },
   ineffective: { glyph: '▲', color: 'warning', label: 'lesson ineffective' },
   nudge: { glyph: '?', color: 'suggestion', label: 'asked whether anything was learned' },
+  used: { glyph: '▸', color: 'suggestion', label: 'skill used' },
+  repeat: { glyph: '↻', color: 'cyan', label: 'asked before' },
   ready: { glyph: '◇', color: 'suggestion', label: 'ready' },
   idle: { glyph: '◇', color: 'inactive', label: 'nothing to reuse' },
 }
@@ -72,6 +74,8 @@ const EVENTS: Record<string, Look> = {
   candidate: { glyph: '⇡', color: 'inactive', label: 'could move to the user level' },
   skill: NOTES.skill,
   rm: NOTES.removed,
+  use: NOTES.used,
+  repeat: NOTES.repeat,
   error: ERROR,
 }
 
@@ -96,6 +100,8 @@ export const WORDS: Record<string, string> = {
   skill: 'skill',
   rm: 'removed',
   judge: 'judged',
+  use: 'used',
+  repeat: 'repeated',
   error: 'error',
   retry: 'retried',
 }
@@ -499,6 +505,8 @@ export function eventText(e: Record<string, unknown>): string {
       return `${num(e.calls)} tool calls`
     case 'promote':
       return `${lesson} → ${str(e.to) || 'user'}`
+    case 'repeat':
+      return `asked ${num(e.times)} times`
     case 'error':
       return oneLine(`${str(e.where)}: ${str(e.message)}`, 80)
     default:
@@ -533,9 +541,9 @@ export function boardFrom(status: string, events: string, session: string, now: 
     return { level, lessons: num(row.lessons), skills: num(row.skills), guards: num(row.guards) }
   })
   const lessons: CompoundLesson[] = list(s.lessons)
-    .map(l => ({ name: str(l.name), level: str(l.level), guard: l.guard === true, reuse: num(l.reuse), guards: num(l.guard_hits), recall: num(l.recall), flag: str(l.flag) }))
+    .map(l => ({ name: str(l.name), level: str(l.level), guard: l.guard === true, reuse: num(l.reuse), guards: num(l.guard_hits), recall: num(l.recall), use: num(l.use), flag: str(l.flag) }))
     .filter(l => l.name !== '')
-    .sort((a, b) => b.reuse + b.guards + b.recall - (a.reuse + a.guards + a.recall) || a.name.localeCompare(b.name))
+    .sort((a, b) => b.reuse + b.guards + b.recall + b.use - (a.reuse + a.guards + a.recall + a.use) || a.name.localeCompare(b.name))
     .slice(0, 12)
   // The judge's verdicts and the call after a refusal are in the log to be measured
   // (`compound report`), not to be read as what happened.
@@ -546,7 +554,7 @@ export function boardFrom(status: string, events: string, session: string, now: 
   })
   const open = record(s.open) ?? {}
   const t = record(s.totals)
-  const totals: CompoundTotals | undefined = t === undefined ? undefined : { reused: num(t.reused), guarded: num(t.guarded), recalled: num(t.recalled), recorded: num(t.recorded), since: Math.floor(Date.parse(str(t.since)) / 1000) || 0 }
+  const totals: CompoundTotals | undefined = t === undefined ? undefined : { reused: num(t.reused), guarded: num(t.guarded), recalled: num(t.recalled), used: num(t.used), recorded: num(t.recorded), since: Math.floor(Date.parse(str(t.since)) / 1000) || 0 }
   return {
     session,
     at: now,
@@ -754,6 +762,8 @@ function totalLines(totals: CompoundTotals, now: number, columns: number): Line[
       piece(NOTES.reuse, totals.reused, totals.reused === 1 ? 'reuse offered' : 'reuses offered'),
       piece(NOTES.guard, totals.guarded, totals.guarded === 1 ? 'call stopped by a guard' : 'calls stopped by a guard'),
       piece(NOTES.recall, totals.recalled, totals.recalled === 1 ? 'lesson recalled' : 'lessons recalled'),
+      // A board kept from before this counter was read holds no such number.
+      piece(NOTES.used, num(totals.used), num(totals.used) === 1 ? 'skill used' : 'skills used'),
       piece(NOTES.recorded, totals.recorded, totals.recorded === 1 ? 'lesson recorded' : 'lessons recorded'),
     ], columns, '  '),
   ]
@@ -814,22 +824,24 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
 
   out.push([], ...levelLines(board.levels, columns))
 
-  // The legend is the header of the three counter columns: each glyph sits over its counts,
+  // The legend is the header of the four counter columns: each glyph sits over its counts,
   // the counts are right-aligned under it and every bar starts in the same cell. A pane too
   // narrow for the legend's words keeps the glyphs and shortens the bars.
-  const used = board.lessons.filter(l => l.reuse + l.guards + l.recall > 0)
+  const used = board.lessons.filter(l => l.reuse + l.guards + l.recall + num(l.use) > 0)
   const shown = used.slice(0, 6)
   const kinds: readonly (readonly [Look, string, (l: CompoundBoard['lessons'][number]) => number])[] = [
     [NOTES.reuse, WORDS.reuse ?? '', l => l.reuse],
     [NOTES.guard, WORDS.guard ?? '', l => l.guards],
     [NOTES.recall, WORDS.recall ?? '', l => l.recall],
+    [NOTES.used, WORDS.use ?? '', l => num(l.use)],
   ]
-  const most = Math.max(1, ...used.flatMap(l => [l.reuse, l.guards, l.recall]))
-  const digits = String(Math.max(0, ...shown.flatMap(l => [l.reuse, l.guards, l.recall]))).length
-  // The last column is not padded, so the table is one cell narrower than three columns.
+  const most = Math.max(1, ...used.flatMap(l => kinds.map(([, , of]) => of(l))))
+  const digits = String(Math.max(0, ...shown.flatMap(l => kinds.map(([, , of]) => of(l))))).length
+  // The last column is not padded, so the table is one cell narrower than its columns.
   const roomy = columns >= 2 + NAME_MIN + kinds.length * LEGEND_CELL - 1
-  const bars = roomy ? BAR_CELLS : 3
-  const cellWide = roomy ? LEGEND_CELL : 2 + digits + 1 + bars
+  // A pane too narrow for four short bars beside a name keeps the counts and drops the bars.
+  const bars = roomy ? BAR_CELLS : columns >= 2 + NAME_MIN + kinds.length * (2 + digits + 1 + 3) ? 3 : 0
+  const cellWide = roomy ? LEGEND_CELL : 2 + digits + (bars > 0 ? 1 + bars : 0)
   // A roomy column ends in the gap before the next, which the last column has not.
   const table = kinds.length * cellWide - (roomy ? 1 : 0)
   const named = Math.max(NAME_MIN, Math.min(28, columns - table - 2, Math.max(...shown.map(l => l.name.length), 0)))
@@ -839,7 +851,7 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
     { text: ' '.repeat(named + 2 - 'Most used'.length) },
     ...kinds.flatMap(([look, word], i) => column([{ text: `  ${' '.repeat(digits - 1)}${look.glyph}`, color: look.color }, ...(roomy ? [{ text: ` ${word}`, dim: true }] : [])], i === kinds.length - 1)),
   ])
-  if (used.length === 0) out.push(...flow(words('nothing was reused, guarded or recalled yet', { dim: true }, '  '), columns, '  '))
+  if (used.length === 0) out.push(...flow(words('nothing was reused, guarded, recalled or used yet', { dim: true }, '  '), columns, '  '))
   for (const l of shown) {
     const name = clip(l.name, named)
     out.push([
@@ -950,6 +962,7 @@ export function itemsFrom(listing: string): CompoundItem[] | undefined {
         reuse: num(counts.reuse),
         guards: num(counts.guard),
         recall: num(counts.recall),
+        use: num(counts.use),
         flag: r.ineffective === true ? 'ineffective' : '',
         description: oneLine(str(r.description), 200),
       }
@@ -967,7 +980,7 @@ function tallied(items: readonly CompoundItem[]): [string, string] {
   return [`${count(items.length - skills, 'lesson')} (${count(items.filter(i => i.kind === 'guard').length, 'guard')})`, count(skills, 'skill')]
 }
 
-// Every lesson and skill, by level, each row a name to press: its kind, its three counters
+// Every lesson and skill, by level, each row a name to press: its kind, its four counters
 // and when it applies. A pane too narrow drops the description, then the counters; a name
 // and a description are the only things ever cut.
 export function allLines(items: readonly CompoundItem[] | null | undefined, problem: string, columns: number): Line[] {
@@ -977,9 +990,10 @@ export function allLines(items: readonly CompoundItem[] | null | undefined, prob
     [NOTES.reuse, WORDS.reuse ?? '', i => i.reuse],
     [NOTES.guard, WORDS.guard ?? '', i => i.guards],
     [NOTES.recall, WORDS.recall ?? '', i => i.recall],
+    [NOTES.used, WORDS.use ?? '', i => num(i.use)],
   ]
   const longest = Math.max(0, ...items.map(i => [...i.name].length))
-  const digits = String(Math.max(0, ...items.flatMap(i => [i.reuse, i.guards, i.recall]))).length
+  const digits = String(Math.max(0, ...items.flatMap(i => kinds.map(([, , of]) => of(i))))).length
   const counters = kinds.length * (2 + digits) + (kinds.length - 1) * 2
   const wanted = Math.max(NAME_MIN, Math.min(ALL_NAME_MAX, longest))
   const fixed = 2 + 2 + KIND_CELL + 2 + counters
@@ -1028,7 +1042,7 @@ const BODY_MAX = 60000
 const BODY_LINES = 300
 
 export function loadingDetail(name: string): CompoundDetail {
-  return { name, state: 'loading', problem: '', at: 0, level: '', kind: '', match: [], description: '', body: '', reuse: 0, guards: 0, recall: 0, flag: '', last: null, path: '', files: [] }
+  return { name, state: 'loading', problem: '', at: 0, level: '', kind: '', match: [], description: '', body: '', reuse: 0, guards: 0, recall: 0, use: 0, flag: '', last: null, path: '', files: [] }
 }
 
 export function failedDetail(name: string, problem: string, at: number): CompoundDetail {
@@ -1057,6 +1071,7 @@ export function detailFrom(shown: string, now: number): CompoundDetail | undefin
     reuse: num(counts.reuse),
     guards: num(counts.guard),
     recall: num(counts.recall),
+    use: num(counts.use),
     flag: d.ineffective === true ? 'ineffective' : '',
     last: last === undefined || fired <= 0 ? null : { at: fired, type: str(last.type) },
     path: oneLine(str(d.path), 400),
@@ -1092,7 +1107,7 @@ export function detailLines(detail: CompoundDetail | null | undefined, columns: 
       { segs: [kind], gap: ' · ' },
       ...(detail.flag === '' ? [] : [{ segs: [{ text: detail.flag, color: WEAK.color }], gap: ' · ' }]),
     ].filter(piece => piece.segs[0]?.text !== ''), columns),
-    ...strung([counter(NOTES.reuse, detail.reuse, WORDS.reuse ?? ''), counter(NOTES.guard, detail.guards, WORDS.guard ?? ''), counter(NOTES.recall, detail.recall, WORDS.recall ?? '')], columns),
+    ...strung([counter(NOTES.reuse, detail.reuse, WORDS.reuse ?? ''), counter(NOTES.guard, detail.guards, WORDS.guard ?? ''), counter(NOTES.recall, detail.recall, WORDS.recall ?? ''), counter(NOTES.used, num(detail.use), WORDS.use ?? '')], columns),
     ...wrapped(detail.last === null ? 'never fired' : `last fired ${/^\d+[smh]$/.test(when) ? `${when} ago` : when} (${eventWord(detail.last.type)})`, columns, '', { dim: true }),
   ]
   if (detail.match.length > 0) {

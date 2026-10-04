@@ -170,6 +170,12 @@ of it covers part of the request, compound tells Claude to use it or extend it.
 A short prompt, a request to run a command, or a request that nothing covers gets nothing
 added.
 
+compound also notices a request that keeps coming back. When you have asked for the same
+kind of work in three sessions and nothing recorded covers it, the note says so and
+offers to make it a skill once the work is done: Claude records how it was done as a
+lesson and turns the lesson into a skill, so the next request starts from it. It is an
+offer; nothing is made unless you want it.
+
 ### 2. Learn after solving
 
 A **lesson** is a short note that says how a problem was solved. When a command fails and
@@ -291,6 +297,15 @@ it is about, so on Linux with bash the first five do nothing:
 `compound list` shows them with the rest. One that does not apply on your machine is
 flagged `not here`.
 
+compound also ships four skills, which a session sees as `compound:<name>`:
+
+| Skill | Claude uses it when | What it has Claude do |
+|-|-|-|
+| `learn` | a lesson is owed, or you say to record one | record one lesson with the CLI |
+| `reuse` | a substantial task starts | look for existing work before building |
+| `finish-task` | a change is done and has to be wrapped up | review the change, find and run every check the project has (all of them again after any fix), update the documentation the change made stale, and commit. It calls `compound:learn` when a command failed along the way and was corrected. It does not push or open a pull request unless you asked, and it does not weaken a test to make it pass |
+| `verify-assumptions-first` | a large effort starts | call `compound:reuse`, state the assumptions the plan rests on, check each against the real file, API or command, say which were false, build the smallest thing that proves the approach, then build out one addition at a time, and end with `compound:finish-task` |
+
 A stop happens once per session, and the same call sent again runs. If one of these
 lessons is wrong for your machine (you installed `timeout`, or your `sed` is GNU sed),
 switch it off for yourself with `compound disable <name>`; `compound enable <name>` brings
@@ -322,6 +337,8 @@ is empty when there is nothing to show.
 | `○` | `lesson declined` | Claude declined to record it, with a reason |
 | `⇡` | `lesson moved to the user level` | a lesson moved up |
 | `▲` | `lesson ineffective` | a lesson did not prevent its failure and needs strengthening |
+| `▸` | `skill used` | Claude invoked a skill compound lists: one made from a lesson, one of yours, or one it ships; the row names it |
+| `↻` | `asked before` | the same kind of request was made in three sessions, and Claude was offered to make it a skill |
 | `✖` | `N compound errors` | compound itself failed; your work is not blocked |
 
 Results fade after 8 seconds. `lesson owed`, `lesson ineffective` and errors stay until
@@ -339,13 +356,13 @@ seconds, like the result beside it.
 
 **3. The `/compound` pane.** Type `/compound` in a session to open a dashboard: health,
 the totals (how often compound offered existing work, stopped a call, gave a lesson
-beside a failure and recorded a lesson), what is open, lessons per level, the most used
+beside a failure, saw a skill used and recorded a lesson), what is open, lessons per level, the most used
 lessons, and recent events. Each open item is followed by the command that settles it.
 
 The first row of the pane lists its keys. The pane opens without the keyboard, so what
 you type still goes to the prompt: press `ctrl+x tab` (or click the pane) to give it the
 keys, and `Esc` to take them back. Then the arrows (or `Tab`) move over the lesson names
-and `Enter` opens the one selected: its level and kind, its counters, when it last fired,
+and `Enter` opens the one selected: its level and kind, its four counters (reused, guarded, recalled, used), when it last fired,
 its guard patterns and its text. `a` lists every lesson and skill by level, `b` goes
 back, `r` reads everything again and `x` closes the pane. `/compound close` closes it
 too. `/compound status` prints the same report as text.
@@ -442,6 +459,7 @@ These are the ones you are likely to change.
 | `COMPOUND_OFF` | unset | `1` switches the mod off |
 | `COMPOUND_QUIET` | unset | `1` turns the band off; the status entry, the toasts and the `/compound` pane stay |
 | `COMPOUND_PROMPT_MIN_CHARS` | 80 | shortest prompt the reuse check looks at |
+| `COMPOUND_REPEAT_MIN` | 3 | sessions that made one kind of request before compound offers to make it a skill |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | tool calls in a turn before Claude is asked whether it learned anything |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
 | `COMPOUND_RECUR_LIMIT` | 2 | times a lesson is recalled before it is ineffective |

@@ -51,12 +51,12 @@ type Answer = { text: string; isError?: true }
 // `listed` is what the CLI prints for the pane's `list --json`, `showCode` and `listCode` their exit
 // codes, `wait` is awaited before either answers, `closed` are the panes the mod closed, and
 // `focusAsked` is what each open asked of the keyboard.
-type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[] }
+type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[]; used: (name: string) => string }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [] }
+  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [], used: () => '{"used":false,"name":""}' }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -109,6 +109,8 @@ function world(on: On, env: Record<string, string> = {}): World {
       return done('')
     }
     if (verb === 'check') return done(w.check)
+    // `compound use --json -- <name>`: whether the skill is one the CLI counts.
+    if (verb === 'use') return done(w.used(argv[argv.length - 1] ?? ''))
     if (verb === 'show') return done(w.show)
     return done('')
   })
@@ -125,6 +127,8 @@ function world(on: On, env: Record<string, string> = {}): World {
     return (failed ? { result: {}, text: 'deploy.sh: error: a target is required', isError: true } : { result: {}, text: 'ok' }) as never
   })
   on('classic.Stop', () => ({}) as never)
+  // The engine's own expansion of a skill: its text as computed.
+  on('skill.prompt', (_$, e) => ({ text: e.text }))
   on('prompt.submit', (_$, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -506,7 +510,7 @@ test('pressing a lesson shows it: reading, then what `compound show --json` prin
     expect(rows.slice(1, 9)).toEqual([
       'release-notes-format',
       'project · guard',
-      '◆ 3 reused  ■ 0 guarded  ↺ 1 recalled',
+      '◆ 3 reused  ■ 0 guarded  ↺ 1 recalled  ▸ 0 used',
       'last fired 25s ago (reused)',
       'guard pattern',
       '  notes\\.md$',
@@ -577,16 +581,16 @@ test('the all-lessons view lists every lesson and skill by level; each opens, an
     const rows = await rowsOf(ui)
     expect(rows[0]).toContain('b: back')
     expect(rows.slice(1)).toEqual([
-      'All lessons  2 lessons (1 guard)  1 skill  ◆ reused  ■ guarded  ↺ recalled',
+      'All lessons  2 lessons (1 guard)  1 skill  ◆ reused  ■ guarded  ↺ recalled  ▸ used',
       ' ',
       'project  1 lesson (1 guard)  0 skills',
-      '  release-notes-format  guard   ◆ 3  ■ 0  ↺ 1  Use when writing release notes.',
+      '  release-notes-format  guard   ◆ 3  ■ 0  ↺ 1  ▸ 0  Use when writing release notes.',
       ' ',
       'user  1 lesson (0 guards)  0 skills',
-      '  never-used            lesson  ◆ 0  ■ 0  ↺ 0  Use when nothing happens.',
+      '  never-used            lesson  ◆ 0  ■ 0  ↺ 0  ▸ 0  Use when nothing happens.',
       ' ',
       'general  0 lessons (0 guards)  1 skill',
-      '  a-skill               skill   ◆ 0  ■ 0  ↺ 0  Use when a skill is wanted.',
+      '  a-skill               skill   ◆ 0  ■ 0  ↺ 0  ▸ 0  Use when a skill is wanted.',
     ])
     // Every row is a Button, also the lesson nothing has used and the skill.
     for (const name of ['release-notes-format', 'never-used', 'a-skill']) expect((await ui.find({ type: 'Button', key: `open:${name}` }))?.props.label).toBe(name)
@@ -1148,4 +1152,175 @@ test('a judge that names the candidate without words of the request adds nothing
   expect((told.context ?? []).join('\n')).not.toContain('Reuse before building')
   expect(w.logged.map(e => [e.type, e.verdict, e.unquoted])).toEqual([['judge', 'nothing', 1]])
   expect(w.memos.map(m => m.verdict)).toEqual(['nothing'])
+})
+
+// ---- a skill that is used, and a request that keeps coming back ----
+
+// The counting of a used skill goes on after its hook has answered: `clock.settle()` lets it finish.
+
+for (const surface of SURFACES) {
+  test(`${surface}: a skill compound lists is counted when its prompt is expanded, and the band and the status entry name it`, async ($, on) => {
+    const w = world(on)
+    const clock = mock.clock(on, { now: T0 })
+    w.used = name => (name === 'compound:finish-task' ? '{"used":true,"name":"finish-task","level":"general","path":"/g/s/finish-task"}' : '{"used":false,"name":"x","reason":"no skill of that name"}')
+    // The hook answers with the skill's own text, unchanged, before anything is counted.
+    const out = await $.skill.prompt({ skill: 'compound:finish-task', text: 'THE SKILL BODY' })
+    expect(out.text).toBe('THE SKILL BODY')
+    await clock.settle()
+    // One CLI call, `use`, with the name as the engine gave it; the CLI writes the event.
+    expect(w.calls.filter(c => c.includes('use')).map(c => c.slice(1))).toEqual([['use', '--json', '--', 'compound:finish-task']])
+    expect(w.statuses[w.statuses.length - 1]).toBe('used finish-task')
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'AbovePrompt', props: BAND, viewport: { columns: 100, rows: 40 } })
+    expect((await ui.find({ type: 'Text', text: NOTES.used.label }))?.props.color).toBe(NOTES.used.color)
+    expect(await ui.find({ type: 'Text', text: 'finish-task' })).toBeDefined()
+    expect(w.logged.filter(e => e.type === 'error')).toEqual([])
+
+    // A skill the CLI does not count draws nothing and sets no entry.
+    await clock.advance(GONE_MS + 30000)
+    const before = w.statuses.length
+    await $.skill.prompt({ skill: 'superpowers:brainstorming', text: 'x' })
+    await clock.settle()
+    expect(w.calls.filter(c => c.includes('use')).length).toBe(2)
+    expect(w.statuses.length).toBe(before)
+    expect(await ui.find({ type: 'Text', text: NOTES.used.label })).toBeUndefined()
+  })
+}
+
+test('a use is counted once for one expansion, whatever the name looks like, and a CLI that cannot say breaks nothing', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  w.used = () => '{"used":true,"name":"local-word","level":"project"}'
+  // Two copies of the mod see one expansion: the claim lets one of them count it.
+  await $.skill.prompt({ skill: 'local-word', text: 'x' })
+  await $.skill.prompt({ skill: 'local-word', text: 'x' })
+  await clock.settle()
+  expect(w.calls.filter(c => c.includes('use')).length).toBe(1)
+  // A name that looks like an option is a name: it goes after `--`.
+  await $.skill.prompt({ skill: '--json', text: 'x' })
+  await clock.settle()
+  expect(w.calls.filter(c => c.includes('use'))[1]!.slice(1)).toEqual(['use', '--json', '--', '--json'])
+  // The CLI prints something else: the skill's text still goes through, and the failure is logged once.
+  w.used = () => 'not json'
+  const out = await $.skill.prompt({ skill: 'another-skill', text: 'BODY' })
+  await clock.settle()
+  expect(out.text).toBe('BODY')
+  expect(w.logged.filter(e => e.type === 'error').map(e => e.where)).toEqual(['use.parse'])
+})
+
+test('COMPOUND_OFF=1 counts no skill', async ($, on) => {
+  const w = world(on, { COMPOUND_OFF: '1' })
+  const clock = mock.clock(on, { now: T0 })
+  expect((await $.skill.prompt({ skill: 'local-word', text: 'BODY' })).text).toBe('BODY')
+  await clock.settle()
+  expect(w.calls).toEqual([])
+})
+
+const DIGEST = 'Write the weekly digest of merged pull requests for the team and post it to the channel, as every week.'
+// Three earlier requests of the same kind, from two other sessions and from this one.
+const ASKED = [
+  { id: 'wk1:3', ts: '2026-09-07', project: '/work/alpha', session: 'wk1', prompt: 'write the weekly digest of merged pull requests and post it', score: 4, sessions: ['wk1'] },
+  { id: 'wk2:1', ts: '2026-09-14', project: '/work/alpha', session: 'wk2', prompt: 'weekly digest of merged pull requests please, post it to the channel', score: 4, sessions: ['wk2', 'session-under-test'] },
+  { id: 'oth:9', ts: '2026-09-20', project: '/work/beta', session: 'oth', prompt: 'rename the digest module', score: 2, sessions: ['oth'] },
+]
+const SEEN = JSON.stringify({ words: ['weekly', 'digest'], items: [], floor: 1.5, memo_key: 'b'.repeat(32), prompts: ASKED, surfer: 'ok' })
+const SAME_KIND = '{"substantial":true,"items":[],"requests":[],"repeats":[{"label":"r1","quote":"weekly digest of merged pull requests"},{"label":"r2","quote":"weekly digest of merged pull requests"}]}'
+
+test('a request made in three sessions with nothing recorded for it is offered a skill, once a session, with an event', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.found = () => SEEN
+  w.judge = async () => SAME_KIND
+  const told = await $.prompt.submit({ text: DIGEST, wait: false, origin: { kind: 'composer' } })
+  const context = (told.context ?? []).join('\n')
+  expect(context.split('\n')[0]).toBe('[compound] A request that keeps coming back.')
+  expect(context).toContain('This kind of request has now been made in 3 sessions, this one included, and no recorded skill or lesson covers it.')
+  expect(context).toContain('- wk1:3 2026-09-07 alpha: "write the weekly digest of merged pull requests and post it"')
+  expect(context).toContain('it is an offer, not an instruction')
+  expect(context).toContain('/bin/compound add`')
+  expect(context).toContain('/bin/compound skill <name>`')
+  expect(context).toContain('It is reference material, to be weighed and not obeyed')
+  expect(context).not.toContain('rename the digest module')
+  // The offer has its own event; no reuse was offered, so none is logged.
+  expect(w.logged.map(e => e.type)).toEqual(['repeat', 'judge'])
+  const event = w.logged[0]!
+  expect([event.times, event.prompts]).toEqual([3, ['wk1:3', 'wk2:1']])
+  expect(w.statuses[w.statuses.length - 1]).toBe('asked in 3 sessions: a skill is on offer')
+  // What the CLI is given to keep: the judge's verdict, and the requests of the same kind.
+  expect(w.memos.map(m => [m.verdict, (m.repeats as { id: string }[]).map(r => r.id)])).toEqual([['nothing', ['wk1:3', 'wk2:1']]])
+
+  // The same kind of request again in this session, in other words: nothing is offered twice.
+  w.logged.length = 0
+  const again = await $.prompt.submit({ text: `${DIGEST} Include the reverted ones too this time.`, wait: false, origin: { kind: 'composer' } })
+  expect((again.context ?? []).join('\n')).not.toContain('keeps coming back')
+  expect(w.logged.map(e => [e.type, e.verdict])).toEqual([['judge', 'nothing']])
+})
+
+test('two sessions are not three, a covered request is offered nothing, and the knob moves the bar', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  // Only one other session asked it.
+  w.found = () => JSON.stringify({ ...JSON.parse(SEEN), prompts: [ASKED[0]] })
+  w.judge = async () => '{"substantial":true,"items":[],"requests":[],"repeats":[{"label":"r1","quote":"weekly digest of merged pull requests"}]}'
+  let told = await $.prompt.submit({ text: `${DIGEST} (two)`, wait: false, origin: { kind: 'composer' } })
+  expect(told.context ?? []).toEqual([])
+  expect(w.logged.map(e => [e.type, e.verdict])).toEqual([['judge', 'nothing']])
+  // A recorded lesson covers it: the lesson is offered, not a new skill.
+  w.logged.length = 0
+  w.found = () => JSON.stringify({ ...JSON.parse(SEEN), items: JSON.parse(ITEMS) })
+  w.judge = async () => SAME_KIND.replace('"items":[]', '"items":[{"name":"release-notes-format","quote":"weekly digest"}]')
+  told = await $.prompt.submit({ text: `${DIGEST} (covered)`, wait: false, origin: { kind: 'composer' } })
+  expect((told.context ?? []).join('\n')).toContain('[compound] Reuse before building.')
+  expect((told.context ?? []).join('\n')).not.toContain('This kind of request')
+  expect(w.logged.map(e => e.type)).toEqual(['judge', 'reuse'])
+  // A quote that is not words of the request names nothing.
+  w.logged.length = 0
+  w.found = () => SEEN
+  w.judge = async () => SAME_KIND.split('weekly digest of merged pull requests').join('the same routine as before')
+  told = await $.prompt.submit({ text: `${DIGEST} (unquoted)`, wait: false, origin: { kind: 'composer' } })
+  expect(told.context ?? []).toEqual([])
+  expect(w.logged.map(e => [e.type, e.verdict, e.unquoted])).toEqual([['judge', 'nothing', 2]])
+})
+
+test('a routine the judge says builds nothing is still offered a skill when it keeps coming back', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.found = () => SEEN
+  w.judge = async () => SAME_KIND.replace('"substantial":true', '"substantial":false')
+  const told = await $.prompt.submit({ text: DIGEST, wait: false, origin: { kind: 'composer' } })
+  expect((told.context ?? []).join('\n').split('\n')[0]).toBe('[compound] A request that keeps coming back.')
+  // The verdict is the judge's own, and it is kept with the requests of the same kind.
+  expect(w.logged.map(e => [e.type, e.verdict ?? e.times])).toEqual([['repeat', 3], ['judge', 'not-substantial']])
+  expect(w.memos.map(m => [m.verdict, (m.repeats as { id: string }[]).map(r => r.id)])).toEqual([['not-substantial', ['wk1:3', 'wk2:1']]])
+  // And a prompt that builds nothing and repeats nothing still gets nothing.
+  w.logged.length = 0
+  w.judge = async () => NOTHING
+  expect((await $.prompt.submit({ text: `${DIGEST} (other)`, wait: false, origin: { kind: 'composer' } })).context ?? []).toEqual([])
+  expect(w.logged.map(e => [e.type, e.verdict])).toEqual([['judge', 'not-substantial']])
+})
+
+test('COMPOUND_REPEAT_MIN=2 offers at the first repetition', async ($, on) => {
+  const w = world(on, { COMPOUND_REPEAT_MIN: '2' })
+  mock.clock(on, { now: T0 })
+  w.found = () => JSON.stringify({ ...JSON.parse(SEEN), prompts: [ASKED[0]] })
+  w.judge = async () => '{"substantial":true,"items":[],"requests":[{"label":"r1","quote":"weekly digest of merged pull requests"}],"repeats":[]}'
+  const context = ((await $.prompt.submit({ text: DIGEST, wait: false, origin: { kind: 'composer' } })).context ?? []).join('\n')
+  // An earlier request for the same deliverable is one of the same kind: it is quoted once.
+  expect(context.split('\n')[0]).toBe('[compound] Reuse before building.')
+  expect(context).toContain('This kind of request has now been made in 2 sessions, this one included, and no recorded skill or lesson covers it. The earlier ones are quoted above.')
+  expect(context.split('wk1:3').length).toBe(2)
+  expect(w.logged.map(e => e.type)).toEqual(['repeat', 'judge', 'reuse'])
+})
+
+test('a request the CLI holds a verdict for is counted with the sessions that asked it since', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  const row = { id: 'wk1:3', ts: '2026-09-07', project: 'alpha', session: 'wk1', prompt: 'write the weekly digest of merged pull requests and post it', sessions: ['wk1'] }
+  // Judged in session wk2 with one earlier request of the kind; asked since by this session.
+  w.found = () => JSON.stringify({ ...JSON.parse(SEEN), prompts: [], surfer: 'memo', memo: { verdict: 'nothing', items: [], prompts: [], repeats: [row], asked: ['wk2', 'session-under-test'], ts: '2026-10-03T00:00:00Z' } })
+  const told = await $.prompt.submit({ text: DIGEST, wait: false, origin: { kind: 'composer' } })
+  expect(w.asked).toBe(0)
+  expect((told.context ?? []).join('\n')).toContain('This kind of request has now been made in 3 sessions')
+  expect(w.logged.map(e => [e.type, e.memo, e.times ?? e.verdict])).toEqual([['repeat', true, 3], ['judge', true, 'named']])
+  // The verdict names the earlier requests the offer rests on.
+  expect(w.logged[1]!.named).toEqual(['wk1:3'])
 })

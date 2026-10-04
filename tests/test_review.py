@@ -925,7 +925,7 @@ class NewEventsTest(Case):
         self.assertExit(self.box.run("skill", "routed"), 0)
         self.box.log({"type": "refuse", "why": "debt", "lesson": "routed"})
         row = self.box.json("list", "--json")[0]
-        self.assertEqual(row["counts"], {"reuse": 0, "guard": 0, "recall": 0, "learn": 1})
+        self.assertEqual(row["counts"], {"reuse": 0, "guard": 0, "recall": 0, "learn": 1, "use": 0})
 
     def test_the_docstring_documents_the_three_types(self):
         text = read(self.box.script).split('"""')[1]

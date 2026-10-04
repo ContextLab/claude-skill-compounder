@@ -35,8 +35,8 @@ test('each prompt carries its data and the one-line reply shape', async () => {
   const reuse = reusePrompt('Please build a release script for this repo', ITEMS)
   expect(reuse.includes('REQUEST:\nPlease build a release script for this repo')).toBe(true)
   expect(reuse.includes('scripts/release.sh [script, project]')).toBe(true)
-  expect(reuse.includes('{"substantial":true|false,"items":[{"name":"<exact name>","quote":"<words copied from the REQUEST>"}],"requests":[{"label":"<label>","quote":"<words copied from the REQUEST>"}]}')).toBe(true)
-  expect(reuse.includes('With nothing to name: {"substantial":true,"items":[],"requests":[]}')).toBe(true)
+  expect(reuse.includes('{"substantial":true|false,"items":[{"name":"<exact name>","quote":"<words copied from the REQUEST>"}],"requests":[{"label":"<label>","quote":"<words copied from the REQUEST>"}],"repeats":[{"label":"<label>","quote":"<words copied from the REQUEST>"}]}')).toBe(true)
+  expect(reuse.includes('With nothing to name: {"substantial":true,"items":[],"requests":[],"repeats":[]}')).toBe(true)
   const recall = recallPrompt('./build.sh', ERROR, LESSONS)
   expect(recall.includes('FAILED CALL:\n./build.sh')).toBe(true)
   expect(recall.includes('{"name":null}')).toBe(true)
@@ -76,7 +76,7 @@ test('a reuse reply names inventory items and the earlier requests by label', as
 test('what a reuse reply names without words of the request is dropped, and counted', async () => {
   // The shape the judge was first asked for: names alone. Nothing ties them to the request.
   const bare = parseReuse('{"substantial":true,"items":["scripts/release.sh","cdl-bib-cite"],"requests":["r1"]}', REQUEST, ITEMS, EARLIER)
-  expect(bare).toEqual({ substantial: true, items: [], earlier: [], unquoted: 3 })
+  expect(bare).toEqual({ substantial: true, items: [], earlier: [], repeats: [], unquoted: 3 })
   const reply = JSON.stringify({
     substantial: true,
     items: [
@@ -122,14 +122,14 @@ test('a reuse reply cannot invent an item, repeat one, or reuse anything for a t
   expect(invented?.items.map(i => i.name)).toEqual(['scripts/release.sh'])
   expect(invented?.unquoted).toBe(0)
   const trivial = parseReuse(JSON.stringify({ substantial: false, items: [quoting('scripts/release.sh')], requests: [{ label: 'r1', quote: 'release script' }] }), REQUEST, ITEMS, EARLIER)
-  expect(trivial).toEqual({ substantial: false, items: [], earlier: [], unquoted: 0 })
+  expect(trivial).toEqual({ substantial: false, items: [], earlier: [], repeats: [], unquoted: 0 })
 })
 
 test('an earlier request is named by its label or its id, never invented, never twice; a missing list names none', async () => {
   const labels = ['r2', 'R2', '2', 'r9', 'r0', 's1:1', 'nonsense'].map(label => ({ label, quote: 'release script' }))
   const a = parseReuse(JSON.stringify({ substantial: true, items: [], requests: [...labels, 7] }), REQUEST, ITEMS, EARLIER)
   expect(a?.earlier.map(e => e.id)).toEqual(['s2:4', 's1:1'])
-  expect(parseReuse('{"substantial":true,"items":[]}', REQUEST, ITEMS, EARLIER)).toEqual({ substantial: true, items: [], earlier: [], unquoted: 0 })
+  expect(parseReuse('{"substantial":true,"items":[]}', REQUEST, ITEMS, EARLIER)).toEqual({ substantial: true, items: [], earlier: [], repeats: [], unquoted: 0 })
   expect(parseReuse('{"substantial":true,"items":[],"requests":[{"label":"r1","quote":"release script"}]}', REQUEST, ITEMS, [])?.earlier).toEqual([])
 })
 
@@ -248,4 +248,30 @@ test('running a named command and reporting its output is not a build task', asy
 test('the fix question rules out a call that was refused before it ran', async () => {
   const fix = fixPrompt({ failed: 'rm -rf build', error: 'x', worked: 'rm -r build' }, [])
   expect(fix.includes('Not when the call was refused before it ran')).toBe(true)
+})
+
+test('the reuse prompt asks which earlier requests are the same kind of work, and a reply names them with words of the request', async () => {
+  const earlier = [
+    { id: 'a:1', date: '2026-09-01', project: 'alpha', session: 'a', text: 'write the weekly digest of merged pull requests', score: 3 },
+    { id: 'b:1', date: '2026-09-08', project: 'alpha', session: 'b', text: 'rename the digest module', score: 2 },
+  ]
+  const request = 'Write the weekly digest of merged pull requests and post it.'
+  const prompt = reusePrompt(request, [], earlier)
+  expect(prompt.includes('decide four things')).toBe(true)
+  expect(prompt.includes('4. repeats: which of the earlier requests asked for the same KIND of work')).toBe(true)
+  expect(prompt.includes('The same topic, tool, file or project is NOT the same kind of work')).toBe(true)
+  const named = parseReuse('{"substantial":true,"items":[],"requests":[],"repeats":[{"label":"r1","quote":"weekly digest of merged pull requests"},{"label":"r1","quote":"weekly digest"},{"label":"r9","quote":"weekly digest"}]}', request, [], earlier)!
+  expect(named.repeats).toEqual([earlier[0]!])
+  expect(named.earlier).toEqual([])
+  // Words that are not the request's name nothing, and are counted.
+  const bare = parseReuse('{"substantial":true,"items":[],"requests":[],"repeats":[{"label":"r2","quote":"the same routine"},"r1"]}', request, [], earlier)!
+  expect([bare.repeats, bare.unquoted]).toEqual([[], 2])
+  // One request may be both, and a list that is no list is unreadable. A prompt that builds nothing
+  // reuses nothing, and the earlier requests of its kind are still read: a routine asked for again.
+  const both = parseReuse('{"substantial":true,"items":[],"requests":[{"label":"r1","quote":"weekly digest"}],"repeats":[{"label":"r1","quote":"weekly digest"}]}', request, [], earlier)!
+  expect([both.earlier, both.repeats]).toEqual([[earlier[0]!], [earlier[0]!]])
+  expect(parseReuse('{"substantial":true,"items":[],"requests":[],"repeats":"r1"}', request, [], earlier)).toBe(undefined)
+  const routine = parseReuse('{"substantial":false,"items":["x"],"requests":[{"label":"r1","quote":"weekly digest"}],"repeats":[{"label":"r1","quote":"weekly digest"},{"label":"r2","quote":"not in it"}]}', request, [], earlier)!
+  expect(routine).toEqual({ substantial: false, items: [], earlier: [], repeats: [earlier[0]!], unquoted: 1 })
+  expect(prompt.includes('This is decided apart from 1')).toBe(true)
 })

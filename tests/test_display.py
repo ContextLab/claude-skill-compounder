@@ -29,18 +29,18 @@ class TotalsTest(Case):
         self.box.log({"type": "recall", "lesson": "a-lesson"}, COMPOUND_NOW=NOW - 500)
         data = self.box.json("status", "--json")
         # A reuse is one offer, however many items it named; a rewrite records no new lesson.
-        self.assertEqual(data["totals"], {"reused": 3, "guarded": 1, "recalled": 1, "recorded": 2,
+        self.assertEqual(data["totals"], {"reused": 3, "guarded": 1, "recalled": 1, "used": 0, "recorded": 2,
                                           "since": "2026-08-12T14:13:20Z"})
         text = self.box.run("status").stdout
         block = text.split("Compound interest\n", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(block, "  3 reuses offered · 1 call stopped by a guard · 1 lesson recalled · "
-                                "2 lessons recorded · since 12 Aug")
+                                "0 skills used · 2 lessons recorded · since 12 Aug")
         # The log holds no duration of a failed call or of its fix: nothing is claimed saved.
         self.assertNotRegex(text, r"(?i)\b(saved|tokens|minutes)\b")
 
     def test_an_empty_log_totals_nothing(self):
         data = self.box.json("status", "--json")
-        self.assertEqual(data["totals"], {"reused": 0, "guarded": 0, "recalled": 0, "recorded": 0, "since": None})
+        self.assertEqual(data["totals"], {"reused": 0, "guarded": 0, "recalled": 0, "used": 0, "recorded": 0, "since": None})
         text = self.box.run("status").stdout
         self.assertIn("Compound interest\n  nothing yet: the log holds no reuse, guard, recall or lesson\n", text)
 
@@ -61,9 +61,9 @@ class WordsTest(Case):
         self.box.add("used")
         self.box.log({"type": "reuse", "lessons": ["used"]})
         status = self.box.run("status").stdout
-        self.assertRegex(status, r"name\s+level\s+kind\s+reused\s+guarded\s+recalled\s+flag")
+        self.assertRegex(status, r"name\s+level\s+kind\s+reused\s+guarded\s+recalled\s+used\s+flag")
         listing = self.box.run("list").stdout
-        self.assertRegex(listing.splitlines()[0], r"^LEVEL\s+KIND\s+NAME\s+REUSED\s+GUARDED\s+RECALLED\s+FLAG\s+WHEN$")
+        self.assertRegex(listing.splitlines()[0], r"^LEVEL\s+KIND\s+NAME\s+REUSED\s+GUARDED\s+RECALLED\s+USED\s+FLAG\s+WHEN$")
         self.assertNotIn("USE/GRD/RCL", listing)
         self.assertRegex(listing.splitlines()[1], r"^project\s+lesson\s+used\s+1\s+0\s+0\s")
 
@@ -97,7 +97,7 @@ class NeverUsedTest(Case):
         text = self.box.run("status").stdout
         block = text.split("\nLessons\n", 1)[1].split("\n\n", 1)[0].splitlines()
         self.assertEqual(len(block), 3, block)
-        self.assertRegex(block[1], r"^  used\s+project\s+lesson\s+1\s+0\s+0$")
+        self.assertRegex(block[1], r"^  used\s+project\s+lesson\s+1\s+0\s+0\s+0$")
         self.assertEqual(block[2], "  4 lessons never used (`compound list` shows them)")
         self.assertNotIn("idle-0", "\n".join(block))
         # The JSON still carries every row.

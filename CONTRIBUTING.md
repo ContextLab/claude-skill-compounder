@@ -48,7 +48,9 @@ fails. They spend model calls, so they are run by hand and never by `run_tests.s
 | `journey_claims.py` | With a claims directory that cannot be made, the mod refuses nothing and logs one `error`. |
 | `journey_error.py` | A failure of the mod itself is logged, reported at the next prompt, each failure once; `COMPOUND_OFF=1` writes nothing. |
 | `journey_general.py` | The lessons the package ships, on macOS with zsh: each shipped guard refuses its wrong form once, the recall lessons are given to their failures, a general lesson recalled past the limit raises no debt, and a disabled or not-applying lesson does nothing. |
-| `journey_skills.py` | The plugin's surface in a headless session: the two skills and the `/compound` command are listed, and `compound:learn`, invoked through the Skill tool, writes a lesson. |
+| `journey_skills.py` | The plugin's surface in a headless session: the `compound:learn` and `compound:reuse` skills and the `/compound` command are listed, and `compound:learn`, invoked through the Skill tool, writes a lesson. |
+| `journey_compose.py` | The two shipped skills that call other skills, on small real projects: `finish-task` fixes a failing change without touching the test, runs every check, updates the stale README and commits without pushing; `verify-assumptions-first` calls `compound:reuse`, reads the real input before it writes and says which stated assumption was false. Neither is invoked for a question or a one-line fix. A lesson made a skill is counted (`use`) when it is invoked through the Skill tool and as a typed `/name`. `--baseline` runs the two projects without the two skills. Its default model is `sonnet`. |
+| `journey_repeat.py` | A request that keeps coming back: seven cases, each with a prompt log of its own. Three kinds of request made in three or more sessions are offered a skill (a `repeat` event); a shared topic, a request made in one other session, a request a recorded lesson covers and two requests that share rare words are not. `--runs N` repeats every case and prints the counts. |
 
 Two more scripts there measure and assert nothing:
 

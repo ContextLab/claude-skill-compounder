@@ -428,7 +428,7 @@ test('the pane\'s data is what the CLI printed: levels, the most used first, eve
     { level: 'general', lessons: 0, skills: 2, guards: 0 },
   ])
   expect(board.lessons.map(l => l.name)).toEqual(['no-marker-echo', 'build-needs-profile', 'never-used'])
-  expect(board.lessons[0]).toEqual({ name: 'no-marker-echo', level: 'project', guard: true, reuse: 0, guards: 9, recall: 0, flag: '' })
+  expect(board.lessons[0]).toEqual({ name: 'no-marker-echo', level: 'project', guard: true, reuse: 0, guards: 9, recall: 0, use: 0, flag: '' })
   expect(board.recent[0]).toEqual({ at: Date.parse('2026-10-03T12:00:00Z') / 1000, type: 'reuse', text: 'a, b', tail: '1 earlier request' })
   expect(board.recent.map(r => `${r.type} ${r.text}`)).toEqual([
     'reuse a, b',
@@ -465,10 +465,12 @@ test('the pane lists what is open first, then the levels, the most used and the 
   // A guard is a lesson that carries a pattern: it is counted among the lessons, and the row says so.
   expect(lines).toContain('  project  2 lessons (1 guard)   0 skills')
   expect(lines).toContain('  user     5 lessons (0 guards)  4 skills')
-  expect(lines[at('Most used')]).toBe('Most used              ◆ reused     ■ guarded    ↺ recalled')
+  // Four counter columns with their words need 61 columns; at 60 the legend keeps its glyphs.
+  expect(lines[at('Most used')]).toBe('Most used              ◆      ■      ↺      ▸')
+  expect(boardLines(boardFrom(STATUS, EVENTS, 's1', T0), 80).map(text)).toContain('Most used              ◆ reused     ■ guarded    ↺ recalled   ▸ used')
   // A lesson never used is not among the most used.
   expect(at('never-used')).toBe(-1)
-  expect(lines[at('no-marker-echo  ')]).toBe('  no-marker-echo       0            9 ▇▇▇▇▇▇     0')
+  expect(lines[at('no-marker-echo  ')]).toBe('  no-marker-echo       0      9 ▇▇▇  0      0')
   // The timeline says the word a person reads for each event, never the log's type name.
   expect(at('recorded deploy-needs-target') < at('reused   a, b · 1 earlier request')).toBe(true)
   expect(at('● owed     ./deploy.sh --target staging') > 0).toBe(true)
@@ -491,7 +493,7 @@ test('the most used table is in columns: each count ends under its legend glyph 
     const head = lines.findIndex(l => l.startsWith('Most used'))
     const rows = lines.slice(head + 1, head + 1 + lessons.length)
     for (const line of boardLines(board, columns)) expect(width(line) <= columns, `${columns}: ${text(line)}`).toBe(true)
-    const glyphs = ['◆', '■', '↺'].map(g => [...lines[head]!].indexOf(g))
+    const glyphs = ['◆', '■', '↺', '▸'].map(g => [...lines[head]!].indexOf(g))
     expect(glyphs.every(g => g > 0), `${columns}: ${lines[head]}`).toBe(true)
     for (const row of rows) {
       const cells = [...row]
@@ -525,18 +527,21 @@ test('the recent rows are in columns whatever the longest event type', async () 
 test('the pane opens with the totals: what the log holds of the mod helping, and since when', async () => {
   const now = new Date(2026, 9, 4, 14, 0, 0).getTime()
   const board = boardFrom(STATUS, EVENTS, 's1', now)!
-  expect(board.totals).toEqual({ reused: 4, guarded: 9, recalled: 1, recorded: 7, since: Date.parse('2026-09-12T10:00:00Z') / 1000 })
+  expect(board.totals).toEqual({ reused: 4, guarded: 9, recalled: 1, used: 0, recorded: 7, since: Date.parse('2026-09-12T10:00:00Z') / 1000 })
   const lines = boardLines(board, 100).map(text)
   const head = lines.indexOf(`Compound interest  since ${dateText(board.totals!.since, now)}`)
   expect(head, lines.join('\n')).toBe(lines.findIndex(l => l === '') + 1)
   expect(head < lines.indexOf('Open')).toBe(true)
-  expect(lines[head + 1]).toBe('  ◆ 4 reuses offered  ■ 9 calls stopped by a guard  ↺ 1 lesson recalled  ✔ 7 lessons recorded')
+  const lines120 = boardLines(board, 120).map(text)
+  expect(lines120[lines120.indexOf(lines[head]!) + 1]).toBe('  ◆ 4 reuses offered  ■ 9 calls stopped by a guard  ↺ 1 lesson recalled  ▸ 0 skills used  ✔ 7 lessons recorded')
+  // At 100 columns the five do not fit one row: the last goes to the next, whole.
+  expect(lines.slice(head + 1, head + 3)).toEqual(['  ◆ 4 reuses offered  ■ 9 calls stopped by a guard  ↺ 1 lesson recalled  ▸ 0 skills used', '  ✔ 7 lessons recorded'])
   const row = boardLines(board, 100)[head + 1]!
   expect(row.find(s => s.text.includes('■'))!.color).toBe(NOTES.guard.color)
   // A narrow pane wraps the totals; it never cuts them.
   const narrow = boardLines(board, 30).map(text)
   const at = narrow.indexOf('Compound interest')
-  expect(narrow.slice(at, at + 6)).toEqual(['Compound interest', `  since ${dateText(board.totals!.since, now)}`, '  ◆ 4 reuses offered', '  ■ 9 calls stopped by a guard', '  ↺ 1 lesson recalled', '  ✔ 7 lessons recorded'])
+  expect(narrow.slice(at, at + 7)).toEqual(['Compound interest', `  since ${dateText(board.totals!.since, now)}`, '  ◆ 4 reuses offered', '  ■ 9 calls stopped by a guard', '  ↺ 1 lesson recalled', '  ▸ 0 skills used', '  ✔ 7 lessons recorded'])
   // Nothing is claimed that the log cannot support.
   expect(lines.join(' ')).not.toMatch(/saved|tokens|minutes/)
   // An empty log, and a status from a CLI that totals nothing.
@@ -671,7 +676,7 @@ test('a pane with nothing to show says so', async () => {
   const lines = boardLines(empty, 60).map(text)
   expect(lines[0]).toBe('✔ healthy  1 checks')
   expect(lines).toContain('Open  nothing waits for anyone')
-  expect(lines).toContain('  nothing was reused, guarded or recalled yet')
+  expect(lines).toContain('  nothing was reused, guarded, recalled or used yet')
   expect(lines).toContain('  no events yet')
   const broken = { ...empty, problem: 'compound status could not start' }
   expect(boardLines(broken, 60).map(text)).toEqual(['✖ compound status could not start'])
@@ -837,7 +842,7 @@ test('the list of every lesson is what the CLI printed: lessons, guards and skil
     ['never-used', 'user', 'lesson'],
     ['a-skill-with-a-very-long-name-that-goes-on-and-on', 'user', 'skill'],
   ])
-  expect(items[0]).toEqual({ name: 'build-needs-profile', level: 'project', kind: 'lesson', reuse: 4, guards: 0, recall: 2, flag: 'ineffective', description: 'Use when the build fails without a profile.' })
+  expect(items[0]).toEqual({ name: 'build-needs-profile', level: 'project', kind: 'lesson', reuse: 4, guards: 0, recall: 2, use: 0, flag: 'ineffective', description: 'Use when the build fails without a profile.' })
   expect(items[3]!.reuse + items[3]!.guards + items[3]!.recall).toBe(0)
   expect(itemsFrom('not json')).toBe(undefined)
   expect(itemsFrom('{}')).toBe(undefined)
@@ -848,7 +853,7 @@ test('the all-lessons view lists every lesson and skill by level, each a row to 
   const items = itemsFrom(LIST)!
   const lines = allLines(items, '', 100)
   const shown = lines.map(text)
-  expect(shown[0]).toBe('All lessons  3 lessons (1 guard)  1 skill  ◆ reused  ■ guarded  ↺ recalled')
+  expect(shown[0]).toBe('All lessons  3 lessons (1 guard)  1 skill  ◆ reused  ■ guarded  ↺ recalled  ▸ used')
   expect(shown).toContain('project  2 lessons (1 guard)  0 skills')
   expect(shown).toContain('user  1 lesson (0 guards)  1 skill')
   expect(shown).toContain('general  nothing recorded')
@@ -856,9 +861,9 @@ test('the all-lessons view lists every lesson and skill by level, each a row to 
   // Every row is something to press, in the CLI's order, and opens its whole name.
   expect(lines.flatMap(l => l.filter(s => s.key !== undefined)).map(s => s.key)).toEqual(items.map(i => openKey(i.name)))
   // A name has at most 32 cells, and the description what the row has left.
-  expect(shown).toContain('  build-needs-profile               lesson  ◆  4  ■  0  ↺  2  Use when the build fails without a pr…')
-  expect(shown).toContain('  no-marker-echo                    guard   ◆  0  ■ 12  ↺  0  Use when a command echoes GUARDED_MAR…')
-  expect(shown).toContain('  a-skill-with-a-very-long-name-t…  skill   ◆  0  ■  0  ↺  0  Use when a skill is wanted.')
+  expect(shown).toContain('  build-needs-profile               lesson  ◆  4  ■  0  ↺  2  ▸  0  Use when the build fails withou…')
+  expect(shown).toContain('  no-marker-echo                    guard   ◆  0  ■ 12  ↺  0  ▸  0  Use when a command echoes GUARD…')
+  expect(shown).toContain('  a-skill-with-a-very-long-name-t…  skill   ◆  0  ■  0  ↺  0  ▸  0  Use when a skill is wanted.')
   // A count is in its counter's colour, a zero is dim; a guard and a skill are told apart from a lesson.
   const guard = lines[shown.findIndex(l => l.includes('no-marker-echo'))]!
   expect(guard.find(s => s.text.trim() === 'guard')!.color).toBe(NOTES.guard.color)
@@ -867,7 +872,7 @@ test('the all-lessons view lists every lesson and skill by level, each a row to 
   const weak = lines[shown.findIndex(l => l.includes('build-needs-profile'))]!
   expect(weak.find(s => s.key !== undefined)!.color).toBe(WEAK.color)
   // Narrower, the description goes, then the counters; the name and the kind stay.
-  expect(allLines(items, '', 60).map(text)).toContain('  no-marker-echo                    guard   ◆  0  ■ 12  ↺  0')
+  expect(allLines(items, '', 60).map(text)).toContain('  no-marker-echo              guard   ◆  0  ■ 12  ↺  0  ▸  0')
   expect(allLines(items, '', 40).map(text)).toContain(`  ${'no-marker-echo'.padEnd(30)}  guard`)
   expect(allLines(items, '', 30).map(text)).toContain('  a-skill-with-a-very…  skill')
   for (const columns of [24, 30, 40, 60, 100]) {
@@ -908,7 +913,7 @@ test('one lesson is what `compound show --json` printed: its facts, its counters
   expect(lines.slice(0, 9)).toEqual([
     'zsh-equals-word',
     'user · guard · ineffective',
-    '◆ 0 reused  ■ 2 guarded  ↺ 3 recalled',
+    '◆ 0 reused  ■ 2 guarded  ↺ 3 recalled  ▸ 0 used',
     'last fired 25s ago (recalled)',
     'guard pattern',
     '  (^|[;&|]\\s*)echo\\s+=+',
@@ -925,7 +930,7 @@ test('one lesson is what `compound show --json` printed: its facts, its counters
   expect(lines.join('\n')).not.toContain('---')
   // A lesson that is no guard, never fired, with nothing attached.
   const plain = detailFrom(JSON.stringify({ name: 'plain', level: 'project', kind: 'skill', description: 'Use when.', path: '/p', match: [], counts: {}, ineffective: false, body: 'Body.', last: null, files: [] }), at)!
-  expect(detailLines(plain, 60).map(text)).toEqual(['plain', 'project · skill', '◆ 0 reused  ■ 0 guarded  ↺ 0 recalled', 'never fired', '/p', '', 'Use when.', '', 'Body.'])
+  expect(detailLines(plain, 60).map(text)).toEqual(['plain', 'project · skill', '◆ 0 reused  ■ 0 guarded  ↺ 0 recalled  ▸ 0 used', 'never fired', '/p', '', 'Use when.', '', 'Body.'])
   expect(detailLines({ ...plain, body: '' }, 60).map(text).slice(-1)).toEqual(['(no text)'])
 })
 

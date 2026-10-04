@@ -5,14 +5,15 @@ import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import {
   BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, sameCall,
-  heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, reportsEvents, reusable, reuseContext, reuseStatus,
-  shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
-  type Failure, type Held, type Turn,
+  heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
+  reuseContext, reuseStatus, shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
+  unsettledContext, usedStatus, userOrigin,
+  type Failure, type Held, type Repeat, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
-  parseTimedOut, parseUnsettled, settlers,
+  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
+  parseTimedOut, parseUnsettled, parseUsed, settlers,
   type Earlier, type Event, type Found, type Item,
 } from './store'
 import {
@@ -36,6 +37,14 @@ import {
 //
 // And once per session, at its first typed prompt, it tells the session what earlier
 // sessions in this project left unsettled.
+//
+// Two more things are seen. A SKILL THAT IS USED: when the engine expands a skill's prompt
+// (`skill.prompt`: the Skill tool, a typed `/name`, a preload, one event for each), the CLI
+// is asked to count it (`compound use`), which it does for a skill it lists. That is done
+// AFTER the hook has answered, so the skill waits for nothing. A REQUEST THAT KEEPS COMING
+// BACK: when the reuse check's judge names earlier requests of the same kind, made in
+// enough other sessions, and no recorded work covers the request, the note added to the
+// prompt offers to make it a skill, once per session per kind of request.
 //
 // WHAT IS OWED, AND WHAT SETTLED IT, IS THE CLI'S TO SAY. While the session owes a lesson
 // or a strengthening, the mod asks `compound events --unsettled --session S` after EVERY
@@ -200,6 +209,7 @@ async function readSettings($: EngineInterface): Promise<{ off: boolean; quiet: 
     recurLimit: await $.env.get('COMPOUND_RECUR_LIMIT'),
     model: await $.env.get('COMPOUND_MODEL'),
     judgeTimeout: await $.env.get('COMPOUND_JUDGE_TIMEOUT'),
+    repeatMin: await $.env.get('COMPOUND_REPEAT_MIN'),
   })
   settings = { at: Date.now(), off: isSwitchedOff, quiet, knobs: found }
   return settings
@@ -801,14 +811,17 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
   if (memo !== undefined) {
     // The same prompt, project and store as a verdict the CLI holds: no model is asked.
     const again = memo.items.map(n => items.find(i => i.name === n)).filter((i): i is Item => i !== undefined)
-    const context = memo.verdict === 'named' ? reuseContext(again, memo.earlier, await cliPath($)) : ''
-    await ruled($, 'reuse', context !== '' ? 'named' : memo.verdict === 'named' ? 'nothing' : memo.verdict, { text: '', ms: 0, reason: '' }, {
+    // The memo also knows which sessions asked this very request since it was judged. A
+    // request that builds nothing reuses nothing, and can still be one that keeps coming back.
+    const repeat = await repeated($, sid, again, [...memo.earlier, ...memo.repeats], memo.asked, k, { ...asked, memo: true })
+    const context = reuseContext(memo.verdict === 'not-substantial' ? [] : again, memo.verdict === 'not-substantial' ? [] : memo.earlier, await cliPath($), repeat)
+    await ruled($, 'reuse', memo.verdict === 'not-substantial' ? memo.verdict : context !== '' ? 'named' : 'nothing', { text: '', ms: 0, reason: '' }, {
       ...asked,
       memo: true,
-      ...(context === '' ? {} : { named: [...again.map(i => i.name), ...memo.earlier.map(e => e.id)] }),
+      ...(context === '' ? {} : { named: [...again.map(i => i.name), ...memo.earlier.map(e => e.id), ...also(repeat, memo.earlier)] }),
     })
     if (context === '') return ''
-    return reuseNamed($, again, memo.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: 0, memo: true })
+    return reuseNamed($, again, memo.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: 0, memo: true }, repeat)
   }
   // Nothing reached the floor and nothing like it was asked before: no model call is made.
   if (items.length === 0 && candidates.length === 0) return ''
@@ -824,26 +837,95 @@ async function reuseJudged($: EngineInterface, sid: string, text: string, reques
     await fail($, 'reuse.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return ''
   }
-  const context = answer.substantial ? reuseContext(answer.items, answer.earlier, await cliPath($)) : ''
+  // The earlier requests of the same kind: the ones that asked for the same deliverable, and
+  // the ones the judge named as the same procedure asked for again.
+  const alike = [...answer.earlier, ...answer.repeats.filter(e => !answer.earlier.includes(e))]
+  // A prompt that builds nothing (a routine to run) is given no existing work, and may still
+  // be offered a skill for the routine: `parseReuse` gives it no items and no covering requests.
+  const repeat = await repeated($, sid, answer.items, alike, [], k, asked)
+  const context = reuseContext(answer.items, answer.earlier, await cliPath($), repeat)
   const verdict = !answer.substantial ? 'not-substantial' : context === '' ? 'nothing' : 'named'
   await ruled($, 'reuse', verdict, reply, {
     ...asked,
-    ...(context === '' ? {} : { named: [...answer.items.map(i => i.name), ...answer.earlier.map(e => e.id)] }),
+    ...(context === '' ? {} : { named: [...answer.items.map(i => i.name), ...answer.earlier.map(e => e.id), ...also(repeat, answer.earlier)] }),
     ...(answer.unquoted > 0 ? { unquoted: answer.unquoted } : {}),
   })
   // The verdict is kept by the CLI, so this prompt asked again against this store costs no model call.
-  if (found.key !== '') await cli($, ['memo'], memoOf(found.key, verdict, answer.items, answer.earlier))
+  // The verdict that is kept is the judge's own: an offer is made anew from it each time.
+  const kept = !answer.substantial ? 'not-substantial' : answer.items.length + answer.earlier.length === 0 ? 'nothing' : 'named'
+  if (found.key !== '') await cli($, ['memo'], memoOf(found.key, kept, answer.items, answer.earlier, alike))
   if (context === '') return ''
   // What the check added to the prompt, in milliseconds: gathering, and the judge.
-  return reuseNamed($, answer.items, answer.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: reply.ms })
+  return reuseNamed($, answer.items, answer.earlier, context, { words: found.words, candidates: candidates.length, ...asked, ms: Date.now() - began, gather_ms: gatheredMs, judge_ms: reply.ms }, repeat)
 }
 
-// Something was named: the `reuse` event, the status entry and the band say so.
-async function reuseNamed($: EngineInterface, items: readonly Item[], earlier: readonly Earlier[], context: string, more: Record<string, unknown>): Promise<string> {
-  await log($, { type: 'reuse', lessons: items.map(i => i.name), prompts: earlier.map(e => e.id), ...more })
-  $.ui.status(reuseStatus(items.map(i => i.name), earlier.length))
-  await paint($, (band, now) => reuseFound(band, items.map(i => i.name), earlier.length, now))
+// The ids of the earlier requests an offer rests on that are not already named as covering the request.
+function also(repeat: Repeat | undefined, earlier: readonly Earlier[]): string[] {
+  return repeat === undefined ? [] : repeat.rows.filter(e => !earlier.includes(e)).map(e => e.id)
+}
+
+// A request that keeps coming back: made in at least COMPOUND_REPEAT_MIN sessions, this one
+// included, with no recorded work that covers it. The offer is made once per session per
+// kind of request (a claim), and a `repeat` event says it was made. undefined otherwise.
+async function repeated($: EngineInterface, sid: string, items: readonly Item[], alike: readonly Earlier[], askedBy: readonly string[], k: Knobs, more: Record<string, unknown>): Promise<Repeat | undefined> {
+  try {
+    const times = askedTimes(alike, askedBy, sid)
+    if (!repeatDue(items, times, k.repeatMin)) return undefined
+    if (!(await firstTime($, sid, `repeat-${repeatKey(alike)}`))) return undefined
+    await log($, { type: 'repeat', times, prompts: alike.map(e => e.id), ...more })
+    return { times, rows: alike }
+  } catch (err) {
+    await fail($, 'repeat', err)
+    return undefined
+  }
+}
+
+// Something was named: the `reuse` event, the status entry and the band say so. With only
+// an offer to make a skill there is no reuse: the offer's own event was written.
+async function reuseNamed($: EngineInterface, items: readonly Item[], earlier: readonly Earlier[], context: string, more: Record<string, unknown>, repeat?: Repeat): Promise<string> {
+  if (items.length + earlier.length > 0) {
+    await log($, { type: 'reuse', lessons: items.map(i => i.name), prompts: earlier.map(e => e.id), ...more })
+    $.ui.status(reuseStatus(items.map(i => i.name), earlier.length))
+    await paint($, (band, now) => reuseFound(band, items.map(i => i.name), earlier.length, now))
+  }
+  if (repeat !== undefined) {
+    $.ui.status(repeatStatus(repeat.times))
+    await paint($, (band, now) => noted(band, 'repeat', `${repeat.times} sessions`, now, 'a skill is on offer'))
+  }
   return context
+}
+
+// ---- a skill that is used ---------------------------------------------------------------
+
+const SKILL_NAME = 200
+// Two copies of the mod in one session each see the expansion: one counts it. The claim is
+// per skill and 20-second window, as the reuse check's is.
+const USE_WINDOW_S = 20
+
+// A session invoked a skill. The CLI decides whether it is one compound counts (a skill it
+// lists, the package's `learn` and `reuse` left out) and writes the `use` event; the band
+// and the status entry say so. Called without being awaited, after the hook has answered:
+// the skill's expansion waits for none of this. Never rejects.
+async function skillUsed($: EngineInterface, skill: string): Promise<void> {
+  try {
+    const name = oneLine(skill, SKILL_NAME)
+    if (name === '' || (await off($))) return
+    const sid = await $.session.id()
+    if (!(await firstTime($, sid, `use-${name}-${Math.floor(nowS() / USE_WINDOW_S)}`))) return
+    const ran = await cli($, ['use', '--json', '--', name])
+    if (ran === undefined) return
+    const used = parseUsed(ran.stdout)
+    if (used === undefined) {
+      await fail($, 'use.parse', `compound use --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
+      return
+    }
+    if (!used.used) return
+    $.ui.status(usedStatus(used.name))
+    await paint($, (band, now) => noted(band, 'used', used.name, now, used.level))
+    boardStale($)
+  } catch (err) {
+    await fail($, 'use', err).catch(() => undefined)
+  }
 }
 
 async function onPrompt($: EngineInterface, raw: string, kind: string | undefined, midTurn: boolean): Promise<string[]> {
@@ -1386,6 +1468,14 @@ export const register: Register = on => {
     failQuietly($, 'prompt.submit', `${next.error.kind}: ${next.error.message ?? ""}`)
     return next(e)
   })
+
+  // A skill's prompt is expanded: by the Skill tool, by a typed `/name`, or as a preload. One
+  // event for each, so the use is counted here and nowhere in the tool-call hook. The hook
+  // answers at once; the counting goes on behind it.
+  on('skill.prompt', ($, e, next) => {
+    void skillUsed($, e.skill)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
     const tool = String(e.tool)
