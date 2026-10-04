@@ -4,7 +4,7 @@ import type { CompoundBand, CompoundBoard, CompoundBusyKind } from '../types'
 import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import {
-  BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli,
+  BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, sameCall,
   heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, reportsEvents, reusable, reuseContext, reuseStatus,
   shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
@@ -137,6 +137,9 @@ const noGuards = new Set<string>()
 // The tools some guard applies to, as a session's last `check` said: before a call of any
 // other tool nothing can hit, so no call is made. Forgotten when `noGuards` is.
 const guardTools = new Map<string, Set<string>>()
+// What a guard refused, as `<session>:<agent loop>:<tool>`, until that loop's next call of
+// the tool: a `retry` event then says whether it was the refused call sent again.
+const refusedCalls = new Map<string, { lessons: string[]; text: string }>()
 // The events of a session's own CLI calls that were already toasted, per session.
 const told = new Map<string, Set<string>>()
 // What each session owes, as the CLI last said: the ids of its unsettled captures, the
@@ -894,7 +897,7 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
 // THE PRE-CALL PATH MAKES ONE CLI CALL, `check`, and no listing. The reply also counts the
 // lessons that carry a `match`; when there is none, nothing can hit, and the calls that
 // follow are not held for a process start at all.
-async function guard($: EngineInterface, sid: string, tool: string, input: Record<string, unknown>): Promise<string | undefined> {
+async function guard($: EngineInterface, sid: string, loop: string, tool: string, input: Record<string, unknown>): Promise<string | undefined> {
   if (noGuards.has(sid)) return undefined
   // A lesson's patterns are tested against the calls of the tools it names (Bash, unless it
   // says otherwise): before a call of a tool no guard applies to, nothing is asked.
@@ -950,12 +953,28 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
   }
   const first = fresh[0]
   if (first === undefined) return undefined
-  const text = callText(tool, input).slice(0, LOGGED_CALL)
+  const whole = callText(tool, input)
+  const text = whole.slice(0, LOGGED_CALL)
   const ms = Date.now() - began
-  for (const h of fresh) await log($, { type: 'guard', lesson: h.name, tool, text, ms })
+  // `watched`: this loop's next call of the tool is logged as a `retry` event.
+  for (const h of fresh) await log($, { type: 'guard', lesson: h.name, tool, text, ms, watched: true })
+  refusedCalls.set(`${loop}:${tool}`, { lessons: fresh.map(h => h.name), text: whole })
   $.ui.status(`guard ${first.name}`)
   await paint($, (band, now) => noted(band, 'guard', fresh.length > 1 ? `${first.name} +${fresh.length - 1}` : first.name, now, `${tool === 'Bash' ? '' : `${tool} `}${oneLine(redact(text), 60)}`))
   return guardReason(fresh, await cliPath($))
+}
+
+// What a loop did with a tool after a guard refused its call: one `retry` event for the
+// first call of that tool that follows, saying whether it was the same call. It is written
+// after that call has run (or was itself refused), so the call does not wait for it. A
+// call of the CLI itself is not that call: a refused session reads the lesson first.
+function refusedBefore(loop: string, tool: string, input: Record<string, unknown>): Record<string, unknown> | undefined {
+  const key = `${loop}:${tool}`
+  const was = refusedCalls.get(key)
+  if (was === undefined) return undefined
+  refusedCalls.delete(key)
+  const text = callText(tool, input)
+  return { type: 'retry', lessons: was.lessons, tool, same: sameCall(was.text, text), text: text.slice(0, LOGGED_CALL) }
 }
 
 // ---- moments 3 and 4: recall and capture ----------------------------------------------
@@ -1374,6 +1393,7 @@ export const register: Register = on => {
     const verb = tool === 'Bash' && typeof input.command === 'string' ? cliCall(input.command) : undefined
     let sid = ''
     let recording: string | undefined
+    let retry: Record<string, unknown> | undefined
     try {
       if (await off($)) return next(e)
       sid = await $.session.id()
@@ -1381,8 +1401,13 @@ export const register: Register = on => {
       turns.set(sid, turnAfterCall(turns.get(sid) ?? turnAfterPrompt(undefined, nowS(), false), e.agentId))
       // The CLI's own calls are not guarded: a lesson's text quotes the mistake it is about.
       if (guarded(tool) && verb === undefined) {
-        const deny = await guard($, sid, tool, input)
-        if (deny !== undefined) return { deny }
+        const loop = `${sid}:${e.agentId ?? 'main'}`
+        retry = refusedBefore(loop, tool, input)
+        const deny = await guard($, sid, loop, tool, input)
+        if (deny !== undefined) {
+          if (retry !== undefined) await log($, retry)
+          return { deny }
+        }
       }
       // The session is writing a lesson: the band says so while the CLI runs.
       if (verb === 'add') {
@@ -1402,6 +1427,11 @@ export const register: Register = on => {
       await paint($, band => checkEnded(band, id))
     }
     if (sid === '') return ran
+    try {
+      if (retry !== undefined) await log($, retry)
+    } catch (err) {
+      await fail($, 'retry', err)
+    }
     try {
       // While something is owed, every call may be the one that settled it, whatever its
       // tool and its text: the CLI is asked. With nothing owed, nothing is asked.

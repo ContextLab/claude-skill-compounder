@@ -97,6 +97,7 @@ export const WORDS: Record<string, string> = {
   rm: 'removed',
   judge: 'judged',
   error: 'error',
+  retry: 'retried',
 }
 
 export function eventWord(type: string): string {
@@ -536,8 +537,9 @@ export function boardFrom(status: string, events: string, session: string, now: 
     .filter(l => l.name !== '')
     .sort((a, b) => b.reuse + b.guards + b.recall - (a.reuse + a.guards + a.recall) || a.name.localeCompare(b.name))
     .slice(0, 12)
-  // The judge's verdicts are in the log to be measured, not to be read as what happened.
-  const rows = (Array.isArray(parsed(events)) ? list(parsed(events)) : list(s.recent)).filter(e => str(e.type) !== 'judge')
+  // The judge's verdicts and the call after a refusal are in the log to be measured
+  // (`compound report`), not to be read as what happened.
+  const rows = (Array.isArray(parsed(events)) ? list(parsed(events)) : list(s.recent)).filter(e => str(e.type) !== 'judge' && str(e.type) !== 'retry')
   const recent: CompoundRecent[] = rows.slice(-20).map(e => {
     const tail = eventTail(e)
     return { at: Math.floor(Date.parse(str(e.ts)) / 1000) || 0, type: str(e.type), text: eventText(e), ...(tail === '' ? {} : { tail }) }

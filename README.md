@@ -408,6 +408,7 @@ each one with its output.
 | remove a lesson | `compound rm <name>` (`--force` for a skill) |
 | switch off a lesson that ships with compound | `compound disable <name>`; `compound enable <name>` switches it back on |
 | record a lesson that holds only on one platform or shell | `compound add ... --platform darwin` or `--shell zsh` |
+| see what the event log says compound did, each figure as a count over its total | `compound report` (`--since <time>`, `--until <time>`, `--project <path>`, `--json`) |
 | hide the band | set `COMPOUND_QUIET` to `1` (see [Settings](#settings)) |
 | switch compound off | set `COMPOUND_OFF` to `1` (see [Settings](#settings)) |
 

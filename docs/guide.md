@@ -29,6 +29,7 @@ Contents:
 - [Share lessons with your team](#share-lessons-with-your-team)
 - [Switch compound off, or make it quiet](#switch-compound-off-or-make-it-quiet)
 - [Read `compound status`](#read-compound-status)
+- [Read `compound report`](#read-compound-report)
 - [Read the event log](#read-the-event-log)
 
 Outputs below are real. Paths are shown for a user named `me` working in a project named
@@ -606,6 +607,152 @@ The rows under `Open`:
 The command exits 1 when a health check fails. `compound status --json` prints the same
 data as JSON.
 
+## Read `compound report`
+
+`compound status` says what is recorded and what is open. `compound report` says what the
+event log shows compound did with it: how captures ended, what a session sent after a
+guard refused a call, how often a recalled lesson was the wrong one, what the reuse check
+answered and what all of it cost in time. It reads the log and writes nothing.
+
+```
+$ compound report
+Window
+  2026-09-27T04:00:00Z to 2026-10-02T04:35:00Z (oldest 27 Sep, newest 23h)
+  93 events in 50 sessions
+  A percentage, a median and a 90th percentile are printed for 10 or more; fewer says "n is too
+  small". What followed an event is looked for in the whole log.
+
+The learn loop
+  captures                 11
+  a lesson recorded        6/11 (54.5%)
+  declined                 3/11 (27.3%)
+    3  a one-off
+  still unsettled          2/11 (18.2%)
+  expired (over 14 days)   0/11 (0.0%)
+  capture to settlement    n is too small: 9
+  lessons recorded         6 new, 1 rewritten
+  stops refused            debt 0, strengthen 0, nudge 0
+  asked after a long turn  0
+  reminded of unsettled    0
+  moved                    0, 0 candidates left in place
+
+Guards
+  refusals                                   12
+  then a different call                      8/12 (66.7%)
+  then the same call again                   2/12 (16.7%)
+  then no call of that tool                  2/12 (16.7%)
+  the lesson's failure later in the session  0/12 (0.0%)
+  lesson            refused  watched  different  same  none  failed after
+  zsh-equals-word         8        8          4     2     2             0
+  macos-no-timeout        4        4          4     0     0             0
+
+Recall
+  recalls                               13
+  after the lesson's guard refused      0/13 (0.0%)
+  the same lesson recalled again later  10/13 (76.9%)
+  marked ineffective                    3/13 (23.1%)
+  stronger lessons owed                 3
+    rewritten                                           1/3 (n is too small: 3)
+    declined                                            1/3 (n is too small: 3)
+    declined: the lesson does not describe the failure  1/3 (n is too small: 3)
+    lesson removed or moved                             0/3 (n is too small: 3)
+    nothing done                                        1/3 (n is too small: 3)
+  lesson                 recalled  after guard  again  ineffective  wrong lesson
+  zsh-nomatch-glob              5            0      4            0             0
+  ci-poll-in-background         4            0      3            3             1
+  sed-in-place-macos            4            0      3            0             0
+
+Reuse
+  checks made: not measurable. A check that finds no candidate writes no event.
+  checks with a candidate  14
+  put to the judge         13/14 (92.9%)
+  answered from the memo   1/14 (7.1%)
+  verdicts
+    named            4/14 (28.6%)
+    nothing          6/14 (42.9%)
+    not substantial  3/14 (21.4%)
+    unanswered       1/14 (7.1%)
+    unreadable       0/14 (0.0%)
+  offers made  4, with 1 earlier request
+  item                  offered
+  release-notes-format        4
+  scripts/notes.py            1
+  whether an offered item was then used: not measurable from the events this report reads.
+
+The judge
+  model calls        30
+  latency            median 810 ms, p90 1700 ms (n=30)
+  no answer          1/30 (3.3%), in time: 1/30 (3.3%)
+  unreadable answer  0/30 (0.0%)
+  reuse   13  median 920 ms, p90 1235 ms (n=13)
+    named            3/13 (23.1%)
+    nothing          6/13 (46.2%)
+    not substantial  3/13 (23.1%)
+    unanswered       1/13 (7.7%)
+    unreadable       0/13 (0.0%)
+  recall  13  median 720 ms, p90 820 ms (n=13)
+    named       13/13 (100.0%)
+    none        0/13 (0.0%)
+    unanswered  0/13 (0.0%)
+    unreadable  0/13 (0.0%)
+  fix      4  n is too small: 4
+    fix         2/4 (n is too small: 4)
+    known       1/4 (n is too small: 4)
+    none        1/4 (n is too small: 4)
+    unanswered  0/4 (n is too small: 4)
+    unreadable  0/4 (n is too small: 4)
+
+Cost to the user
+  at a prompt, something offered  n is too small: 4
+    of it gathering               n is too small: 4
+    of it the judge               n is too small: 4
+  at a prompt, the judge alone    median 920 ms, p90 1235 ms (n=13)
+  a refused call's check          median 66.5 ms, p90 80 ms (n=12)
+  after a failed call, the judge  median 720 ms, p90 820 ms (n=13)
+  after a fix, the judge          n is too small: 4
+  errors                          1
+    1  reuse.judge
+
+Not measured
+  time or tokens saved: no duration of a failed call or of its fix is logged
+  whether an offered item was then used: no event this report reads says that an offered lesson,
+  skill, script or earlier request was opened or run
+  what followed a refusal whose `guard` event carries no `watched` field: the next call of that tool
+  was not logged for it
+  how many reuse checks were made: a check that finds no candidate writes no event, so only the
+  checks that reached the judge or the memo are counted
+  the time a reuse check took when the judge named nothing: only the judge's `ms` is logged for it
+```
+
+How to read it:
+
+- Every figure is a count over what it is counted among: `8/12 (66.7%)` is 8 of the 12
+  refusals. A percentage, a median and a 90th percentile are printed only for 10 or
+  more. For fewer the line says `n is too small` and gives the n.
+- **Window** says which events were counted. `--since <time>` and `--until <time>` (an
+  ISO 8601 time or epoch seconds) and `--project <path>` narrow it. What followed a
+  counted event, such as the lesson that settled a capture, is looked for in the whole
+  log.
+- **The learn loop**: each capture ended with a lesson recorded, was declined (the
+  reasons are grouped by their opening words), is still unsettled, or expired after 14
+  days.
+- **Guards**: what the session sent next with the same tool after a refusal: a different
+  call, the same call again, or nothing. This is known only for a refusal whose `guard`
+  event carries `watched`; the report says how many do not. `failed after` counts the
+  refusals after which the lesson was recalled beside a failure in the same session.
+- **Recall**: `again` counts the recalls after which the same lesson was recalled once
+  more. A lesson marked ineffective is a stronger lesson owed, and the lines under it say
+  how each debt ended. `wrong lesson` counts the debts declined with a reason that says
+  the lesson does not describe the failure.
+- **Reuse**: only the checks that had a candidate are in the log, so the number of checks
+  made is not printed. Nothing in the log says whether an offered item was opened or run.
+- **The judge** and **Cost to the user**: the model calls and the milliseconds they took,
+  and compound's own errors by where they happened.
+- **Not measured** lists what the log cannot support. No time or tokens saved is claimed.
+
+`compound report --json` prints the same data; each figure is `{"n": 8, "of": 12, "pct":
+66.7}`, with `pct` null where n is too small.
+
 ## Read the event log
 
 Every time compound acts, it appends one line of JSON to
@@ -642,6 +789,8 @@ terminal.
 | `skill` | a lesson became a skill |
 | `rm` | a lesson or skill was removed |
 | `error` | compound itself failed |
+| `judge` | a question was put to the judge model: which question, its verdict and the milliseconds it took |
+| `retry` | the first call of a tool after a guard refused one, and whether it is the same call |
 
 Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`,
 `--unsettled`, `--limit <n>`, and `--json` for the full objects.
