@@ -184,6 +184,7 @@ def git(*args, **kw):
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"})
     return subprocess.run(
         ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "-c", "maintenance.auto=false", "-c", "gc.auto=0",
          "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"] + list(args),
         cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         universal_newlines=True, timeout=120)
@@ -230,7 +231,7 @@ class SupportTest(Case):
     def test_the_script_is_standard_library_only(self):
         with open(SCRIPT) as handle:
             text = handle.read()
-        allowed = {"json", "os", "re", "sys", "time", "datetime", "subprocess", "shutil",
+        allowed = {"json", "os", "re", "sys", "time", "datetime", "subprocess", "shutil", "fcntl",
                    "tempfile", "argparse"}
         import re as _re
         found = set(_re.findall(r"^\s*import (\w+)", text, _re.M))

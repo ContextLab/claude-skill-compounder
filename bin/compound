@@ -173,6 +173,7 @@ EXIT STATUS
     that does not finish inside the budget is named in "timed_out".
 """
 
+import fcntl
 import json
 import os
 import re
@@ -896,6 +897,9 @@ def append_event(event):
     line = (dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
+        # Held across the look and the write: on Linux a reader can see another writer's
+        # append half made, and would take its unfinished last byte for a cut line.
+        fcntl.flock(fd, fcntl.LOCK_EX)
         size = os.fstat(fd).st_size
         if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
             line = b"\n" + line
