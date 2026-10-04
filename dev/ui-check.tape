@@ -204,6 +204,41 @@ Sleep 1s
 Enter
 Sleep 8s
 Screenshot shots/4-pane.png
+
+# The pane's keys. Opened, it has not the keyboard: what is typed goes to the prompt.
+# ctrl+x tab gives it the keys: the ring starts on the first lesson row, the arrows walk
+# the rows, Enter opens the one ringed, `b` goes back, `a` lists every lesson, Esc hands
+# the keyboard back to the prompt.
+Type "typed"
+Sleep 1s
+Screenshot shots/4-pane-typing-goes-to-the-prompt.png
+Backspace 5
+Sleep 500ms
+Ctrl+X
+Tab
+Sleep 1500ms
+Screenshot shots/4-pane-with-the-keys.png
+Enter
+Sleep 3s
+Screenshot shots/4-pane-lesson.png
+Type "b"
+Sleep 2s
+Screenshot shots/4-pane-back.png
+Type "a"
+Sleep 3s
+Screenshot shots/4-pane-all-lessons.png
+Down
+Sleep 1s
+Enter
+Sleep 3s
+Screenshot shots/4-pane-lesson-from-the-list.png
+Type "b"
+Sleep 2s
+Screenshot shots/4-pane-back-to-the-list.png
+Type "b"
+Sleep 2s
+Escape
+Sleep 1s
 Type "/compound status"
 Sleep 1s
 Enter

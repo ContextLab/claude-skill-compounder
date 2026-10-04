@@ -270,6 +270,41 @@ class StatusTest(Case):
     def test_nothing_open_is_said(self):
         self.assertIn("nothing open", self.box.run("status").stdout)
 
+    def test_each_open_row_carries_the_command_the_report_prints_for_it(self):
+        """The pane shows what settles an open row: the JSON carries the very text the
+        report prints, so the two cannot differ."""
+        self.box.add("flaky")
+        for offset in (10, 20):
+            self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + offset)
+        self.box.log({"type": "capture", "call": "c1", "failed": "./build.sh", "fixed": "./build.sh --profile dev"},
+                     COMPOUND_NOW=NOW + 30)
+        data = self.status(COMPOUND_NOW=NOW + 40)
+        owed = data["open"]["unsettled"][0]
+        self.assertEqual(owed["command"], "/compound:learn settle %s" % owed["id"])
+        self.assertEqual(owed["decline"], 'compound skip --settles %s --why "<reason>"' % owed["id"])
+        weak = data["open"]["ineffective"][0]
+        self.assertEqual(weak["command"], "compound add --update --name flaky --match RE")
+        opened = self.box.run("status", COMPOUND_NOW=NOW + 40).stdout.split("Open")[1]
+        for command in (owed["command"], owed["decline"], weak["command"]):
+            self.assertIn(command, opened)
+
+    def test_show_json_carries_the_body_and_when_the_lesson_last_fired(self):
+        """What the pane's lesson view draws: the body without its frontmatter, and the
+        newest reuse, guard or recall that names the lesson."""
+        self.box.add("flaky", "Use when the build fails.", "Pass --profile dev.\n\nIt has no default.\n",
+                     "--match", "build\\.sh$")
+        shown = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 5)
+        self.assertEqual(shown["body"], "Pass --profile dev.\n\nIt has no default.")
+        self.assertNotIn("---", shown["body"])
+        self.assertIn("---", shown["text"])
+        self.assertIsNone(shown["last"], "recording a lesson is not the lesson firing")
+        self.box.log({"type": "guard", "lesson": "flaky"}, COMPOUND_NOW=NOW + 10)
+        self.box.log({"type": "reuse", "lessons": ["other", "flaky"]}, COMPOUND_NOW=NOW + 20)
+        self.box.log({"type": "recall", "lesson": "other"}, COMPOUND_NOW=NOW + 30)
+        last = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 40)["last"]
+        self.assertEqual(last["type"], "reuse")
+        self.assertEqual(last["ts"], [e for e in self.box.read_events() if e["type"] == "reuse"][0]["ts"])
+
 
 if __name__ == "__main__":
     unittest.main()

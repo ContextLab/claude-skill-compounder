@@ -340,8 +340,15 @@ seconds, like the result beside it.
 **3. The `/compound` pane.** Type `/compound` in a session to open a dashboard: health,
 the totals (how often compound offered existing work, stopped a call, gave a lesson
 beside a failure and recorded a lesson), what is open, lessons per level, the most used
-lessons, and recent events. `r` refreshes
-it. `/compound close` closes it. `/compound status` prints the same report as text.
+lessons, and recent events. Each open item is followed by the command that settles it.
+
+The first row of the pane lists its keys. The pane opens without the keyboard, so what
+you type still goes to the prompt: press `ctrl+x tab` (or click the pane) to give it the
+keys, and `Esc` to take them back. Then the arrows (or `Tab`) move over the lesson names
+and `Enter` opens the one selected: its level and kind, its counters, when it last fired,
+its guard patterns and its text. `a` lists every lesson and skill by level, `b` goes
+back, `r` reads everything again and `x` closes the pane. `/compound close` closes it
+too. `/compound status` prints the same report as text.
 
 ![The /compound pane: health, open items, levels, most used lessons, recent events](docs/media/demo-2-pane.png)
 

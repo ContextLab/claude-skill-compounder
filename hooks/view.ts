@@ -1,6 +1,6 @@
 import type {
-  CompoundBand, CompoundBoard, CompoundBusyKind, CompoundCheck, CompoundLesson, CompoundLevel, CompoundNoteKind, CompoundRecent, CompoundStep,
-  CompoundTotals,
+  CompoundBand, CompoundBoard, CompoundBusyKind, CompoundCheck, CompoundDetail, CompoundItem, CompoundLesson, CompoundLevel, CompoundNoteKind, CompoundOpen, CompoundPane,
+  CompoundPaneView, CompoundRecent, CompoundStep, CompoundTotals,
 } from '../types'
 import { oneLine } from './safe'
 
@@ -292,10 +292,13 @@ export function phaseKey(band: CompoundBand | null | undefined, now: number): st
 
 // ---- the band's row --------------------------------------------------------------------
 
-export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean; inverse?: boolean }
+// A segment with a `key` is something to press: the pane draws it as a Button of that key
+// whose label is the text. With a `hotkey` the surface draws the key before the label
+// (`a: all lessons`), which is three cells more.
+export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean; inverse?: boolean; key?: string; hotkey?: string }
 
 export function width(segs: readonly Seg[]): number {
-  return segs.reduce((n, s) => n + [...s.text].length, 0)
+  return segs.reduce((n, s) => n + [...s.text].length + (s.hotkey === undefined ? 0 : 3), 0)
 }
 
 function clip(text: string, room: number): string {
@@ -493,6 +496,14 @@ export function eventTail(e: Record<string, unknown>): string {
   return reuseText([], names(e.prompts).length)
 }
 
+const COMMAND_MAX = 400
+
+// One open row: its text, and the commands the CLI gave for it, each on one line.
+function openRow(text: string, command?: unknown, more?: unknown): CompoundOpen {
+  const [first, second] = [oneLine(str(command), COMMAND_MAX), oneLine(str(more), COMMAND_MAX)]
+  return { text, ...(first === '' ? {} : { command: first }), ...(second === '' ? {} : { more: second }) }
+}
+
 // `compound status --json` and `compound events --json`, as the pane's data. undefined when
 // the status is not the object it should be.
 export function boardFrom(status: string, events: string, session: string, now: number): CompoundBoard | undefined {
@@ -527,11 +538,12 @@ export function boardFrom(status: string, events: string, session: string, now: 
     levels,
     lessons,
     recent,
+    // Each row with the command the CLI gave for it: the text `compound status` prints.
     open: {
-      unsettled: list(open.unsettled).map(u => `${str(u.id)} ${oneLine(str(u.fixed), 50)} (${str(u.age)}${str(u.project) === '' ? '' : `, ${base(str(u.project))}`})`),
-      ineffective: list(open.ineffective).map(i => `${str(i.name)} (recalled ${num(i.recall)} times)`),
-      candidates: list(open.candidates).map(c => `${str(c.lesson)} in ${base(str(c.from))}`),
-      errors: list(open.errors).map(e => oneLine(`${str(e.where)}: ${str(e.message)}`, 100)),
+      unsettled: list(open.unsettled).map(u => openRow(`${str(u.id)} ${oneLine(str(u.fixed), 50)} (${str(u.age)}${str(u.project) === '' ? '' : `, ${base(str(u.project))}`})`, u.command, u.decline)),
+      ineffective: list(open.ineffective).map(i => ({ ...openRow(`${str(i.name)} (recalled ${num(i.recall)} times)`, i.command), ...(str(i.name) === '' ? {} : { lesson: str(i.name) }) })),
+      candidates: list(open.candidates).map(c => openRow(`${str(c.lesson)} in ${base(str(c.from))}`, c.command)),
+      errors: list(open.errors).map(e => openRow(oneLine(`${str(e.where)}: ${str(e.message)}`, 100))),
       skips: list(open.skips).length,
     },
     problem: '',
@@ -613,6 +625,52 @@ function flow(pieces: readonly Seg[][], columns: number, indent: string): Line[]
 function words(text: string, style: Omit<Seg, 'text'> = {}, lead = ''): Seg[][] {
   return text.split(' ').filter(w => w !== '').map((w, i) => [{ ...style, text: i === 0 ? `${lead}${w}` : ` ${w}` }])
 }
+
+// Text on as many lines as it takes, each under `indent` and at most `columns` cells wide:
+// broken at its spaces, and a word longer than a line broken where the line ends. Nothing
+// is cut.
+export function wrapped(text: string, columns: number, indent = '', style: Omit<Seg, 'text'> = {}): Line[] {
+  const room = Math.max(1, columns - indent.length)
+  const rows: string[] = []
+  let line = ''
+  for (const word of text.split(' ').filter(w => w !== '')) {
+    if (line !== '' && [...line].length + 1 + [...word].length <= room) {
+      line = `${line} ${word}`
+      continue
+    }
+    if (line !== '') rows.push(line)
+    let rest = [...word]
+    while (rest.length > room) {
+      rows.push(rest.slice(0, room).join(''))
+      rest = rest.slice(room)
+    }
+    line = rest.join('')
+  }
+  if (line !== '' || rows.length === 0) rows.push(line)
+  return rows.map(row => (indent === '' ? [{ ...style, text: row }] : [{ text: indent }, { ...style, text: row }]))
+}
+
+// The key of the Button that opens a lesson, and the lesson of such a key.
+const OPEN_KEY = 'open:'
+
+export function openKey(name: string): string {
+  return `${OPEN_KEY}${name}`
+}
+
+export function openedBy(key: string): string | undefined {
+  return key.startsWith(OPEN_KEY) ? key.slice(OPEN_KEY.length) : undefined
+}
+
+// The first thing to press in a view's lines: where the pane's ring starts.
+export function firstKey(lines: readonly Line[]): string | undefined {
+  return lines.flatMap(line => line).find(seg => seg.key !== undefined)?.key
+}
+
+// What reads the errors: no command settles one, and they leave the pane after seven days.
+const READ_ERRORS = 'compound events --type error'
+const COMMAND_INDENT = '      '
+// From this width an open row also shows the second way to settle it.
+const MORE_COLUMNS = 60
 
 const LABEL_ROOM = 16
 const BAR_CELLS = 6
@@ -709,16 +767,27 @@ export function boardLines(board: CompoundBoard | null | undefined, columns: num
   const o = board.open
   const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length
   out.push([], ...flow([[{ text: 'Open', bold: true }], ...(waiting === 0 ? words('nothing waits for anyone', { dim: true }, '  ') : [])], columns, '  '))
-  const group = (rows: readonly string[], look: Look, what: string) => {
+  // Under each row, the command that settles it, whole: broken at its spaces where the pane
+  // is narrow, never cut. The second way to settle a row is shown where there is room for it.
+  // A row that names a lesson opens it.
+  const group = (rows: readonly CompoundOpen[], look: Look, what: string, command = '') => {
     if (rows.length === 0) return
     out.push(...flow([[{ text: `  ${look.glyph}`, color: look.color }], ...words(what, { color: look.color, bold: true }, ' ')], columns, '    '))
-    for (const row of rows.slice(0, 3)) out.push([{ text: `    ${row}`, dim: true }])
+    for (const row of rows.slice(0, 3)) {
+      const named = row.lesson !== undefined && row.lesson !== '' && row.text.startsWith(row.lesson) ? row.lesson : undefined
+      out.push(named === undefined
+        ? [{ text: `    ${row.text}`, dim: true }]
+        : [{ text: '    ' }, { text: named, key: openKey(named) }, { text: row.text.slice(named.length), dim: true }])
+      if (row.command !== undefined) out.push(...wrapped(row.command, columns, COMMAND_INDENT))
+      if (row.more !== undefined && columns >= MORE_COLUMNS) out.push(...wrapped(`or ${row.more}`, columns, COMMAND_INDENT, { dim: true }))
+    }
     if (rows.length > 3) out.push([{ text: `    and ${rows.length - 3} more`, dim: true }])
+    if (command !== '') out.push(...wrapped(command, columns, COMMAND_INDENT))
   }
   group(o.unsettled, OWED, count(o.unsettled.length, 'lesson owed', 'lessons owed'))
   group(o.ineffective, WEAK, count(o.ineffective.length, 'ineffective lesson'))
   group(o.candidates, eventLook('candidate'), count(o.candidates.length, 'lesson that could move to the user level', 'lessons that could move to the user level'))
-  group(o.errors, ERROR, `${count(o.errors.length, 'error')} in the last 7 days`)
+  group(o.errors, ERROR, `${count(o.errors.length, 'error')} in the last 7 days`, READ_ERRORS)
   if (o.skips > 0) out.push([{ text: `  ${NOTES.declined.glyph} `, dim: true }, { text: `${count(o.skips, 'lesson')} declined`, dim: true }])
 
   out.push([], ...levelLines(board.levels, columns))
@@ -750,8 +819,12 @@ export function boardLines(board: CompoundBoard | null | undefined, columns: num
   ])
   if (used.length === 0) out.push(...flow(words('nothing was reused, guarded or recalled yet', { dim: true }, '  '), columns, '  '))
   for (const l of shown) {
+    const name = clip(l.name, named)
     out.push([
-      { text: `  ${clip(l.name, named).padEnd(named)}`, ...(l.flag === 'ineffective' ? { color: WEAK.color } : {}) },
+      { text: '  ' },
+      // The name is the row's button: a press opens the lesson.
+      { text: name, key: openKey(l.name), ...(l.flag === 'ineffective' ? { color: WEAK.color } : {}) },
+      { text: ' '.repeat(named - [...name].length) },
       ...kinds.flatMap(([look, , of], i) => {
         const n = of(l)
         const filled = bar(n, most, bars)
@@ -784,4 +857,277 @@ export function boardLines(board: CompoundBoard | null | undefined, columns: num
     out.push(width(row) + width(tail) <= columns ? [...row, ...tail] : row)
   }
   return out.map(l => fit(l, columns))
+}
+
+// ---- the pane's views: the keys, every lesson, one lesson --------------------------------
+
+// Why the CLI could not say, on as many lines as it takes.
+function problemLines(problem: string, columns: number): Line[] {
+  return wrapped(problem, columns, '  ').map((line, i) => (i === 0 ? [{ text: `${ERROR.glyph} `, color: ERROR.color }, ...line.slice(1)] : line))
+}
+
+type Strung = { segs: Seg[]; gap: string }
+
+// Pieces in a row, each after its gap, on as many lines as it takes: a piece is never
+// broken and a line never starts with a gap.
+function strung(pieces: readonly Strung[], columns: number): Line[] {
+  const out: Line[] = []
+  let line: Seg[] = []
+  for (const piece of pieces) {
+    const gap: Seg[] = line.length === 0 ? [] : [{ text: piece.gap, dim: true }]
+    if (line.length > 0 && width(line) + width(gap) + width(piece.segs) > columns) {
+      out.push(line)
+      line = [...piece.segs]
+    } else line = [...line, ...gap, ...piece.segs]
+  }
+  if (line.length > 0) out.push(line)
+  return out
+}
+
+// What the key row depends on: the view, whether the pane holds the keyboard, whether its
+// tree is taller than its window, whether the view has rows to press, and whether the
+// surface is a terminal (the keys named here are a terminal's).
+export type PaneKeys = { view: CompoundPaneView; focused: boolean; taller: boolean; rows: boolean; terminal: boolean }
+
+// The key row, the first of every view: what the keyboard does here, then the view's
+// Buttons, each drawn with its hotkey. Keys reach a pane only while it holds the keyboard,
+// which the person gives it (ctrl+x tab, or a click) and takes back (Esc): until then the
+// row says how. While the tree fits its window the arrows walk the rows; a taller tree is
+// scrolled by them, and Tab walks the rows. Too wide for one line, the row shortens its
+// words and then wraps; a key is never dropped.
+export function keyLines(k: PaneKeys, columns: number): Line[] {
+  const build = (short: boolean): Strung[] => {
+    const hints = !k.terminal
+      ? []
+      : !k.focused
+        ? [short ? 'ctrl+x tab: keys' : 'ctrl+x tab for keys']
+        : [...(k.taller ? ['↑↓ scroll'] : []), ...(k.rows ? [k.taller ? 'tab select' : '↑↓ select', 'enter open'] : []), short ? 'esc prompt' : 'esc to the prompt']
+    const keys: (readonly [string, string, string])[] = [k.view === 'board' ? ['all', 'a', short ? 'all' : 'all lessons'] : ['back', 'b', 'back'], ['refresh', 'r', 'refresh'], ['close', 'x', 'close']]
+    return [
+      ...hints.map(hint => ({ segs: [{ text: hint, dim: true }], gap: ' · ' })),
+      ...keys.map(([key, hotkey, label]) => ({ segs: [{ text: label, key, hotkey }], gap: '  ' })),
+    ]
+  }
+  const long = strung(build(false), columns)
+  return long.length <= 1 ? long : strung(build(true), columns)
+}
+
+// `compound list --json`, as the rows of the all-lessons view: every lesson and skill, in
+// the CLI's order. undefined when it is not the list it should be.
+export function itemsFrom(listing: string): CompoundItem[] | undefined {
+  const rows = parsed(listing)
+  if (!Array.isArray(rows)) return undefined
+  return list(rows)
+    .filter(r => str(r.name) !== '' && (str(r.kind) === 'lesson' || str(r.kind) === 'skill'))
+    .map(r => {
+      const counts = record(r.counts) ?? {}
+      return {
+        name: str(r.name),
+        level: str(r.level),
+        kind: str(r.kind) === 'lesson' && names(r.match).length > 0 ? 'guard' : str(r.kind),
+        reuse: num(counts.reuse),
+        guards: num(counts.guard),
+        recall: num(counts.recall),
+        flag: r.ineffective === true ? 'ineffective' : '',
+        description: oneLine(str(r.description), 200),
+      }
+    })
+}
+
+const LEVELS: readonly string[] = ['project', 'user', 'general']
+const KIND_CELL = 6
+const ALL_NAME_MAX = 32
+const DESCRIPTION_MIN = 20
+
+// How many lessons (and guards among them) and how many skills, as the Levels rows say it.
+function tallied(items: readonly CompoundItem[]): [string, string] {
+  const skills = items.filter(i => i.kind === 'skill').length
+  return [`${count(items.length - skills, 'lesson')} (${count(items.filter(i => i.kind === 'guard').length, 'guard')})`, count(skills, 'skill')]
+}
+
+// Every lesson and skill, by level, each row a name to press: its kind, its three counters
+// and when it applies. A pane too narrow drops the description, then the counters; a name
+// and a description are the only things ever cut.
+export function allLines(items: readonly CompoundItem[] | null | undefined, problem: string, columns: number): Line[] {
+  const failed = problem === '' ? [] : problemLines(problem, columns)
+  if (items === null || items === undefined) return failed.length > 0 ? failed : [[{ text: 'Reading the store…', dim: true }]]
+  const kinds: readonly (readonly [Look, string, (i: CompoundItem) => number])[] = [
+    [NOTES.reuse, WORDS.reuse ?? '', i => i.reuse],
+    [NOTES.guard, WORDS.guard ?? '', i => i.guards],
+    [NOTES.recall, WORDS.recall ?? '', i => i.recall],
+  ]
+  const longest = Math.max(0, ...items.map(i => [...i.name].length))
+  const digits = String(Math.max(0, ...items.flatMap(i => [i.reuse, i.guards, i.recall]))).length
+  const counters = kinds.length * (2 + digits) + (kinds.length - 1) * 2
+  const wanted = Math.max(NAME_MIN, Math.min(ALL_NAME_MAX, longest))
+  const fixed = 2 + 2 + KIND_CELL + 2 + counters
+  // The counters are drawn when they leave a name most of its room.
+  const counted = columns - fixed >= Math.min(wanted, 24)
+  const named = Math.max(NAME_MIN, Math.min(wanted, counted ? columns - fixed : columns - 2 - 2 - KIND_CELL))
+  const described = counted ? columns - fixed - named - 2 : 0
+  const [lessons, skills] = tallied(items)
+  const out: Line[] = [...failed, ...flow([
+    [{ text: 'All lessons', bold: true }],
+    [{ text: `  ${lessons}`, dim: true }],
+    [{ text: `  ${skills}`, dim: true }],
+    ...(counted ? kinds.map(([look, word]): Seg[] => [{ text: `  ${look.glyph}`, color: look.color }, { text: ` ${word}`, dim: true }]) : []),
+  ], columns, '  ')]
+  if (items.length === 0) return [...out, [{ text: '  nothing recorded yet', dim: true }]]
+  for (const level of [...LEVELS, ...items.map(i => i.level).filter((l, n, all) => !LEVELS.includes(l) && all.indexOf(l) === n)]) {
+    const mine = items.filter(i => i.level === level)
+    const [mineLessons, mineSkills] = tallied(mine)
+    out.push([], ...flow(mine.length === 0
+      ? [[{ text: level, bold: true }], [{ text: '  nothing recorded', dim: true }]]
+      : [[{ text: level, bold: true }], [{ text: `  ${mineLessons}`, dim: true }], [{ text: `  ${mineSkills}`, dim: true }]], columns, '  '))
+    for (const item of mine) {
+      const name = clip(item.name, named)
+      const row: Seg[] = [
+        { text: '  ' },
+        { text: name, key: openKey(item.name), ...(item.flag === 'ineffective' ? { color: WEAK.color } : {}) },
+        { text: ' '.repeat(named - [...name].length + 2) },
+        { text: item.kind, ...(item.kind === 'guard' ? { color: NOTES.guard.color } : item.kind === 'skill' ? { color: NOTES.skill.color } : { dim: true }) },
+      ]
+      if (counted) {
+        row.push({ text: ' '.repeat(Math.max(0, KIND_CELL - item.kind.length)) })
+        for (const [look, , of] of kinds) {
+          const n = of(item)
+          row.push({ text: '  ' }, { text: `${look.glyph} ${String(n).padStart(digits)}`, ...(n > 0 ? { color: look.color } : { dim: true }) })
+        }
+        if (described >= DESCRIPTION_MIN && item.description !== '') row.push({ text: '  ' }, { text: clip(item.description, described), dim: true })
+      }
+      out.push(row)
+    }
+  }
+  return out.map(l => fit(l, columns))
+}
+
+// How much of a lesson's text the pane keeps, and how many of its lines it draws.
+const BODY_MAX = 60000
+const BODY_LINES = 300
+
+export function loadingDetail(name: string): CompoundDetail {
+  return { name, state: 'loading', problem: '', at: 0, level: '', kind: '', match: [], description: '', body: '', reuse: 0, guards: 0, recall: 0, flag: '', last: null, path: '', files: [] }
+}
+
+export function failedDetail(name: string, problem: string, at: number): CompoundDetail {
+  return { ...loadingDetail(name), state: 'failed', problem: oneLine(problem, 300), at }
+}
+
+// `compound show <name> --json`, as the lesson view's data, read at `now` (milliseconds).
+// undefined when it is not the object it should be.
+export function detailFrom(shown: string, now: number): CompoundDetail | undefined {
+  const d = record(parsed(shown))
+  if (d === undefined || str(d.name) === '') return undefined
+  const counts = record(d.counts) ?? {}
+  const match = names(d.match)
+  const last = record(d.last)
+  const fired = last === undefined ? 0 : Math.floor(Date.parse(str(last.ts)) / 1000) || 0
+  return {
+    name: str(d.name),
+    state: 'ready',
+    problem: '',
+    at: now,
+    level: str(d.level),
+    kind: str(d.kind) === 'lesson' && match.length > 0 ? 'guard' : str(d.kind),
+    match,
+    description: oneLine(str(d.description), 600),
+    body: (typeof d.body === 'string' ? d.body : '').slice(0, BODY_MAX),
+    reuse: num(counts.reuse),
+    guards: num(counts.guard),
+    recall: num(counts.recall),
+    flag: d.ineffective === true ? 'ineffective' : '',
+    last: last === undefined || fired <= 0 ? null : { at: fired, type: str(last.type) },
+    path: oneLine(str(d.path), 400),
+    files: names(d.files),
+  }
+}
+
+// A line of a lesson as the pane may draw it: a tab is two cells, and no control character
+// reaches the terminal.
+function clean(line: string): string {
+  return line.replace(/\t/g, '  ').replace(/[\u0000-\u001f\u007f]/g, '')
+}
+
+// One lesson: its name, level and kind, its counters and when it last fired, its guard
+// patterns, where it is, when it applies, and its text. Nothing is cut: a long line is
+// wrapped under its own indent, and a text longer than BODY_LINES lines ends in a line
+// that says how many more there are and how to read them.
+export function detailLines(detail: CompoundDetail | null | undefined, columns: number): Line[] {
+  if (detail === null || detail === undefined) return [[{ text: 'Reading the lesson…', dim: true }]]
+  const title = wrapped(detail.name, columns, '', { bold: true, ...(detail.flag === 'ineffective' ? { color: WEAK.color } : {}) })
+  if (detail.state === 'loading') return [...title, [{ text: 'Reading the lesson…', dim: true }]]
+  if (detail.state === 'failed') return [...title, ...problemLines(detail.problem, columns)]
+  const kind: Seg = { text: detail.kind, ...(detail.kind === 'guard' ? { color: NOTES.guard.color } : detail.kind === 'skill' ? { color: NOTES.skill.color } : {}) }
+  const counter = (look: Look, n: number, word: string): Strung => ({
+    segs: [{ text: `${look.glyph} `, color: look.color }, { text: String(n), bold: n > 0, ...(n > 0 ? {} : { dim: true }) }, { text: ` ${word}`, dim: true }],
+    gap: '  ',
+  })
+  const when = detail.last === null ? '' : ago(detail.last.at, detail.at)
+  const out: Line[] = [
+    ...title,
+    ...strung([
+      { segs: [{ text: detail.level }], gap: ' · ' },
+      { segs: [kind], gap: ' · ' },
+      ...(detail.flag === '' ? [] : [{ segs: [{ text: detail.flag, color: WEAK.color }], gap: ' · ' }]),
+    ].filter(piece => piece.segs[0]?.text !== ''), columns),
+    ...strung([counter(NOTES.reuse, detail.reuse, WORDS.reuse ?? ''), counter(NOTES.guard, detail.guards, WORDS.guard ?? ''), counter(NOTES.recall, detail.recall, WORDS.recall ?? '')], columns),
+    ...wrapped(detail.last === null ? 'never fired' : `last fired ${/^\d+[smh]$/.test(when) ? `${when} ago` : when} (${eventWord(detail.last.type)})`, columns, '', { dim: true }),
+  ]
+  if (detail.match.length > 0) {
+    out.push([{ text: detail.match.length === 1 ? 'guard pattern' : 'guard patterns', dim: true }])
+    for (const pattern of detail.match) out.push(...wrapped(clean(pattern), columns, '  ', { color: NOTES.guard.color }))
+  }
+  if (detail.files.length > 0) out.push(...wrapped(`attached: ${detail.files.map(clean).join(', ')}`, columns, '', { dim: true }))
+  if (detail.path !== '') out.push(...wrapped(detail.path, columns, '', { dim: true }))
+  if (detail.description !== '') out.push([], ...wrapped(detail.description, columns))
+  out.push([])
+  const lines = detail.body.replace(/\r\n?/g, '\n').split('\n')
+  while (lines.length > 0 && (lines[lines.length - 1] ?? '').trim() === '') lines.pop()
+  if (lines.length === 0) out.push([{ text: '(no text)', dim: true }])
+  for (const raw of lines.slice(0, BODY_LINES)) {
+    const line = clean(raw).trimEnd()
+    if (line === '') out.push([])
+    else if ([...line].length <= columns) out.push([{ text: line }])
+    else {
+      const indent = (/^ */.exec(line)?.[0] ?? '').slice(0, Math.floor(columns / 3))
+      out.push(...wrapped(line.trimStart(), columns, indent))
+    }
+  }
+  if (lines.length > BODY_LINES) out.push(...wrapped(`… ${lines.length - BODY_LINES} more lines: compound show ${detail.name}`, columns, '', { dim: true }))
+  return out
+}
+
+// ---- which view the pane shows -----------------------------------------------------------
+
+export function emptyPane(session: string): CompoundPane {
+  return { session, view: 'board', back: 'board', detail: null, items: null, itemsProblem: '' }
+}
+
+// The pane's view as this session's: another session's starts at the dashboard.
+export function forPane(pane: CompoundPane | null | undefined, session: string): CompoundPane {
+  return pane === null || pane === undefined || pane.session !== session ? emptyPane(session) : pane
+}
+
+// A lesson was pressed: its view opens over the one it was pressed in, and says it is reading.
+export function paneOpening(pane: CompoundPane, name: string): CompoundPane {
+  return { ...pane, view: 'lesson', back: pane.view === 'lesson' ? pane.back : pane.view, detail: loadingDetail(name) }
+}
+
+// The CLI answered for a lesson: drawn only while that lesson is still the one shown.
+export function paneRead(pane: CompoundPane, name: string, detail: CompoundDetail): CompoundPane {
+  return pane.view === 'lesson' && pane.detail?.name === name ? { ...pane, detail } : pane
+}
+
+export function paneAll(pane: CompoundPane): CompoundPane {
+  return { ...pane, view: 'all' }
+}
+
+// Back: from a lesson to the view it was pressed in, from the list to the dashboard.
+export function paneBack(pane: CompoundPane): CompoundPane {
+  return { ...pane, view: pane.view === 'lesson' ? pane.back : 'board' }
+}
+
+// The list was read, or could not be: the rows it had stay, beside why.
+export function paneItems(pane: CompoundPane, items: CompoundItem[] | undefined, problem: string): CompoundPane {
+  return items === undefined ? { ...pane, itemsProblem: oneLine(problem, 300) } : { ...pane, items, itemsProblem: '' }
 }

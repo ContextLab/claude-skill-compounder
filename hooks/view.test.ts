@@ -4,6 +4,7 @@ import {
   ago, bandRow, bar, began, boardFrom, boardLines, BUSY, BUSY_MAX_MS, captured, dateText, emptyBand, ended, erred, ERROR, eventLook, eventTail, eventText, eventWord, FLASH_MS, forSession,
   frameAt, FRAME_MS, FRAMES, FRESH_MS, GONE_MS, greeted, HINT, inventoried, listed, motion, newTurn, noted, NOTES, OWED, phaseAt, phaseKey, reuseFound, reuseIdle, reuseText, settledBy, stepped, synced, trackSegs,
   unfixed, WATCHING, WEAK, weakened, width, WORDS,
+  allLines, detailFrom, detailLines, emptyPane, failedDetail, forPane, itemsFrom, keyLines, loadingDetail, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, wrapped,
   type Seg,
 } from './view'
 
@@ -401,9 +402,9 @@ const STATUS = JSON.stringify({
   ],
   recent: [{ ts: '2026-10-03T12:00:00Z', type: 'guard', lesson: 'no-marker-echo' }],
   open: {
-    ineffective: [{ name: 'build-needs-profile', level: 'project', path: '/p', recall: 2 }],
-    unsettled: [{ id: 'abc123', age: '2h', project: '/work/alpha', failed: './x', fixed: './x --y' }],
-    candidates: [{ lesson: 'zsh-equals-word', from: '/work/beta', seen_in: ['/work/alpha'], command: 'c' }],
+    ineffective: [{ name: 'build-needs-profile', level: 'project', path: '/p', recall: 2, command: 'compound add --update --name build-needs-profile --match RE' }],
+    unsettled: [{ id: 'abc123', age: '2h', project: '/work/alpha', failed: './x', fixed: './x --y', command: '/compound:learn settle abc123', decline: 'compound skip --settles abc123 --why "<reason>"' }],
+    candidates: [{ lesson: 'zsh-equals-word', from: '/work/beta', seen_in: ['/work/alpha'], command: 'COMPOUND_PROJECT=/work/beta compound promote zsh-equals-word --to user' }],
     skips: [{ why: 'a typo' }],
     errors: [{ where: 'reuse.judge', message: 'no answer' }],
   },
@@ -436,10 +437,11 @@ test('the pane\'s data is what the CLI printed: levels, the most used first, eve
     'refuse lesson owed',
     'learn deploy-needs-target',
   ])
-  expect(board.open.unsettled).toEqual(['abc123 ./x --y (2h, alpha)'])
-  expect(board.open.ineffective).toEqual(['build-needs-profile (recalled 2 times)'])
-  expect(board.open.candidates).toEqual(['zsh-equals-word in beta'])
-  expect(board.open.errors).toEqual(['reuse.judge: no answer'])
+  // Each open row carries the command the CLI gave for it, and an ineffective one the lesson it opens.
+  expect(board.open.unsettled).toEqual([{ text: 'abc123 ./x --y (2h, alpha)', command: '/compound:learn settle abc123', more: 'compound skip --settles abc123 --why "<reason>"' }])
+  expect(board.open.ineffective).toEqual([{ text: 'build-needs-profile (recalled 2 times)', lesson: 'build-needs-profile', command: 'compound add --update --name build-needs-profile --match RE' }])
+  expect(board.open.candidates).toEqual([{ text: 'zsh-equals-word in beta', command: 'COMPOUND_PROJECT=/work/beta compound promote zsh-equals-word --to user' }])
+  expect(board.open.errors).toEqual([{ text: 'reuse.judge: no answer' }])
   expect(board.open.skips).toBe(1)
   // With no events reply, the status's own recent rows are the timeline.
   expect(boardFrom(STATUS, '', 's1', T0)!.recent.map(r => r.type)).toEqual(['guard'])
@@ -703,4 +705,290 @@ test('an event\'s line says what it was about', async () => {
   for (const e of [{ type: 'remind', captures: Array.from({ length: 12 }, (_, i) => `c${i}`) }, { type: 'refuse', why: 'strengthen' }, { type: 'nudge', calls: 1234 }]) expect(eventText(e).length <= 16, eventText(e)).toBe(true)
   expect(eventText({ type: 'error', where: 'guard.check', message: 'timed out' })).toBe('guard.check: timed out')
   expect(eventText({ type: 'learn', lesson: 'a', update: true })).toBe('a (rewritten)')
+})
+
+// ---- the pane's drill-down: commands, keys, every lesson, one lesson ----
+
+const READ_ERRORS = 'compound events --type error'
+
+test('each open row says how to settle it: the command the CLI gave, whole, on lines of its own', async () => {
+  const board = boardFrom(STATUS, EVENTS, 's1', T0)!
+  const wide = boardLines(board, 100).map(text)
+  const at = (lines: string[], needle: string) => lines.findIndex(l => l.includes(needle))
+  expect(wide[at(wide, 'abc123 ./x') + 1]).toBe('      /compound:learn settle abc123')
+  expect(wide[at(wide, 'abc123 ./x') + 2]).toBe('      or compound skip --settles abc123 --why "<reason>"')
+  expect(wide[at(wide, 'build-needs-profile (recalled') + 1]).toBe('      compound add --update --name build-needs-profile --match RE')
+  expect(wide[at(wide, 'zsh-equals-word in beta') + 1]).toBe('      COMPOUND_PROJECT=/work/beta compound promote zsh-equals-word --to user')
+  // No command settles an error: the row says how to read them.
+  expect(wide[at(wide, 'reuse.judge: no answer') + 1]).toBe(`      ${READ_ERRORS}`)
+  // The command is brighter than the row it is under.
+  const drawn = boardLines(board, 100)
+  expect(drawn[at(wide, '/compound:learn settle abc123')]!.some(s => s.text.includes('/compound:learn') && s.dim !== true)).toBe(true)
+  // A narrow pane breaks a command at its spaces and cuts nothing of it; the second way to
+  // settle is left to the report.
+  for (const columns of [30, 40]) {
+    const lines = boardLines(board, columns).map(text)
+    const from = at(lines, 'build-needs-profile') + 1
+    const taken = lines.slice(from, lines.findIndex((l, i) => i >= from && !l.startsWith('      ')))
+    expect(taken.map(l => l.trim()).join(' '), `${columns}`).toBe('compound add --update --name build-needs-profile --match RE')
+    expect(taken.length > 1, `${columns}`).toBe(true)
+    expect(lines.some(l => l.includes('--settles')), `${columns}`).toBe(false)
+    expect(lines.map(l => l.trim()).join(' ')).toContain('/compound:learn settle abc123')
+    for (const line of boardLines(board, columns)) expect(width(line) <= columns, `${columns}: ${text(line)}`).toBe(true)
+  }
+  // A status from a CLI that gives no command draws the rows without one.
+  const bare = JSON.parse(STATUS) as { open: { unsettled: Record<string, unknown>[] } }
+  delete bare.open.unsettled[0]!.command
+  delete bare.open.unsettled[0]!.decline
+  const lines = boardLines(boardFrom(JSON.stringify(bare), EVENTS, 's1', T0), 100).map(text)
+  expect(lines[at(lines, 'abc123 ./x') + 1]).toBe('  ▲ 1 ineffective lesson')
+})
+
+test('text is wrapped at its spaces under an indent, and a word longer than the line is broken, never cut', async () => {
+  expect(wrapped('one two three', 9).map(text)).toEqual(['one two', 'three'])
+  expect(wrapped('one two three', 9, '  ').map(text)).toEqual(['  one two', '  three'])
+  expect(wrapped('abcdefghijkl mn', 5).map(text)).toEqual(['abcde', 'fghij', 'kl mn'])
+  expect(wrapped('', 10).map(text)).toEqual([''])
+  for (const line of wrapped('COMPOUND_PROJECT=/a/very/long/path/to/a/project compound promote x --to user', 24, '      ')) expect(width(line) <= 24).toBe(true)
+})
+
+test('a lesson row is something to press: the most used rows and the ineffective rows carry the lesson they open', async () => {
+  const lines = boardLines(boardFrom(STATUS, EVENTS, 's1', T0), 100)
+  const keyed = lines.flatMap(l => l.filter(s => s.key !== undefined))
+  // The ineffective row under Open, then the two most used rows; a lesson never used is not offered here.
+  expect(keyed.map(s => [s.key, s.text])).toEqual([
+    [openKey('build-needs-profile'), 'build-needs-profile'],
+    [openKey('no-marker-echo'), 'no-marker-echo'],
+    [openKey('build-needs-profile'), 'build-needs-profile'],
+  ])
+  // A name cut in a narrow pane still opens the whole name.
+  const narrow = boardLines(boardFrom(STATUS, EVENTS, 's1', T0), 30).flatMap(l => l.filter(s => s.key !== undefined))
+  expect(narrow.every(s => s.key === openKey('build-needs-profile') || s.key === openKey('no-marker-echo'))).toBe(true)
+  expect(narrow.some(s => s.text.endsWith('…'))).toBe(true)
+  // An owed row, a candidate and an error open nothing.
+  for (const line of lines) if (/abc123|in beta|reuse\.judge/.test(text(line))) expect(line.some(s => s.key !== undefined)).toBe(false)
+})
+
+const hints = (lines: Seg[][]) => lines.map(text).join(' | ')
+const buttons = (lines: Seg[][]) => lines.flatMap(l => l.filter(s => s.key !== undefined)).map(s => `${s.hotkey}:${s.key}:${s.text}`)
+
+test('the key row lists the keys that work in the view shown, and says how the pane gets the keyboard', async () => {
+  // Opened, the pane has not the keyboard: typing goes to the prompt, and the row says how to give it the keys.
+  const idle = keyLines({ view: 'board', focused: false, taller: false, rows: true, terminal: true }, 100)
+  expect(idle.map(text)).toEqual(['ctrl+x tab for keys  all lessons  refresh  close'])
+  expect(buttons(idle)).toEqual(['a:all:all lessons', 'r:refresh:refresh', 'x:close:close'])
+  // A hotkey is drawn before its label, `a: all lessons`: three cells the width counts.
+  expect(width(idle[0]!)).toBe(text(idle[0]!).length + 9)
+  // With the keyboard and a tree that fits its window, the arrows walk the rows.
+  expect(hints(keyLines({ view: 'board', focused: true, taller: false, rows: true, terminal: true }, 100))).toBe('↑↓ select · enter open · esc to the prompt  all lessons  refresh  close')
+  // A tree taller than its window is scrolled by the arrows, and Tab walks the rows.
+  expect(hints(keyLines({ view: 'board', focused: true, taller: true, rows: true, terminal: true }, 100))).toBe('↑↓ scroll · tab select · enter open · esc to the prompt  all lessons  refresh  close')
+  // The other views go back; a lesson has no row to select.
+  const all = keyLines({ view: 'all', focused: true, taller: true, rows: true, terminal: true }, 100)
+  expect(buttons(all)).toEqual(['b:back:back', 'r:refresh:refresh', 'x:close:close'])
+  const lesson = keyLines({ view: 'lesson', focused: true, taller: false, rows: false, terminal: true }, 100)
+  expect(hints(lesson)).toBe('esc to the prompt  back  refresh  close')
+  expect(hints(keyLines({ view: 'lesson', focused: true, taller: true, rows: false, terminal: true }, 100))).toBe('↑↓ scroll · esc to the prompt  back  refresh  close')
+  expect(buttons(lesson)).toEqual(['b:back:back', 'r:refresh:refresh', 'x:close:close'])
+  // A surface that is no terminal draws the buttons and names no terminal key.
+  expect(hints(keyLines({ view: 'board', focused: false, taller: false, rows: true, terminal: false }, 100))).toBe('all lessons  refresh  close')
+  // No two keys of a view share a hotkey, and each is one lowercase letter.
+  for (const view of ['board', 'all', 'lesson'] as const) {
+    const keys = buttons(keyLines({ view, focused: true, taller: true, rows: true, terminal: true }, 100)).map(b => b.split(':')[0]!)
+    expect(new Set(keys).size).toBe(keys.length)
+    for (const key of keys) expect(key).toMatch(/^[a-z]$/)
+  }
+})
+
+test('a narrow pane shortens the key row and wraps it: every key stays, no line is too wide, nothing is cut', async () => {
+  for (const columns of [24, 30, 40, 60, 100]) {
+    for (const view of ['board', 'all', 'lesson'] as const) {
+      for (const focused of [true, false]) {
+        for (const taller of [true, false]) {
+          const lines = keyLines({ view, focused, taller, rows: view !== 'lesson', terminal: true }, columns)
+          for (const line of lines) {
+            expect(width(line) <= columns, `${columns} ${view}: ${text(line)}`).toBe(true)
+            expect(text(line).includes('…')).toBe(false)
+            expect(text(line)).toBe(text(line).trim())
+          }
+          expect(buttons(lines).map(b => b.split(':')[1])).toEqual([view === 'board' ? 'all' : 'back', 'refresh', 'close'])
+          expect(hints(lines)).toContain(focused ? 'esc' : 'ctrl+x tab')
+        }
+      }
+    }
+  }
+  expect(keyLines({ view: 'board', focused: false, taller: false, rows: true, terminal: true }, 40).map(text)).toEqual(['ctrl+x tab: keys  all  refresh', 'close'])
+  expect(keyLines({ view: 'board', focused: true, taller: true, rows: true, terminal: true }, 60).length).toBe(2)
+})
+
+const LIST = JSON.stringify([
+  { level: 'project', kind: 'lesson', name: 'build-needs-profile', description: 'Use when the build fails without a profile.', path: '/p/1', match: [], counts: { reuse: 4, guard: 0, recall: 2, learn: 1 }, ineffective: true },
+  { level: 'project', kind: 'lesson', name: 'no-marker-echo', description: 'Use when a command echoes GUARDED_MARKER.', path: '/p/2', match: ['echo\\s+GUARDED'], counts: { reuse: 0, guard: 12, recall: 0, learn: 1 }, ineffective: false },
+  { level: 'user', kind: 'lesson', name: 'never-used', description: 'Use when nothing happens.', path: '/u/1', match: [], counts: { reuse: 0, guard: 0, recall: 0, learn: 1 }, ineffective: false },
+  { level: 'user', kind: 'skill', name: 'a-skill-with-a-very-long-name-that-goes-on-and-on', description: 'Use when a skill is wanted.', path: '/u/2', match: [] },
+  { level: 'project', kind: 'script', name: 'scripts/x.py', description: 'A script.', path: '/p/scripts/x.py' },
+])
+
+test('the list of every lesson is what the CLI printed: lessons, guards and skills, with their counts', async () => {
+  const items = itemsFrom(LIST)!
+  expect(items.map(i => [i.name, i.level, i.kind])).toEqual([
+    ['build-needs-profile', 'project', 'lesson'],
+    ['no-marker-echo', 'project', 'guard'],
+    ['never-used', 'user', 'lesson'],
+    ['a-skill-with-a-very-long-name-that-goes-on-and-on', 'user', 'skill'],
+  ])
+  expect(items[0]).toEqual({ name: 'build-needs-profile', level: 'project', kind: 'lesson', reuse: 4, guards: 0, recall: 2, flag: 'ineffective', description: 'Use when the build fails without a profile.' })
+  expect(items[3]!.reuse + items[3]!.guards + items[3]!.recall).toBe(0)
+  expect(itemsFrom('not json')).toBe(undefined)
+  expect(itemsFrom('{}')).toBe(undefined)
+  expect(itemsFrom('[]')).toEqual([])
+})
+
+test('the all-lessons view lists every lesson and skill by level, each a row to press, used or not', async () => {
+  const items = itemsFrom(LIST)!
+  const lines = allLines(items, '', 100)
+  const shown = lines.map(text)
+  expect(shown[0]).toBe('All lessons  3 lessons (1 guard)  1 skill  ◆ reused  ■ guarded  ↺ recalled')
+  expect(shown).toContain('project  2 lessons (1 guard)  0 skills')
+  expect(shown).toContain('user  1 lesson (0 guards)  1 skill')
+  expect(shown).toContain('general  nothing recorded')
+  expect(shown.indexOf('project  2 lessons (1 guard)  0 skills') < shown.indexOf('user  1 lesson (0 guards)  1 skill')).toBe(true)
+  // Every row is something to press, in the CLI's order, and opens its whole name.
+  expect(lines.flatMap(l => l.filter(s => s.key !== undefined)).map(s => s.key)).toEqual(items.map(i => openKey(i.name)))
+  // A name has at most 32 cells, and the description what the row has left.
+  expect(shown).toContain('  build-needs-profile               lesson  ◆  4  ■  0  ↺  2  Use when the build fails without a pr…')
+  expect(shown).toContain('  no-marker-echo                    guard   ◆  0  ■ 12  ↺  0  Use when a command echoes GUARDED_MAR…')
+  expect(shown).toContain('  a-skill-with-a-very-long-name-t…  skill   ◆  0  ■  0  ↺  0  Use when a skill is wanted.')
+  // A count is in its counter's colour, a zero is dim; a guard and a skill are told apart from a lesson.
+  const guard = lines[shown.findIndex(l => l.includes('no-marker-echo'))]!
+  expect(guard.find(s => s.text.trim() === 'guard')!.color).toBe(NOTES.guard.color)
+  expect(guard.find(s => s.text === '■ 12')!.color).toBe(NOTES.guard.color)
+  expect(guard.find(s => s.text === '◆  0')!.dim).toBe(true)
+  const weak = lines[shown.findIndex(l => l.includes('build-needs-profile'))]!
+  expect(weak.find(s => s.key !== undefined)!.color).toBe(WEAK.color)
+  // Narrower, the description goes, then the counters; the name and the kind stay.
+  expect(allLines(items, '', 60).map(text)).toContain('  no-marker-echo                    guard   ◆  0  ■ 12  ↺  0')
+  expect(allLines(items, '', 40).map(text)).toContain(`  ${'no-marker-echo'.padEnd(30)}  guard`)
+  expect(allLines(items, '', 30).map(text)).toContain('  a-skill-with-a-very…  skill')
+  for (const columns of [24, 30, 40, 60, 100]) {
+    for (const line of allLines(items, '', columns)) {
+      expect(width(line) <= columns, `${columns}: ${text(line)}`).toBe(true)
+      expect(text(line)).toBe(text(line).trimEnd())
+    }
+    // Only a name or a description is ever cut: never a heading, a kind or a counter.
+    for (const line of allLines(items, '', columns)) {
+      for (const seg of line) if (seg.text.includes('…')) expect(seg.key !== undefined || seg.text.startsWith('Use when'), `${columns}: ${text(line)}`).toBe(true)
+    }
+  }
+  // Before the list was read, with nothing recorded, and when the CLI could not say.
+  expect(allLines(null, '', 60).map(text)).toEqual(['Reading the store…'])
+  expect(allLines([], '', 60).map(text)).toContain('  nothing recorded yet')
+  expect(allLines(null, 'compound list exit 2: no such file', 30).map(text)).toEqual(['✖ compound list exit 2: no', '  such file'])
+})
+
+const SHOW = JSON.stringify({
+  level: 'user', kind: 'lesson', name: 'zsh-equals-word', description: 'Use when a zsh command line prints a separator with a bare word starting with "=".',
+  path: '/home/me/.claude/compound/lessons/zsh-equals-word', match: ['(^|[;&|]\\s*)echo\\s+=+'], counts: { reuse: 0, guard: 2, recall: 3, learn: 1 }, ineffective: true,
+  text: '---\nname: zsh-equals-word\n---\nPrint a separator with printf.\n',
+  body: 'Print a separator with printf, or single-quote it.\n\n    echo ====== fails\n\tzsh expands a bare word starting with "=" as an =command path lookup, so the rest of the chain is lost.',
+  last: { ts: '2026-10-03T12:00:00Z', type: 'recall' }, files: ['check.sh'],
+})
+
+test('one lesson is what `compound show --json` printed: its facts, its counters, when it last fired, its text', async () => {
+  const at = Date.parse('2026-10-03T12:00:25Z')
+  const d = detailFrom(SHOW, at)!
+  expect([d.name, d.state, d.level, d.kind, d.flag, d.at]).toEqual(['zsh-equals-word', 'ready', 'user', 'guard', 'ineffective', at])
+  expect([d.reuse, d.guards, d.recall]).toEqual([0, 2, 3])
+  expect(d.last).toEqual({ at: Date.parse('2026-10-03T12:00:00Z') / 1000, type: 'recall' })
+  expect(d.match).toEqual(['(^|[;&|]\\s*)echo\\s+=+'])
+  expect(d.files).toEqual(['check.sh'])
+  expect(detailFrom('not json', at)).toBe(undefined)
+  expect(detailFrom('{}', at)).toBe(undefined)
+  const lines = detailLines(d, 100).map(text)
+  expect(lines.slice(0, 9)).toEqual([
+    'zsh-equals-word',
+    'user · guard · ineffective',
+    '◆ 0 reused  ■ 2 guarded  ↺ 3 recalled',
+    'last fired 25s ago (recalled)',
+    'guard pattern',
+    '  (^|[;&|]\\s*)echo\\s+=+',
+    'attached: check.sh',
+    '/home/me/.claude/compound/lessons/zsh-equals-word',
+    '',
+  ])
+  expect(lines[9]).toBe('Use when a zsh command line prints a separator with a bare word starting with "=".')
+  expect(lines.slice(10, 14)).toEqual(['', 'Print a separator with printf, or single-quote it.', '', '    echo ====== fails'])
+  // A long line of the body is wrapped under its own indent, a tab is two cells, nothing is cut.
+  expect(lines.slice(14)).toEqual(['  zsh expands a bare word starting with "=" as an =command path lookup, so the rest of the chain is', '  lost.'])
+  // The name is in the colour of a lesson to strengthen; the frontmatter is not drawn.
+  expect(detailLines(d, 100)[0]![0]).toEqual({ text: 'zsh-equals-word', bold: true, color: WEAK.color })
+  expect(lines.join('\n')).not.toContain('---')
+  // A lesson that is no guard, never fired, with nothing attached.
+  const plain = detailFrom(JSON.stringify({ name: 'plain', level: 'project', kind: 'skill', description: 'Use when.', path: '/p', match: [], counts: {}, ineffective: false, body: 'Body.', last: null, files: [] }), at)!
+  expect(detailLines(plain, 60).map(text)).toEqual(['plain', 'project · skill', '◆ 0 reused  ■ 0 guarded  ↺ 0 recalled', 'never fired', '/p', '', 'Use when.', '', 'Body.'])
+  expect(detailLines({ ...plain, body: '' }, 60).map(text).slice(-1)).toEqual(['(no text)'])
+})
+
+test('the lesson view is never wider than the pane, cuts nothing, and says when its text was shortened', async () => {
+  const d = detailFrom(SHOW, T0)!
+  for (const columns of [24, 30, 40, 60, 100]) {
+    const lines = detailLines(d, columns)
+    for (const line of lines) {
+      expect(width(line) <= columns, `${columns}: ${text(line)}`).toBe(true)
+      expect(text(line).endsWith('…'), `${columns}: ${text(line)}`).toBe(false)
+    }
+    // Every word of the description and the body is there, on however many lines.
+    const flat = lines.map(l => text(l).trim()).join(' ').replace(/\s+/g, ' ')
+    for (const part of ['bare word starting', 'single-quote it.', 'echo ====== fails', 'chain is lost.', 'last fired', '3 recalled']) expect(flat, `${columns}: ${part}`).toContain(part)
+    expect(lines.map(l => text(l).trim()).join('')).toContain('(^|[;&|]\\s*)echo\\s+=+')
+  }
+  // A very long text is drawn to a limit, and the last line says how many lines more and how to read them.
+  const long = { ...d, body: Array.from({ length: 450 }, (_, i) => `line ${i + 1}`).join('\n') }
+  const drawn = detailLines(long, 60).map(text)
+  expect(drawn).toContain('line 300')
+  expect(drawn).not.toContain('line 301')
+  expect(drawn[drawn.length - 1]).toBe('… 150 more lines: compound show zsh-equals-word')
+  // A control character in a lesson is not handed to the terminal.
+  const odd = { ...d, body: 'a\u001b[31mb\u0007c' }
+  expect(detailLines(odd, 60).map(text).slice(-1)).toEqual(['a[31mbc'])
+})
+
+test('the lesson view says it is reading, and says why it could not', async () => {
+  expect(detailLines(null, 60).map(text)).toEqual(['Reading the lesson…'])
+  expect(detailLines(loadingDetail('zsh-equals-word'), 60).map(text)).toEqual(['zsh-equals-word', 'Reading the lesson…'])
+  const failed = detailLines(failedDetail('gone', "compound show exit 1: compound: no lesson or skill named 'gone'", T0), 40)
+  expect(failed.map(text)).toEqual(['gone', '✖ compound show exit 1: compound: no', "  lesson or skill named 'gone'"])
+  expect(failed[1]![0]!.color).toBe(ERROR.color)
+  for (const line of failed) expect(width(line) <= 40).toBe(true)
+})
+
+test('the pane\'s view: a lesson opens over the view it was pressed in and goes back to it; a late answer changes nothing', async () => {
+  const start = emptyPane('s1')
+  expect(start).toEqual({ session: 's1', view: 'board', back: 'board', detail: null, items: null, itemsProblem: '' })
+  expect(forPane(null, 's1')).toEqual(start)
+  expect(forPane({ ...start, view: 'all' }, 's2').view).toBe('board')
+  expect(forPane({ ...start, view: 'all' }, 's1').view).toBe('all')
+  // From the dashboard.
+  const opening = paneOpening(start, 'a')
+  expect([opening.view, opening.back, opening.detail?.name, opening.detail?.state]).toEqual(['lesson', 'board', 'a', 'loading'])
+  const ready = detailFrom(JSON.stringify({ name: 'a', level: 'user', kind: 'lesson' }), T0)!
+  expect(paneRead(opening, 'a', ready).detail?.state).toBe('ready')
+  expect(paneBack(paneRead(opening, 'a', ready)).view).toBe('board')
+  // From the list of every lesson, and back to it; from there back to the dashboard.
+  const listed = paneItems(paneAll(start), itemsFrom(LIST)!, '')
+  expect([listed.view, listed.items?.length]).toEqual(['all', 4])
+  const fromAll = paneOpening(listed, 'b')
+  expect([fromAll.view, fromAll.back]).toEqual(['lesson', 'all'])
+  expect(paneBack(fromAll).view).toBe('all')
+  expect(paneBack(paneBack(fromAll)).view).toBe('board')
+  // The answer for a lesson no longer shown is dropped.
+  expect(paneRead(paneOpening(opening, 'b'), 'a', ready).detail?.name).toBe('b')
+  expect(paneRead(paneBack(opening), 'a', ready).view).toBe('board')
+  expect(paneRead(paneBack(opening), 'a', ready).detail?.state).toBe('loading')
+  // A lesson opened from a lesson keeps where back goes.
+  expect(paneOpening(fromAll, 'c').back).toBe('all')
+  // A list that could not be read keeps the rows it had and says why.
+  const failed = paneItems(listed, undefined, 'compound list exit 2')
+  expect([failed.items?.length, failed.itemsProblem]).toEqual([4, 'compound list exit 2'])
+  expect(paneItems(failed, [], '').itemsProblem).toBe('')
 })

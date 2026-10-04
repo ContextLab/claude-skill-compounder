@@ -2069,6 +2069,12 @@ def cmd_show(args):
         row["recur_limit"] = recur_limit()
         row["here"] = {"platform": this_platform(), "shell": this_shell()}
         row["text"] = text
+        # What the pane's lesson view draws: the body without its frontmatter, and the
+        # newest reuse, guard or recall that names the lesson.
+        row["body"] = item.get("_body", "")
+        fired = [event for event in events
+                 if event.get("type") in ("reuse", "guard", "recall") and item["name"] in event_names(event)]
+        row["last"] = {"ts": fired[-1].get("ts"), "type": fired[-1].get("type")} if fired else None
         row["files"] = files
         emit(row)
         return 0
@@ -3722,7 +3728,10 @@ def build_status():
         unsettled.append({"id": capture_id(cap), "ts": cap.get("ts"), "age": age_text(clock - parse_ts(cap.get("ts"))),
                           "session": cap.get("session", ""), "project": cap.get("project", ""),
                           "failed": one_line(cap.get("failed", ""))[:OPEN_TEXT],
-                          "fixed": one_line(cap.get("fixed", ""))[:OPEN_TEXT]})
+                          "fixed": one_line(cap.get("fixed", ""))[:OPEN_TEXT],
+                          # What settles it, as the report prints it and the pane shows it.
+                          "command": "/compound:learn settle %s" % capture_id(cap),
+                          "decline": 'compound skip --settles %s --why "<reason>"' % capture_id(cap)})
 
     candidates = []
     for event in events:
@@ -3776,7 +3785,9 @@ def build_status():
         "recent": [event for event in events if event.get("type") not in VERDICT_TYPES][-10:],
         "open": {
             "ineffective": [{"name": row["name"], "level": row["level"], "path": row["path"],
-                             "recall": row["counts"]["recall"]} for row in rows if row["ineffective"]],
+                             "recall": row["counts"]["recall"],
+                             "command": "compound add --update --name %s --match RE" % row["name"]}
+                            for row in rows if row["ineffective"]],
             "recurring": [{"name": row["name"], "level": row["level"], "path": row["path"],
                            "recall": row["counts"]["recall"]} for row in rows if row["recurring"] and active(row)],
             "unsettled": unsettled,
@@ -3879,9 +3890,9 @@ def cmd_status(args):
         out("  nothing open\n")
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
-            "/compound:learn settle %s  Or decline it: compound skip --settles %s --why \"<reason>\"\n" % (
+            "%s  Or decline it: %s\n" % (
                 row["id"], row["age"], os.path.basename(str(row["project"])) or "-", row["failed"], row["fixed"],
-                row["id"], row["id"]))
+                row["command"], row["decline"]))
     for row in opened["candidates"]:
         if row.get("conflict"):
             why = ("%s holds a different lesson of that name, so it was not moved. Move it to the user level "
@@ -3897,8 +3908,8 @@ def cmd_status(args):
             row["name"], row["level"], one_line(row["problem"])[:120], row["path"], row["name"]))
     for row in opened["ineffective"]:
         out("  ineffective  %s (%s): recalled %d times and the failure came back. Add a match "
-            "(compound add --update --name %s --match RE), attach a script or rewrite the description\n"
-            % (row["name"], row["level"], row["recall"], row["name"]))
+            "(%s), attach a script or rewrite the description\n"
+            % (row["name"], row["level"], row["recall"], row["command"]))
     for row in opened["recurring"]:
         out("  recurring    %s (general): recalled %d times and the failure came back. It ships with the package "
             "and is not rewritten here. Switch it off for yourself (compound disable %s) or report it at %s\n"

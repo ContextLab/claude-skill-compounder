@@ -16,9 +16,10 @@ import {
   type Earlier, type Event, type Item,
 } from './store'
 import {
-  bandRow, began as checkBegan, boardFrom, boardLines, captured, ended as checkEnded, erred, forSession, FRAME_MS, greeted, GUARD_SHOW_MS, inventoried, motion, newTurn, noted, phaseKey,
+  allLines, bandRow, began as checkBegan, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
+  greeted, GUARD_SHOW_MS, inventoried, itemsFrom, keyLines, motion, newTurn, noted, openedBy, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, phaseKey,
   reuseFound, reuseIdle, settledBy, stepped, synced, unfixed, weakened,
-  type Seg,
+  type Line, type Seg,
 } from './view'
 
 // compound: before a substantial task it looks for existing work to reuse, and after a
@@ -61,10 +62,13 @@ import {
 // only ever shown to Claude as a quotation (./render), never as the mod's own instruction.
 // COMPOUND_OFF=1 switches all of it off.
 //
-// WHAT THE PERSON SEES is drawn from two values kept in `$.state` (see ../types and ./view):
+// WHAT THE PERSON SEES is drawn from values kept in `$.state` (see ../types and ./view):
 // the band above the prompt, which shows the check in flight and what the last moment did,
 // and the `/compound` pane, a dashboard read from `compound status --json` and `compound
-// events --json`. A drawing problem never breaks a turn: every render hook answers
+// events --json`, with a list of every lesson (`compound list --json`) and a view of one
+// (`compound show <name> --json`) behind its Buttons. The pane's reads are made when it
+// opens, at a press and on a timer after an event, never on a path a tool call waits on.
+// A drawing problem never breaks a turn: every render hook answers
 // `next(e)` on any failure, and logs one `error` per session per kind. One timer animates
 // the band, and it runs only while a spinner turns or a result fades. COMPOUND_QUIET=1
 // turns the band off; the status entry and the toasts stay.
@@ -102,6 +106,8 @@ const PANE_ROWS = 34
 const BAND = atom({ plugin: 'compound', key: 'band' } as const, null)
 const FRAME = atom({ plugin: 'compound', key: 'frame' } as const, 0)
 const BOARD = atom({ plugin: 'compound', key: 'board' } as const, null)
+// Which of the pane's views is shown, and what the list and the lesson views were read as.
+const VIEW = atom({ plugin: 'compound', key: 'pane' } as const, null)
 
 type Ran = { code: number; stdout: string; stderr: string }
 type Reply = { text: string | undefined; ms: number; reason: string }
@@ -334,6 +340,94 @@ async function refreshBoard($: EngineInterface): Promise<void> {
     const board: CompoundBoard | undefined = status.code === 0 || status.code === 1 ? boardFrom(status.stdout, recent.code === 0 ? recent.stdout : '', sid, now) : undefined
     const problem = status.code === 0 || status.code === 1 ? 'compound status --json printed something unreadable' : `compound status ${why(status)}`
     await update($, BOARD, () => board ?? { session: sid, at: now, health: [], checks: 0, levels: [], lessons: [], recent: [], open: { unsettled: [], ineffective: [], candidates: [], errors: [], skips: 0 }, problem: oneLine(problem, 300) })
+    // The list or the lesson on screen is read again with the dashboard.
+    const pane = forPane(await read($, VIEW), sid)
+    if (pane.view === 'all') await readItems($, sid)
+    if (pane.view === 'lesson' && pane.detail !== null) await readLesson($, sid, pane.detail.name)
+  } catch (err) {
+    drawFailed($, sid, 'pane', err)
+  }
+}
+
+// Reads one lesson for the pane: `compound show <name> --json`. A lesson the CLI cannot
+// show is the view's to say, not a failure of the mod. The answer is drawn only while that
+// lesson is still the one shown.
+async function readLesson($: EngineInterface, sid: string, name: string): Promise<void> {
+  const ran = await spawn($, ['show', name, '--json'], undefined, undefined, BUDGET.prompt, false)
+  const now = await $.clock.now()
+  const detail = ran.code === 0 ? detailFrom(ran.stdout, now) : undefined
+  const problem = ran.code === 0 ? 'compound show --json printed something unreadable' : `compound show ${why(ran)}`
+  await update($, VIEW, kept => paneRead(forPane(kept, sid), name, detail ?? failedDetail(name, problem, now)))
+}
+
+// Reads every lesson and skill for the pane: `compound list --json`.
+async function readItems($: EngineInterface, sid: string): Promise<void> {
+  const ran = await spawn($, ['list', '--json'], undefined, undefined, BUDGET.prompt, false)
+  const items = ran.code === 0 ? itemsFrom(ran.stdout) : undefined
+  const problem = ran.code === 0 ? 'compound list --json printed something that is not a list' : `compound list ${why(ran)}`
+  await update($, VIEW, kept => paneItems(forPane(kept, sid), items, problem))
+}
+
+// A view that changed starts at its top: the window is the engine's, and it is asked.
+async function paneTop($: EngineInterface): Promise<void> {
+  try {
+    await $.ui.scroll({ in: PANE, to: 'start' })
+  } catch {
+    // A surface that scrolls nothing has nothing to move.
+  }
+}
+
+// A view that changed has its ring put on a row: the lesson the person came back from, else
+// the first row there is to open. Left alone, the ring of a redrawn tree is on its first
+// Button, which is the key row's. Only a pane that holds the keyboard has a ring to move.
+async function paneRing($: EngineInterface, sid: string, from?: string): Promise<void> {
+  try {
+    const pane = forPane(await read($, VIEW), sid)
+    const board = await read($, BOARD)
+    const lines = pane.view === 'all' ? allLines(pane.items, '', 100) : pane.view === 'board' ? boardLines(board !== null && board.session === sid ? board : null, 100) : []
+    const keys = lines.flatMap(line => line).map(seg => seg.key)
+    const key = from !== undefined && keys.includes(openKey(from)) ? openKey(from) : firstKey(lines)
+    if (key === undefined) return
+    await $.ui.focus({ requestId: PANE, key })
+    // A row below the window is brought into it; one already showing does not move.
+    await $.ui.scroll({ in: PANE, to: { key } })
+  } catch {
+    // A surface with no ring has nothing to move.
+  }
+}
+
+// One press of a Button of the pane, by its key: a lesson's name opens the lesson, and the
+// key row's Buttons change the view, read it again or close the pane. A press is the
+// person's own act, so the CLI reads it makes are on no path a tool call waits on. Never
+// rejects: a failure is kept for the next typed prompt, once per session, and the pane
+// stays as it was.
+async function pressed($: EngineInterface, key: string): Promise<void> {
+  let sid = 'unknown'
+  try {
+    sid = await $.session.id()
+    const session = sid
+    const name = openedBy(key)
+    if (name !== undefined) {
+      await update($, VIEW, kept => paneOpening(forPane(kept, session), name))
+      await paneTop($)
+      await readLesson($, session, name)
+    } else if (key === 'all') {
+      await update($, VIEW, kept => paneAll(forPane(kept, session)))
+      await paneTop($)
+      await readItems($, session)
+      await paneRing($, session)
+    } else if (key === 'back') {
+      const was = forPane(await read($, VIEW), session)
+      await update($, VIEW, kept => paneBack(forPane(kept, session)))
+      await paneTop($)
+      await paneRing($, session, was.view === 'lesson' ? was.detail?.name : undefined)
+    } else if (key === 'refresh') {
+      await refreshBoard($)
+    } else if (key === 'close') {
+      // The next `/compound` starts at the dashboard.
+      await update($, VIEW, () => emptyPane(session))
+      await $.ui.close({ id: PANE })
+    }
   } catch (err) {
     drawFailed($, sid, 'pane', err)
   }
@@ -1216,6 +1310,8 @@ export const register: Register = on => {
     const asked = e.args.trim()
     if (asked === 'close') {
       try {
+        const sid = await $.session.id()
+        await update($, VIEW, () => emptyPane(sid))
         await $.ui.close({ id: PANE })
       } catch (err) {
         drawFailed($, 'unknown', 'pane', err)
@@ -1224,6 +1320,10 @@ export const register: Register = on => {
     }
     if (asked === '' && e.origin.kind === 'composer') {
       try {
+        // The pane opens at the dashboard and without the keyboard: what the person types
+        // goes on to the prompt until they give the pane the keys (ctrl+x tab, or a click).
+        const sid = await $.session.id()
+        await update($, VIEW, () => emptyPane(sid))
         const opened = await $.ui.open({ id: PANE, title: 'compound', rows: PANE_ROWS })
         if (opened.isPlaced) {
           void refreshBoard($)
@@ -1349,28 +1449,49 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
-  // The pane: the dashboard `/compound` opens.
+  // The pane `/compound` opens: the key row, then the view shown (the dashboard, every
+  // lesson, or one lesson). The key row is first because the window is the engine's: a tree
+  // taller than it is scrolled, and a row at its foot would be out of sight.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     let sid = 'unknown'
     try {
       const { Box, Button, Text } = $.ui.resolve(e)
       const board = await read($, BOARD)
+      const kept = await read($, VIEW)
       sid = await $.session.id()
       const mine = board !== null && board.session === sid ? board : null
+      const pane = forPane(kept, sid)
       const columns = Math.max(24, e.props.bodyColumns)
-      const lines = boardLines(mine, columns)
-      return tree(h(
-        Box,
-        { flexDirection: 'column' },
-        ...lines.map(line => (line.length === 0 ? h(Text, null, ' ') : h(Box, { flexDirection: 'row' }, ...line.map(seg => h(Text, textProps(seg), seg.text))))),
-        h(Text, null, ' '),
-        h(
-          Box,
-          { flexDirection: 'row', gap: 2 },
-          h(Button, { key: 'refresh', label: 'Refresh', hotkey: 'r', onPress: () => refreshBoard($) }),
-          h(Button, { key: 'close', label: 'Close', hotkey: 'x', role: 'dismiss', onPress: () => $.ui.close({ id: PANE }) }),
-        ),
-      ))
+      const body: Line[] = pane.view === 'lesson' ? detailLines(pane.detail, columns) : pane.view === 'all' ? allLines(pane.items, pane.itemsProblem, columns) : boardLines(mine, columns)
+      const keys = (taller: boolean): Line[] =>
+        keyLines({ view: pane.view, focused: e.props.isFocused, taller, rows: body.some(line => line.some(seg => seg.key !== undefined)), terminal: e.surface === 'terminal' }, columns)
+      // The arrows walk the rows while the tree fits its window, and scroll it when it does not.
+      const fitting = keys(false)
+      const head = fitting.length + body.length > e.props.scroll.bodyRows ? keys(true) : fitting
+      // The ring starts on the first row there is to open, not on the key row above it.
+      const first = body.flatMap(line => line).find(seg => seg.key !== undefined)?.key
+      // A lesson named on two rows is two Buttons, and a key is drawn once.
+      const seen = new Map<string, number>()
+      const piece = (seg: Seg): ReturnType<typeof h> => {
+        if (seg.key === undefined) return h(Text, textProps(seg), seg.text)
+        const pressKey = seg.key
+        const n = (seen.get(pressKey) ?? 0) + 1
+        seen.set(pressKey, n)
+        return h(Button, {
+          key: n === 1 ? pressKey : `${pressKey}#${n}`,
+          label: seg.text,
+          plain: true,
+          ...(seg.hotkey === undefined ? {} : { hotkey: seg.hotkey }),
+          ...(pressKey === 'close' ? { role: 'dismiss' } : {}),
+          ...(pressKey === first && n === 1 ? { autoFocus: true } : {}),
+          onPress: () => pressed($, pressKey),
+        })
+      }
+      const row = (line: Line): ReturnType<typeof h> => {
+        const segs = line.filter(seg => seg.text !== '')
+        return segs.length === 0 ? h(Text, null, ' ') : h(Box, { flexDirection: 'row' }, ...segs.map(piece))
+      }
+      return tree(h(Box, { flexDirection: 'column' }, ...[...head, ...body].map(row)))
     } catch (err) {
       drawFailed($, sid, 'pane', err)
       return next(e)

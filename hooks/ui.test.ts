@@ -22,7 +22,19 @@ const STATUS = JSON.stringify({
   store: { project: { lessons: 1, skills: 0, guards: 0 }, user: { lessons: 0, skills: 0, guards: 0 }, general: { lessons: 0, skills: 2, guards: 0 } },
   lessons: [{ name: 'release-notes-format', level: 'project', kind: 'lesson', guard: false, reuse: 3, guard_hits: 0, recall: 1, flag: '' }],
   recent: [],
-  open: { ineffective: [], unsettled: [{ id: 'abc123', age: '2h', project: '/work/alpha', failed: './x', fixed: './x --y' }], candidates: [], skips: [], errors: [] },
+  open: { ineffective: [], unsettled: [{ id: 'abc123', age: '2h', project: '/work/alpha', failed: './x', fixed: './x --y', command: '/compound:learn settle abc123', decline: 'compound skip --settles abc123 --why "<reason>"' }], candidates: [], skips: [], errors: [] },
+})
+// What the CLI prints for the pane's `list --json` and for `show release-notes-format --json`.
+const LISTED = JSON.stringify([
+  { level: 'project', kind: 'lesson', name: 'release-notes-format', description: 'Use when writing release notes.', path: '/p/l/release-notes-format', match: ['notes\\.md$'], counts: { reuse: 3, guard: 0, recall: 1, learn: 1 }, ineffective: false },
+  { level: 'user', kind: 'lesson', name: 'never-used', description: 'Use when nothing happens.', path: '/u/l/never-used', match: [], counts: { reuse: 0, guard: 0, recall: 0, learn: 1 }, ineffective: false },
+  { level: 'general', kind: 'skill', name: 'a-skill', description: 'Use when a skill is wanted.', path: '/g/s/a-skill', match: [] },
+])
+const SHOWN = JSON.stringify({
+  level: 'project', kind: 'lesson', name: 'release-notes-format', description: 'Use when writing release notes.', path: '/p/l/release-notes-format', match: ['notes\\.md$'],
+  counts: { reuse: 3, guard: 0, recall: 1, learn: 1 }, ineffective: false, text: '---\nname: release-notes-format\n---\nOne line per change.\n',
+  body: 'One line per change, newest first.\n\nEach line starts with the issue number, and a line that is very long is wrapped where the pane ends and never cut short.',
+  last: { ts: '2027-01-15T07:59:35Z', type: 'reuse' }, files: [],
 })
 const EVENTS = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'guard', lesson: 'no-marker-echo' }])
 
@@ -32,12 +44,15 @@ const EVENTS = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'guard', less
 // `tool` answers a tool call in the engine's place (undefined: the default below), `show` is
 // what the CLI prints for `show <name> --json`, and `asked` counts the questions put to the judge.
 type Answer = { text: string; isError?: true }
-type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number }
+// `listed` is what the CLI prints for the pane's `list --json`, `showCode` and `listCode` their exit
+// codes, `wait` is awaited before either answers, `closed` are the panes the mod closed, and
+// `focusAsked` is what each open asked of the keyboard.
+type World = { calls: string[][]; logged: Record<string, unknown>[]; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[] }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0 }
+  const w: World = { calls: [], logged: [], judge: async () => '{"substantial":true,"items":["release-notes-format"],"requests":[]}', check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [] }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -55,7 +70,12 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', (_$, e) => {
     w.opened.push(e.id)
+    w.focusAsked.push((e as { focus?: unknown }).focus)
     return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', (_$, e) => {
+    w.closed.push(e.id)
+    return { value: undefined }
   })
   on('ui.panes', () => ({ value: [{ id: 'compound', title: 'compound', isShown: true, isFocused: false, isPlaced: true }] }))
   on('process.run', (_$, e) => {
@@ -71,8 +91,13 @@ function world(on: On, env: Record<string, string> = {}): World {
       }
       return done('')
     }
+    const failed = (exitCode: number, stderr: string) => ({ value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } })
+    // The pane lists without the scripts; the reuse check lists with them.
+    if (verb === 'list' && !argv.includes('--scripts') && !argv.includes('--level')) return w.wait().then(() => (w.listCode === 0 ? done(w.listed) : failed(w.listCode, 'compound: the store cannot be read')))
     if (verb === 'list') return done(ITEMS)
-    if (verb === 'status') return done(STATUS)
+    if (verb === 'status') return done(w.status)
+    if (verb === 'show' && w.showCode !== 0) return w.wait().then(() => failed(w.showCode, `compound: no lesson or skill named '${argv[2]}'`))
+    if (verb === 'show') return w.wait().then(() => done(w.show))
     if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(w.owed) : '[]') : w.events)
     if (verb === 'find') return done('{"words":[],"items":[],"prompts":[],"surfer":"ok"}')
     if (verb === 'check') return done(w.check)
@@ -379,7 +404,8 @@ test('/compound opens the dashboard: levels, the most used, recent events and wh
     // The timeline says the word a person reads and how long ago, not the log's type or a time of day.
     expect(all).toContain(`${NOTES.guard.glyph} guarded no-marker-echo`)
     expect(all).not.toMatch(/\d\d:\d\d /)
-    expect(all).toContain('release-notes-format')
+    // A lesson's name is something to press.
+    expect((await ui.find({ type: 'Button', key: 'open:release-notes-format' }))?.props.label).toBe('release-notes-format')
     expect(lines).toContain('▇▇▇')
     expect(all).toContain('no-marker-echo')
     // The timeline's glyph and colour are the band's.
@@ -399,6 +425,251 @@ test('/compound opens the dashboard: levels, the most used, recent events and wh
     expect(await ui.find({ type: 'Button', key: 'close' })).toBeDefined()
     await ui.unmount()
   }
+})
+
+// ---- the pane's drill-down ----
+
+type Node = { type: string; props?: Record<string, unknown>; children?: (Node | string)[] }
+
+// The rows of a drawn pane as a terminal shows them: a Text by its text, and a Button by its
+// label, after its hotkey when it has one (`a: all lessons`).
+async function rowsOf(ui: { drawn: () => Promise<unknown> }): Promise<string[]> {
+  const said = (n: Node | string): string =>
+    typeof n === 'string' ? n : n.type === 'Button' ? `${n.props?.hotkey === undefined ? '' : `${String(n.props.hotkey)}: `}${String(n.props?.label ?? '')}` : (n.children ?? []).map(said).join('')
+  return (((await ui.drawn()) as Node).children ?? []).map(said)
+}
+
+const open = ($: Parameters<TestBody>[0]) => $.command.run({ command: 'compound', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+
+test('opening the pane asks for no keyboard, and its first row says which keys work and how the pane gets them', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  await open($)
+  // Typing stays with the prompt: the pane is opened without `focus`.
+  expect(w.focusAsked).toEqual([undefined])
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: PANE })
+    // Without the keyboard: how to give it, then the keys, each a Button drawn with its hotkey.
+    expect((await rowsOf(ui))[0]).toBe(surface === 'terminal' ? 'ctrl+x tab for keys  a: all lessons  r: refresh  x: close' : 'a: all lessons  r: refresh  x: close')
+    for (const [key, hotkey] of [['all', 'a'], ['refresh', 'r'], ['close', 'x']] as const) {
+      const button = await ui.find({ type: 'Button', key })
+      expect([button?.props.hotkey, button?.props.plain]).toEqual([hotkey, true])
+    }
+    expect((await ui.find({ type: 'Button', key: 'close' }))?.props.role).toBe('dismiss')
+    // With the keyboard, a tree that fits its window is walked by the arrows.
+    await ui.redraw({ ...PANE, isFocused: true, bodyColumns: 100, scroll: { offset: 0, bodyRows: 60 } })
+    expect((await rowsOf(ui))[0]).toBe(surface === 'terminal' ? '↑↓ select · enter open · esc to the prompt  a: all lessons  r: refresh  x: close' : 'a: all lessons  r: refresh  x: close')
+    // A tree taller than its window is scrolled by them, and Tab walks the rows.
+    await ui.redraw({ ...PANE, isFocused: true, bodyColumns: 100, scroll: { offset: 0, bodyRows: 8 } })
+    expect((await rowsOf(ui))[0]).toBe(surface === 'terminal' ? '↑↓ scroll · tab select · enter open · esc to the prompt  a: all lessons  r: refresh  x: close' : 'a: all lessons  r: refresh  x: close')
+    // Each open row is followed by the command that settles it, as the CLI gave it.
+    const rows = await rowsOf(ui)
+    expect(rows[rows.findIndex(r => r.includes('abc123 ./x --y')) + 1]).toBe('      /compound:learn settle abc123')
+    expect(rows[rows.findIndex(r => r.includes('abc123 ./x --y')) + 2]).toBe('      or compound skip --settles abc123 --why "<reason>"')
+    // Close closes the pane.
+    await ui.press({ key: 'close' })
+    expect(w.closed).toEqual(['compound'])
+    w.closed.length = 0
+    await ui.unmount()
+  }
+})
+
+test('pressing a lesson shows it: reading, then what `compound show --json` printed, and back returns to where it was pressed', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  const clock = mock.clock(on, { now: T0 })
+  w.show = SHOWN
+  for (const surface of SURFACES) {
+    await open($)
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: { ...PANE, isFocused: true } })
+    const shows = () => w.calls.filter(c => c[1] === 'show')
+    const before = shows().length
+    w.wait = () => clock.sleep(300)
+    const pressing = ui.press({ key: 'open:release-notes-format' })
+    await clock.settle()
+    // While the CLI is asked the view says so, under the lesson's name, and offers the way back.
+    expect((await rowsOf(ui)).slice(1)).toEqual(['release-notes-format', 'Reading the lesson…'])
+    expect((await rowsOf(ui))[0]).toContain('b: back')
+    expect(await ui.find({ type: 'Button', key: 'all' })).toBeUndefined()
+    await clock.advance(300)
+    await pressing
+    w.wait = async () => undefined
+    expect(shows().slice(before)).toEqual([[shows()[0]![0]!, 'show', 'release-notes-format', '--json']])
+    const rows = await rowsOf(ui)
+    expect(rows.slice(1, 9)).toEqual([
+      'release-notes-format',
+      'project · guard',
+      '◆ 3 reused  ■ 0 guarded  ↺ 1 recalled',
+      'last fired 25s ago (reused)',
+      'guard pattern',
+      '  notes\\.md$',
+      '/p/l/release-notes-format',
+      ' ',
+    ])
+    expect(rows[9]).toBe('Use when writing release notes.')
+    expect(rows.slice(11)).toEqual(['One line per change, newest first.', ' ', 'Each line starts with the issue number, and a line that is', 'very long is wrapped where the pane ends and never cut', 'short.'])
+    expect(rows.join('\n')).not.toContain('---')
+    expect((await ui.find({ type: 'Text', text: 'release-notes-format' }))?.props.bold).toBe(true)
+    // Back is the dashboard again, and it asked the CLI nothing.
+    const calls = w.calls.length
+    await ui.press({ key: 'back' })
+    expect((await rowsOf(ui)).some(r => r.startsWith('Most used'))).toBe(true)
+    expect(await ui.find({ type: 'Button', key: 'all' })).toBeDefined()
+    expect(w.calls.length).toBe(calls)
+    // No lesson is read on a path a tool call waits on.
+    await $.tool.call({ tool: 'Bash', command: 'ls' })
+    expect(shows().length).toBe(before + 1)
+    expect(w.logged.filter(e => e.type === 'error')).toEqual([])
+    await ui.unmount()
+  }
+})
+
+test('a lesson the CLI cannot show says why, logs no error, and Refresh asks again', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  for (const surface of SURFACES) {
+    await open($)
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: PANE })
+    w.showCode = 1
+    await ui.press({ key: 'open:release-notes-format' })
+    expect((await rowsOf(ui)).slice(1)).toEqual(['release-notes-format', '✖ compound show exit 1: compound: no lesson or skill named', "  'release-notes-format'"])
+    expect((await ui.find({ type: 'Text', text: /^✖ $/ }))?.props.color).toBe(ERROR.color)
+    // What the CLI printed is not the object it should be.
+    w.showCode = 0
+    w.show = 'not json'
+    await ui.press({ key: 'refresh' })
+    expect((await rowsOf(ui)).slice(1).join(' ')).toContain('compound show --json printed something unreadable')
+    // Refresh asks again, and the lesson is there.
+    w.show = SHOWN
+    await ui.press({ key: 'refresh' })
+    expect((await rowsOf(ui)).slice(1, 3)).toEqual(['release-notes-format', 'project · guard'])
+    // A lesson that is gone is the store's state, not a failure of the mod.
+    expect(w.logged.filter(e => e.type === 'error')).toEqual([])
+    await ui.press({ key: 'back' })
+    await ui.unmount()
+  }
+})
+
+test('the all-lessons view lists every lesson and skill by level; each opens, and back returns to the list, then the dashboard', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  const clock = mock.clock(on, { now: T0 })
+  w.show = SHOWN
+  for (const surface of SURFACES) {
+    await open($)
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: { ...PANE, bodyColumns: 100 } })
+    const lists = () => w.calls.filter(c => c[1] === 'list' && !c.includes('--scripts'))
+    const before = lists().length
+    w.wait = () => clock.sleep(300)
+    const pressing = ui.press({ key: 'all' })
+    await clock.settle()
+    expect((await rowsOf(ui)).slice(1)).toEqual(['Reading the store…'])
+    await clock.advance(300)
+    await pressing
+    w.wait = async () => undefined
+    expect(lists().slice(before).map(c => c.slice(1))).toEqual([['list', '--json']])
+    const rows = await rowsOf(ui)
+    expect(rows[0]).toContain('b: back')
+    expect(rows.slice(1)).toEqual([
+      'All lessons  2 lessons (1 guard)  1 skill  ◆ reused  ■ guarded  ↺ recalled',
+      ' ',
+      'project  1 lesson (1 guard)  0 skills',
+      '  release-notes-format  guard   ◆ 3  ■ 0  ↺ 1  Use when writing release notes.',
+      ' ',
+      'user  1 lesson (0 guards)  0 skills',
+      '  never-used            lesson  ◆ 0  ■ 0  ↺ 0  Use when nothing happens.',
+      ' ',
+      'general  0 lessons (0 guards)  1 skill',
+      '  a-skill               skill   ◆ 0  ■ 0  ↺ 0  Use when a skill is wanted.',
+    ])
+    // Every row is a Button, also the lesson nothing has used and the skill.
+    for (const name of ['release-notes-format', 'never-used', 'a-skill']) expect((await ui.find({ type: 'Button', key: `open:${name}` }))?.props.label).toBe(name)
+    // A lesson opened from the list goes back to the list; the list goes back to the dashboard.
+    await ui.press({ key: 'open:release-notes-format' })
+    expect((await rowsOf(ui)).slice(1, 3)).toEqual(['release-notes-format', 'project · guard'])
+    await ui.press({ key: 'back' })
+    expect((await rowsOf(ui))[1]).toContain('All lessons')
+    // Refresh in the list reads the list again.
+    w.listed = '[]'
+    await ui.press({ key: 'refresh' })
+    expect(await rowsOf(ui)).toContain('  nothing recorded yet')
+    // A list the CLI cannot give says why, over the rows it had.
+    w.listCode = 2
+    await ui.press({ key: 'refresh' })
+    expect((await rowsOf(ui))[1]).toBe('✖ compound list exit 2: compound: the store cannot be read')
+    w.listCode = 0
+    w.listed = LISTED
+    await ui.press({ key: 'back' })
+    expect((await rowsOf(ui)).some(r => r.startsWith('Most used'))).toBe(true)
+    expect(w.logged.filter(e => e.type === 'error')).toEqual([])
+    await ui.unmount()
+  }
+})
+
+test('no row of any view is wider than the pane at 30, 40, 60 and 100 columns, and every key is in the first rows', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  w.show = SHOWN
+  for (const surface of SURFACES) {
+    await open($)
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: PANE })
+    const fits = async (view: string, keys: readonly string[]) => {
+      for (const columns of [30, 40, 60, 100]) {
+        for (const isFocused of [true, false]) {
+          await ui.redraw({ ...PANE, isFocused, bodyColumns: columns })
+          const rows = await rowsOf(ui)
+          for (const row of rows) expect([...row].length <= columns, `${surface} ${view} ${columns}: ${row}`).toBe(true)
+          const head = rows.slice(0, 4).join(' ')
+          for (const key of keys) expect(head, `${surface} ${view} ${columns}`).toContain(key)
+        }
+      }
+    }
+    await fits('board', ['a: all', 'r: refresh', 'x: close'])
+    await ui.press({ key: 'all' })
+    await fits('all', ['b: back', 'r: refresh', 'x: close'])
+    await ui.press({ key: 'open:never-used' })
+    await fits('lesson', ['b: back', 'r: refresh', 'x: close'])
+    await ui.press({ key: 'back' })
+    await ui.press({ key: 'back' })
+    await ui.unmount()
+  }
+})
+
+test('a press that fails breaks nothing: the pane goes on, and Claude is told once', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  await open($)
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'Pane', requestId: 'compound', props: PANE })
+  // What every handler asks the engine first starts failing.
+  w.isLost = true
+  for (const key of ['all', 'open:release-notes-format', 'refresh', 'all']) await ui.press({ key })
+  w.isLost = false
+  // The dashboard is still the view, and its keys still work.
+  await ui.redraw({ ...PANE, bodyColumns: 61 })
+  expect((await rowsOf(ui)).some(r => r.startsWith('Most used'))).toBe(true)
+  await ui.press({ key: 'all' })
+  expect((await rowsOf(ui))[1]).toContain('All lessons')
+  const told = await $.prompt.submit({ text: 'what happened?', wait: false, origin: { kind: 'composer' } })
+  const report = (told.context ?? []).join('\n')
+  expect(report.split('ui.pane').length - 1).toBe(1)
+  await ui.unmount()
+})
+
+test('/compound typed again, and a pane closed, start at the dashboard', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  mock.clock(on, { now: T0 })
+  w.show = SHOWN
+  await open($)
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'Pane', requestId: 'compound', props: PANE })
+  await ui.press({ key: 'all' })
+  await ui.press({ key: 'open:never-used' })
+  expect((await rowsOf(ui))[0]).toContain('b: back')
+  await open($)
+  expect((await rowsOf(ui))[0]).toContain('a: all lessons')
+  await ui.press({ key: 'all' })
+  await ui.press({ key: 'close' })
+  expect((await rowsOf(ui))[0]).toContain('a: all lessons')
+  await $.command.run({ command: 'compound', args: 'close', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  expect(w.closed).toEqual(['compound', 'compound'])
+  await ui.unmount()
 })
 
 test('the pane is read again when the mod logs an event, once for a burst, and never before a tool call returns', async ($, on) => {
