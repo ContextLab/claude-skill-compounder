@@ -1,0 +1,1994 @@
+#!/usr/bin/env python3
+"""compound: the store, the event log and the install of the compound mod.
+
+This file is the only code that reads or writes lessons, skills, the event log and the
+install record. The mod (hooks/) calls it for every store operation. Standard library
+only; runs on Python 3.8 and later.
+
+LEVELS
+    project   <repo>/.claude/compound/lessons/<name>/   <repo>/.claude/skills/<name>/
+    user      <COMPOUND_HOME>/lessons/<name>/           <COMPOUND_CLAUDE_DIR>/skills/<name>/
+    general   <package>/lessons/<name>/                 <package>/skills/<name>/
+
+    <repo> is COMPOUND_PROJECT when set, else `git rev-parse --show-toplevel` of the
+    working directory, else the working directory. <package> is the checkout this file
+    really lives in (the installed `compound` is a symlink to it).
+
+LESSON FORMAT
+    <dir>/SKILL.md: a `---` line, flat `key: value` lines, a `---` line, the body.
+    Keys written here: name, description, match, created, updated, origin. `match` is a
+    JSON array of Python regular expressions on ONE line; each is tested with
+    re.search() against the text of a tool call (the `command` for Bash, otherwise the
+    JSON of the input). A lesson with `match` is a guard.
+
+EVENT LOG
+    <COMPOUND_HOME>/events.jsonl, append-only, one JSON object per line, one write()
+    per line. `compound log` reads ONE object on stdin and appends it. It fills three
+    fields when they are absent: `ts`, `session` (from CLAUDE_CODE_SESSION_ID) and
+    `project` (the project root). `type` is required.
+
+    Fields every event carries:
+        ts        string  UTC, "YYYY-MM-DDTHH:MM:SSZ"
+        type      string  one of the names below
+        session   string  Claude Code session id, "" when unknown
+        project   string  absolute path of the project root
+
+    Fields per type. A name marked * is READ by this CLI; the others are stored and
+    shown as they are.
+
+        type      written by        fields
+        reuse     mod               lessons* [string]  names of the inventory items
+                                                       offered, exactly as `compound
+                                                       list --json` names them (a
+                                                       script's name is its path
+                                                       relative to the project)
+                                    prompts  [string]  prompt-log ids offered
+                                    keywords [string]  the search words
+        guard     mod               lesson*  string    the lesson whose match hit
+                                    tool     string    tool name
+                                    text     string    the text that was tested
+        recall    mod               lesson*  string    the lesson returned beside a
+                                                       failure (one recurrence)
+                                    tool     string
+                                    error    string    the failure's text
+        capture   mod               tool     string
+                                    failed   string    the failing call
+                                    error    string
+                                    fixed    string    the working call
+        learn     CLI `add`         lesson*  string
+                                    level    string    project | user | general
+                                    kind     string    lesson | skill
+                                    path     string    the lesson's directory
+                                    guard    bool      it has a match
+                                    update   bool      --update rewrote it
+        skip      CLI `skip`        why*     string
+        nudge     mod               calls    int       tool calls in the turn
+        promote   CLI `promote`     lesson*  string
+                                    from     string    level it left
+                                    to       string    user | general
+                                    path     string    where it is now
+                                    url      string    the pull request (general only)
+        error     mod               where*   string    hook or step that failed
+                                    message* string
+
+    Counting. `counts` for a name is {reuse, guard, recall, learn}: the number of
+    events of that type whose `lesson` equals the name or whose `lessons` list
+    contains it. Both fields are read on all four types, so a recall that matched two
+    lessons may carry `lessons`. Events are selected by type NAME; an unknown type is
+    stored, shown by `events`, and counted nowhere.
+
+    Ineffective. A lesson is ineffective when at least COMPOUND_RECUR_LIMIT (default
+    2) `recall` events naming it have a `ts` later than its SKILL.md's modification
+    time. Rewriting the lesson (`compound add --update`) clears the flag.
+
+ENVIRONMENT
+    COMPOUND_HOME        user level root and the event log (default <claude dir>/compound)
+    COMPOUND_CLAUDE_DIR  the Claude Code directory (default ~/.claude)
+    COMPOUND_PROJECT     the project root, overriding git
+    COMPOUND_NOW         pins the clock: epoch seconds or an ISO 8601 time
+    COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
+    COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
+    COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
+    COMPOUND_NO_SURFER   install does not fetch history-surfer
+    COMPOUND_SURFER_URL  where install clones history-surfer from
+    CLAUDE_CODE_SESSION_ID  set by Claude Code; stamps `session` on events written here
+
+EXIT STATUS
+    0 success; 2 usage or validation error (an unknown lesson name included);
+    1 any other failure. Errors go to stderr.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+LEVELS = ("project", "user", "general")
+COUNT_TYPES = ("reuse", "guard", "recall", "learn")
+UPSTREAM_DEFAULT = "ContextLab/claude-skill-compounder"
+SURFER_URL = "https://github.com/ContextLab/claude-history-surfer.git"
+PLUGIN_ENV = "CLAUDE_CODE_PLUGIN_DIRS"
+SCRIPT_DIRS = ("scripts", "bin", "tools")
+SCRIPT_CAP = 200
+WEEK = 7 * 86400
+# Prompt-log rows that begin like this were not typed by the user.
+NOT_TYPED = ("<agent-message", "<task-notification", "<system-reminder",
+             "This session is being continued from a previous conversation")
+STOPWORDS = frozenset(
+    "a an and are as at be by for from in is it of on or that the this to with".split()
+)
+
+
+class Fail(Exception):
+    """An error with the exit status it should end the process on."""
+
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+        self.message = message
+
+
+def usage(message):
+    return Fail(2, message)
+
+
+def failure(message):
+    return Fail(1, message)
+
+
+# ----------------------------------------------------------------------------- clock
+
+
+def parse_ts(value):
+    """Epoch seconds for an epoch number or an ISO 8601 string, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if re.match(r"^\d+(\.\d+)?$", text):
+        return float(text)
+    import datetime
+
+    iso = text
+    if iso.endswith("Z") or iso.endswith("z"):
+        iso = iso[:-1] + "+00:00"
+    iso = re.sub(r"(\.\d{6})\d+", r"\1", iso)
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def now():
+    pinned = os.environ.get("COMPOUND_NOW")
+    if pinned:
+        value = parse_ts(pinned)
+        if value is None:
+            raise usage("COMPOUND_NOW is neither epoch seconds nor an ISO 8601 time: %r" % pinned)
+        return value
+    return time.time()
+
+
+def iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def age_text(seconds):
+    seconds = int(seconds)
+    if seconds < 0:
+        return "in the future"
+    if seconds < 60:
+        return "%ds" % seconds
+    if seconds < 3600:
+        return "%dm" % (seconds // 60)
+    if seconds < 86400:
+        return "%dh" % (seconds // 3600)
+    return "%dd" % (seconds // 86400)
+
+
+# ----------------------------------------------------------------------------- paths
+
+
+def pkg_root():
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def _expand(path):
+    return os.path.abspath(os.path.expanduser(path))
+
+
+def claude_dir():
+    return _expand(os.environ.get("COMPOUND_CLAUDE_DIR") or "~/.claude")
+
+
+def home_dir():
+    value = os.environ.get("COMPOUND_HOME")
+    if value:
+        return _expand(value)
+    return os.path.join(claude_dir(), "compound")
+
+
+def events_path():
+    return os.path.join(home_dir(), "events.jsonl")
+
+
+def manifest_path():
+    return os.path.join(home_dir(), "install.json")
+
+
+def _walk_up_git(start):
+    here = start
+    while True:
+        if os.path.exists(os.path.join(here, ".git")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def project_root(fast=False):
+    """COMPOUND_PROJECT, else the git top level, else the working directory.
+
+    `fast` finds the top level by walking up to a `.git` entry instead of starting
+    git; `check` uses it because it runs before every tool call.
+    """
+    pinned = os.environ.get("COMPOUND_PROJECT")
+    if pinned:
+        return _expand(pinned)
+    cwd = os.getcwd()
+    if fast:
+        return _walk_up_git(cwd) or cwd
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return cwd
+    top = proc.stdout.decode("utf-8", "replace").strip()
+    if proc.returncode == 0 and top:
+        return top
+    return cwd
+
+
+def level_dirs(project):
+    """[(level, lessons dir, skills dir)] in project, user, general order."""
+    pkg = pkg_root()
+    return [
+        ("project", os.path.join(project, ".claude", "compound", "lessons"),
+         os.path.join(project, ".claude", "skills")),
+        ("user", os.path.join(home_dir(), "lessons"), os.path.join(claude_dir(), "skills")),
+        ("general", os.path.join(pkg, "lessons"), os.path.join(pkg, "skills")),
+    ]
+
+
+def dirs_of(project, level):
+    for name, lessons, skills in level_dirs(project):
+        if name == level:
+            return lessons, skills
+    raise usage("unknown level %r" % level)
+
+
+# ----------------------------------------------------------------------------- files
+
+
+def atomic_write(path, text, mode=None):
+    """Write `text` to `path` through a temp file in the same directory and a rename."""
+    import tempfile
+
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_copy(src, dst):
+    import shutil
+    import tempfile
+
+    directory = os.path.dirname(dst)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(dst) + ".", suffix=".tmp")
+    os.close(fd)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+# ----------------------------------------------------------------------------- format
+
+
+def one_line(value):
+    return " ".join(str(value).split())
+
+
+def _unquote(value):
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        inner = value[1:-1]
+        if value[0] not in inner:
+            return inner
+    return value
+
+
+def parse_skill(text):
+    """(frontmatter dict in file order, body, problem). `problem` is None when the
+    frontmatter block is well formed."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}, text, "no frontmatter"
+    end = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            end = index
+            break
+    if end is None:
+        return {}, text, "frontmatter is not closed"
+    fields = {}
+    problem = None
+    last = None
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[0] in " \t":
+            if last is not None:
+                fields[last] = (fields[last] + " " + line.strip()).strip()
+            continue
+        found = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if not found:
+            problem = problem or "frontmatter line is not `key: value`: %r" % line
+            continue
+        last = found.group(1)
+        value = found.group(2).strip()
+        if value in (">", "|", ">-", "|-", ">+", "|+"):
+            value = ""
+        fields[last] = value
+    body = "\n".join(lines[end + 1:])
+    return fields, body, problem
+
+
+def parse_match(value):
+    """(list of patterns, problem) from a frontmatter `match` value."""
+    if value is None or value == "":
+        return [], None
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return [], "match is not a JSON array on one line"
+    if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
+        return [], "match is not a JSON array of strings"
+    return data, None
+
+
+def match_problem(pattern):
+    """Why `pattern` cannot be a guard, or None."""
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        return "does not compile: %s" % exc
+    if compiled.search("") is not None:
+        return "matches the empty string, so it would refuse every tool call"
+    return None
+
+
+def render_skill(fields, body):
+    out = ["---"]
+    for key, value in fields.items():
+        out.append("%s: %s" % (key, value))
+    out.append("---")
+    return "\n".join(out) + "\n" + body.strip("\n") + "\n"
+
+
+# ----------------------------------------------------------------------------- store
+
+
+def _load_item(level, kind, directory, with_body):
+    name = os.path.basename(directory)
+    skill_md = os.path.join(directory, "SKILL.md")
+    item = {
+        "level": level, "kind": kind, "name": name, "description": "",
+        "path": directory, "match": [],
+        "_file": skill_md, "_problem": None, "_match_issue": None, "_fields": {}, "_body": "",
+    }
+    try:
+        text = read_text(skill_md)
+    except OSError as exc:
+        item["_problem"] = "SKILL.md cannot be read: %s" % (exc.strerror or exc)
+        return item
+    fields, body, problem = parse_skill(text)
+    item["_fields"] = fields
+    item["_text"] = text
+    if with_body:
+        item["_body"] = body.strip("\n")
+    item["description"] = _unquote(fields.get("description", ""))
+    patterns, match_issue = parse_match(fields.get("match"))
+    usable = []
+    for pattern in patterns:
+        issue = match_problem(pattern)
+        if issue:
+            match_issue = match_issue or "match %r %s" % (pattern, issue)
+        else:
+            usable.append(pattern)
+    item["match"] = usable
+    if kind == "lesson":
+        if problem is None and not fields.get("name"):
+            problem = "frontmatter has no name"
+        if problem is None and _unquote(fields.get("name", "")) != name:
+            problem = "frontmatter name %r is not the directory name" % fields.get("name")
+        if problem is None and not item["description"]:
+            problem = "frontmatter has no description"
+        if problem is None and not body.strip():
+            problem = "the body is empty"
+        item["_problem"] = problem
+    item["_match_issue"] = match_issue
+    return item
+
+
+def scan(project, with_body=False):
+    """(items, broken). Every lesson and skill at all three levels, one entry per real
+    SKILL.md: a directory reachable from two levels (a skills symlink into the package,
+    a project that is the home directory) is listed once, at the widest level."""
+    found = {}
+    broken = []
+    reported = set()
+    rank = {"project": 0, "user": 1, "general": 2}
+    for level, lessons, skills in level_dirs(project):
+        for kind, base in (("lesson", lessons), ("skill", skills)):
+            try:
+                names = sorted(os.listdir(base))
+            except OSError:
+                continue
+            for name in names:
+                if name.startswith("."):
+                    continue
+                directory = os.path.join(base, name)
+                if not os.path.isdir(directory):
+                    continue
+                skill_md = os.path.join(directory, "SKILL.md")
+                if not os.path.isfile(skill_md):
+                    if kind == "lesson":
+                        broken.append({"level": level, "name": name, "path": directory,
+                                       "problem": "no SKILL.md"})
+                    continue
+                item = _load_item(level, kind, directory, with_body)
+                real = os.path.realpath(skill_md)
+                issue = item["_problem"] or (item["_match_issue"] if kind == "lesson" else None)
+                if issue and real not in reported:
+                    reported.add(real)
+                    broken.append({"level": level, "name": name, "path": directory, "problem": issue})
+                if item["_problem"]:
+                    continue  # a lesson that does not read is reported, never listed
+                previous = found.get(real)
+                if previous is None or rank[level] > rank[previous["level"]]:
+                    found[real] = item
+    items = sorted(found.values(), key=lambda it: (rank[it["level"]], it["kind"], it["name"]))
+    return items, broken
+
+
+def find_item(project, name, with_body=True):
+    items, _ = scan(project, with_body=with_body)
+    hits = [item for item in items if item["name"] == name]
+    if not hits:
+        raise usage("no lesson or skill named %r (see `compound list`)" % name)
+    if len(hits) > 1:
+        sys.stderr.write("compound: %r exists at %s; using the %s one\n" % (
+            name, ", ".join(h["level"] for h in hits), hits[0]["level"]))
+    return hits[0]
+
+
+def public(item, extra=None):
+    out = {key: value for key, value in item.items() if not key.startswith("_")}
+    if extra:
+        out.update(extra)
+    return out
+
+
+def first_comment(path):
+    """The first comment line of a script, else a Python docstring's first line."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            head = [handle.readline() for _ in range(40)]
+    except OSError:
+        return ""
+    for line in head:
+        text = line.strip()
+        if text.startswith("#!"):
+            continue
+        if text.startswith("#"):
+            text = text.lstrip("#").strip()
+            if text and not text.startswith("-*-"):
+                return one_line(text)
+            continue
+        if text.startswith("//"):
+            text = text.lstrip("/").strip()
+            if text:
+                return one_line(text)
+    joined = "".join(head)
+    doc = re.search(r'^\s*(?:"""|\'\'\')\s*(.*)', joined, re.M)
+    if doc:
+        text = doc.group(1).strip().strip("\"'").strip()
+        if text:
+            return one_line(text)
+    return ""
+
+
+def scan_scripts(project):
+    """Executable files and *.py / *.sh under the project's scripts/, bin/ and tools/,
+    at most two levels down, at most SCRIPT_CAP of them."""
+    out = []
+    for top in SCRIPT_DIRS:
+        base = os.path.join(project, top)
+        if not os.path.isdir(base):
+            continue
+        for root, dirnames, filenames in os.walk(base):
+            depth = 0 if root == base else os.path.relpath(root, base).count(os.sep) + 1
+            dirnames[:] = sorted(d for d in dirnames
+                                 if not d.startswith(".") and d != "__pycache__" and d != "node_modules")
+            if depth >= 1:
+                dirnames[:] = []
+            for filename in sorted(filenames):
+                if filename.startswith("."):
+                    continue
+                path = os.path.join(root, filename)
+                if not os.path.isfile(path):
+                    continue
+                if not (filename.endswith((".py", ".sh")) or os.access(path, os.X_OK)):
+                    continue
+                out.append({
+                    "level": "project", "kind": "script",
+                    "name": os.path.relpath(path, project),
+                    "description": first_comment(path), "path": path, "match": [],
+                })
+                if len(out) >= SCRIPT_CAP:
+                    return out
+    return out
+
+
+# ----------------------------------------------------------------------------- events
+
+
+def read_events():
+    """(events, unparseable line count). A missing log is an empty one."""
+    events = []
+    bad = 0
+    try:
+        handle = open(events_path(), "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return events, bad
+    with handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            if not isinstance(event, dict):
+                bad += 1
+                continue
+            events.append(event)
+    return events, bad
+
+
+def append_event(event):
+    """One event, one line, one write()."""
+    path = events_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    line = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def log_event(event_type, project, **fields):
+    event = {
+        "ts": iso(now()),
+        "type": event_type,
+        "session": os.environ.get("CLAUDE_CODE_SESSION_ID", ""),
+        "project": project,
+    }
+    event.update(fields)
+    append_event(event)
+    return event
+
+
+def event_names(event):
+    names = []
+    one = event.get("lesson")
+    if isinstance(one, str) and one:
+        names.append(one)
+    many = event.get("lessons")
+    if isinstance(many, list):
+        for value in many:
+            if isinstance(value, str) and value and value not in names:
+                names.append(value)
+    return names
+
+
+def tally(events):
+    """({name: {reuse, guard, recall, learn}}, {name: [recall epochs]})."""
+    counts = {}
+    recalls = {}
+    for event in events:
+        kind = event.get("type")
+        if kind not in COUNT_TYPES:
+            continue
+        for name in event_names(event):
+            row = counts.setdefault(name, dict.fromkeys(COUNT_TYPES, 0))
+            row[kind] += 1
+            if kind == "recall":
+                stamp = parse_ts(event.get("ts"))
+                if stamp is not None:
+                    recalls.setdefault(name, []).append(stamp)
+    return counts, recalls
+
+
+def recur_limit():
+    value = os.environ.get("COMPOUND_RECUR_LIMIT", "")
+    if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
+        return int(value)
+    return 2
+
+
+def is_ineffective(item, recalls, limit):
+    stamps = recalls.get(item["name"])
+    if not stamps:
+        return False
+    try:
+        modified = int(os.stat(item["_file"]).st_mtime)
+    except OSError:
+        return False
+    return sum(1 for stamp in stamps if stamp > modified) >= limit
+
+
+def annotate(items, events):
+    """Public dicts carrying `counts` and `ineffective`."""
+    counts, recalls = tally(events)
+    limit = recur_limit()
+    out = []
+    for item in items:
+        extra = {"counts": dict(counts.get(item["name"], dict.fromkeys(COUNT_TYPES, 0)))}
+        if item["kind"] == "script":
+            extra["ineffective"] = False
+        else:
+            extra["ineffective"] = is_ineffective(item, recalls, limit)
+        out.append(public(item, extra))
+    return out
+
+
+def event_summary(event):
+    kind = event.get("type")
+    names = event_names(event)
+    if kind == "skip":
+        return one_line(event.get("why", ""))
+    if kind == "error":
+        where = one_line(event.get("where", ""))
+        message = one_line(event.get("message", ""))
+        return (where + ": " + message) if where else message
+    if kind == "promote":
+        text = "%s %s -> %s" % (", ".join(names), event.get("from", "?"), event.get("to", "?"))
+        if event.get("url"):
+            text += " " + str(event["url"])
+        return text
+    if kind == "learn":
+        return "%s (%s%s)" % (", ".join(names), event.get("level", "?"),
+                              ", updated" if event.get("update") else "")
+    if kind == "nudge":
+        return "%s calls" % event.get("calls", "?")
+    if names:
+        return ", ".join(names)
+    if kind == "capture":
+        return one_line(event.get("fixed", ""))[:80]
+    return ""
+
+
+def event_line(event):
+    session = str(event.get("session") or "")[:8] or "-"
+    project = os.path.basename(str(event.get("project") or "")) or "-"
+    return "%-20s %-8s %-8s %-20s %s" % (
+        event.get("ts", "?"), event.get("type", "?"), session, project[:20],
+        event_summary(event)[:100])
+
+
+# ----------------------------------------------------------------------------- output
+
+
+def emit(data):
+    sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def table(rows, header):
+    if not rows:
+        return ""
+    widths = [len(col) for col in header]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(str(cell)))
+    lines = []
+    for row in [header] + rows:
+        lines.append("  ".join(str(cell).ljust(widths[index])
+                               for index, cell in enumerate(row)).rstrip())
+    return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------- add
+
+
+def read_stdin():
+    if sys.stdin is None or sys.stdin.isatty():
+        return ""
+    data = sys.stdin.buffer.read()
+    return data.decode("utf-8", "replace")
+
+
+def cmd_add(args):
+    name = args.name
+    if not SLUG_RE.match(name):
+        raise usage("--name %r is not a slug: lowercase letters, digits and hyphens, "
+                    "2 to 63 characters, starting with a letter or digit" % name)
+    if args.level == "general":
+        raise usage("a lesson reaches general only through `compound promote %s --to general`" % name)
+    if args.match and args.no_match:
+        raise usage("--match and --no-match cannot both be given")
+    for pattern in args.match or []:
+        issue = match_problem(pattern)
+        if issue:
+            raise usage("--match %r %s" % (pattern, issue))
+    attachments = []
+    for source in args.attach or []:
+        if not os.path.isfile(source):
+            raise usage("--attach %s is not a file" % source)
+        if os.path.basename(source) == "SKILL.md":
+            raise usage("--attach cannot replace SKILL.md")
+        attachments.append(os.path.abspath(source))
+    names = [os.path.basename(path) for path in attachments]
+    if len(set(names)) != len(names):
+        raise usage("two --attach files share a file name")
+    body = read_stdin()
+    description = one_line(args.when) if args.when is not None else None
+
+    project = project_root()
+    items, _ = scan(project, with_body=True)
+    existing = [item for item in items if item["name"] == name]
+
+    if args.update:
+        if not existing:
+            raise usage("no lesson named %r to update (drop --update to add it)" % name)
+        item = existing[0]
+        if item["level"] == "general":
+            raise usage("%r is in the general pool, which changes through a pull request "
+                        "(`compound promote`), not in place" % name)
+        fields = dict(item["_fields"])
+        if description is not None:
+            if not description:
+                raise usage("--when is empty")
+            fields["description"] = description
+        if not _unquote(fields.get("description", "")):
+            raise usage("--when is required: the lesson has no description")
+        if "name" not in fields:
+            fields = dict([("name", name)] + list(fields.items()))
+        if args.match:
+            fields["match"] = json.dumps(args.match, ensure_ascii=False)
+        elif args.no_match:
+            fields.pop("match", None)
+        if args.origin:
+            fields["origin"] = one_line(args.origin)
+        text = body if body.strip() else item["_body"]
+        if not text.strip():
+            raise usage("the body is empty: write the lesson on stdin")
+        stamp = now()
+        fields["updated"] = time.strftime("%Y-%m-%d", time.gmtime(stamp))
+        directory = item["path"]
+        atomic_write(item["_file"], render_skill(fields, text))
+        for source in attachments:
+            atomic_copy(source, os.path.join(directory, os.path.basename(source)))
+        _pin_mtime(item["_file"], stamp)
+        level, kind = item["level"], item["kind"]
+    else:
+        if existing:
+            where = existing[0]
+            raise usage("%r already exists at the %s level (%s). Use --update to rewrite it "
+                        "where it is; a second copy is never added" % (name, where["level"], where["path"]))
+        if description is None or not description:
+            raise usage("--when is required and cannot be empty: it says when the lesson applies")
+        if not body.strip():
+            raise usage("the body is empty: write the lesson on stdin")
+        stamp = now()
+        fields = {"name": name, "description": description}
+        if args.match:
+            fields["match"] = json.dumps(args.match, ensure_ascii=False)
+        fields["created"] = time.strftime("%Y-%m-%d", time.gmtime(stamp))
+        session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        origin = args.origin or "project %s%s" % (
+            os.path.basename(project) or project, (", session " + session[:8]) if session else "")
+        fields["origin"] = one_line(origin)
+        lessons, _skills = dirs_of(project, args.level)
+        directory = os.path.join(lessons, name)
+        _create_dir(lessons, name, render_skill(fields, body), attachments)
+        _pin_mtime(os.path.join(directory, "SKILL.md"), stamp)
+        level, kind = args.level, "lesson"
+
+    log_event("learn", project, lesson=name, level=level, kind=kind, path=directory,
+              guard=bool(fields.get("match")), update=bool(args.update))
+    result = {"name": name, "level": level, "kind": kind, "path": directory,
+              "updated": bool(args.update), "guard": bool(fields.get("match"))}
+    if args.json:
+        emit(result)
+    else:
+        sys.stdout.write("%s %s %s (%s)\n  %s\n" % (
+            "updated" if args.update else "recorded", "guard" if result["guard"] else kind,
+            name, level, directory))
+    return 0
+
+
+def _pin_mtime(path, stamp):
+    """With the clock pinned, a file written 'now' carries the pinned time too, so
+    'recalled since it was last modified' compares one clock with itself."""
+    if os.environ.get("COMPOUND_NOW"):
+        os.utime(path, (stamp, stamp))
+
+
+def _create_dir(parent, name, text, attachments):
+    """Build the lesson beside its final place and rename it in, so a half-written
+    lesson is never visible and a name taken in the meantime is refused."""
+    import shutil
+    import tempfile
+
+    os.makedirs(parent, exist_ok=True)
+    final = os.path.join(parent, name)
+    staging = tempfile.mkdtemp(dir=parent, prefix="." + name + ".", suffix=".tmp")
+    try:
+        os.chmod(staging, 0o755)
+        with open(os.path.join(staging, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write(text)
+        for source in attachments:
+            shutil.copy2(source, os.path.join(staging, os.path.basename(source)))
+        if os.path.lexists(final):
+            raise usage("%s appeared while the lesson was being written; nothing was changed" % final)
+        os.rename(staging, final)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+# ----------------------------------------------------------------------------- list, show, find
+
+
+def cmd_list(args):
+    project = project_root()
+    items, _ = scan(project)
+    if args.scripts:
+        items = items + scan_scripts(project)
+    if args.level:
+        items = [item for item in items if item["level"] == args.level]
+    events, _ = read_events()
+    rows = annotate(items, events)
+    if args.json:
+        emit(rows)
+        return 0
+    if not rows:
+        sys.stdout.write("nothing recorded yet\n")
+        return 0
+    lines = []
+    for row in rows:
+        counts = row["counts"]
+        kind = "guard" if (row["kind"] == "lesson" and row["match"]) else row["kind"]
+        flag = "ineffective" if row["ineffective"] else ""
+        lines.append([row["level"], kind, row["name"],
+                      "%d/%d/%d" % (counts["reuse"], counts["guard"], counts["recall"]),
+                      flag, row["description"][:70]])
+    sys.stdout.write(table(lines, ["LEVEL", "KIND", "NAME", "USE/GRD/RCL", "FLAG", "WHEN"]))
+    return 0
+
+
+def cmd_show(args):
+    project = project_root()
+    item = find_item(project, args.name)
+    text = item.get("_text", "")
+    files = sorted(name for name in os.listdir(item["path"]) if name != "SKILL.md" and not name.startswith("."))
+    if args.json:
+        events, _ = read_events()
+        row = annotate([item], events)[0]
+        row["text"] = text
+        row["files"] = files
+        emit(row)
+        return 0
+    sys.stdout.write("%s (%s %s)\n%s\n" % (item["name"], item["level"], item["kind"], item["path"]))
+    for name in files:
+        sys.stdout.write("  attached: %s\n" % name)
+    sys.stdout.write("\n" + text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+def words_of(text):
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def query_words(parts):
+    seen = []
+    for word in words_of(" ".join(parts)):
+        if len(word) >= 2 and word not in seen:
+            seen.append(word)
+    kept = [word for word in seen if word not in STOPWORDS]
+    return kept or seen
+
+
+def surfer_bin():
+    named = os.environ.get("COMPOUND_SURFER")
+    if named:
+        return named if (os.path.isfile(named) and os.access(named, os.X_OK)) else None
+    import shutil
+
+    return shutil.which("surfer")
+
+
+def prompt_hits(words, project, cap=5):
+    """(hits, state). Prompt-log matches for the current project first, then for every
+    project, de-duplicated, best word overlap first within each scope."""
+    binary = surfer_bin()
+    if not binary:
+        return [], "missing"
+    import subprocess
+
+    pattern = "|".join(re.escape(word) for word in words)
+    hits = []
+    seen = set()
+    state = "ok"
+    for scope, extra in (("project", ["--project", project]), ("all", ["--all"])):
+        if len(hits) >= cap:
+            break
+        try:
+            proc = subprocess.run(
+                [binary, "search", pattern, "--regex", "--json", "--limit", "200"] + extra,
+                cwd=project if os.path.isdir(project) else None,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=20)
+            rows = json.loads(proc.stdout.decode("utf-8", "replace") or "[]") if proc.returncode == 0 else None
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            state = "error: %s" % one_line(exc)[:120]
+            continue
+        if not isinstance(rows, list):
+            state = "error: surfer search exited %d" % proc.returncode
+            continue
+        ranked = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("is_command"):
+                continue
+            prompt = str(row.get("prompt") or "")
+            if prompt.lstrip().startswith(NOT_TYPED):
+                continue
+            present = set(words_of(prompt))
+            score = sum(1 for word in words if word in present)
+            ranked.append((score, str(row.get("ts") or ""), row, prompt))
+        ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        for score, _ts, row, prompt in ranked:
+            key = str(row.get("id") or "") or prompt
+            if key in seen or one_line(prompt) in seen:
+                continue
+            seen.add(key)
+            seen.add(one_line(prompt))
+            hits.append({"id": str(row.get("id") or ""), "ts": str(row.get("ts") or ""),
+                         "project": str(row.get("cwd") or ""), "scope": scope,
+                         "score": score, "prompt": one_line(prompt)[:300]})
+            if len(hits) >= cap:
+                break
+    return hits, state
+
+
+def cmd_find(args):
+    words = query_words(args.words)
+    if not words:
+        raise usage("give at least one word to search for")
+    project = project_root()
+    items, _ = scan(project, with_body=True)
+    candidates = items + scan_scripts(project)
+    events, _ = read_events()
+    scored = []
+    for item, row in zip(candidates, annotate(candidates, events)):
+        head = set(words_of(item["name"] + " " + item["description"]))
+        everything = head | set(words_of(item.get("_body", "")))
+        score = sum(1 for word in words if word in everything)
+        if score == 0:
+            continue
+        row["score"] = score
+        scored.append((score, sum(1 for word in words if word in head), row))
+    scored.sort(key=lambda entry: (-entry[0], -entry[1], entry[2]["name"]))
+    rows = [entry[2] for entry in scored[: args.limit]]
+    prompts, state = prompt_hits(words, project)
+    if args.json:
+        emit({"words": words, "items": rows, "prompts": prompts, "surfer": state})
+        return 0
+    if rows:
+        for row in rows:
+            sys.stdout.write("%s %s (%s) [%d/%d words]: %s\n  -> %s\n" % (
+                row["kind"], row["name"], row["level"], row["score"], len(words),
+                row["description"], row["path"]))
+    else:
+        sys.stdout.write("no lesson, skill or script matches: %s\n" % " ".join(words))
+    if state == "missing":
+        sys.stdout.write("prompt log: not searched (history-surfer's `surfer` is not on PATH)\n")
+    elif state != "ok":
+        sys.stdout.write("prompt log: %s\n" % state)
+    if prompts:
+        sys.stdout.write("earlier requests:\n")
+        for hit in prompts:
+            sys.stdout.write("  %s %s %s: \"%s\"\n" % (
+                hit["id"], hit["ts"][:10], os.path.basename(hit["project"]) or "-", hit["prompt"][:160]))
+    elif state == "ok":
+        sys.stdout.write("prompt log: no earlier request matches\n")
+    return 0
+
+
+# ----------------------------------------------------------------------------- check
+
+
+def cmd_check(_args=None):
+    raw = sys.stdin.read() if sys.stdin is not None and not sys.stdin.isatty() else ""
+    try:
+        call = json.loads(raw)
+    except ValueError:
+        raise usage("check reads one JSON object {\"tool\":...,\"input\":...} on stdin")
+    if not isinstance(call, dict):
+        raise usage("check reads one JSON object {\"tool\":...,\"input\":...} on stdin")
+    payload = call.get("input")
+    if call.get("tool") == "Bash" and isinstance(payload, dict) and isinstance(payload.get("command"), str):
+        text = payload["command"]
+    elif isinstance(payload, str):
+        text = payload
+    elif payload is None:
+        text = ""
+    else:
+        text = json.dumps(payload, ensure_ascii=False)
+    hits = []
+    if text:
+        items, _ = scan(project_root(fast=True), with_body=True)
+        for item in items:
+            for pattern in item["match"]:
+                try:
+                    found = re.search(pattern, text)
+                except re.error:
+                    continue
+                if found:
+                    hits.append({"name": item["name"], "level": item["level"],
+                                 "path": item["path"], "text": item["_body"].strip()})
+                    break
+    sys.stdout.write(json.dumps({"hits": hits}, ensure_ascii=False) + "\n")
+    return 0
+
+
+# ----------------------------------------------------------------------------- skill, promote, rm
+
+
+def _move(source, target):
+    import shutil
+
+    if os.path.lexists(target):
+        raise usage("%s already exists; nothing was moved" % target)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    try:
+        os.rename(source, target)
+    except OSError:
+        shutil.move(source, target)
+
+
+def cmd_skill(args):
+    project = project_root()
+    item = find_item(project, args.name)
+    if item["kind"] != "lesson":
+        raise usage("%r is already a skill (%s)" % (args.name, item["path"]))
+    if item["level"] == "general":
+        raise usage("%r is in the general pool, which changes through a pull request" % args.name)
+    _lessons, skills = dirs_of(project, item["level"])
+    target = os.path.join(skills, item["name"])
+    _move(item["path"], target)
+    result = {"name": item["name"], "level": item["level"], "kind": "skill", "path": target}
+    if args.json:
+        emit(result)
+    else:
+        sys.stdout.write("%s is now a skill (%s)\n  %s\n" % (item["name"], item["level"], target))
+    return 0
+
+
+def _lesson_files(directory):
+    out = []
+    for root, dirnames, filenames in os.walk(directory):
+        dirnames[:] = sorted(d for d in dirnames if d not in ("__pycache__", ".git"))
+        for filename in sorted(filenames):
+            if filename == ".DS_Store" or filename.endswith(".pyc"):
+                continue
+            out.append(os.path.relpath(os.path.join(root, filename), directory))
+    return out
+
+
+def _run(argv, cwd=None, timeout=300):
+    import subprocess
+
+    try:
+        proc = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", str(exc)
+    return (proc.returncode, proc.stdout.decode("utf-8", "replace").strip(),
+            proc.stderr.decode("utf-8", "replace").strip())
+
+
+def _must(argv, cwd=None, what=None):
+    code, out, err = _run(argv, cwd=cwd)
+    if code != 0:
+        raise failure("%s failed: %s" % (what or " ".join(argv[:3]), one_line(err or out)[:300]))
+    return out
+
+
+def cmd_promote(args):
+    project = project_root()
+    item = find_item(project, args.name)
+    name = item["name"]
+    if args.to == "user":
+        if item["level"] != "project":
+            raise usage("%r is already at the %s level" % (name, item["level"]))
+        lessons, skills = dirs_of(project, "user")
+        target = os.path.join(lessons if item["kind"] == "lesson" else skills, name)
+        _move(item["path"], target)
+        log_event("promote", project, lesson=name, to="user", path=target, **{"from": "project"})
+        result = {"name": name, "from": "project", "to": "user", "kind": item["kind"], "path": target}
+        if args.json:
+            emit(result)
+        else:
+            sys.stdout.write("moved %s from project to user\n  %s\n" % (name, target))
+        return 0
+
+    if item["level"] == "general":
+        raise usage("%r is already in the general pool" % name)
+    upstream = os.environ.get("COMPOUND_UPSTREAM") or UPSTREAM_DEFAULT
+    if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", upstream):
+        raise usage("COMPOUND_UPSTREAM is not owner/repo: %r" % upstream)
+    subdir = "lessons" if item["kind"] == "lesson" else "skills"
+    branch = "compound/%s-%s" % (item["kind"], name)
+    files = _lesson_files(item["path"])
+    title = "Add %s: %s" % (item["kind"], name)
+    body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
+        item["kind"], name, item["description"])
+    if item["match"]:
+        body += "\nGuard patterns:\n" + "".join("- `%s`\n" % pattern for pattern in item["match"])
+    body += "\nFiles:\n" + "".join("- `%s/%s/%s`\n" % (subdir, name, rel) for rel in files)
+    body += "\nThe text:\n\n```\n%s\n```\n" % item["_body"].strip()
+    plan = {
+        "name": name, "from": item["level"], "to": "general", "upstream": upstream,
+        "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
+        "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
+    }
+    if not args.yes:
+        if args.json:
+            emit(plan)
+        else:
+            sys.stdout.write(
+                "Plan (nothing has been written; run again with --yes to do it):\n"
+                "  upstream : %s\n  branch   : %s\n  from     : %s (%s level)\n  files    :\n%s"
+                "  PR title : %s\n  PR body  :\n%s\n"
+                "  SKILL.md as it will be published:\n%s\n" % (
+                    upstream, branch, item["path"], item["level"],
+                    "".join("    %s\n" % path for path in plan["files"]), title,
+                    "".join("    %s\n" % line for line in body.splitlines()),
+                    "".join("    %s\n" % line for line in item.get("_text", "").splitlines())))
+        return 0
+
+    import shutil
+    import tempfile
+
+    gh = shutil.which("gh")
+    if not gh:
+        raise failure("`gh` is not on PATH; `promote --to general --yes` needs the GitHub CLI")
+    if not shutil.which("git"):
+        raise failure("`git` is not on PATH")
+    code, _out, err = _run([gh, "auth", "status"], timeout=60)
+    if code != 0:
+        raise failure("`gh` is not authenticated (run `gh auth login`): %s" % one_line(err)[:200])
+    code, can_push, err = _run([gh, "api", "repos/" + upstream, "--jq", ".permissions.push"], timeout=60)
+    if code != 0:
+        raise failure("cannot read %s: %s" % (upstream, one_line(err)[:200]))
+    work = tempfile.mkdtemp(prefix="compound-promote-")
+    try:
+        clone = os.path.join(work, "repo")
+        _must([gh, "repo", "clone", upstream, clone, "--", "--depth", "1"], what="cloning " + upstream)
+        target = os.path.join(clone, subdir, name)
+        if os.path.exists(target):
+            raise failure("%s/%s already exists in %s" % (subdir, name, upstream))
+        _must(["git", "checkout", "-b", branch], cwd=clone)
+        shutil.copytree(item["path"], target,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", ".git"))
+        _must(["git", "add", "--", os.path.join(subdir, name)], cwd=clone)
+        _must(["git", "commit", "-m", title], cwd=clone, what="git commit")
+        helper = ["-c", "credential.helper=", "-c", "credential.helper=!%s auth git-credential" % gh]
+        if can_push.strip() == "true":
+            _must(["git"] + helper + ["push", "origin", branch], cwd=clone, what="git push")
+            head = branch
+        else:
+            _must([gh, "repo", "fork", "--remote", "--remote-name", "fork"], cwd=clone, what="gh repo fork")
+            login = _must([gh, "api", "user", "--jq", ".login"], what="gh api user")
+            _must(["git"] + helper + ["push", "fork", branch], cwd=clone, what="git push")
+            head = "%s:%s" % (login, branch)
+        url = _must([gh, "pr", "create", "--repo", upstream, "--head", head,
+                     "--title", title, "--body", body], cwd=clone, what="gh pr create")
+        url = url.splitlines()[-1].strip() if url else ""
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    log_event("promote", project, lesson=name, to="general", path=item["path"], url=url,
+              **{"from": item["level"]})
+    plan["url"] = url
+    if args.json:
+        emit(plan)
+    else:
+        sys.stdout.write("%s\n" % url)
+    return 0
+
+
+def cmd_rm(args):
+    import shutil
+
+    project = project_root()
+    item = find_item(project, args.name)
+    if item["level"] == "general":
+        raise usage("%r is in the general pool and ships with the package; it is not removed here" % args.name)
+    if item["kind"] != "lesson" and not args.force:
+        raise usage("%r is a skill (%s); `compound rm` removes lessons. "
+                    "Pass --force to remove a skill" % (args.name, item["path"]))
+    path = item["path"]
+    if os.path.islink(path):
+        os.unlink(path)
+    else:
+        shutil.rmtree(path)
+    result = {"name": item["name"], "level": item["level"], "kind": item["kind"], "removed": path}
+    if args.json:
+        emit(result)
+    else:
+        sys.stdout.write("removed %s (%s)\n  %s\n" % (item["name"], item["level"], path))
+    return 0
+
+
+# ----------------------------------------------------------------------------- skip, log, events
+
+
+def cmd_skip(args):
+    why = one_line(args.why)
+    if not why:
+        raise usage("--why cannot be empty: say why no lesson is being recorded")
+    event = log_event("skip", project_root(), why=why)
+    if args.json:
+        emit(event)
+    else:
+        sys.stdout.write("declined: %s\n" % why)
+    return 0
+
+
+def cmd_log(args):
+    raw = read_stdin()
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        raise usage("log reads one JSON object on stdin")
+    if not isinstance(event, dict):
+        raise usage("log reads one JSON object on stdin, not %s" % type(event).__name__)
+    kind = event.get("type")
+    if not isinstance(kind, str) or not re.match(r"^[a-z][a-z0-9_-]{0,31}$", kind):
+        raise usage("the event needs a `type` (a lowercase name such as reuse, guard, recall)")
+    out = {"ts": event.get("ts") if isinstance(event.get("ts"), str) and parse_ts(event.get("ts")) is not None
+           else iso(now()), "type": kind}
+    session = event.get("session")
+    out["session"] = session if isinstance(session, str) else os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    project = event.get("project")
+    out["project"] = project if isinstance(project, str) and project else project_root()
+    for key, value in event.items():
+        if key not in out:
+            out[key] = value
+    append_event(out)
+    if args.json:
+        emit(out)
+    return 0
+
+
+def cmd_events(args):
+    since = None
+    if args.since is not None:
+        since = parse_ts(args.since)
+        if since is None:
+            raise usage("--since %r is neither epoch seconds nor an ISO 8601 time" % args.since)
+    events, bad = read_events()
+    out = []
+    for event in events:
+        if args.type and event.get("type") != args.type:
+            continue
+        if args.session and event.get("session") != args.session:
+            continue
+        if since is not None:
+            stamp = parse_ts(event.get("ts"))
+            if stamp is None or stamp < since:
+                continue
+        out.append(event)
+    if args.limit:
+        out = out[-args.limit:]
+    if bad:
+        sys.stderr.write("compound: %d line(s) of %s do not parse and were skipped\n" % (bad, events_path()))
+    if args.json:
+        emit(out)
+    else:
+        for event in out:
+            sys.stdout.write(event_line(event) + "\n")
+    return 0
+
+
+# ----------------------------------------------------------------------------- settings
+
+
+def settings_path(directory=None):
+    return os.path.join(directory or claude_dir(), "settings.json")
+
+
+def load_settings(path):
+    """(settings dict, whether the file exists). Raises Fail(1) naming the problem on
+    anything that is not a JSON object; the file is never touched in that case."""
+    real = os.path.realpath(path)
+    if not os.path.exists(real):
+        return {}, False
+    try:
+        text = read_text(real)
+    except OSError as exc:
+        raise failure("%s cannot be read: %s" % (path, exc.strerror or exc))
+    if not text.strip():
+        return {}, True
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise failure("%s is not valid JSON (%s); it was left untouched. Fix it and run again" % (path, exc))
+    if not isinstance(data, dict):
+        raise failure("%s holds a JSON %s, not an object; it was left untouched" % (path, type(data).__name__))
+    env = data.get("env")
+    if env is not None and not isinstance(env, dict):
+        raise failure("%s: `env` is not an object; it was left untouched" % path)
+    if env and PLUGIN_ENV in env and not isinstance(env[PLUGIN_ENV], str):
+        raise failure("%s: `env.%s` is not a string; it was left untouched" % (path, PLUGIN_ENV))
+    return data, True
+
+
+def write_settings(path, data):
+    """Atomically, and through the symlink when `path` is one."""
+    real = os.path.realpath(path)
+    mode = None
+    try:
+        mode = os.stat(real).st_mode & 0o777
+    except OSError:
+        pass
+    atomic_write(real, json.dumps(data, ensure_ascii=False, indent=2) + "\n", mode=mode)
+
+
+def plugin_dirs(settings):
+    env = settings.get("env") or {}
+    return [part for part in str(env.get(PLUGIN_ENV, "")).split(os.pathsep) if part]
+
+
+def _same_path(left, right):
+    return os.path.realpath(os.path.expanduser(left)) == os.path.realpath(os.path.expanduser(right))
+
+
+def mod_enabled(settings, package):
+    return any(_same_path(part, package) for part in plugin_dirs(settings))
+
+
+def read_manifest():
+    try:
+        data = json.loads(read_text(manifest_path()))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# ----------------------------------------------------------------------------- install
+
+
+def pick_bin_dir():
+    """The first of ~/.local/bin, ~/bin that is on PATH, else None."""
+    on_path = [os.path.realpath(_expand(part)) for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    for candidate in ("~/.local/bin", "~/bin"):
+        full = _expand(candidate)
+        if os.path.realpath(full) in on_path:
+            return full
+    return None
+
+
+def install_surfer(claude, bin_dir, previous):
+    """Fetch history-surfer when it is absent. Returns a record; never raises."""
+    import shutil
+
+    if os.environ.get("COMPOUND_NO_SURFER"):
+        return {"status": "skipped", "detail": "COMPOUND_NO_SURFER is set"}
+    present = surfer_bin()
+    if not present and bin_dir and os.path.exists(os.path.join(bin_dir, "surfer")):
+        present = os.path.join(bin_dir, "surfer")
+    if present:
+        if previous and previous.get("status") == "installed":
+            return previous
+        return {"status": "present", "detail": present}
+    if not bin_dir:
+        return {"status": "skipped", "detail": "no bin directory to link `surfer` into"}
+    if not shutil.which("git"):
+        return {"status": "failed", "detail": "git is not on PATH"}
+    home = os.path.join(home_dir(), "history-surfer")
+    url = os.environ.get("COMPOUND_SURFER_URL") or SURFER_URL
+    setup = os.path.join(home, "scripts", "setup.py")
+    try:
+        if not os.path.isfile(setup):
+            if os.path.exists(home):
+                return {"status": "failed", "detail": "%s exists and is not a history-surfer checkout" % home}
+            os.makedirs(os.path.dirname(home), exist_ok=True)
+            code, out, err = _run(["git", "clone", "--depth", "1", url, home], timeout=180)
+            if code != 0:
+                shutil.rmtree(home, ignore_errors=True)
+                return {"status": "failed", "detail": "git clone %s: %s" % (url, one_line(err or out)[:200])}
+        code, out, err = _run([sys.executable, setup, "--claude-dir", claude, "--bin-dir", bin_dir], timeout=180)
+        if code != 0:
+            return {"status": "failed", "home": home,
+                    "detail": "its setup.py exited %d: %s" % (code, one_line(err or out)[:200])}
+    except Exception as exc:  # never fails the install
+        return {"status": "failed", "detail": one_line(exc)[:200]}
+    return {"status": "installed", "home": home, "url": url, "claude_dir": claude, "bin_dir": bin_dir}
+
+
+def cmd_install(args):
+    if args.claude_dir:
+        os.environ["COMPOUND_CLAUDE_DIR"] = _expand(args.claude_dir)
+    claude = claude_dir()
+    package = pkg_root()
+    script = os.path.join(package, "bin", "compound")
+    previous = read_manifest() or {}
+    spath = settings_path(claude)
+
+    # Everything that can refuse is checked before anything is written.
+    settings, existed = load_settings(spath)
+    bin_dir = _expand(args.bin_dir) if args.bin_dir else pick_bin_dir()
+    link = os.path.join(bin_dir, "compound") if bin_dir else None
+    if link and os.path.lexists(link):
+        if not (os.path.islink(link) and _same_path(link, script)):
+            raise failure("%s exists and is not a link to this package; it was left alone. "
+                          "Remove it or pass --bin-dir" % link)
+    report = []
+
+    env_created = False
+    added = False
+    if not mod_enabled(settings, package):
+        if not isinstance(settings.get("env"), dict):
+            settings["env"] = {}
+            env_created = True
+        parts = plugin_dirs(settings) + [package]
+        settings["env"][PLUGIN_ENV] = os.pathsep.join(parts)
+        write_settings(spath, settings)
+        added = True
+        report.append("mod      enabled: added %s to env.%s in %s" % (package, PLUGIN_ENV, spath))
+    else:
+        report.append("mod      already enabled in %s" % spath)
+
+    link_created = False
+    if link:
+        if os.path.lexists(link):
+            report.append("cli      %s already links here" % link)
+        else:
+            os.makedirs(bin_dir, exist_ok=True)
+            os.symlink(script, link)
+            link_created = True
+            report.append("cli      linked %s" % link)
+    else:
+        report.append("cli      not linked: neither ~/.local/bin nor ~/bin is on PATH "
+                      "(add one and run install again, or pass --bin-dir)")
+
+    surfer = install_surfer(claude, bin_dir, previous.get("surfer"))
+    report.append("prompts  history-surfer %s%s" % (
+        surfer["status"], (": " + surfer["detail"]) if surfer.get("detail") else
+        (" at " + surfer["home"]) if surfer.get("home") else ""))
+
+    same_target = previous.get("settings") == spath and previous.get("package") == package
+    manifest = {
+        "package": package,
+        "claude_dir": claude,
+        "settings": spath,
+        "plugin_dir_added": added or bool(same_target and previous.get("plugin_dir_added")),
+        "settings_created": (added and not existed) or bool(same_target and previous.get("settings_created")),
+        "env_created": (added and env_created) or bool(same_target and previous.get("env_created")),
+        "link": link,
+        "link_created": link_created or bool(previous.get("link") == link and previous.get("link_created")),
+        "surfer": surfer,
+        "installed_at": previous.get("installed_at") or iso(now()),
+    }
+    text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    try:
+        unchanged = read_text(manifest_path()) == text
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        atomic_write(manifest_path(), text)
+    report.append("record   %s" % manifest_path())
+    if args.json:
+        emit(manifest)
+    else:
+        sys.stdout.write("compound installed from %s\n" % package)
+        for line in report:
+            sys.stdout.write("  " + line + "\n")
+        sys.stdout.write("Check it with: compound status\n")
+    return 0
+
+
+def cmd_uninstall(args):
+    import shutil
+
+    if args.claude_dir:
+        os.environ["COMPOUND_CLAUDE_DIR"] = _expand(args.claude_dir)
+    manifest = read_manifest()
+    report = []
+    problems = []
+    if manifest is None:
+        report.append("no install record at %s; nothing to reverse" % manifest_path())
+    else:
+        package = manifest.get("package") or pkg_root()
+        spath = manifest.get("settings") or settings_path()
+        if manifest.get("plugin_dir_added"):
+            try:
+                settings, existed = load_settings(spath)
+            except Fail as exc:
+                problems.append("settings not edited: " + exc.message)
+            else:
+                env = settings.get("env") if isinstance(settings.get("env"), dict) else None
+                parts = plugin_dirs(settings)
+                kept = [part for part in parts if not _same_path(part, package)]
+                if existed and env is not None and len(kept) != len(parts):
+                    if kept:
+                        env[PLUGIN_ENV] = os.pathsep.join(kept)
+                    else:
+                        del env[PLUGIN_ENV]
+                        if not env and manifest.get("env_created"):
+                            del settings["env"]
+                    if not settings and manifest.get("settings_created"):
+                        os.unlink(os.path.realpath(spath))
+                        report.append("mod      removed %s, which install had created" % spath)
+                    else:
+                        write_settings(spath, settings)
+                        report.append("mod      removed %s from env.%s in %s" % (package, PLUGIN_ENV, spath))
+                else:
+                    report.append("mod      %s was not in %s" % (package, spath))
+        else:
+            report.append("mod      the settings element was there before install; left in place")
+        link = manifest.get("link")
+        if link and manifest.get("link_created"):
+            script = os.path.join(package, "bin", "compound")
+            if os.path.islink(link) and (_same_path(link, script) or os.readlink(link) == script):
+                os.unlink(link)
+                report.append("cli      removed %s" % link)
+            elif os.path.lexists(link):
+                report.append("cli      %s no longer links to this package; left alone" % link)
+            else:
+                report.append("cli      %s was already gone" % link)
+        surfer = manifest.get("surfer") or {}
+        if surfer.get("status") == "installed" and surfer.get("home"):
+            setup = os.path.join(surfer["home"], "scripts", "setup.py")
+            if args.purge and os.path.isfile(setup):
+                code, out, err = _run([sys.executable, setup, "--uninstall",
+                                       "--claude-dir", surfer.get("claude_dir") or claude_dir(),
+                                       "--bin-dir", surfer.get("bin_dir") or ""], timeout=120)
+                if code == 0:
+                    report.append("prompts  history-surfer unwired (its prompt store was left in place)")
+                else:
+                    problems.append("history-surfer's uninstall exited %d: %s" % (code, one_line(err or out)[:200]))
+            else:
+                report.append("prompts  history-surfer left in place at %s (remove it with: python3 %s --uninstall)"
+                              % (surfer["home"], setup))
+        if not problems:
+            try:
+                os.unlink(manifest_path())
+                report.append("record   removed %s" % manifest_path())
+            except OSError:
+                pass
+    if args.purge and not problems:
+        home = home_dir()
+        real = os.path.realpath(home)
+        protected = [os.path.realpath(p) for p in ("/", os.path.expanduser("~"), claude_dir())]
+        if real in protected or any(p.startswith(real.rstrip(os.sep) + os.sep) for p in protected):
+            problems.append("--purge refused: %s is not a directory of compound's own" % home)
+        elif os.path.isdir(home):
+            shutil.rmtree(home)
+            report.append("purged   %s (user lessons and the event log)" % home)
+        else:
+            report.append("purged   nothing: %s does not exist" % home)
+    elif not args.purge:
+        report.append("kept     %s (your lessons and the event log; --purge removes them)" % home_dir())
+    if args.json:
+        emit({"report": report, "problems": problems})
+    else:
+        for line in report:
+            sys.stdout.write(line + "\n")
+    for line in problems:
+        sys.stderr.write("compound: %s\n" % line)
+    return 1 if problems else 0
+
+
+def cmd_update(args):
+    import shutil
+
+    package = pkg_root()
+    if not shutil.which("git"):
+        raise failure("`git` is not on PATH")
+    code, old, err = _run(["git", "-C", package, "rev-parse", "--short", "HEAD"], timeout=30)
+    if code != 0:
+        raise failure("%s is not a git checkout: %s" % (package, one_line(err)[:200]))
+    code, out, err = _run(["git", "-C", package, "pull", "--ff-only"], timeout=300)
+    if code != 0:
+        raise failure("git pull --ff-only failed in %s: %s" % (package, one_line(err or out)[:300]))
+    _code, new, _err = _run(["git", "-C", package, "rev-parse", "--short", "HEAD"], timeout=30)
+
+    general = {}
+    for base in (os.path.join(package, "lessons"), os.path.join(package, "skills")):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            skill_md = os.path.join(base, name, "SKILL.md")
+            if os.path.isfile(skill_md):
+                general[name] = skill_md
+    removed = []
+    differing = []
+    user_lessons, user_skills = dirs_of(project_root(), "user")
+    for base in (user_lessons, user_skills):
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            directory = os.path.join(base, name)
+            skill_md = os.path.join(directory, "SKILL.md")
+            if name not in general or os.path.islink(directory) or not os.path.isfile(skill_md):
+                continue
+            if os.path.realpath(skill_md) == os.path.realpath(general[name]):
+                continue
+            if read_text(skill_md) == read_text(general[name]):
+                shutil.rmtree(directory)
+                removed.append({"name": name, "path": directory})
+            else:
+                differing.append({"name": name, "path": directory, "general": os.path.dirname(general[name])})
+    result = {"package": package, "old": old, "new": new, "changed": old != new,
+              "removed": removed, "differing": differing}
+    if args.json:
+        emit(result)
+        return 0
+    if old == new:
+        sys.stdout.write("already up to date at %s\n" % new)
+    else:
+        sys.stdout.write("updated %s -> %s\n" % (old, new))
+    for row in removed:
+        sys.stdout.write("removed user lesson %s: the general pool now carries the same text\n" % row["name"])
+    for row in differing:
+        sys.stdout.write("kept user lesson %s: the general pool has the name with different text "
+                         "(%s vs %s)\n" % (row["name"], row["path"], row["general"]))
+    return 0
+
+
+# ----------------------------------------------------------------------------- status
+
+
+def build_status():
+    import shutil
+
+    project = project_root()
+    package = pkg_root()
+    clock = now()
+    items, broken = scan(project)
+    events, bad_lines = read_events()
+    rows = annotate(items, events)
+    health = []
+
+    def check(name, state, detail):
+        health.append({"check": name, "status": state, "detail": detail})
+
+    version = "%d.%d.%d" % sys.version_info[:3]
+    check("python", "PASS" if sys.version_info >= (3, 8) else "FAIL",
+          version if sys.version_info >= (3, 8) else version + " is older than 3.8")
+
+    spath = settings_path()
+    try:
+        settings, existed = load_settings(spath)
+    except Fail as exc:
+        check("mod", "FAIL", exc.message)
+    else:
+        if mod_enabled(settings, package):
+            check("mod", "PASS", "enabled in %s" % spath)
+        elif not existed:
+            check("mod", "WARN", "%s does not exist; run `compound install` (or the package is loaded as a plugin)" % spath)
+        else:
+            check("mod", "WARN", "%s is not in env.%s of %s; run `compound install` "
+                                 "(or the package is loaded as a plugin)" % (package, PLUGIN_ENV, spath))
+
+    on_path = shutil.which("compound")
+    script = os.path.join(package, "bin", "compound")
+    if on_path and _same_path(on_path, script):
+        check("cli", "PASS", "%s" % on_path)
+    elif on_path:
+        check("cli", "WARN", "`compound` on PATH is %s, not this package's (%s)" % (on_path, script))
+    else:
+        check("cli", "WARN", "`compound` is not on PATH; the mod cannot call it by name")
+
+    surfer = surfer_bin()
+    if not surfer:
+        check("prompt log", "WARN", "history-surfer's `surfer` is not on PATH; reuse checks see no earlier prompts")
+    else:
+        code, out, err = _run([surfer, "stats"], cwd=project if os.path.isdir(project) else None, timeout=20)
+        if code == 0:
+            lines = [line for line in out.splitlines() if line.strip()]
+            check("prompt log", "PASS", one_line(lines[0]) if lines else surfer)
+        else:
+            check("prompt log", "WARN", "`surfer stats` exited %d: %s" % (code, one_line(err or out)[:120]))
+
+    stamps = [parse_ts(event.get("ts")) for event in events]
+    stamps = [stamp for stamp in stamps if stamp is not None]
+    if bad_lines:
+        check("last event", "FAIL", "%d line(s) of %s do not parse" % (bad_lines, events_path()))
+    elif not stamps:
+        check("last event", "WARN", "no events yet in %s" % events_path())
+    else:
+        check("last event", "PASS", "%s ago (%d events)" % (age_text(clock - max(stamps)), len(events)))
+
+    by_name = {}
+    for item in items:
+        by_name.setdefault(item["name"], []).append(item)
+    duplicates = []
+    for name, group in sorted(by_name.items()):
+        if len(group) > 1:
+            duplicates.append({"name": name, "paths": [entry["path"] for entry in group],
+                               "lesson": any(entry["kind"] == "lesson" for entry in group)})
+    if not duplicates:
+        check("duplicates", "PASS", "every name exists once")
+    else:
+        text = "; ".join("%s at %s" % (dup["name"], ", ".join(dup["paths"])) for dup in duplicates)
+        check("duplicates", "FAIL" if any(dup["lesson"] for dup in duplicates) else "WARN", text)
+
+    if broken:
+        check("lessons parse", "FAIL", "; ".join("%s: %s" % (row["path"], row["problem"]) for row in broken))
+    else:
+        check("lessons parse", "PASS", "every lesson reads")
+
+    errors = []
+    for event in events:
+        if event.get("type") != "error":
+            continue
+        stamp = parse_ts(event.get("ts"))
+        if stamp is not None and clock - stamp <= WEEK:
+            errors.append({"ts": event.get("ts"), "session": event.get("session", ""),
+                           "where": one_line(event.get("where", "")),
+                           "message": one_line(event.get("message", ""))})
+    check("errors", "WARN" if errors else "PASS",
+          "%d in the last 7 days" % len(errors) if errors else "none in the last 7 days")
+
+    store = {}
+    for level in LEVELS:
+        mine = [row for row in rows if row["level"] == level]
+        store[level] = {
+            "lessons": sum(1 for row in mine if row["kind"] == "lesson"),
+            "skills": sum(1 for row in mine if row["kind"] == "skill"),
+            "guards": sum(1 for row in mine if row["match"]),
+        }
+
+    lessons = []
+    for row in rows:
+        counts = row["counts"]
+        used = counts["reuse"] + counts["guard"] + counts["recall"]
+        if row["kind"] == "skill" and used == 0 and not row["match"]:
+            continue
+        flag = "ineffective" if row["ineffective"] else ("never used" if used == 0 else "")
+        lessons.append({"name": row["name"], "level": row["level"], "kind": row["kind"],
+                        "guard": bool(row["match"]), "reuse": counts["reuse"], "guard_hits": counts["guard"],
+                        "recall": counts["recall"], "flag": flag, "path": row["path"]})
+
+    skips = [{"ts": event.get("ts"), "session": event.get("session", ""),
+              "project": event.get("project", ""), "why": one_line(event.get("why", ""))}
+             for event in events if event.get("type") == "skip"][-10:]
+    return {
+        "ok": not any(row["status"] == "FAIL" for row in health),
+        "health": health,
+        "store": store,
+        "lessons": lessons,
+        "recent": events[-10:],
+        "open": {
+            "ineffective": [{"name": row["name"], "level": row["level"], "path": row["path"],
+                             "recall": row["counts"]["recall"]} for row in rows if row["ineffective"]],
+            "skips": skips,
+            "errors": errors,
+        },
+        "project": project,
+        "package": package,
+    }
+
+
+def cmd_status(args):
+    data = build_status()
+    if args.json:
+        emit(data)
+        return 0 if data["ok"] else 1
+    out = sys.stdout.write
+    out("Health\n")
+    for row in data["health"]:
+        out("  %-4s  %-13s  %s\n" % (row["status"], row["check"], row["detail"]))
+    out("\nStore\n")
+    out("".join("  " + line + "\n" for line in table(
+        [[level, data["store"][level]["lessons"], data["store"][level]["skills"], data["store"][level]["guards"]]
+         for level in LEVELS], ["level", "lessons", "skills", "guards"]).splitlines()))
+    out("\nLessons\n")
+    if data["lessons"]:
+        out("".join("  " + line + "\n" for line in table(
+            [[row["name"], row["level"], "guard" if row["guard"] and row["kind"] == "lesson" else row["kind"],
+              row["reuse"], row["guard_hits"], row["recall"], row["flag"]] for row in data["lessons"]],
+            ["name", "level", "kind", "reuse", "guard", "recall", "flag"]).splitlines()))
+    else:
+        out("  none recorded yet\n")
+    out("\nRecent\n")
+    if data["recent"]:
+        for event in data["recent"]:
+            out("  " + event_line(event) + "\n")
+    else:
+        out("  no events yet\n")
+    out("\nOpen\n")
+    opened = data["open"]
+    if not (opened["ineffective"] or opened["skips"] or opened["errors"]):
+        out("  nothing open\n")
+    for row in opened["ineffective"]:
+        out("  ineffective  %s (%s): recalled %d times and the failure came back. Add a match, "
+            "attach a script or rewrite the description: compound add --update --name %s\n"
+            % (row["name"], row["level"], row["recall"], row["name"]))
+    for row in opened["skips"]:
+        out("  skipped      %s %s: %s\n" % (row["ts"], str(row["session"])[:8] or "-", row["why"]))
+    for row in opened["errors"]:
+        out("  error        %s %s%s\n" % (row["ts"], (row["where"] + ": ") if row["where"] else "", row["message"]))
+    return 0 if data["ok"] else 1
+
+
+# ----------------------------------------------------------------------------- main
+
+
+def build_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="compound", description="Lessons, skills, the event log and the install of the compound mod.")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    def command(name, func, text, json_flag=True):
+        one = sub.add_parser(name, help=text, description=text)
+        one.set_defaults(func=func)
+        if json_flag:
+            one.add_argument("--json", action="store_true", help="print JSON")
+        return one
+
+    one = command("add", cmd_add, "Write a lesson; the body is read on stdin.")
+    one.add_argument("--name", required=True)
+    one.add_argument("--when", help="when the lesson applies (its description)")
+    one.add_argument("--level", choices=LEVELS, default="project")
+    one.add_argument("--match", action="append", metavar="RE", help="a guard pattern; repeatable")
+    one.add_argument("--no-match", action="store_true", help="with --update: drop the guard patterns")
+    one.add_argument("--attach", action="append", metavar="FILE", help="a file to keep beside the lesson; repeatable")
+    one.add_argument("--origin")
+    one.add_argument("--update", action="store_true",
+                     help="rewrite the lesson where it is; flags left out keep their value")
+
+    one = command("list", cmd_list, "Lessons and skills at every level.")
+    one.add_argument("--level", choices=LEVELS)
+    one.add_argument("--scripts", action="store_true", help="add the project's scripts")
+
+    one = command("show", cmd_show, "One lesson's path and text.")
+    one.add_argument("name")
+
+    one = command("find", cmd_find, "Lessons, skills and scripts by word overlap, then prompt-log hits.")
+    one.add_argument("words", nargs="+")
+    one.add_argument("--limit", type=int, default=10)
+
+    command("check", cmd_check, "Test a tool call (JSON on stdin) against every guard.", json_flag=False) \
+        .add_argument("--json", action="store_true", help="accepted; the output is always JSON")
+
+    one = command("skill", cmd_skill, "Move a lesson to the skills directory of its level.")
+    one.add_argument("name")
+
+    one = command("promote", cmd_promote, "Move a lesson to the user level, or propose it to the general pool.")
+    one.add_argument("name")
+    one.add_argument("--to", required=True, choices=("user", "general"))
+    one.add_argument("--yes", action="store_true", help="with --to general: open the pull request")
+
+    one = command("rm", cmd_rm, "Remove a lesson.")
+    one.add_argument("name")
+    one.add_argument("--force", action="store_true", help="remove a skill too")
+
+    one = command("skip", cmd_skip, "Decline an owed lesson.")
+    one.add_argument("--why", required=True)
+
+    command("log", cmd_log, "Append one event (a JSON object on stdin).")
+
+    one = command("events", cmd_events, "Read the event log.")
+    one.add_argument("--since", metavar="TS")
+    one.add_argument("--type")
+    one.add_argument("--session")
+    one.add_argument("--limit", type=int, default=0)
+
+    command("status", cmd_status, "Health, store counts, per-lesson use, recent events, what is open.")
+
+    one = command("install", cmd_install, "Enable the mod, link the CLI, fetch history-surfer.")
+    one.add_argument("--claude-dir")
+    one.add_argument("--bin-dir")
+
+    command("update", cmd_update, "Pull the package and drop user lessons the general pool now carries.")
+
+    one = command("uninstall", cmd_uninstall, "Reverse what install recorded.")
+    one.add_argument("--claude-dir")
+    one.add_argument("--purge", action="store_true", help="also remove COMPOUND_HOME")
+    return parser
+
+
+def main(argv):
+    try:
+        if argv[:1] == ["check"] and len(argv) == 1:
+            return cmd_check()
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        if not getattr(args, "func", None):
+            parser.print_usage(sys.stderr)
+            return 2
+        return args.func(args)
+    except Fail as exc:
+        sys.stderr.write("compound: %s\n" % exc.message)
+        return exc.code
+    except BrokenPipeError:
+        return 0
+    except KeyboardInterrupt:
+        return 1
+    except OSError as exc:
+        sys.stderr.write("compound: %s\n" % exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

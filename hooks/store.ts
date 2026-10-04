@@ -1,0 +1,195 @@
+// How the CLI's JSON is read. The mod never opens a lesson file or the event log: it asks
+// `compound`, and these functions turn what it prints into values. Pure: text in, values
+// out. Anything that is not the expected shape yields an empty answer or `undefined`, and
+// the caller decides whether that is an error.
+
+export type Kind = 'lesson' | 'skill' | 'script'
+
+export type Item = {
+  kind: Kind
+  name: string
+  level: string
+  description: string
+  path: string
+  match: string[]
+  // Set on a project-level lesson that belongs to a project other than the session's.
+  project?: string
+}
+
+export type Hit = { name: string; level: string; path: string; text: string }
+export type Earlier = { id: string; date: string; project: string; session: string; text: string }
+export type Event = Record<string, unknown> & { type: string }
+
+function parsed(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+}
+
+function str(value: unknown): string {
+  return typeof value === 'string' ? value : typeof value === 'number' ? String(value) : ''
+}
+
+// The rows of a reply that is a list, or an object holding one list under any of `keys`.
+function rows(value: unknown, keys: readonly string[]): Record<string, unknown>[] | undefined {
+  let list: unknown = value
+  const o = record(value)
+  if (o !== undefined) {
+    const key = keys.find(k => Array.isArray(o[k]))
+    list = key === undefined ? undefined : o[key]
+  }
+  if (!Array.isArray(list)) return undefined
+  return list.map(record).filter((r): r is Record<string, unknown> => r !== undefined)
+}
+
+function kindOf(value: unknown): Kind | undefined {
+  return value === 'lesson' || value === 'skill' || value === 'script' ? value : undefined
+}
+
+function itemOf(r: Record<string, unknown>): Item | undefined {
+  const kind = kindOf(r.kind)
+  const name = str(r.name)
+  if (kind === undefined || name === '') return undefined
+  const match = Array.isArray(r.match) ? r.match.filter((m): m is string => typeof m === 'string') : []
+  const project = str(r.project)
+  return { kind, name, level: str(r.level), description: str(r.description), path: str(r.path), match, ...(project === '' ? {} : { project }) }
+}
+
+// `compound list --scripts --json`. undefined when the output is not the list it should be.
+export function parseInventory(stdout: string): Item[] | undefined {
+  const list = rows(parsed(stdout), ['items', 'inventory', 'lessons'])
+  if (list === undefined) return undefined
+  return list.map(itemOf).filter((i): i is Item => i !== undefined)
+}
+
+// `compound check`: {"hits":[{name,level,path,text}]}.
+export function parseHits(stdout: string): Hit[] | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined || !Array.isArray(o.hits)) return undefined
+  return o.hits
+    .map(record)
+    .filter((r): r is Record<string, unknown> => r !== undefined && str(r.name) !== '')
+    .map(r => ({ name: str(r.name), level: str(r.level), path: str(r.path), text: str(r.text) }))
+}
+
+// The prompt-log half of `compound find --json`: {"prompts":[{id, ts, project, prompt}]},
+// best first as the CLI ranked them. The CLI's rows carry no session, so the current
+// session's own prompts are recognised by their text (`mine`), compared the way the CLI
+// stores a prompt: whitespace squeezed, the first 300 characters.
+export function squeezed(text: string): string {
+  return text.split(/\s+/).filter(w => w !== '').join(' ').slice(0, 300)
+}
+
+export function parseEarlier(stdout: string, session: string, mine: readonly string[], most: number): Earlier[] | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined) return undefined
+  const list = rows(o, ['prompts'])
+  if (list === undefined) return []
+  const own = new Set(mine.map(squeezed))
+  const out: Earlier[] = []
+  for (const r of list) {
+    const text = str(r.prompt) || str(r.text)
+    const from = str(r.session) || str(r.session_id)
+    if (text.trim() === '' || (session !== '' && from === session) || own.has(squeezed(text))) continue
+    if (out.some(e => e.text === text)) continue
+    const project = str(r.project)
+    out.push({ id: str(r.id), date: (str(r.ts) || str(r.date)).slice(0, 10), project: project.split('/').filter(p => p !== '').pop() ?? '', session: from, text })
+    if (out.length >= most) break
+  }
+  return out
+}
+
+export type Shown = { text: string; path: string; level: string; recalls: number; ineffective: boolean | undefined }
+
+// A SKILL.md without its frontmatter: the lesson as it is read.
+export function bodyOf(text: string): string {
+  const m = /^---\n[\s\S]*?\n---\n?/.exec(text)
+  return (m === null ? text : text.slice(m[0].length)).trim()
+}
+
+// `compound show <name> --json`: the lesson's text, how often it has been recalled, and
+// whether the CLI now counts it ineffective. Output that is not JSON is taken as the text.
+export function parseShow(stdout: string): Shown {
+  const o = record(parsed(stdout))
+  if (o === undefined) return { text: bodyOf(stdout), path: '', level: '', recalls: 0, ineffective: undefined }
+  const counts = record(o.counts)
+  const recalls = counts !== undefined && typeof counts.recall === 'number' ? counts.recall : 0
+  return {
+    text: bodyOf(str(o.text) || str(o.body)),
+    path: str(o.path),
+    level: str(o.level),
+    recalls,
+    ineffective: typeof o.ineffective === 'boolean' ? o.ineffective : undefined,
+  }
+}
+
+// Project-level lessons recorded in OTHER projects, from the log's `learn` events: the
+// pool a second project's failure is matched against. A name the current inventory already
+// holds is this project's, or has already moved up. Newest projects first, a few of them.
+export function otherProjects(events: readonly Event[], have: ReadonlySet<string>, most: number): { project: string; names: string[] }[] {
+  const byProject = new Map<string, Set<string>>()
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i]!
+    const name = str(e.lesson)
+    const project = str(e.project)
+    if (e.type !== 'learn' || e.level !== 'project' || e.kind === 'skill' || name === '' || project === '' || have.has(name)) continue
+    if (!byProject.has(project)) {
+      if (byProject.size >= most) continue
+      byProject.set(project, new Set())
+    }
+    byProject.get(project)!.add(name)
+  }
+  return [...byProject.entries()].map(([project, names]) => ({ project, names: [...names] }))
+}
+
+// `compound events --json`: a list, or one JSON object per line.
+export function parseEvents(stdout: string): Event[] | undefined {
+  const whole = rows(parsed(stdout), ['events'])
+  const list = whole ?? stdout.split('\n').filter(l => l.trim() !== '').map(l => record(parsed(l)))
+  if (list.some(r => r === undefined)) return undefined
+  return (list as Record<string, unknown>[]).filter(r => typeof r.type === 'string') as Event[]
+}
+
+// An event's time in seconds, whether the log keeps a number or an ISO string. 0 when it has neither.
+export function seconds(event: Event): number {
+  const ts = event.ts
+  if (typeof ts === 'number') return ts > 1e12 ? ts / 1000 : ts
+  if (typeof ts === 'string') {
+    if (/^[0-9]+(\.[0-9]+)?$/.test(ts)) return Number(ts)
+    const at = Date.parse(ts)
+    return Number.isNaN(at) ? 0 : at / 1000
+  }
+  return 0
+}
+
+export type Debt = { key: string; tool: string; failed: string; error: string; fixed: string }
+
+// The lessons a session still owes: each `capture` with no `learn` or `skip` after it, in
+// the order the log holds them. One `learn` or `skip` settles every capture before it.
+export function debts(events: readonly Event[]): Debt[] {
+  let owed: Debt[] = []
+  for (const e of events) {
+    if (e.type === 'learn' || e.type === 'skip') owed = []
+    else if (e.type === 'capture') {
+      owed.push({ key: str(e.call) || str(e.ts), tool: str(e.tool), failed: str(e.failed), error: str(e.error), fixed: str(e.fixed) })
+    }
+  }
+  return owed
+}
+
+// Whether a big turn may be asked about lessons: nothing was recorded or owed since the
+// turn began, and the last nudge is at least `cooldown` seconds old.
+export function mayNudge(events: readonly Event[], turnStart: number, now: number, cooldown: number): boolean {
+  for (const e of events) {
+    const at = seconds(e)
+    if ((e.type === 'learn' || e.type === 'skip' || e.type === 'capture') && at >= turnStart) return false
+    if (e.type === 'nudge' && now - at < cooldown) return false
+  }
+  return true
+}
