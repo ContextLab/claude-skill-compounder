@@ -376,7 +376,8 @@ or recorded. Every new failure is reported, each one once.
 - **Band**: one row directly above the prompt that shows what the mod is doing now. It is
   drawn on the terminal and in the desktop app, and it draws nothing when there is nothing
   to show. `COMPOUND_QUIET=1` turns it off. Each row starts with a glyph, then `compound`,
-  then a label, then the lesson's name where there is one:
+  then a label, then the thing itself: the lesson's name, the items a reuse check found,
+  the call that fixed a failure. A row says which, never only how many:
 
   | Glyph | Colour | Label | When | Stays |
   |-|-|-|-|-|
@@ -385,18 +386,20 @@ or recorded. Every new failure is reported, each one once.
   | spinner | orange | `matching a recorded lesson` | a failed call is put to the judge | while it runs |
   | spinner | orange | `is this the fix?` | a success after a held failure is put to the judge | while it runs |
   | spinner | orange | `recording the lesson` | the session is running `compound add` | while it runs |
-  | `◆` | cyan | `reuse found` and the count | the reuse check added something to the prompt | 8 s |
-  | `■` | red | `guard stopped a call` | a guard refused a call | 8 s |
+  | `◆` | cyan | `reuse found`, the names of the items found (a script by its file name), and the number of earlier requests | the reuse check added something to the prompt | 8 s |
+  | `◇` | blue | `ready`, then `N lessons (M guards)` | once a session, when the first reuse check found nothing: the counts are of the listing that check read. A first prompt too short for a check gets `ready` and `/compound opens the dashboard`; when the first check finds something, its row carries the counts instead | 8 s |
+  | `◇` | grey | `nothing to reuse` | a later reuse check added nothing to the prompt. Drawn dim from the start | 3 s |
+  | `■` | red | `guard stopped a call`, the lesson, and the call it stopped | a guard refused a call | 8 s |
   | `↺` | magenta | `lesson recalled` | a failed call was given its recorded lesson | 8 s |
   | `◌` | orange | `watching for the fix` | a call failed and no lesson describes it | 8 s |
-  | `●` | yellow | `lesson owed` | a fix was captured and the session owes its lesson | until the CLI no longer lists it as owed |
+  | `●` | yellow | `lesson owed` and the call that worked | a fix was captured and the session owes its lesson | until the CLI no longer lists it as owed |
   | `✔` | green | `lesson recorded`, `lesson rewritten` | the log holds a `learn` event of the session, or one that settles its debt | 8 s |
   | `○` | grey | `lesson declined` | the log holds such a `skip` event | 8 s |
   | `⇡` | blue | `lesson moved to the user level`, `lesson proposed to the general pool` | a lesson moved, by the mod or by `compound promote` | 8 s |
   | `✦` | blue | `lesson made a skill` | `compound skill` | 8 s |
   | `−` | grey | `removed` | `compound rm` | 8 s |
-  | `▲` | yellow | `lesson ineffective`, then `strengthening owed` | a recalled lesson did not prevent its failure | until the CLI no longer lists it as owed |
-  | `●` | yellow | `unsettled from earlier sessions` | the session's first prompt was told of them | 8 s |
+  | `▲` | yellow | `lesson ineffective`, then `lesson to strengthen` | a recalled lesson did not prevent its failure | until the CLI no longer lists it as owed |
+  | `●` | yellow | `owed from earlier sessions`, how many, and the newest one's working call | the session's first prompt was told of them | 8 s |
   | `?` | blue | `asked whether anything was learned` | the question after a long turn | 8 s |
   | `✖` | red | `N compound errors` | the mod itself failed | until Claude is told at the next typed prompt |
 
@@ -411,8 +414,13 @@ or recorded. Every new failure is reported, each one once.
   the lesson was declined). Steps passed are ticked and dim, the current one is bold in its
   colour, the ones ahead are dim: `✓ failed → ✓ fixed → ● owed → ○ recorded`. The track
   stays while a lesson is owed and fades with the result otherwise. Where the row would be
-  wider than the band, the track keeps its glyphs and the current step's name, then the
-  marks go, then the track, and last the name is cut with `…`.
+  wider than the band, the track keeps its glyphs and the current step's name, then what
+  follows the name goes (the call a guard stopped, the greeting's counts), then the marks,
+  then the track, and last the name is cut with `…`. A list of names is not cut: it keeps
+  as many names as fit and counts the rest, `bibdupcheck.py, cdl-bib-cite +2`.
+
+  The greeting and `nothing to reuse` are drawn from the band's state like every other
+  row and use the band's one timer. Neither costs a CLI call.
 
   The spinner turns ten times a second on one timer, which runs only while a spinner
   shows or a result fades: an idle band and an owed lesson cost no timer at all. A check
@@ -420,13 +428,25 @@ or recorded. Every new failure is reported, each one once.
   per session id, so `/clear` starts it over.
 - **Pane**: `/compound` opens a dashboard: beside the transcript in the fullscreen
   layout, above the prompt otherwise. It shows a health line (the checks that failed, by
-  name and detail, and the ones that warned, by name); **Open**, everything that waits for
-  someone (lessons owed, ineffective lessons, lessons that could move to the user level,
-  errors of the last seven days, each with up to three entries, and the count of lessons
-  declined); **Levels**, the lessons, guards and skills at each of the three levels;
-  **Most used**, up to six lessons in a table whose three columns are reused (`◆`), guarded
-  (`■`) and recalled (`↺`), each a count and a bar; and **Recent**, the newest events with the band's glyphs and
-  colours. `Refresh` (`r` while the pane has the keyboard) reads it again, `Close` (`x`)
+  name and detail, and the ones that warned, by name); **Compound interest**, the totals
+  of `compound status` (see below) and the day of the log's first event; **Open**,
+  everything that waits for someone (lessons owed, ineffective lessons, lessons that could
+  move to the user level, errors of the last seven days, each with up to three entries,
+  and the count of lessons declined); **Levels**, a row a level, `user  33 lessons (7
+  guards)  4 skills`: a guard is a lesson that carries a pattern, so the guards are counted
+  among the lessons and the brackets say so; **Most used**, up to six lessons in a table
+  whose three columns are reused (`◆`), guarded (`■`) and recalled (`↺`), each a count and
+  a bar; and **Recent**, the newest events, each with how long ago it was, the band's glyph
+  and colour, the word for its type (see "Words") and what it was about. A time is `5s`,
+  `2m`, `3h`, then `yesterday` for the calendar day before, then the date (`3 Oct`, with
+  the year when it is another one), so rows of different days are told apart.
+
+  The pane cuts none of its own labels. Only a lesson's name or free text (a call, a path,
+  a reason) is ever cut with `…`. A label that does not fit goes to the next line whole;
+  where a level's row does not fit, the levels are a table under the heading (`Levels
+  lessons (guards) skills`), which fits 30 columns; the Most used legend keeps its glyphs and
+  drops its words; and a timeline with less than 16 columns left for its text drops the
+  type words and keeps the glyphs. `Refresh` (`r` while the pane has the keyboard) reads it again, `Close` (`x`)
   or `/compound close` closes it. The pane reads `compound status --json` and `compound
   events --json`, when it opens, when `Refresh` is pressed, and 400 ms after the mod logs
   an event or the session's own `compound` call returns, once for a burst of events and
@@ -436,16 +456,20 @@ or recorded. Every new failure is reported, each one once.
 - **Drawing failures**: a band or a pane that cannot be drawn leaves the engine's own
   drawing in its place and never stops a turn. One `error` event per session is logged for
   the band (`ui.band`) and one for the pane (`ui.pane`).
-- **Status entry**: every firing sets a short entry (`2 reusable`, `guard
-  zsh-equals-word`, `lesson owed`, `1 error`). Claude Code shows the plugin's name before
-  it, so the status area reads `compound: 2 reusable`. A hook that the engine stopped (it
+- **Status entry**: every firing sets a short entry (`reuse bibdupcheck.py +1`, `guard
+  zsh-equals-word`, `lesson owed: ./deploy.sh --target staging`, `2 owed from earlier
+  sessions`, `1 error`). Claude Code shows the plugin's name before it, so the status area
+  reads `compound: reuse bibdupcheck.py +1`. A hook that the engine stopped (it
   threw, or ran out of its time) sets `N errors` from its `.catch` handler. A `compound`
   command the session runs sets one for what it did (`skill <name>`, `removed <name>`,
   `moved <name>`). While a lesson or a strengthening is owed the entry says so; it
   is cleared when the CLI no longer lists the debt (see "What a session owes"), and at the
   start of each new typed prompt.
 - **Toast**: a lesson recorded, rewritten, moved, proposed to the general pool, made a
-  skill, removed or marked ineffective. A toast for a `compound` command the session ran
+  skill, removed or marked ineffective. Every toast has one word order: what happened, in
+  the band's label for it, then the name (`lesson recorded: zsh-equals-word`, `lesson moved
+  to the user level: zsh-equals-word`, `removed: stale-note`, `lesson ineffective:
+  zsh-nomatch-glob (recalled 2 times)`). A toast for a `compound` command the session ran
   follows the event that command wrote to the log (`learn`, `promote`, `skill`, `rm`),
   never the text of the command: `compound promote <name> --to general` without `--yes`
   prints a plan, writes no event and raises nothing.
@@ -461,14 +485,61 @@ or recorded. Every new failure is reported, each one once.
   and judged by one copy of the mod) and `reuse-<digest>-<n>` (the reuse check of one
   prompt, where the digest is of the prompt's text and the number counts 20-second windows). A
   session's claims are removed two weeks after its last one.
-- **`compound status`** (also `/compound status`): health checks; store counts per level; for
-  each lesson how often it was reused, guarded, recalled, and the projects that keep a
-  committed copy of a user-level lesson; recent events; and under Open everything that
-  waits for someone: unsettled captures, promotion candidates with the command that moves
-  each, ineffective lessons, debts declined and why, and errors in the last seven days.
-  An unsettled capture is listed with the two things that settle it, each as it is typed:
+- **`compound status`** (also `/compound status`): **Health**, the checks below;
+  **Compound interest**, the totals; **Levels**, the counts per level, worded as on the
+  pane (`user  33 lessons (7 guards)  4 skills`); **Lessons**, for each lesson that was
+  used how often it was reused, guarded and recalled, then one line counting the lessons
+  never used (`31 lessons never used`; `compound list` has their rows), and the projects
+  that keep a committed copy of a user-level lesson; **Recent**, the last ten events, each
+  with how long ago it was and the word for its type; and under **Open** everything that
+  waits for someone: lessons owed, promotion candidates with the command that moves each,
+  ineffective lessons, debts declined and why, and errors in the last seven days. A lesson
+  owed is listed with the two things that settle it, each as it is typed:
   `/compound:learn settle <id>` in a Claude Code session in that project, or `compound
   skip --settles <id> --why "<reason>"`.
+
+  The totals are counted from the event log, one per event: reuses offered (`reuse`),
+  calls stopped by a guard (`guard`), lessons recalled (`recall`), lessons recorded
+  (`learn`, not counting a rewrite), and the time of the log's oldest event. `status
+  --json` carries them as `totals`: `reused`, `guarded`, `recalled`, `recorded`, `since`.
+  Nothing is said of time or tokens saved: the log holds no duration of a failed call or
+  of its fix, so such a figure would be invented.
+- **Text output of the CLI**: `status`, `list`, `find` and `events` print for a person.
+  A time is how long ago it was, as on the pane; `--json` keeps every timestamp as it is
+  in the log. `events` prints the log's type names, which are what `--type` takes;
+  `status` prints the words below. With stdout a terminal the output is coloured (the
+  health statuses, the three counters and the event types in the pane's colours, what is
+  secondary dim) unless `NO_COLOR` is set to anything or `TERM` is `dumb`; piped output
+  and `--json` are never coloured. A line is fitted to the terminal: its width is
+  `COLUMNS` when that is a number, else the terminal's, and a cut ends in `…`. `list`
+  gives the description the room left beside its columns, and a line of its own under
+  each row when that is under 24 columns; piped with no `COLUMNS`, the description is cut
+  at 70 characters. `find` says `matched 2 of 3 words` only when some word did not match.
+- **Words**: one word for each thing, on the band, the status entry, the toasts, the
+  pane and the CLI's text. The event types in the log are the contract and keep their
+  names; this is what a person is shown for each:
+
+  | Event type | Word | Said of |
+  |-|-|-|
+  | `reuse` | `reused` | existing work offered at a prompt; the band's row is `reuse found` |
+  | `guard` | `guarded` | a call a guard stopped |
+  | `recall` | `recalled` | a lesson given beside the failure it describes |
+  | `capture` | `owed` | a fix was found and its lesson is not written: `lesson owed` |
+  | `remind` | `reminded` | a session was told what earlier sessions left owed |
+  | `refuse` | `refused` | a stop was refused: `lesson owed`, `to strengthen` or `long turn` |
+  | `learn` | `recorded` | a lesson was written; `rewritten` when it was an update |
+  | `skip` | `declined` | a lesson owed was declined, with a reason |
+  | `nudge` | `asked` | the question after a long turn |
+  | `promote` | `moved` | a lesson moved to the user level, or was proposed to the general pool |
+  | `candidate` | `candidate` | a lesson that could move to the user level |
+  | `skill` | `skill` | a lesson made a skill |
+  | `rm` | `removed` | a lesson removed |
+  | `error` | `error` | the mod itself failed |
+
+  A lesson that did not prevent its failure is `ineffective`, and what it is owed is `to
+  strengthen`. The three counters are `reused`, `guarded` and `recalled` wherever they are
+  shown. The counts per level are `Levels`. `events --unsettled` and the `unsettled` key
+  of `status --json` keep their names: they are the CLI's interface, not its report.
 
 The health checks, in order:
 
@@ -493,9 +564,9 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | Command | Does |
 |-|-|
 | `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--no-match`, with `--update`, drops the lesson's guard patterns. `--settles ID` settles that capture. Logs `learn`. |
-| `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. |
+| `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the three counters (`REUSED`, `GUARDED`, `RECALLED`), the flag and the description, fitted to the terminal. |
 | `compound show N` | One lesson's path and text. |
-| `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. |
+| `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. `--json` carries each item's `score`, the number of words that matched. |
 | `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for matching guards. `--guards` adds `"guards"`, the number of lessons that carry a `match`. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote` when it moved or proposed something. |
@@ -503,7 +574,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound skip --why T [--settles ID]` | Declines what the session owes, or with `--settles` the capture of that id. Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound log` | stdin: one event object of a known type. Appends it with `ts`, `session` and `project` filled in, and an `id` for a `capture`. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
-| `compound status` | The report above. Exit 1 when a health check fails. |
+| `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |
 | `compound install [--claude-dir D] [--bin-dir D]` | See below. `--claude-dir` names the Claude Code directory and `--bin-dir` the directory the link goes into. |
 | `compound update` | See below. |
 | `compound uninstall [--claude-dir D] [--purge]` | See below. |

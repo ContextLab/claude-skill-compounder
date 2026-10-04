@@ -150,6 +150,15 @@ EVENT LOG
     body flag keeps the body and does not read stdin at all; text that is already
     waiting there is exit 2, so a body is never dropped in silence.
 
+    Totals. `status` counts, one per event: `reuse` (reuses offered), `guard` (calls a
+    guard stopped), `recall` (lessons recalled) and `learn` without `update` (lessons
+    recorded), with the time of the oldest event. No duration of a failed call or of its
+    fix is logged, so no time or tokens saved is ever reported.
+
+    Words. Text output shows a person a word for each type (EVENT_WORDS: `capture` is
+    "owed", `learn` is "recorded", ...) and how long ago an event was; `events` prints
+    the type names themselves, and `--json` the stored values.
+
     Last fired. The types the mod writes are reuse, guard, recall, capture, remind,
     refuse, nudge and error; `status` reports the age of the newest of them.
 
@@ -174,6 +183,10 @@ ENVIRONMENT
     COMPOUND_NO_SURFER   install does not fetch history-surfer
     COMPOUND_SURFER_URL  where install clones history-surfer from
     CLAUDE_CODE_SESSION_ID  set by Claude Code; stamps `session` on events written here
+    NO_COLOR, TERM       text output is coloured only when stdout is a terminal, NO_COLOR is
+                         unset or empty and TERM is not "dumb"; `--json` never is
+    COLUMNS              the width text output is fitted to; else the terminal's; piped
+                         with neither, lines are not fitted
 
     COMPOUND_RECUR_LIMIT and COMPOUND_OFF are shared with the mod, which reads them in
     a session where Claude Code has applied the `env` block of its settings. Run from
@@ -322,6 +335,102 @@ def age_text(seconds):
     if seconds < 86400:
         return "%dh" % (seconds // 3600)
     return "%dd" % (seconds // 86400)
+
+
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def date_text(stamp, clock):
+    """The local day of `stamp`: "3 Oct", with the year when it is not `clock`'s. "?" for
+    a time no calendar holds."""
+    try:
+        then, today = time.localtime(stamp), time.localtime(clock)
+    except (ValueError, OverflowError, OSError):
+        return "?"
+    text = "%d %s" % (then.tm_mday, MONTHS[then.tm_mon - 1])
+    return text if then.tm_year == today.tm_year else "%s %d" % (text, then.tm_year)
+
+
+def when_text(stamp, clock):
+    """How long ago `stamp` was, for a person: 5s, 2m, 3h, then "yesterday" for the
+    calendar day before, then the date. `--json` output carries the stamp itself."""
+    if stamp is None or not 0 <= stamp <= MAX_EPOCH:
+        return "?"
+    seconds = int(clock - stamp)
+    if 0 <= seconds < 86400:
+        return age_text(seconds)
+    if seconds >= 0:
+        import datetime
+
+        try:
+            then, today = time.localtime(stamp), time.localtime(clock)
+            days = (datetime.date(today.tm_year, today.tm_mon, today.tm_mday)
+                    - datetime.date(then.tm_year, then.tm_mon, then.tm_mday)).days
+        except (ValueError, OverflowError, OSError):
+            return "?"
+        if days == 1:
+            return "yesterday"
+    return date_text(stamp, clock)
+
+
+# What a person is shown for each event type. The type names are the log's and the ones
+# `events --type` takes; these are the words of the reports, the band and the pane.
+EVENT_WORDS = {
+    "reuse": "reused", "guard": "guarded", "recall": "recalled", "capture": "owed", "remind": "reminded",
+    "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
+    "candidate": "candidate", "skill": "skill", "rm": "removed", "error": "error",
+}
+
+BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
+EVENT_COLOURS = {
+    "reuse": CYAN, "guard": RED, "recall": MAGENTA, "capture": YELLOW, "remind": YELLOW, "refuse": YELLOW,
+    "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
+    "error": RED,
+}
+STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
+
+
+def colours_on():
+    """Colour only for a person at a terminal: stdout is one, NO_COLOR is unset or empty
+    and TERM is not "dumb". Never in `--json`, which does not call `paint`."""
+    try:
+        return bool(sys.stdout.isatty()) and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
+    except (AttributeError, ValueError):
+        return False
+
+
+def paint(text, *codes):
+    codes = [code for code in codes if code]
+    if not codes or not text or not colours_on():
+        return text
+    return "\x1b[%sm%s\x1b[0m" % (";".join(codes), text)
+
+
+def term_width():
+    """The columns a line may take: COLUMNS when it is a number, else the terminal's when
+    stdout is one, else None (piped: nobody said how wide)."""
+    value = os.environ.get("COLUMNS", "")
+    if value.isdigit() and int(value) > 0:
+        return max(40, int(value))
+    try:
+        if sys.stdout.isatty():
+            import shutil
+
+            return max(40, shutil.get_terminal_size().columns)
+    except (AttributeError, ValueError, OSError):
+        pass
+    return None
+
+
+def clip(text, room):
+    """`text` in at most `room` characters, a cut ending in an ellipsis."""
+    if len(text) <= room:
+        return text
+    return text[:max(0, room - 1)] + "\u2026" if room > 1 else text[:max(0, room)]
+
+
+def plural(count, one, many=None):
+    return "%d %s" % (count, one if count == 1 else (many or one + "s"))
 
 
 # ----------------------------------------------------------------------------- paths
@@ -1252,12 +1361,35 @@ def event_summary(event):
     return ""
 
 
-def event_line(event):
-    session = str(event.get("session") or "")[:8] or "-"
-    project = os.path.basename(str(event.get("project") or "")) or "-"
-    return "%-20s %-8s %-8s %-20s %s" % (
-        one_line(event.get("ts", "?"))[:32], one_line(event.get("type", "?"))[:32], session, project[:20],
-        event_summary(event)[:240 if event.get("type") == "skill" else 100])
+def event_lines(events, clock, words=False, indent=""):
+    """One line an event, in columns: how long ago, the type (or with `words` the word a
+    person is shown for it), the session (not with `words`), the project and what the
+    event was about, cut to the terminal's width when there is one."""
+    width = term_width()
+    rows = []
+    for event in events:
+        kind = one_line(event.get("type", "?"))[:32]
+        cells = [when_text(parse_ts(event.get("ts")), clock), EVENT_WORDS.get(kind, kind) if words else kind]
+        if not words:
+            cells.append(str(event.get("session") or "")[:8] or "-")
+        cells.append(os.path.basename(str(event.get("project") or "")) or "-")
+        rows.append((cells, kind, event_summary(event)[:240 if kind == "skill" else 100]))
+    if not rows:
+        return []
+    widths = [max(len(cells[index]) for cells, _, _ in rows) for index in range(len(rows[0][0]))]
+    if width is not None:
+        # A long project name gives way before the summary does.
+        widths[-1] = min(widths[-1], max(8, width // 4))
+    lines = []
+    for cells, kind, summary in rows:
+        cells = cells[:-1] + [clip(cells[-1], widths[-1])]
+        head = [paint(cells[0].rjust(widths[0]), DIM), paint(cells[1].ljust(widths[1]), EVENT_COLOURS.get(kind))]
+        head += [paint(cell.ljust(widths[index + 2]), DIM) for index, cell in enumerate(cells[2:])]
+        used = len(indent) + sum(widths) + 2 * len(widths)
+        if width is not None:
+            summary = clip(summary, max(10, width - used))
+        lines.append((indent + "  ".join(head) + "  " + summary).rstrip())
+    return lines
 
 
 # ----------------------------------------------------------------------------- output
@@ -1267,7 +1399,9 @@ def emit(data):
     sys.stdout.write(dumps(data, indent=2) + "\n")
 
 
-def table(rows, header):
+def table(rows, header, style=None):
+    """Rows in columns under `header`. `style(row, column, cell)` answers the colour codes
+    of a cell, or nothing; the header is row -1 and is bold."""
     if not rows:
         return ""
     widths = [len(col) for col in header]
@@ -1275,9 +1409,13 @@ def table(rows, header):
         for index, cell in enumerate(row):
             widths[index] = max(widths[index], len(str(cell)))
     lines = []
-    for row in [header] + rows:
-        lines.append("  ".join(str(cell).ljust(widths[index])
-                               for index, cell in enumerate(row)).rstrip())
+    for number, row in enumerate([header] + rows, -1):
+        cells = []
+        for index, cell in enumerate(row):
+            text = str(cell).ljust(widths[index]) if index < len(row) - 1 else str(cell)
+            codes = (BOLD,) if number < 0 else ((style(number, index, str(cell)) if style else None) or ())
+            cells.append(paint(text, *codes) if text.strip() else text)
+        lines.append("  ".join(cells).rstrip())
     return "\n".join(lines) + "\n"
 
 
@@ -1571,18 +1709,47 @@ def cmd_list(args):
         sys.stdout.write("nothing recorded yet\n")
         return 0
     lines = []
-    for row in unreadable:
-        lines.append([row["level"], "unparseable", row["name"], "-", "",
-                      "%s: %s" % (row["path"], one_line(row["problem"])[:120])])
     for row in rows:
         counts = row["counts"]
         kind = "guard" if (row["kind"] == "lesson" and row["match"]) else row["kind"]
         flag = "ineffective" if row["ineffective"] else ""
-        lines.append([row["level"], kind, row["name"],
-                      "%d/%d/%d" % (counts["reuse"], counts["guard"], counts["recall"]),
-                      flag, row["description"][:70]])
-    lines = [row for row in lines if row[1] != "unparseable"] + [row for row in lines if row[1] == "unparseable"]
-    sys.stdout.write(table(lines, ["LEVEL", "KIND", "NAME", "USE/GRD/RCL", "FLAG", "WHEN"]))
+        lines.append([row["level"], kind, row["name"], counts["reuse"], counts["guard"], counts["recall"],
+                      flag, row["description"]])
+    for row in unreadable:
+        lines.append([row["level"], "unparseable", row["name"], "-", "-", "-", "",
+                      "%s: %s" % (row["path"], one_line(row["problem"])[:120])])
+    header = ["LEVEL", "KIND", "NAME", "REUSED", "GUARDED", "RECALLED", "FLAG", "WHEN"]
+    # The description takes the room the terminal has left beside the columns; with too
+    # little, it gets a line of its own under its row. Piped, it is cut at 70 characters.
+    width = term_width()
+    fixed = sum(max(len(str(row[index])) for row in lines + [header]) + 2 for index in range(len(header) - 1))
+    room = 70 if width is None else width - fixed
+    counters = {3: CYAN, 4: RED, 5: MAGENTA}
+
+    def style(number, index, cell):
+        if index in counters:
+            return (counters[index],) if cell not in ("0", "-") else (DIM,)
+        if index == 1 and cell in ("guard", "unparseable"):
+            return (RED,)
+        if index == 6:
+            return (YELLOW,)
+        if index == 7:
+            return (DIM,)
+        return None
+
+    if room >= 24:
+        # Piped, the path of a lesson that does not parse is never cut: it is what to fix.
+        text = table([row[:-1] + [row[-1] if width is None and row[1] == "unparseable" else clip(row[-1], room)]
+                      for row in lines], header, style)
+    else:
+        under = iter([row[-1] for row in lines])
+        out = []
+        for number, line in enumerate(table([row[:-1] for row in lines], header[:-1], style).splitlines()):
+            out.append(line)
+            if number > 0:
+                out.append("    " + paint(clip(next(under), max(10, (width or 80) - 4)), DIM))
+        text = "\n".join(out) + "\n"
+    sys.stdout.write(text)
     return 0
 
 
@@ -1711,10 +1878,14 @@ def cmd_find(args):
         emit({"words": words, "items": rows, "prompts": prompts, "surfer": state})
         return 0
     if rows:
+        width = term_width()
         for row in rows:
-            sys.stdout.write("%s %s (%s) [%d/%d words]: %s\n  -> %s\n" % (
-                row["kind"], row["name"], row["level"], row["score"], len(words),
-                row["description"], row["path"]))
+            # How many of the words matched is said only when some did not.
+            partial = "" if row["score"] == len(words) else ", matched %d of %d words" % (row["score"], len(words))
+            head = "%s %s (%s)%s: " % (row["kind"], row["name"], row["level"], partial)
+            text = row["description"] if width is None else clip(row["description"], max(10, width - len(head)))
+            sys.stdout.write("%s %s (%s)%s: %s\n  %s\n" % (
+                row["kind"], paint(row["name"], BOLD), row["level"], partial, text, paint("-> " + row["path"], DIM)))
     else:
         sys.stdout.write("no lesson, skill or script matches: %s\n" % " ".join(words))
     if state == "missing":
@@ -2315,8 +2486,8 @@ def cmd_events(args):
     if args.json:
         emit(out)
     else:
-        for event in out:
-            sys.stdout.write(event_line(event) + "\n")
+        for line in event_lines(out, now()):
+            sys.stdout.write(line + "\n")
     return 0
 
 
@@ -3102,9 +3273,20 @@ def build_status():
     skips = [{"ts": event.get("ts"), "session": event.get("session", ""),
               "project": event.get("project", ""), "why": one_line(event.get("why", ""))}
              for event in events if event.get("type") == "skip"][-10:]
+    # What the log holds of the mod helping: one per event. A rewrite records no new
+    # lesson. The log holds no duration of a failed call or of its fix, so no time and no
+    # tokens are claimed saved.
+    kinds = [event.get("type") for event in events if not (event.get("type") == "learn" and event.get("update"))]
+    totals = {"reused": kinds.count("reuse"), "guarded": kinds.count("guard"), "recalled": kinds.count("recall"),
+              "recorded": kinds.count("learn"), "since": None}
+    # Since the oldest event with a time a calendar holds.
+    dated = [stamp for stamp in stamps if 0 <= stamp <= MAX_EPOCH]
+    if dated:
+        totals["since"] = iso(min(dated))
     return {
         "ok": not any(row["status"] == "FAIL" for row in health),
         "health": health,
+        "totals": totals,
         "store": store,
         "lessons": lessons,
         "recent": events[-10:],
@@ -3128,37 +3310,84 @@ def cmd_status(args):
         emit(data)
         return 0 if data["ok"] else 1
     out = sys.stdout.write
-    out("Health\n")
+    clock = now()
+    width = term_width()
+
+    def head(text):
+        out(paint(text, BOLD) + "\n")
+
+    def lines_of(text):
+        return "".join("  " + line + "\n" for line in text.splitlines())
+
+    head("Health")
     for row in data["health"]:
-        out("  %-4s  %-14s  %s\n" % (row["status"], row["check"], row["detail"]))
-    out("\nStore\n")
-    out("".join("  " + line + "\n" for line in table(
-        [[level, data["store"][level]["lessons"], data["store"][level]["skills"], data["store"][level]["guards"]]
-         for level in LEVELS], ["level", "lessons", "skills", "guards"]).splitlines()))
-    out("\nLessons\n")
-    if data["lessons"]:
-        out("".join("  " + line + "\n" for line in table(
-            [[row["name"], row["level"], "guard" if row["guard"] and row["kind"] == "lesson" else row["kind"],
-              row["reuse"], row["guard_hits"], row["recall"], row["flag"]] for row in data["lessons"]],
-            ["name", "level", "kind", "reuse", "guard", "recall", "flag"]).splitlines()))
+        out("  %s  %-14s  %s\n" % (paint("%-4s" % row["status"], STATUS_COLOURS.get(row["status"])), row["check"],
+                                   row["detail"]))
+
+    out("\n")
+    head("Compound interest")
+    totals = data["totals"]
+    if totals["since"] is None:
+        out("  nothing yet: the log holds no reuse, guard, recall or lesson\n")
     else:
+        out("  %s \u00b7 %s \u00b7 %s \u00b7 %s \u00b7 %s\n" % (
+            paint(plural(totals["reused"], "reuse") + " offered", CYAN),
+            paint(plural(totals["guarded"], "call") + " stopped by a guard", RED),
+            paint(plural(totals["recalled"], "lesson") + " recalled", MAGENTA),
+            paint(plural(totals["recorded"], "lesson") + " recorded", GREEN),
+            paint("since " + date_text(parse_ts(totals["since"]), clock), DIM)))
+
+    out("\n")
+    head("Levels")
+    # The guards are among the lessons: a lesson that carries a pattern.
+    digits = [max(len(str(data["store"][level][key])) for level in LEVELS) for key in ("lessons", "skills")]
+    levels = [[level, plural(data["store"][level]["lessons"], "lesson").rjust(digits[0] + len(" lesson")
+                                                                              + (data["store"][level]["lessons"] != 1)),
+               "(%s)" % plural(data["store"][level]["guards"], "guard"),
+               plural(data["store"][level]["skills"], "skill").rjust(digits[1] + len(" skill")
+                                                                     + (data["store"][level]["skills"] != 1))]
+              for level in LEVELS]
+    wide = [max(len(row[index]) for row in levels) for index in range(4)]
+    for row in levels:
+        out(("  " + "  ".join(cell.ljust(wide[index]) for index, cell in enumerate(row))).rstrip() + "\n")
+
+    out("\n")
+    head("Lessons")
+    used = [row for row in data["lessons"] if row["flag"] != "never used"]
+    idle = len(data["lessons"]) - len(used)
+    counters = {3: CYAN, 4: RED, 5: MAGENTA}
+    if used:
+        out(lines_of(table(
+            [[row["name"], row["level"], "guard" if row["guard"] and row["kind"] == "lesson" else row["kind"],
+              row["reuse"], row["guard_hits"], row["recall"], row["flag"]] for row in used],
+            ["name", "level", "kind", "reused", "guarded", "recalled", "flag"],
+            lambda number, index, cell: ((counters[index],) if cell != "0" else (DIM,)) if index in counters
+            else ((YELLOW,) if index == 6 else None))))
+    if idle:
+        # One line for the lessons nothing has touched: `compound list` has every row.
+        out("  %s\n" % paint("%s never used (`compound list` shows %s)" % (
+            plural(idle, "lesson"), "it" if idle == 1 else "them"), DIM))
+    if not data["lessons"]:
         out("  none recorded yet\n")
     for row in data["lessons"]:
         for root in row["also_in"]:
             out("  %s (%s) is also committed in %s\n" % (row["name"], row["level"], root))
-    out("\nRecent\n")
+
+    out("\n")
+    head("Recent")
     if data["recent"]:
-        for event in data["recent"]:
-            out("  " + event_line(event) + "\n")
+        for line in event_lines(data["recent"], clock, words=True, indent="  "):
+            out(line + "\n")
     else:
         out("  no events yet\n")
-    out("\nOpen\n")
+    out("\n")
+    head("Open")
     opened = data["open"]
     if not (opened["ineffective"] or opened["skips"] or opened["errors"] or data["unparseable"]
             or opened["unsettled"] or opened["candidates"]):
         out("  nothing open\n")
     for row in opened["unsettled"]:
-        out("  unsettled    %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
+        out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
             "/compound:learn settle %s  Or decline it: compound skip --settles %s --why \"<reason>\"\n" % (
                 row["id"], row["age"], os.path.basename(str(row["project"])) or "-", row["failed"], row["fixed"],
                 row["id"], row["id"]))
@@ -3180,10 +3409,11 @@ def cmd_status(args):
             "(compound add --update --name %s --match RE), attach a script or rewrite the description\n"
             % (row["name"], row["level"], row["recall"], row["name"]))
     for row in opened["skips"]:
-        out("  skipped      %s %s: %s\n" % (one_line(row["ts"])[:32], str(row["session"])[:8] or "-", row["why"]))
+        out("  declined     %s %s: %s\n" % (when_text(parse_ts(row["ts"]), clock), str(row["session"])[:8] or "-",
+                                             row["why"]))
     for row in opened["errors"]:
-        out("  error        %s %s%s\n" % (one_line(row["ts"])[:32], (row["where"] + ": ") if row["where"] else "",
-                                         row["message"]))
+        out("  %s        %s %s%s\n" % (paint("error", RED), when_text(parse_ts(row["ts"]), clock),
+                                        (row["where"] + ": ") if row["where"] else "", row["message"]))
     return 0 if data["ok"] else 1
 
 
@@ -3264,7 +3494,7 @@ def build_parser():
                      help="only what is owed and unsettled in the last 14 days: captures, and ineffective recalls")
     one.add_argument("--limit", type=int, default=0)
 
-    command("status", cmd_status, "Health, store counts, per-lesson use, recent events, what is open.")
+    command("status", cmd_status, "Health, totals, counts per level, per-lesson use, recent events, what is open.")
 
     one = command("install", cmd_install, "Enable the mod, link the CLI, fetch history-surfer.")
     one.add_argument("--claude-dir")

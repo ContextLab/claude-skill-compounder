@@ -27,7 +27,9 @@ class StatusTest(Case):
         proc = self.box.run("status")
         self.assertExit(proc, 0)
         heads = [line for line in proc.stdout.splitlines() if re.match(r"^[A-Z][a-z]+$", line)]
-        self.assertEqual(heads, ["Health", "Store", "Lessons", "Recent", "Open"])
+        self.assertEqual(heads, ["Health", "Levels", "Lessons", "Recent", "Open"])
+        # The totals have a two-word heading, between Health and Levels.
+        self.assertLess(proc.stdout.index("\nCompound interest\n"), proc.stdout.index("\nLevels\n"))
 
     def test_health_checks_come_in_the_documented_order(self):
         data = self.status()
@@ -183,7 +185,9 @@ class StatusTest(Case):
         proc = self.box.run("status", COMPOUND_NOW=NOW + 50)
         self.assertExit(proc, 0)
         self.assertRegex(proc.stdout, r"flaky\s+project\s+lesson\s+0\s+0\s+2\s+ineffective")
-        self.assertRegex(proc.stdout, r"unused\s+project\s+lesson\s+0\s+0\s+0\s+never used")
+        # The lessons never used are one line with their count; `compound list` has the rows.
+        self.assertIn("\n  1 lesson never used (`compound list` shows it)\n", proc.stdout)
+        self.assertNotRegex(proc.stdout.split("\nLessons\n")[1].split("\n\n")[0], r"\bunused\b")
         self.assertRegex(proc.stdout.split("Open")[1], r"ineffective\s+flaky")
 
     def test_recent_is_the_last_ten_events(self):

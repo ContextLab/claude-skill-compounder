@@ -239,11 +239,13 @@ is empty when there is nothing to show.
 | Glyph | Label | Meaning |
 |-|-|-|
 | spinner | `checking for reusable work`, `is this the fix?`, ... | a check is running |
-| `◆` | `reuse found` | existing work was added to your prompt |
-| `■` | `guard stopped a call` | a guard refused a call |
+| `◆` | `reuse found` | existing work was added to your prompt; the row names it |
+| `◇` | `ready` | once a session: compound is loaded, with how many lessons and guards it holds |
+| `◇` | `nothing to reuse` | a reuse check found nothing to add |
+| `■` | `guard stopped a call` | a guard refused a call; the row names the lesson and the call |
 | `↺` | `lesson recalled` | a failed call was given its lesson |
 | `◌` | `watching for the fix` | a call failed and no lesson describes it |
-| `●` | `lesson owed` | a fix was found; the lesson is not yet recorded |
+| `●` | `lesson owed` | a fix was found; the lesson is not yet recorded. The row shows the call that worked |
 | `✔` | `lesson recorded` | the lesson is written |
 | `○` | `lesson declined` | Claude declined to record it, with a reason |
 | `⇡` | `lesson moved to the user level` | a lesson moved up |
@@ -264,7 +266,9 @@ The track stays for as long as a lesson is owed. At every other step it fades af
 seconds, like the result beside it.
 
 **3. The `/compound` pane.** Type `/compound` in a session to open a dashboard: health,
-what is open, lessons per level, the most used lessons, and recent events. `r` refreshes
+the totals (how often compound offered existing work, stopped a call, gave a lesson
+beside a failure and recorded a lesson), what is open, lessons per level, the most used
+lessons, and recent events. `r` refreshes
 it. `/compound close` closes it. `/compound status` prints the same report as text.
 
 ![The /compound pane: health, open items, levels, most used lessons, recent events](docs/media/demo-2-pane.png)
@@ -273,12 +277,13 @@ it. `/compound close` closes it. `/compound status` prints the same report as te
 proposed, made a skill, removed, or marked ineffective.
 
 **5. The status entry.** The **status entry** is a short line in Claude Code's status
-area. compound sets it each time it acts, for example `compound: 2 reusable`,
-`compound: guard zsh-equals-word` or `compound: lesson owed`.
+area. compound sets it each time it acts, for example `compound: reuse bibdupcheck.py +1`,
+`compound: guard zsh-equals-word` or `compound: lesson owed: ./deploy.sh --target staging`.
 
 **6. `compound status` and the event log.** `compound status` in a terminal prints
-health checks, counts per level, how often each lesson was used, recent events, and
-everything that waits for you, each with the command that deals with it. Every event is
+health checks, the totals, counts per level, how often each lesson was used, recent
+events, and everything that waits for you, each with the command that deals with it. It
+is coloured in a terminal (set `NO_COLOR` to turn that off) and fitted to its width. Every event is
 also one line of JSON in `~/.claude/compound/events.jsonl`; `compound events` prints
 them.
 

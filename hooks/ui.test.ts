@@ -1,6 +1,6 @@
 import { expect, mock, test, type TestBody } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { BUSY, ERROR, FRAME_MS, FRAMES, GONE_MS, NOTES, OWED, WEAK } from './view'
+import { BUSY, ERROR, FRAME_MS, FRAMES, FRESH_MS, GONE_MS, HINT, NOTES, OWED, WEAK } from './view'
 
 // The band and the pane, drawn through the mod's own hooks on every surface that draws
 // them. The world beneath the mod is the test's: the CLI's replies, the judge's answer,
@@ -17,6 +17,7 @@ const ITEMS = JSON.stringify([
 ])
 const STATUS = JSON.stringify({
   ok: true,
+  totals: { reused: 3, guarded: 1, recalled: 1, recorded: 5, since: '2026-09-12T10:00:00Z' },
   health: [{ check: 'python', status: 'PASS', detail: '3.12.1' }],
   store: { project: { lessons: 1, skills: 0, guards: 0 }, user: { lessons: 0, skills: 0, guards: 0 }, general: { lessons: 0, skills: 2, guards: 0 } },
   lessons: [{ name: 'release-notes-format', level: 'project', kind: 'lesson', guard: false, reuse: 3, guard_hits: 0, recall: 1, flag: '' }],
@@ -129,7 +130,11 @@ test('the band spins while the reuse check runs, shows what it found, fades, and
     await submitted
     const found = await ui.find({ type: 'Text', text: NOTES.reuse.label })
     expect(found?.props.color).toBe(NOTES.reuse.color)
-    expect(await ui.find({ type: 'Text', text: '1 lesson or skill' })).toBeDefined()
+    // The result names what was found, and the session's first result carries the greeting.
+    expect(await ui.find({ type: 'Text', text: 'release-notes-format' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /lesson or skill|reusable/ })).toBeUndefined()
+    expect((await ui.find({ type: 'Text', text: '1 lesson (0 guards) ready' })) !== undefined).toBe(surface === SURFACES[0])
+    expect(w.statuses[w.statuses.length - 1]).toBe('reuse release-notes-format')
     expect((await ui.findAll({ type: 'Text' }))[0]!.text).toBe(`${NOTES.reuse.glyph} `)
     expect(await ui.find({ type: 'Text', text: BUSY.reuse })).toBeUndefined()
     expect(w.logged.map(e => e.type), JSON.stringify(w.logged)).toEqual(['reuse'])
@@ -164,6 +169,8 @@ test('a guard that stops a call is shown with the lesson\'s name, in the guard\'
     expect(ran.deny).toContain(`lesson=no-marker-echo-${surface}`)
     expect((await ui.find({ type: 'Text', text: NOTES.guard.label }))?.props.color).toBe(NOTES.guard.color)
     expect(await ui.find({ type: 'Text', text: `no-marker-echo-${surface}` })).toBeDefined()
+    // And with the call it stopped.
+    expect((await ui.find({ type: 'Text', text: 'echo GUARDED_MARKER' }))?.props.dimColor).toBe(true)
     expect((await ui.findAll({ type: 'Text' }))[0]!.text).toBe(`${NOTES.guard.glyph} `)
     await ui.unmount()
   }
@@ -190,7 +197,9 @@ test('a failure, its fix, the lesson owed and the lesson recorded walk the track
   expect(await shown()).toContain(`${BUSY.fix}   ✓ failed → ● fixed → ○ owed → ○ recorded`)
   await clock.advance(300)
   await fixing
-  expect(await shown()).toBe(`${OWED.glyph} compound lesson owed   ✓ failed → ✓ fixed → ● owed → ○ recorded`)
+  // The lesson owed is named by its fix; at the band's 95 columns the track keeps its glyphs.
+  expect(await shown()).toBe(`${OWED.glyph} compound lesson owed · ./deploy.sh --target staging   ✓ ✓ ● owed ○`)
+  expect(w.statuses[w.statuses.length - 1]).toBe('lesson owed: ./deploy.sh --target staging')
   expect((await ui.find({ type: 'Text', text: '● owed' }))?.props).toEqual({ color: 'warning', bold: true })
   expect(w.logged.map(e => e.type)).toEqual(['capture'])
 
@@ -223,6 +232,75 @@ test('COMPOUND_QUIET=1 turns the band off and leaves the moments, the status ent
     expect(await pane.find({ type: 'Text', text: BENEATH })).toBeUndefined()
     await pane.unmount()
   }
+})
+
+const NOTHING = '{"substantial":false,"items":[],"requests":[]}'
+
+test('the first reuse check of a session that finds nothing greets with the store\'s counts; the next closes dim and goes', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  w.judge = async () => {
+    await clock.sleep(500)
+    return NOTHING
+  }
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND, viewport: { columns: 100, rows: 40 } })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  const first = $.prompt.submit({ text: `${PROMPT} (first)`, wait: false, origin: { kind: 'composer' } })
+  await clock.settle()
+  expect(await shown()).toContain(BUSY.reuse)
+  const calls = w.calls.length
+  await clock.advance(500)
+  await first
+  // The counts are the listing's that the check had already read: no call was made for them.
+  expect(await shown()).toBe(`${NOTES.ready.glyph} compound ready · 1 lesson (0 guards)  ${HINT}`)
+  expect(w.calls.slice(calls).filter(c => c[1] === 'list' || c[1] === 'status')).toEqual([])
+  expect(w.logged.map(e => e.type)).toEqual([])
+  await clock.advance(GONE_MS)
+  expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+
+  // The next check that finds nothing: no blank row after the spinner, a dim line for three seconds.
+  const second = $.prompt.submit({ text: `${PROMPT} (second)`, wait: false, origin: { kind: 'composer' } })
+  await clock.settle()
+  await clock.advance(500)
+  await second
+  expect(await shown()).toBe(`${NOTES.idle.glyph} compound ${NOTES.idle.label}`)
+  expect((await ui.findAll({ type: 'Text' })).every(t => t.props.dimColor === true)).toBe(true)
+  await clock.advance(GONE_MS - FRESH_MS)
+  expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+  // Nothing animates after it.
+  const after = w.calls.length
+  await clock.advance(3_600_000)
+  expect(w.calls.length).toBe(after)
+  await ui.unmount()
+})
+
+test('a first prompt too short for a reuse check is greeted once, without counts and without a CLI call', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
+  const clock = mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND, viewport: { columns: 100, rows: 40 } })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  await $.prompt.submit({ text: 'hello there', wait: false, origin: { kind: 'composer' } })
+  expect(await shown()).toBe(`${NOTES.ready.glyph} compound ready · ${HINT}`)
+  expect(w.calls.filter(c => c[1] === 'list' || c[1] === 'status')).toEqual([])
+  await clock.advance(GONE_MS)
+  expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+  await $.prompt.submit({ text: 'and again', wait: false, origin: { kind: 'composer' } })
+  expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+  await ui.unmount()
+})
+
+test('COMPOUND_QUIET=1 shows no greeting and no "nothing to reuse"', async ($, on) => {
+  const w = world(on, { COMPOUND_QUIET: '1' })
+  mock.clock(on, { now: T0 })
+  w.judge = async () => NOTHING
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  for (const n of ['one', 'two']) {
+    await $.prompt.submit({ text: `${PROMPT} (${n})`, wait: false, origin: { kind: 'composer' } })
+    expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: NOTES.ready.label })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: NOTES.idle.label })).toBeUndefined()
+  }
+  await ui.unmount()
 })
 
 test('the band yields to a survey', async ($, on) => {
@@ -284,6 +362,13 @@ test('/compound opens the dashboard: levels, the most used, recent events and wh
     for (const heading of ['Open', 'Levels', 'Most used', 'Recent']) expect(lines).toContain(heading)
     expect(all).toContain('1 lesson owed')
     expect(all).toContain('abc123 ./x --y (2h, alpha)')
+    // The totals, from the same status reply; the levels say the guards are among the lessons.
+    expect(lines).toContain('Compound interest')
+    for (const total of ['reuses offered', 'call stopped by a guard', 'lesson recalled', 'lessons recorded']) expect(all).toContain(total)
+    expect(all).toContain('(0 guards)')
+    // The timeline says the word a person reads and how long ago, not the log's type or a time of day.
+    expect(all).toContain(`${NOTES.guard.glyph} guarded no-marker-echo`)
+    expect(all).not.toMatch(/\d\d:\d\d /)
     expect(all).toContain('release-notes-format')
     expect(lines).toContain('▇▇▇')
     expect(all).toContain('no-marker-echo')
@@ -369,7 +454,7 @@ test('a lesson recorded settles the band and the status entry, however the comma
     n += 1
     await owe($, w)
     expect(await shown(), command).toContain(OWED.label)
-    expect(w.statuses[w.statuses.length - 1], command).toBe('lesson owed')
+    expect(w.statuses[w.statuses.length - 1], command).toBe('lesson owed: ./deploy.sh --target staging')
     // The call writes the lesson: the log now holds its `learn`, and nothing is owed.
     w.owed = []
     w.events = JSON.stringify([{ ts: `2026-10-03T12:${String(n).padStart(2, '0')}:00Z`, type: 'learn', lesson: 'deploy-needs-target', update: false, session: 'session-under-test' }])
