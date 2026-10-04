@@ -28,8 +28,26 @@ curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/
 
 Then start a new Claude Code session. Sessions that are already open do not load the mod.
 
+The installer installs the newest release: the highest version tag (`v0.4.0` or later) of
+this repository, or the `main` branch when there is no such tag. To install the tip of
+`main` instead, or to pin one release, set `COMPOUND_REF`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | COMPOUND_REF=main bash
+```
+
 **Requirements:** Claude Code 2.1.288 or later, `python3` (3.9 or later) and `git`. The
-installer also installs [history-surfer](https://github.com/ContextLab/claude-history-surfer)
+installer prints a warning when the `claude` on your `PATH` is older, and `compound
+status` reports it.
+
+**Platforms:** compound is developed on macOS. The installer, the CLI and the mod in real
+Claude Code sessions have been run there. On Linux, the tests of the CLI and the
+installer run on Ubuntu in this repository's CI; the mod in a Claude Code session on
+Linux is not tested. WSL is not tested. Native Windows is not tested, and three things
+in the code assume a Unix system: the installer is a bash script, the CLI locks files
+with `fcntl`, and `compound` is installed as a symbolic link.
+
+The installer also installs [history-surfer](https://github.com/ContextLab/claude-history-surfer)
 unless you already have it. history-surfer keeps the **prompt log**: a searchable record
 of the prompts you type in Claude Code. compound searches it for earlier requests like
 the one you are making.
@@ -56,6 +74,7 @@ Right after install, the report looks like this (paths shown for a user named `m
 ```
 Health
   PASS  python          3.9.13
+  PASS  claude code     2.1.289
   PASS  mod             enabled in /Users/me/.claude/settings.json
   WARN  mod last fired  never: the event log holds no event the mod wrote (reuse, guard, ...)
   PASS  cli             /Users/me/.local/bin/compound
@@ -68,17 +87,42 @@ Health
 ```
 
 The two `WARN` rows are expected on a new install. They turn to `PASS` once compound has
-acted in a session. Two more can show: `cli`, until the directory that holds `compound` is
-on your `PATH`, and `prompt log`, when history-surfer is not installed.
+acted in a session. Three more can show: `cli`, until the directory that holds `compound` is
+on your `PATH`, `prompt log`, when history-surfer is not installed, and `claude code`, when
+no `claude` command is on your `PATH` to ask for its version.
 [Troubleshooting](#troubleshooting) explains every row.
 
 **Update and uninstall:**
 
 | To | Run |
 |-|-|
-| update to the newest version | `compound update` |
+| update to the newest release | `compound update` |
+| follow the tip of `main` from now on | `compound update --ref main` |
+| move to one release | `compound update --ref v0.4.0` |
 | uninstall and keep everything you recorded | `compound uninstall` |
 | uninstall and also delete `~/.claude/compound` | `compound uninstall --purge` |
+
+`compound update` follows what the installed copy is on. Installed from a release, it
+moves to the newest release and prints the old and the new version, or says that it is
+already on the newest one. On a branch, such as after `--ref main`, it pulls that branch.
+Running the installer again without `COMPOUND_REF` puts the copy back on the newest
+release.
+
+Uninstall also works without `compound` on your `PATH`, as one line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash -s -- uninstall
+```
+
+To also delete `~/.claude/compound`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash -s -- uninstall --purge
+```
+
+Both find the installed copy through `~/.claude/compound` and run its `compound
+uninstall`. They download nothing but the script itself, and say so when compound is not
+installed.
 
 Install changes three things: it adds one path to `env.CLAUDE_CODE_PLUGIN_DIRS` in
 `~/.claude/settings.json`, it links `compound` into `~/.local/bin` or `~/bin`, and it
@@ -89,7 +133,9 @@ It does a fourth when it finds no `surfer` command: it clones history-surfer int
 (`scripts/setup.py`) for the same Claude Code directory and the same bin directory.
 Setting `COMPOUND_NO_SURFER` before installing skips this.
 
-`compound uninstall` reverses the first three. A history-surfer that install fetched
+`compound uninstall` reverses the first three, and removes a directory that install
+created (such as `~/.local/bin`) when nothing else is in it. A plain uninstall ends with
+the command that deletes what it kept. A history-surfer that install fetched
 stays installed, and the output prints the command that removes it. `compound uninstall
 --purge` also runs history-surfer's own uninstaller for that copy and deletes its clone
 with the rest of `~/.claude/compound`. A history-surfer you already had is never touched.
@@ -387,6 +433,8 @@ exits 1 when a row fails.
 | Row | It says | What to do |
 |-|-|-|
 | `python` | FAIL: older than 3.9 | install Python 3.9 or later |
+| `claude code` | FAIL: older than 2.1.288 | update Claude Code: `claude update` |
+| `claude code` | WARN: `claude` is not on `PATH`, or it gave no version | nothing, if your Claude Code is 2.1.288 or newer; the row only says that the version could not be checked |
 | `mod` | WARN: not in `env.CLAUDE_CODE_PLUGIN_DIRS`, or `settings.json` does not exist | run `compound install` |
 | `mod` | FAIL: `settings.json` cannot be read | the row prints the problem; fix the JSON in `~/.claude/settings.json` |
 | `mod` | WARN: switched off | remove `COMPOUND_OFF` from your settings or environment |

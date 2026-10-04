@@ -213,6 +213,12 @@ OPEN_TEXT = 100
 UPSTREAM_DEFAULT = "ContextLab/claude-skill-compounder"
 SURFER_URL = "https://github.com/ContextLab/claude-history-surfer.git"
 PLUGIN_ENV = "CLAUDE_CODE_PLUGIN_DIRS"
+# The oldest Claude Code the mod runs on; `install` and `status` check `claude --version`.
+CLAUDE_CODE_MIN = (2, 1, 288)
+# The oldest release `update` moves to: tags before it hold no bin/compound. install.sh
+# carries the same number as `min_release`.
+RELEASE_MIN = (0, 4, 0)
+RELEASE_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 SCRIPT_DIRS = ("scripts", "bin", "tools")
 SCRIPT_CAP = 200
 WEEK = 7 * 86400
@@ -2485,6 +2491,37 @@ def pick_bin_dir():
     return _expand("~/.local/bin")
 
 
+def claude_code():
+    """(PASS | WARN | FAIL, detail) for the `claude` on PATH against CLAUDE_CODE_MIN.
+    WARN when its version cannot be told, FAIL when it is older."""
+    import shutil
+
+    need = "%d.%d.%d" % CLAUDE_CODE_MIN
+    found = shutil.which("claude")
+    if not found:
+        return "WARN", "`claude` is not on PATH, so its version was not checked; the mod needs Claude Code %s or later" % need
+    code, out, err = _run([found, "--version"], timeout=5)
+    version = re.search(r"(\d+)\.(\d+)\.(\d+)", out) if code == 0 else None
+    if not version:
+        return "WARN", "`%s --version` gave no version (%s); the mod needs Claude Code %s or later" % (
+            found, one_line(err or out)[:120] or "exit %d" % code, need)
+    if tuple(int(part) for part in version.groups()) < CLAUDE_CODE_MIN:
+        return "FAIL", "%s is older than %s, which the mod needs; update Claude Code with: claude update" % (
+            version.group(0), need)
+    return "PASS", version.group(0)
+
+
+def release_tags(names):
+    """The release tags among `names`, oldest first: vX.Y.Z, compared as numbers, and
+    never older than RELEASE_MIN. Sorted here: git's own version sort needs git 2.18."""
+    found = []
+    for name in names:
+        hit = RELEASE_RE.match(name.strip())
+        if hit and tuple(int(part) for part in hit.groups()) >= RELEASE_MIN:
+            found.append((tuple(int(part) for part in hit.groups()), name.strip()))
+    return [name for _version, name in sorted(found)]
+
+
 def install_surfer(claude, bin_dir, previous):
     """Fetch history-surfer when it is absent. Returns a record; never raises."""
     import shutil
@@ -2564,6 +2601,9 @@ def cmd_install(args):
         "env_created": env_created or bool(same_target and previous.get("env_created")),
         "link": link,
         "link_created": needs_link or bool(previous.get("link") == link and previous.get("link_created")),
+        # Every directory an install made, so uninstall can remove the ones left empty.
+        "dirs_created": [path for path in previous.get("dirs_created") or [] if isinstance(path, str)]
+        if isinstance(previous.get("dirs_created"), list) else [],
         "surfer": previous.get("surfer") or {"status": "pending", "detail": "install did not finish"},
         "installed_at": previous.get("installed_at") or iso(now()),
     }
@@ -2588,6 +2628,7 @@ def cmd_install(args):
             missing.append(here)
             here = os.path.dirname(here)
         made_dirs.extend(missing)
+        manifest["dirs_created"].extend(one for one in missing if one not in manifest["dirs_created"])
         os.makedirs(path, exist_ok=True)
 
     try:
@@ -2648,6 +2689,12 @@ def cmd_install(args):
                 report.append("cli      %s is not on PATH. Add this line to your shell profile "
                               "(~/.zshrc for zsh, ~/.bashrc for bash) and open a new shell:" % bin_dir)
                 report.append("             %s" % path_line(bin_dir))
+            import shutil
+
+            first = shutil.which("compound")
+            if first and not _same_path(first, script):
+                report.append("cli      another `compound` comes first on PATH: %s. Typing `compound` runs that one; "
+                              "remove or rename it, or put %s ahead of it on PATH" % (first, bin_dir))
         else:
             report.append("cli      not linked")
 
@@ -2678,6 +2725,8 @@ def cmd_install(args):
             one_line(why)[:300], ("; could not undo: " + "; ".join(left)) if left else ""))
 
     report.append("record   %s" % mpath)
+    state, detail = claude_code()
+    report.append("claude   %s" % (("Claude Code " + detail) if state == "PASS" else detail))
     if args.json:
         emit(manifest)
     else:
@@ -2786,11 +2835,25 @@ def cmd_uninstall(args):
                     home, " and the package clone" if clone else ""))
         else:
             report.append("purged   nothing: %s does not exist" % home)
-    elif not args.purge:
+    if not problems and isinstance(manifest, dict) and isinstance(manifest.get("dirs_created"), list):
+        # The directories install made, deepest first, and only the ones that are empty
+        # now: `rmdir` refuses any other.
+        for path in sorted((one for one in manifest["dirs_created"] if isinstance(one, str) and one),
+                           key=len, reverse=True):
+            if os.path.isdir(path) and not os.path.islink(path):
+                try:
+                    os.rmdir(path)
+                    report.append("removed  %s (empty; install had created it)" % path)
+                except OSError:
+                    pass
+    if not args.purge and os.path.isdir(home_dir()):
         report.append("kept     %s (your lessons and the event log; --purge removes them)" % home_dir())
         clone = os.path.join(home_dir(), "app")
         if os.path.isdir(clone):
             report.append("kept     %s (the package clone; --purge removes it)" % clone)
+        script = os.path.join(pkg_root(), "bin", "compound")
+        report.append("To delete what was kept later, run: %s uninstall --purge" % (
+            '"%s"' % script if " " in script else script))
     if args.json:
         emit({"report": report, "problems": problems})
     else:
@@ -2805,24 +2868,70 @@ def cmd_update(args):
     import shutil
 
     package = pkg_root()
+    if args.ref is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$", args.ref):
+        raise usage("--ref takes the name of a branch or a tag, not %r" % args.ref)
     if not shutil.which("git"):
         raise failure("`git` is not on PATH")
     code, old, err = _run(["git", "-C", package, "rev-parse", "--short", "HEAD"], timeout=30)
     if code != 0:
         raise failure("%s is not a git checkout: %s" % (package, one_line(err)[:200]))
-    code, _branch, _err = _run(["git", "-C", package, "symbolic-ref", "-q", "HEAD"], timeout=30)
-    if code != 0:
-        raise failure("%s is on a detached HEAD (at %s), not on a branch, so there is nothing to pull; "
-                      "check out a branch there (git -C %s switch main) and run update again" % (package, old, package))
-    _code, changed, _err = _run(["git", "-C", package, "status", "--porcelain", "--untracked-files=no"], timeout=60)
+
+    def git(*argv, **kw):
+        return _run(["git", "-C", package, "-c", "advice.detachedHead=false"] + list(argv), timeout=kw.get("timeout", 60))
+
+    # What the checkout follows: the branch it is on, or, on a detached HEAD, the
+    # releases. `--ref` names a branch or a tag to move to instead.
+    code, branch, _err = git("symbolic-ref", "-q", "--short", "HEAD")
+    on_branch = code == 0 and bool(branch)
+    if on_branch:
+        old_ref = branch
+    else:
+        _code, here, _err = git("tag", "--points-at", "HEAD")
+        old_ref = (release_tags(here.splitlines()) or [old])[-1]
+    _code, changed, _err = git("status", "--porcelain", "--untracked-files=no")
     dirty = bool(changed.strip())
     if dirty and not args.json:
         sys.stdout.write("%s has uncommitted changes (%d file(s)); pulling anyway, and git stops if they are "
                          "in the way\n" % (package, len(changed.strip().splitlines())))
         sys.stdout.flush()
-    code, out, err = _run(["git", "-C", package, "pull", "--ff-only"], timeout=300)
-    if code != 0:
-        raise failure("git pull --ff-only failed in %s: %s" % (package, one_line(err or out)[:300]))
+    target = args.ref
+    newest = False
+    if target or not on_branch:
+        code, out, err = git("fetch", "--quiet", "--tags", "origin", timeout=300)
+        if code != 0:
+            raise failure("git fetch failed in %s: %s" % (package, one_line(err or out)[:300]))
+        if not target:
+            _code, names, _err = git("tag", "--list")
+            releases = release_tags(names.splitlines())
+            if not releases:
+                raise failure("%s is on a detached HEAD (at %s), not on a branch, and its origin has no release "
+                              "tag (v%d.%d.%d or later) to move to; follow a branch instead with: compound update "
+                              "--ref main" % ((package, old) + RELEASE_MIN))
+            target = releases[-1]
+            newest = True
+        code, _out, _err = git("show-ref", "--verify", "--quiet", "refs/remotes/origin/" + target)
+        if code == 0:
+            # A branch of origin: be on it, then pull.
+            if not (on_branch and branch == target):
+                code, out, err = git("checkout", "--quiet", target)
+                if code != 0:
+                    raise failure("cannot check out %s in %s: %s" % (target, package, one_line(err or out)[:300]))
+            code, out, err = git("pull", "--ff-only", "origin", target, timeout=300)
+            if code != 0:
+                raise failure("git pull --ff-only failed in %s: %s" % (package, one_line(err or out)[:300]))
+        else:
+            code, _out, _err = git("rev-parse", "-q", "--verify", target + "^{commit}")
+            if code != 0:
+                raise failure("origin of %s has no branch or tag named %s; nothing was moved" % (package, target))
+            code, out, err = git("checkout", "--quiet", "--detach", target)
+            if code != 0:
+                raise failure("cannot check out %s in %s: %s" % (target, package, one_line(err or out)[:300]))
+        new_ref = target
+    else:
+        code, out, err = git("pull", "--ff-only", timeout=300)
+        if code != 0:
+            raise failure("git pull --ff-only failed in %s: %s" % (package, one_line(err or out)[:300]))
+        new_ref = old_ref
     _code, new, _err = _run(["git", "-C", package, "rev-parse", "--short", "HEAD"], timeout=30)
 
     # Only a lesson under the user lessons directory is ever a candidate, and only
@@ -2849,15 +2958,21 @@ def cmd_update(args):
             removed.append({"name": name, "path": directory})
         else:
             differing.append({"name": name, "path": directory, "general": theirs})
-    result = {"package": package, "old": old, "new": new, "changed": old != new, "dirty": dirty,
-              "removed": removed, "differing": differing}
+    moved = old != new or old_ref != new_ref
+    result = {"package": package, "old": old, "new": new, "changed": moved, "dirty": dirty,
+              "old_ref": old_ref, "ref": new_ref, "removed": removed, "differing": differing}
     if args.json:
         emit(result)
         return 0
-    if old == new:
-        sys.stdout.write("already up to date at %s\n" % new)
+    if on_branch and not args.ref:
+        if old == new:
+            sys.stdout.write("already up to date at %s\n" % new)
+        else:
+            sys.stdout.write("updated %s -> %s\n" % (old, new))
+    elif not moved:
+        sys.stdout.write("%s %s (%s)\n" % ("already the newest release:" if newest else "already at", new_ref, new))
     else:
-        sys.stdout.write("updated %s -> %s\n" % (old, new))
+        sys.stdout.write("updated %s -> %s (%s -> %s)\n" % (old_ref, new_ref, old, new))
     for row in removed:
         sys.stdout.write("removed user lesson %s: the general pool now carries the same files\n" % row["name"])
     for row in differing:
@@ -2931,6 +3046,7 @@ def build_status():
                    for row in broken if row.get("unparseable")]
     check("python", "PASS" if sys.version_info >= (3, 9) else "FAIL",
           version if sys.version_info >= (3, 9) else version + " is older than 3.9")
+    check("claude code", *claude_code())
 
     spath = settings_path()
     try:
@@ -3270,7 +3386,8 @@ def build_parser():
     one.add_argument("--claude-dir")
     one.add_argument("--bin-dir")
 
-    command("update", cmd_update, "Pull the package and drop user lessons the general pool now carries.")
+    one = command("update", cmd_update, "Move the package to its newest version and drop user lessons the general pool now carries.")
+    one.add_argument("--ref", metavar="REF", help="the branch or tag to move the checkout to and follow from then on")
 
     one = command("uninstall", cmd_uninstall, "Reverse what install recorded.")
     one.add_argument("--claude-dir")

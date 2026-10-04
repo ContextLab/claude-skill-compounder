@@ -32,8 +32,8 @@ class StatusTest(Case):
     def test_health_checks_come_in_the_documented_order(self):
         data = self.status()
         self.assertEqual([row["check"] for row in data["health"]],
-                         ["python", "mod", "mod last fired", "cli", "prompt log", "last event", "duplicates",
-                          "lessons parse", "errors"])
+                         ["python", "claude code", "mod", "mod last fired", "cli", "prompt log", "last event",
+                          "duplicates", "lessons parse", "errors"])
         self.assertTrue(all(row["status"] in ("PASS", "WARN", "FAIL") for row in data["health"]))
 
     def test_json_carries_the_same_sections(self):
@@ -58,6 +58,59 @@ class StatusTest(Case):
     def test_python_version_is_reported(self):
         import sys
         self.assertEqual(self.health(self.status(), "python")["detail"], "%d.%d.%d" % sys.version_info[:3])
+
+    def claude(self, text, body=None):
+        """A real executable named `claude` that answers `--version` with `text`; the
+        directory it is in, for PATH."""
+        tools = os.path.join(self.box.root, "tools")
+        os.makedirs(tools, exist_ok=True)
+        path = os.path.join(tools, "claude")
+        with open(path, "w") as handle:
+            handle.write(body or "#!/bin/sh\necho '%s'\n" % text)
+        os.chmod(path, 0o755)
+        return tools + ":/usr/bin:/bin"
+
+    def test_without_claude_on_path_the_claude_code_row_warns(self):
+        row = self.health(self.status(), "claude code")
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("not on PATH", row["detail"])
+        self.assertIn("2.1.288", row["detail"])
+
+    def test_a_claude_code_at_or_above_the_minimum_passes(self):
+        for version in ("2.1.288", "2.1.289", "2.2.0", "3.0.1", "2.10.0"):
+            row = self.health(self.status(PATH=self.claude("%s (Claude Code)" % version)), "claude code")
+            self.assertEqual((row["status"], row["detail"]), ("PASS", version))
+
+    def test_a_claude_code_below_the_minimum_fails_and_says_what_to_do(self):
+        for version in ("2.1.287", "2.0.999", "1.9.300"):
+            data = self.status(PATH=self.claude("%s (Claude Code)" % version))
+            row = self.health(data, "claude code")
+            self.assertEqual(row["status"], "FAIL", version)
+            self.assertIn(version, row["detail"])
+            self.assertIn("2.1.288", row["detail"])
+            self.assertIn("claude update", row["detail"])
+            self.assertFalse(data["ok"])
+
+    def test_a_claude_that_gives_no_version_warns(self):
+        for body in ("#!/bin/sh\necho 'no numbers here'\n", "#!/bin/sh\nexit 3\n"):
+            row = self.health(self.status(PATH=self.claude("", body)), "claude code")
+            self.assertEqual(row["status"], "WARN", body)
+            self.assertIn("2.1.288", row["detail"])
+
+    def test_the_real_claude_code_is_read(self):
+        import shutil
+        import subprocess
+        real = shutil.which("claude")
+        if not real:
+            self.skipTest("no `claude` on PATH here")
+        said = subprocess.run([real, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, universal_newlines=True, timeout=30).stdout
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", said)
+        self.assertIsNotNone(found, said)
+        row = self.health(self.status(PATH=os.path.dirname(real) + ":/usr/bin:/bin"), "claude code")
+        want = "PASS" if tuple(int(part) for part in found.groups()) >= (2, 1, 288) else "FAIL"
+        self.assertEqual(row["status"], want, row)
+        self.assertIn(found.group(0), row["detail"])
 
     def test_after_install_mod_and_cli_pass(self):
         self.box.plugin()

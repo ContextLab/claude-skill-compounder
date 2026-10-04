@@ -136,6 +136,47 @@ class WordingTest(unittest.TestCase):
         for text in (read("README.md"), design, read("bin", "compound"), read("CONTRIBUTING.md")):
             self.assertNotIn("3.8", text)
 
+    def test_one_claude_code_minimum_everywhere(self):
+        """The CLI holds the number; the README and the design say the same one."""
+        found = re.search(r"^CLAUDE_CODE_MIN = \((\d+), (\d+), (\d+)\)", read("bin", "compound"), re.M)
+        self.assertIsNotNone(found, "bin/compound defines CLAUDE_CODE_MIN")
+        version = ".".join(found.groups())
+        readme = read("README.md")
+        self.assertIn("Claude Code %s or later" % version, readme)
+        self.assertIn("Claude Code %s or later" % version, read("docs", "design.md"))
+        requirements = [line for line in readme.splitlines() if line.startswith("**Requirements:**")]
+        self.assertEqual(len(requirements), 1)
+        self.assertEqual(re.findall(r"Claude Code (\d+\.\d+\.\d+) or later", readme), [version] * readme.count(
+            "Claude Code %s or later" % version), "the README names another minimum somewhere")
+        rows = [line for line in readme.splitlines() if line.startswith("| `claude code` |")]
+        self.assertEqual(len(rows), 2, "Troubleshooting has a FAIL and a WARN row for `claude code`")
+        for line in rows:
+            self.assertEqual(set(re.findall(r"\d+\.\d+\.\d+", line)), {version}, line)
+
+    def test_one_oldest_release_in_the_installer_and_the_cli(self):
+        found = re.search(r"^RELEASE_MIN = \((\d+), (\d+), (\d+)\)", read("bin", "compound"), re.M)
+        self.assertIsNotNone(found, "bin/compound defines RELEASE_MIN")
+        version = ".".join(found.groups())
+        self.assertRegex(read("install.sh"), r'(?m)^min_release="%s"$' % re.escape(version))
+        self.assertIn("v%s" % version, read("docs", "design.md"))
+
+    def test_the_readme_gives_the_install_and_uninstall_one_liners(self):
+        readme = read("README.md")
+        section = readme.split("## Install", 1)[1].split("\n## ", 1)[0]
+        url = "https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh"
+        for line in ("curl -fsSL %s | bash" % url,
+                     "curl -fsSL %s | bash -s -- uninstall" % url,
+                     "curl -fsSL %s | bash -s -- uninstall --purge" % url):
+            self.assertIn(line + "\n", section)
+        design = read("docs", "design.md")
+        self.assertIn("curl -fsSL %s | bash -s -- uninstall" % url, design)
+
+    def test_the_readme_says_which_platforms_were_tested(self):
+        section = read("README.md").split("## Install", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("**Platforms:**", section)
+        for word in ("macOS", "Linux", "Windows", "not tested"):
+            self.assertIn(word, section)
+
     def test_every_claim_kind_the_mod_makes_is_in_the_design(self):
         source = read("hooks", "register.ts")
         kinds = set()

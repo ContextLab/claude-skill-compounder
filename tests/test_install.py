@@ -214,6 +214,71 @@ class InstallTest(Case):
         self.assertEqual(json.loads(read(self.box.manifest))["surfer"]["status"], "present")
         self.assertIn("history-surfer present", proc.stdout)
 
+    def program(self, directory, name, text):
+        """A real executable `name` in `directory` that prints `text`."""
+        path = os.path.join(directory, name)
+        write(path, "#!/bin/sh\necho '%s'\n" % text)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_another_compound_earlier_on_path_is_reported(self):
+        tools = os.path.join(self.box.root, "tools")
+        other = self.program(tools, "compound", "another compound")
+        proc = self.install(PATH=tools + ":" + self.box.bin + ":/usr/bin:/bin")
+        lines = [line for line in proc.stdout.splitlines() if other in line]
+        self.assertEqual(len(lines), 1, proc.stdout)
+        self.assertIn("first on PATH", lines[0])
+        self.assertTrue(os.path.islink(os.path.join(self.box.bin, "compound")), "the link is still made")
+        self.assertEqual(read(other), "#!/bin/sh\necho 'another compound'\n", "the other program is left alone")
+
+    def test_no_shadow_is_reported_when_the_link_is_what_path_finds(self):
+        os.makedirs(self.box.bin)
+        proc = self.install(PATH=self.box.bin + ":/usr/bin:/bin")
+        self.assertNotIn("first on PATH", proc.stdout)
+
+    def claude_lines(self, proc):
+        return [line for line in proc.stdout.splitlines() if line.strip().startswith("claude ")]
+
+    def test_a_claude_code_older_than_the_minimum_is_a_warning_and_not_a_failure(self):
+        tools = os.path.join(self.box.root, "tools")
+        self.program(tools, "claude", "2.1.100 (Claude Code)")
+        proc = self.install(PATH=tools + ":/usr/bin:/bin")
+        lines = self.claude_lines(proc)
+        self.assertEqual(len(lines), 1, proc.stdout)
+        self.assertIn("2.1.100", lines[0])
+        self.assertIn("2.1.288", lines[0])
+        self.assertIn("claude update", lines[0])
+        self.assertTrue(os.path.isfile(self.box.manifest), "the install went through")
+
+    def test_a_claude_code_at_the_minimum_is_one_quiet_line(self):
+        tools = os.path.join(self.box.root, "tools")
+        self.program(tools, "claude", "2.1.288 (Claude Code)")
+        proc = self.install(PATH=tools + ":/usr/bin:/bin")
+        lines = self.claude_lines(proc)
+        self.assertEqual(len(lines), 1, proc.stdout)
+        self.assertIn("2.1.288", lines[0])
+        self.assertNotIn("older", lines[0])
+
+    def test_without_claude_on_path_install_says_the_version_was_not_checked(self):
+        proc = self.install()
+        lines = self.claude_lines(proc)
+        self.assertEqual(len(lines), 1, proc.stdout)
+        self.assertIn("not on PATH", lines[0])
+        self.assertIn("2.1.288", lines[0])
+
+    def test_the_record_names_the_directories_install_created(self):
+        other = os.path.join(self.box.root, "fresh", "claude")
+        proc = self.box.run("install", "--claude-dir", other, "--bin-dir", self.box.bin, COMPOUND_HOME=None)
+        self.assertExit(proc, 0)
+        record = json.loads(read(os.path.join(other, "compound", "install.json")))
+        self.assertEqual(sorted(record["dirs_created"]), sorted([
+            os.path.join(self.box.root, "fresh"), other, os.path.join(other, "compound"),
+            os.path.join(self.box.home, ".local"), self.box.bin]))
+        again = self.box.run("install", "--claude-dir", other, "--bin-dir", self.box.bin, COMPOUND_HOME=None)
+        self.assertExit(again, 0)
+        self.assertEqual(json.loads(read(os.path.join(other, "compound", "install.json"))), record,
+                         "a second install keeps the list")
+
     def test_the_real_history_surfer_is_cloned_and_set_up(self):
         if not surfer_reachable():
             self.skipTest("history-surfer cannot be cloned from here (%s)" % SURFER_URL)
@@ -355,6 +420,57 @@ class UninstallTest(Case):
             self.assertExit(proc, 1)
             self.assertIn("--purge refused", proc.stderr)
             self.assertTrue(os.path.isdir(self.box.claude))
+
+    def test_empty_directories_install_created_are_removed(self):
+        """~/.local/bin and ~/.local were made by install and hold nothing else: they go.
+        The Claude directory was there before install: it stays."""
+        self.assertFalse(os.path.exists(os.path.join(self.box.home, ".local")))
+        self.install()
+        self.assertTrue(os.path.isdir(self.box.bin))
+        proc = self.box.run("uninstall")
+        self.assertExit(proc, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.box.home, ".local")), proc.stdout)
+        self.assertFalse(os.path.exists(self.box.chome), "an empty COMPOUND_HOME install made goes too")
+        self.assertTrue(os.path.isdir(self.box.claude))
+        self.assertIn("removed  %s" % self.box.bin, proc.stdout)
+        self.assertNotIn("kept ", proc.stdout, "nothing is said to be kept in a directory that is gone")
+
+    def test_a_directory_install_created_that_now_holds_something_stays(self):
+        self.install()
+        write(os.path.join(self.box.bin, "other-tool"), "#!/bin/sh\n")
+        self.box.add("kept-lesson", "Use when.", "Body.\n", "--level", "user")
+        self.assertExit(self.box.run("uninstall"), 0)
+        self.assertEqual(os.listdir(self.box.bin), ["other-tool"])
+        self.assertTrue(os.path.isdir(self.box.chome))
+
+    def test_a_directory_that_was_there_before_install_stays_even_when_empty(self):
+        os.makedirs(self.box.bin)
+        self.install()
+        self.assertExit(self.box.run("uninstall"), 0)
+        self.assertEqual(os.listdir(self.box.bin), [])
+
+    def test_a_claude_directory_install_created_is_removed_with_purge(self):
+        other = os.path.join(self.box.root, "fresh", "claude")
+        env = {"COMPOUND_HOME": None, "COMPOUND_CLAUDE_DIR": other}
+        self.assertExit(self.box.run("install", "--bin-dir", self.box.bin, **env), 0)
+        self.assertTrue(os.path.isfile(os.path.join(other, "settings.json")))
+        self.assertExit(self.box.run("uninstall", "--purge", **env), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.box.root, "fresh")))
+
+    def test_plain_uninstall_prints_the_command_that_purges_later(self):
+        self.install()
+        self.box.add("kept-lesson", "Use when.", "Body.\n", "--level", "user")
+        proc = self.box.run("uninstall")
+        self.assertExit(proc, 0)
+        line = [text for text in proc.stdout.splitlines() if "uninstall --purge" in text]
+        self.assertEqual(len(line), 1, proc.stdout)
+        self.assertIn(self.box.script, line[0])
+        self.assertTrue(os.path.isfile(os.path.join(self.box.lesson_dir("kept-lesson", "user"), "SKILL.md")))
+        argv = line[0].split(": ", 1)[1].split()
+        later = subprocess.run(argv, env=self.box.env(), cwd=self.box.root, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(later.returncode, 0, later.stderr)
+        self.assertFalse(os.path.exists(self.box.chome), "the printed command purges")
 
     def test_json_output(self):
         self.install()
@@ -508,6 +624,175 @@ class InstallShTest(Case):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("not a git checkout", proc.stderr)
         self.assertTrue(os.path.isdir(os.path.join(self.box.chome, "app", "something")))
+
+    # ---- the piped uninstall ----
+
+    def piped(self, *args, **kw):
+        return self.sh(["bash", "-s", "--"] + list(args), stdin=read(os.path.join(REPO, "install.sh")), **kw)
+
+    def test_piped_uninstall_finds_the_clone_with_no_compound_on_path(self):
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=self.origin(), COMPOUND_REF="release")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        app = os.path.join(self.box.chome, "app")
+        link = os.path.join(self.box.bin, "compound")
+        self.assertTrue(os.path.islink(link))
+        self.assertIsNone(shutil.which("compound", path=self.box.env()["PATH"]), "compound is not on PATH here")
+
+        proc = self.piped("uninstall")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.lexists(link))
+        self.assertFalse(os.path.exists(self.box.settings))
+        self.assertFalse(os.path.exists(self.box.manifest))
+        self.assertTrue(os.path.isfile(os.path.join(app, "bin", "compound")), "plain uninstall keeps the clone")
+        self.assertIn("removed", proc.stdout)
+
+        # Later, with the record gone, the clone is still found and --purge removes it.
+        proc = self.piped("uninstall", "--purge")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(self.box.chome))
+        self.assertIn("purged", proc.stdout)
+
+    def test_piped_uninstall_with_compound_on_path(self):
+        os.makedirs(self.box.bin)
+        path = self.box.bin + ":/usr/bin:/bin"
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=self.origin(), COMPOUND_REF="release", PATH=path)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIsNotNone(shutil.which("compound", path=path))
+        proc = self.piped("uninstall", "--purge", PATH=path)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.lexists(os.path.join(self.box.bin, "compound")))
+        self.assertFalse(os.path.exists(self.box.chome))
+        self.assertFalse(os.path.exists(self.box.settings))
+
+    def test_piped_uninstall_finds_a_checkout_elsewhere_through_the_install_record(self):
+        self.assertExit(self.box.run("install", "--bin-dir", self.box.bin), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.box.chome, "app")), "installed from a checkout, no clone")
+        proc = self.piped("uninstall")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.lexists(os.path.join(self.box.bin, "compound")))
+        self.assertFalse(os.path.exists(self.box.settings))
+        self.assertTrue(os.path.isfile(self.box.script), "the checkout itself is never removed")
+
+    def test_piped_uninstall_honours_compound_claude_dir_for_the_default_home(self):
+        other = os.path.join(self.box.root, "other-claude")
+        env = {"COMPOUND_HOME": None, "COMPOUND_CLAUDE_DIR": other}
+        self.assertExit(self.box.run("install", "--bin-dir", self.box.bin, **env), 0)
+        self.assertTrue(os.path.isfile(os.path.join(other, "compound", "install.json")))
+        proc = self.piped("uninstall", **env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(other, "compound", "install.json")))
+        self.assertFalse(os.path.lexists(os.path.join(self.box.bin, "compound")))
+
+    def test_piped_uninstall_when_nothing_is_installed_says_so_and_changes_nothing(self):
+        before = self.box.snapshot()
+        for args in (["uninstall"], ["uninstall", "--purge"]):
+            proc = self.piped(*args)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("compound is not installed", proc.stderr)
+            self.assertIn(self.box.manifest, proc.stderr)
+            self.assertEqual(self.box.snapshot(), before)
+
+    def test_piped_uninstall_never_clones(self):
+        proc = self.piped("uninstall", COMPOUND_REPO=self.origin(), COMPOUND_REF="release")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(self.box.chome))
+
+    def test_the_word_install_is_accepted(self):
+        proc = self.piped("install", "--bin-dir", self.box.bin, COMPOUND_REPO=self.origin(), COMPOUND_REF="release")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.islink(os.path.join(self.box.bin, "compound")))
+
+    # ---- releases ----
+
+    def released(self, *tags):
+        """An origin on `main` with one commit per tag, in the order given, and one more
+        commit on main after the last tag."""
+        origin = os.path.join(self.box.root, "origin")
+        os.makedirs(os.path.join(origin, "bin"))
+        shutil.copy2(self.box.script, os.path.join(origin, "bin", "compound"))
+        git_ok("init", "-q", origin)
+        git_ok("checkout", "-q", "-b", "main", cwd=origin)
+        for tag in tags:
+            self.release(origin, tag)
+        self.release(origin, None)
+        return origin
+
+    def release(self, origin, tag, text=None):
+        write(os.path.join(origin, "VERSION"), "%s\n" % (text or tag or "tip"))
+        git_ok("add", "-A", cwd=origin)
+        git_ok("commit", "-q", "-m", tag or "not a release", cwd=origin)
+        if tag:
+            git_ok("tag", tag, cwd=origin)
+
+    def version(self):
+        return read(os.path.join(self.box.chome, "app", "VERSION")).strip()
+
+    def test_with_no_ref_the_newest_release_is_installed(self):
+        """Versions are compared as numbers (0.10.0 is newer than 0.9.0), a release older
+        than 0.4.0 or a tag that is not vX.Y.Z is never picked, and main's tip is not used."""
+        origin = self.released("v0.3.9", "v0.4.0", "v0.10.0", "v0.9.0", "v1.0.0-rc1", "nightly")
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.version(), "v0.10.0")
+        self.assertIn("v0.10.0", proc.stderr)
+        self.assertNotIn("detached HEAD", proc.stderr)
+
+    def test_an_annotated_release_tag_is_found(self):
+        origin = self.released("v0.4.0")
+        self.release(origin, None, "annotated")
+        git_ok("tag", "-a", "v0.5.0", "-m", "release 0.5.0", cwd=origin)
+        self.release(origin, None)
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.version(), "annotated")
+        self.assertNotIn("warning", proc.stderr, "git's 'is not a commit' warning for an annotated tag is not shown")
+
+    def test_a_ref_the_repository_does_not_have_is_refused_and_its_clone_is_not_left_behind(self):
+        origin = self.released("v0.4.0")
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin, COMPOUND_REF="v9.9.9")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("cannot check out v9.9.9", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.box.chome, "app")))
+        self.assertFalse(os.path.exists(self.box.settings))
+
+    def test_with_no_release_main_is_installed(self):
+        origin = self.released("v0.3.0", "v0.3.1")
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.version(), "tip")
+        self.assertEqual(git_ok("symbolic-ref", "--short", "HEAD", cwd=os.path.join(self.box.chome, "app")), "main")
+
+    def test_a_second_run_moves_the_clone_to_a_newer_release(self):
+        origin = self.released("v0.4.0")
+        self.assertEqual(self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin).returncode, 0)
+        self.assertEqual(self.version(), "v0.4.0")
+        self.release(origin, "v0.4.1")
+        self.release(origin, None)
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.version(), "v0.4.1")
+        self.assertNotIn("detached HEAD", proc.stderr)
+
+    def test_compound_ref_main_follows_the_tip(self):
+        origin = self.released("v0.4.0")
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin, COMPOUND_REF="main")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.version(), "tip")
+        self.release(origin, "v0.4.1")
+        self.release(origin, None, "newer tip")
+        proc = self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin, COMPOUND_REF="main")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.version(), "newer tip")
+
+    def test_installed_from_a_release_compound_update_moves_to_the_next_one(self):
+        origin = self.released("v0.4.0")
+        self.assertEqual(self.piped("--bin-dir", self.box.bin, COMPOUND_REPO=origin).returncode, 0)
+        self.release(origin, "v0.4.1")
+        self.release(origin, None)
+        proc = self.box.run("update", script=os.path.join(self.box.chome, "app", "bin", "compound"))
+        self.assertExit(proc, 0)
+        self.assertEqual(self.version(), "v0.4.1")
+        self.assertIn("v0.4.0 -> v0.4.1", proc.stdout)
 
 
 if __name__ == "__main__":
