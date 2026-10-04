@@ -24,6 +24,7 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 | D | 2. general pool | platform and shell condition on a lesson; a general lesson can be strengthened locally or switched off; ship the six drafts (four as guards) | waiting on A |
 | E | 5. pane drill-down | open a lesson from the pane; settling command on Open rows; all-lessons view | waiting on C |
 | F | 6. reuse precision | rarity-weighted words; memo for repeated prompts; stemming in `find`; duplicate gate in `add` | waiting on A |
+| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | waiting on A |
 
 ## Not to do without the owner
 
@@ -35,3 +36,4 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 ## Log
 
 - 2026-10-04: tracker written, wave 1 dispatched.
+- 2026-10-04: a background security review of a commit reported 4 findings; track S added.
