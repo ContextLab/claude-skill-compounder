@@ -21,10 +21,24 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 
 | Track | Proposal | Scope | Status |
 |-|-|-|-|
-| D | 2. general pool | platform and shell condition on a lesson; a general lesson can be strengthened locally or switched off; ship the six drafts (four as guards) | dispatched |
+| D | 2. general pool | platform and shell condition on a lesson; a general lesson can be strengthened locally or switched off; ship the six drafts (four as guards) | MERGED (df69796, merge 509c35a); notes in `2026-10-04-track-d-general-pool.md` |
 | E | 5. pane drill-down | open a lesson from the pane; settling command on Open rows; all-lessons view | dispatched on base ba5d77b |
 | F | 6. reuse precision | rarity-weighted words; memo for repeated prompts; stemming in `find`; duplicate gate in `add` | dispatched |
-| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | NOT dispatched yet: waits on D (both change the lesson loader). Third finding, from a second notice: untrusted tool output reaches the LLM judge (lesson poisoning) in `hooks/register.ts` |
+| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | dispatched on base after 509c35a. Third finding, from a second notice: untrusted tool output reaches the LLM judge (lesson poisoning) in `hooks/register.ts` |
+
+## Wave 3 (from the open-issue audit, 2026-10-04)
+
+The owner asked for the open issues to be audited: anything relevant goes on this list,
+the rest is closed with a comment. #30, #31, #34 closed (they track the implementation
+removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
+
+| Track | From | Scope | Status |
+|-|-|-|-|
+| G1 | #19 point 4 | a `use` event when a skill made from a lesson (or any recorded skill) is invoked, with its notice on the band and its count in `status` and the pane | waits on F (same reuse path in `register.ts`) |
+| G2 | #19 point 1 | notice a repeated request (the same procedure asked for several times, from the prompt log) and propose making it a skill | waits on F |
+| G3 | #19 point 3 | a skill in the shipped pool that composes other skills. Which skill is a product choice: ASK THE OWNER | not started |
+| H | #30 | after some weeks of ordinary use, a sweep of the log: capture to lesson / skip / unsettled rates, guard refusals corrected vs re-sent, recall precision, reuse relevance. A `compound` report that prints them | not started; needs elapsed time for the data, the report can be built now |
+| I | #42 | a credential for sessions in a throwaway `CLAUDE_CONFIG_DIR` (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`), then prove the marketplace install route and run the journeys fully isolated. ONLY THE OWNER can create the token | blocked on the owner |
 
 ## Not to do without the owner
 
@@ -56,3 +70,9 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
   unvalidated persisted state reaching the model's context, in `hooks/register.ts`. No
   detail given. For track S: trace every value read back from `$.state`, the claims, the
   event log and the store that ends up in text added to a prompt or a stop message.
+- 2026-10-04: track D merged, all checks green (14 test files, 173 plugin tests).
+  The merge was done in the main checkout and its conflict markers broke the live mod for
+  a few minutes (guard checks failed with SyntaxError). Recorded as project lesson
+  `merge-in-a-scratch-worktree`: remaining merges are done in a scratch worktree and
+  fast-forwarded.
+- 2026-10-04: open issues audited; wave 3 added above. Track S dispatched. Running: E, F, S.
