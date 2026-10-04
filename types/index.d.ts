@@ -47,6 +47,9 @@ export type CompoundBand = {
   // Failures of the mod itself that Claude was not yet told about.
   errors: number
   track: CompoundTrack | null
+  // Since when the mod holds a failed call whose fix it is watching for, in milliseconds;
+  // absent while it holds none. The row shows it for as long as it is there.
+  held?: number
   // The greeting a session gets once: the store's counts, known once the inventory was
   // read at a prompt, and how much of the greeting was said.
   counts?: { lessons: number; guards: number }

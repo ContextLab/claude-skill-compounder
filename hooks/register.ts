@@ -4,7 +4,8 @@ import type { CompoundBand, CompoundBoard, CompoundBusyKind } from '../types'
 import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import {
-  BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, sameCall,
+  bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
+  sameCall,
   heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
   reuseContext, reuseStatus, shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
   unsettledContext, usedStatus, userOrigin,
@@ -19,7 +20,7 @@ import {
 import {
   allLines, bandRow, began as checkBegan, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
   greeted, GUARD_SHOW_MS, inventoried, itemsFrom, keyLines, motion, newTurn, noted, openedBy, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, phaseKey,
-  reuseFound, reuseIdle, settledBy, stepped, synced, unfixed, weakened,
+  reuseFound, reuseIdle, settledBy, stepped, synced, unfixed, watched, weakened,
   type Line, type Seg,
 } from './view'
 
@@ -32,6 +33,9 @@ import {
 //                              (a call refused before it ran is not a failed call, and a Bash
 //                              call that exited 0 with a shell error in its output is one)
 //   4 capture  tool.call       a success after a held failure makes the session owe a lesson
+//                              (one failure is held per agent loop; a failure a lesson is
+//                              recalled for leaves it held; the held call passing unchanged
+//                              with nothing run between is a retry, not a fix)
 //   5 stop     classic.Stop    an owed lesson, or an owed strengthening of one, refuses the stop
 //                              once; a long turn is asked once
 //
@@ -332,6 +336,27 @@ async function during<T>($: EngineInterface, kind: CompoundBusyKind, work: () =>
   } finally {
     await paint($, band => checkEnded(band, id))
   }
+}
+
+// Whether the session still holds a failed call whose fix it is watching for, in any of its
+// agent loops. One that has outlived its turns is dropped here, as a success would drop it.
+function holds(sid: string): boolean {
+  const turn = turns.get(sid)?.n ?? 0
+  let any = false
+  for (const [key, was] of held) {
+    if (!key.startsWith(`${sid}:`)) continue
+    if (heldStep(was, was.tool, turn) === 'expired') held.delete(key)
+    else any = true
+  }
+  return any
+}
+
+// The band is made to say what the mod holds: while a failure is held the row shows it, and
+// when the last one is dropped (its fix captured, its attempts used up, its turns over, the
+// module started over) the row lets go of it. Called wherever `held` may have changed.
+async function watch($: EngineInterface, sid: string): Promise<void> {
+  const holding = holds(sid)
+  await paint($, (band, now) => watched(band, holding, now))
 }
 
 // How many failures of the mod this session has not been told about.
@@ -938,7 +963,9 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
   turns.set(sid, turnAfterPrompt(turns.get(sid), nowS(), midTurn))
   if (!midTurn) {
     $.ui.status(undefined)
-    await paint($, band => newTurn(band))
+    // A failure is held through the turn after its own: the row keeps it until then.
+    const holding = holds(sid)
+    await paint($, (band, now) => watched(newTurn(band), holding, now))
     // A new turn: a subcommand that ran out of time is tried again, and so is the check.
     stalled.delete(sid)
     noGuards.delete(sid)
@@ -1161,36 +1188,65 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
     }
   }
   if (hit === undefined) {
-    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0, at: nowS() })
-    await paint($, (band, now) => stepped(band, 'failed', now))
+    // One failure is held per agent loop: a newer one that no lesson describes takes its place.
+    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0, at: nowS(), between: [], skipped: 0 })
+    await paint($, (band, now) => watched(stepped(band, 'failed', now), true, now))
     return []
   }
-  // A failure answered with a recorded lesson is not held: the fix teaches nothing new.
-  held.delete(key)
-  return recurred($, sid, hit, tool, call, error, k, false, ms)
+  // A failure answered with a recorded lesson is not held: the fix teaches nothing new. A
+  // failure held from before stays held: this one is another mistake, and the fix of the
+  // first is still to come. Only when this is the held call itself, sent again and failing
+  // again, does the lesson answer the held failure too, and it is let go.
+  const was = held.get(key)
+  if (was !== undefined && was.tool === tool && sameCall(was.call, call)) held.delete(key)
+  else if (was !== undefined) ranBetween(was, betweenLine(tool, call, true))
+  const out = await recurred($, sid, hit, tool, call, error, k, false, ms)
+  await watch($, sid)
+  return out
 }
 
 async function onSuccess($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
   const was = held.get(key)
   const step = heldStep(was, tool, turns.get(sid)?.n ?? 0)
-  if (step === 'expired') held.delete(key)
+  if (step === 'expired') {
+    held.delete(key)
+    await watch($, sid)
+  }
   // Another tool's success is not an attempt at the failed call: no question is asked.
   if (was === undefined || step !== 'judge') return []
+  // The failed call, sent again unchanged with nothing run between, and it passed: nothing
+  // was fixed, so no model is asked and no lesson is owed. The failure went away by itself,
+  // and it is let go, so that no later success is taken for its fix.
+  if (bareRetry(was, tool, call)) {
+    held.delete(key)
+    await watch($, sid)
+    return []
+  }
+  // The attempt is counted before the question is asked, so two successes that arrive
+  // together cannot both be the last. The failure stays held while the judge is asked.
   was.left -= 1
-  if (was.left <= 0) held.delete(key)
+  // The judge has had its attempts, or the failed call itself now passes and was no fix:
+  // either way the failure is over, and it is let go.
+  const done = was.left <= 0 || sameCall(was.call, call)
+  const letGo = async (): Promise<void> => {
+    if (done && held.get(key) === was) held.delete(key)
+    await paint($, band => unfixed(band))
+    await watch($, sid)
+  }
   const known = await lessons($)
   const k = await knobs($)
   await paint($, (band, now) => stepped(band, 'fixed', now))
-  const reply = await during($, 'fix', () => ask($, fixPrompt({ failed: was.call, error: was.error, worked: call }, known), k))
+  const pair = { failed: was.call, error: was.error, worked: call, between: [...was.between], skipped: was.skipped }
+  const reply = await during($, 'fix', () => ask($, fixPrompt(pair, known), k))
   if (reply.text === undefined) {
-    await paint($, band => unfixed(band))
+    await letGo()
     await ruled($, 'fix', 'unanswered', reply, { tool, reason: oneLine(reply.reason, 200) })
     await fail($, 'capture.judge', `${k.model} gave no answer: ${reply.reason}`)
     return []
   }
   const answer = parseFix(reply.text, known, was.error)
   if (answer === undefined) {
-    await paint($, band => unfixed(band))
+    await letGo()
     await ruled($, 'fix', 'unreadable', reply, { tool })
     await fail($, 'capture.parse', `${k.model} answered something unreadable: ${reply.text.slice(0, 200)}`)
     return []
@@ -1201,10 +1257,10 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     ...(answer.verdict === 'NONE' ? { reason: answer.reason } : {}),
   })
   if (answer.verdict === 'NONE') {
-    await paint($, band => unfixed(band))
+    await letGo()
     return []
   }
-  held.delete(key)
+  if (held.get(key) === was) held.delete(key)
   if (answer.verdict === 'KNOWN') {
     // A lesson this session first recorded AFTER the call failed is younger than the
     // failure it matches: it is the lesson of this very failure, written before the fixing
@@ -1212,9 +1268,12 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     const learned = await events($, ['--session', sid, '--type', 'learn', '--since', String(was.at)])
     if (learned !== undefined && learnedSince(learned, answer.lesson.name)) {
       await paint($, band => unfixed(band))
+      await watch($, sid)
       return []
     }
-    return recurred($, sid, answer.lesson, tool, was.call, was.error, k, true, reply.ms)
+    const out = await recurred($, sid, answer.lesson, tool, was.call, was.error, k, true, reply.ms)
+    await watch($, sid)
+    return out
   }
   const id = digest(`${sid}:${callId}`)
   await log($, {
@@ -1232,6 +1291,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   owes(sid, [id], [])
   $.ui.status(owedStatus(redact(call)))
   await paint($, (band, now) => captured(band, now, redact(call)))
+  await watch($, sid)
   return [captureContext({ failed: was.call, error: was.error, fixed: call }, await cliPath($))]
 }
 
@@ -1410,6 +1470,8 @@ export const register: Register = on => {
         // A reload starts the module over: a check it had in flight is no longer running,
         // and a pane left open is given its data again.
         await paint($, band => ({ ...band, busy: [] }))
+        // And a failure it held is no longer held: the row says what the module holds now.
+        await watch($, await $.session.id())
         boardStale($)
       }
     } catch (err) {
@@ -1538,21 +1600,33 @@ export const register: Register = on => {
       }
       // The CLI reached through a variable or a wrapper: what it wrote is in the log.
       if (tool === 'Bash' && typeof input.command === 'string' && mentionsCli(input.command)) await onCliCall($, sid, 'add', began)
-      if (!judged(tool)) return ran
       const key = `${sid}:${e.agentId ?? 'main'}`
-      const call = callText(tool, input)
+      // What this loop holds now: a call that runs while it is held ran between the failure
+      // and whatever fixes it, and the judge is shown it.
+      // A tool that only reads or keeps books changes nothing, and is not listed.
+      const before = held.get(key)
+      if (!judged(tool) && (before === undefined || !guarded(tool))) return ran
       const text = String(ran.text ?? '')
       // A call that was refused before it ran (a permission, a safety check, the harness, a
       // hook) is not a failed call: no judge is asked, nothing is held, nothing is watched.
       if (ran.isError === true && refusal(text) !== undefined) return ran
+      const call = callText(tool, input)
+      if (!judged(tool)) {
+        if (before !== undefined) ranBetween(before, betweenLine(tool, call, ran.isError === true))
+        return ran
+      }
       // A Bash call that exited 0 with the shell's own error in its output did fail.
       const shell = ran.isError !== true && tool === 'Bash' ? shellError(text) : undefined
+      const failed = ran.isError === true || shell !== undefined
       const extra =
         ran.isError === true
           ? await onFailure($, sid, key, tool, e.tool_use_id, call, text)
           : shell !== undefined
             ? await onFailure($, sid, key, tool, e.tool_use_id, call, shellFailure(shell, text))
             : await onSuccess($, sid, key, tool, e.tool_use_id, e.agentId, call)
+      // A success that was judged no fix, or that another tool made, ran between as well.
+      // (A failure that was recalled is noted where it is recalled.)
+      if (!failed && before !== undefined && held.get(key) === before) ranBetween(before, betweenLine(tool, call, false))
       return extra.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...extra] }
     } catch (err) {
       await fail($, ran.isError === true ? 'recall' : 'capture', err)

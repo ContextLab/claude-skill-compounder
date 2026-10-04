@@ -404,13 +404,56 @@ event log knows. A match is returned beside the error, quoted, and counted as a
 left in place as described under Levels. With no match the failure is held, per agent, as
 the possible start of a new lesson.
 
+**One failure is held per agent loop.** A later failure that no lesson describes takes
+the place of the one held. A later failure that a lesson *is* recalled for is not held
+and takes nothing's place: the failure held before it stays held, and its fix is still
+to come. The one exception is the held call itself, sent again and failing again with a
+lesson now recalled for it: the lesson answers the held failure too, and it is let go.
+
 ### 4. Capture: a call succeeded after a held failure
 
 A held failure waits for the next five successful calls of the same tool. Each of those
 is put to a model: is this success the fix for the held failure, and is it worth keeping?
 A success of another tool is not an attempt at the same thing: it uses none of the five
-and costs no model call. A failure is held through the turn it happened in and the turn
-after it, then dropped.
+and costs no model call, and neither does a call that failed. A failure is held through
+the turn it happened in and the turn after it, then dropped.
+
+**What the model is shown.** The failed call, its error, the later call, and two things
+worked out for it (`fixPrompt` and `changed` in `hooks/judge.ts`):
+
+- **What changed** between the two calls: the words they share at their start and at
+  their end are left out, and what each has in between is shown (`The failed call had:
+  python3` / `The later call has: /opt/homebrew/bin/python3.12`), or that nothing
+  changed, or that everything did.
+- **The calls between the two**: what the same agent loop ran after the failure and
+  before this success, oldest first, one line each as `tool: call`, a failed one marked.
+  The newest eight are listed, each cut at 200 characters and masked like every call, and
+  the ones before them are counted. A tool that only reads or keeps books (Read, Grep,
+  Glob, the task tools) is not listed, and neither is a call of the `compound` CLI.
+
+A fix is worth keeping when the later call is another attempt at the same thing, the
+failure came from how the call was written or from what it took for granted about the
+machine (a flag, the syntax, a program that is missing, an interpreter, version or
+package that lacks what the call uses), the error names the mistake in words the model
+can quote, and a later session would make it again. `ModuleNotFoundError: No module
+named 'tomllib'` under one Python followed by the same script under another is such a
+fix. A test that failed on the work, a search that found nothing and a call that was
+refused are not.
+
+**The failed call sent again unchanged is not a fix.** When the call that passes is the
+held call word for word, nothing was rewritten, so the call fixed nothing:
+
+- With no call between the two (a bare retry), no model is asked. The failure passed by
+  itself (a timeout, a busy network, a flaky test), no lesson is owed, and the failure is
+  let go, so that no later success is taken for its fix (`bareRetry` in
+  `hooks/render.ts`). No event is written: no question was put.
+- With calls between the two, the same text is not proof that nothing changed: an
+  install, a setting or a file put in place may be what made it work. The model is asked,
+  with those calls in front of it, and may answer that one of them is the fix; the lesson
+  is then that step. Calls that only looked at things, or an edit to the work itself,
+  explain nothing, and the answer is "not the fix".
+- Either way the failure is let go once its own call has passed: recovered, whatever the
+  model said.
 
 When the model says a success is the fix, the mod returns, beside the result, the failing call, its error and
 the working call word for word, with the instruction to record the lesson now using the
@@ -836,7 +879,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | `◇` | grey | `nothing to reuse` | a later reuse check added nothing to the prompt. Drawn dim from the start | 3 s |
   | `■` | red | `guard stopped a call`, the lesson, and the call it stopped | a guard refused a call | 8 s |
   | `↺` | magenta | `lesson recalled` | a failed call was given its recorded lesson | 8 s |
-  | `◌` | orange | `watching for the fix` | a call failed and no lesson describes it | 8 s |
+  | `◌` | orange | `watching for the fix` | a call failed and no lesson describes it | while the failure is held |
   | `●` | yellow | `lesson owed` and the call that worked | a fix was captured and the session owes its lesson | until the CLI no longer lists it as owed |
   | `✔` | green | `lesson recorded`, `lesson rewritten` | the log holds a `learn` event of the session, or one that settles its debt | 8 s |
   | `○` | grey | `lesson declined` | the log holds such a `skip` event | 8 s |
@@ -851,7 +894,8 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | `✖` | red | `N compound errors` | the mod itself failed | until Claude is told at the next typed prompt |
 
   A result is bold for its first 1.2 seconds, plain until 5 seconds, dim until 8 seconds,
-  and then gone. A state that stays is shown whenever no spinner or newer result is; while
+  and then gone. A held failure is bold and plain for the same times and then stays dim
+  for as long as the mod holds it. A state that stays is shown whenever no spinner or newer result is; while
   one is, it rides behind it as a short mark (`● 1 owed`, `▲ 1 to strengthen`, `✖ 1
   error`). The colours are theme colours and ANSI names, so they follow the terminal's
   theme.
@@ -860,7 +904,14 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   track of four steps, `failed → fixed → owed → recorded` (the last reads `declined` when
   the lesson was declined). Steps passed are ticked and dim, the current one is bold in its
   colour, the ones ahead are dim: `✓ failed → ✓ fixed → ● owed → ○ recorded`. The track
-  stays while a lesson is owed and fades with the result otherwise. Where the row would be
+  stays while a lesson is owed and while a failure is held, and fades with the result
+  otherwise. **The row follows what the mod holds.** The band's state carries since when a
+  failure is held (`held`), set and cleared by the hook wherever it holds or drops one,
+  so the row is never empty while a later success may still be judged as a fix: when the
+  judge says a success was no fix, the track goes back to `failed`. The row lets go when
+  the mod does: the fix was captured (the track is then the owed lesson's), a recorded
+  lesson answered it, the five attempts were used, its own call passed unchanged, the
+  second typed prompt after it started a turn, or the module was loaded again. Where the row would be
   wider than the band, the track keeps its glyphs and the current step's name, then what
   follows the name goes (the call a guard stopped, the greeting's counts), then the marks,
   then the track, and last the name is cut with `…`. A list of names is not cut: it keeps
@@ -870,7 +921,8 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   row and use the band's one timer. Neither costs a CLI call.
 
   The spinner turns ten times a second on one timer, which runs only while a spinner
-  shows or a result fades: an idle band and an owed lesson cost no timer at all. A check
+  shows or a result fades: an idle band, an owed lesson and a held failure that has dimmed
+  cost no timer at all. A check
   whose end was never reported stops counting after a minute. The band's state is kept
   per session id, so `/clear` starts it over.
 - **Pane**: `/compound` opens a dashboard: beside the transcript in the fullscreen
@@ -1288,3 +1340,8 @@ never touched.
   it spends no model call.
 - `tests/journeys/`: real `claude -p --plugin-dir .` sessions that drive each moment and
   assert on the event log. Run by hand; they spend model calls.
+  `tests/journeys/measure_fix.py` puts the fix judge's question for real, many times,
+  about pairs of calls whose answer is known, and prints how often it was right. The
+  question goes through `tests/journeys/fix_probe/`, a plugin of one hook that builds the
+  prompt with the mod's `fixPrompt`, asks through `$.model.complete` and reads the reply
+  with `parseFix`. `--hooks DIR` measures another commit's prompt the same way.

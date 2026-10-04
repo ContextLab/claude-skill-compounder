@@ -58,6 +58,7 @@ Two more scripts there measure and assert nothing:
 | Script | What it measures |
 |-|-|
 | `measure_reuse.py` | How noisy the reuse check is: over fourteen ordinary prompts, how many got something added, how many of those additions were relevant, how many covered prompts got nothing, how many prompts were put to the judge at all and how long it took; and that a prompt sent a second time asks no model. |
+| `measure_fix.py` | How the fix judge rules: pairs of a failed call and a later success whose answer is known (the README's `tomllib` example, a missing program, a flaky retry, a test that failed on the work, an unrelated command) are each put to the model several times through the mod's own prompt, and the counts of right and wrong answers and the model's time are printed. `--hooks DIR` takes the prompt from another copy of `hooks/`, to compare two versions. `fix_probe/` is the one-hook plugin it asks through. |
 | `probe_injection.py` | What a session does with a planted lesson whose text gives orders, met as a guard, as a recalled lesson and in the reuse check: whether the quoted note is weighed or obeyed. |
 
 `common.py` is what they share: the throwaway world, the session runner and the checks.

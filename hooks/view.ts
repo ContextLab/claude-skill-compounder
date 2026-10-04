@@ -213,9 +213,22 @@ export function stepped(band: CompoundBand, step: 'failed' | 'fixed', now: numbe
   return band.track?.step === 'owed' ? band : { ...band, track: { step, at: now } }
 }
 
-// The judge said the later call was no fix: the track goes back to the failure.
+// The judge said the later call was no fix: the track goes back to the failure, which the
+// row goes on showing for as long as it is held (see `watched`).
 export function unfixed(band: CompoundBand): CompoundBand {
   return band.track?.step === 'fixed' ? { ...band, track: null } : band
+}
+
+// Whether the mod holds a failed call whose fix it is watching for. While it does, the row
+// shows the track at `failed`, dim once it is no longer new, and never nothing; when it no
+// longer does, a track that was still at the failure or at a fix being judged goes with it.
+// A band that already says so is answered as it is, so nothing is redrawn for it.
+export function watched(band: CompoundBand, holding: boolean, now: number): CompoundBand {
+  if (holding) return band.held !== undefined ? band : { ...band, held: now }
+  const open = band.track?.step === 'failed' || band.track?.step === 'fixed'
+  if (band.held === undefined && !open) return band
+  const { held: _held, ...rest } = band
+  return { ...rest, track: open ? null : band.track }
 }
 
 // `text` says what the lesson is owed for: the call that worked.
@@ -272,11 +285,24 @@ export function newTurn(band: CompoundBand): CompoundBand {
 // no timer is needed.
 export type Motion = 'spin' | 'fade' | 'still'
 
-function trackPhase(band: CompoundBand, now: number): Phase {
-  if (band.track === null) return 'gone'
-  if (band.track.step === 'owed') return 'fresh'
-  if (band.track.step === 'fixed' && liveBusy(band, now).some(b => b.kind === 'fix')) return 'fresh'
-  return phaseAt(band.track.at, now)
+// The step the track shows, how bright, and whether it stays as it is with no timer: a
+// lesson owed stays, and so does a held failure once it has dimmed. A track that has faded
+// gives way to the failure the mod still holds.
+type Tracked = { step: CompoundStep; phase: Phase; stays: boolean }
+
+function trackOf(band: CompoundBand, now: number): Tracked | undefined {
+  const track = band.track
+  if (track !== null) {
+    if (track.step === 'owed') return { step: 'owed', phase: 'fresh', stays: true }
+    if (track.step === 'fixed' && liveBusy(band, now).some(b => b.kind === 'fix')) return { step: 'fixed', phase: 'fresh', stays: false }
+    // The track of a failure that is held is the held failure's own: see below.
+    const phase = phaseAt(track.at, now)
+    if (phase !== 'gone' && !(track.step === 'failed' && band.held !== undefined)) return { step: track.step, phase, stays: false }
+  }
+  if (band.held === undefined) return undefined
+  // New for as long as any result is, counted from the newest failure, and dim from then on.
+  const phase = phaseAt(track !== null && track.step === 'failed' ? Math.max(track.at, band.held) : band.held, now)
+  return phase === 'dim' || phase === 'gone' ? { step: 'failed', phase: 'dim', stays: true } : { step: 'failed', phase, stays: false }
 }
 
 function notePhase(band: CompoundBand, now: number): Phase {
@@ -286,15 +312,16 @@ function notePhase(band: CompoundBand, now: number): Phase {
 export function motion(band: CompoundBand | null | undefined, now: number): Motion {
   if (band === null || band === undefined) return 'still'
   if (liveBusy(band, now).length > 0) return 'spin'
-  const moving = (p: Phase, persistent: boolean) => p !== 'gone' && !persistent
-  return moving(notePhase(band, now), false) || moving(trackPhase(band, now), band.track?.step === 'owed') ? 'fade' : 'still'
+  const track = trackOf(band, now)
+  return notePhase(band, now) !== 'gone' || (track !== undefined && !track.stays) ? 'fade' : 'still'
 }
 
 // What a redraw would change apart from the spinner's frame: two times with one key draw
 // the same band, so a fading result is redrawn only when its phase turns.
 export function phaseKey(band: CompoundBand | null | undefined, now: number): string {
   if (band === null || band === undefined) return ''
-  return `${liveBusy(band, now).length}|${notePhase(band, now)}|${trackPhase(band, now)}`
+  const track = trackOf(band, now)
+  return `${liveBusy(band, now).length}|${notePhase(band, now)}|${track === undefined ? 'gone' : `${track.step} ${track.phase}`}`
 }
 
 // ---- the band's row --------------------------------------------------------------------
@@ -386,8 +413,9 @@ export function bandRow(band: CompoundBand | null | undefined, now: number, colu
 function bandSegs(band: CompoundBand | null | undefined, now: number, columns: number): Seg[] {
   if (band === null || band === undefined || columns < 12) return []
   const main = mainOf(band, now)
-  const phase = trackPhase(band, now)
-  const step = band.track !== null && phase !== 'gone' ? band.track.step : undefined
+  const tracked = trackOf(band, now)
+  const phase = tracked?.phase ?? 'gone'
+  const step = tracked?.step
   if (main === undefined && step === undefined) return []
   const faded = (main === undefined || main.phase === 'dim') && (step === undefined || phase === 'dim')
   // The track alone: a call failed and the mod is waiting to see what fixes it.
