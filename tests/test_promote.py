@@ -169,7 +169,7 @@ class PromoteGeneralTest(Case):
         named here does not exist, so no pull request could be opened even by a gh that
         was somehow logged in."""
         before = self.box.snapshot()
-        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes",
+        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", NO_UPSTREAM,
                             COMPOUND_UPSTREAM=NO_UPSTREAM, GH_TOKEN=None, GITHUB_TOKEN=None)
         self.assertExit(proc, 1)
         self.assertRegex(proc.stderr, r"`gh` is not (on PATH|authenticated)|cannot read")
@@ -180,7 +180,7 @@ class PromoteGeneralTest(Case):
         self.assertTrue(os.path.isfile(os.path.join(self.box.lesson_dir("zsh-equals-word", "user"), "SKILL.md")))
 
     def test_yes_with_an_empty_path_names_gh(self):
-        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes",
+        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", NO_UPSTREAM,
                             COMPOUND_UPSTREAM=NO_UPSTREAM, PATH="")
         self.assertExit(proc, 1)
         self.assertIn("`gh` is not on PATH", proc.stderr)

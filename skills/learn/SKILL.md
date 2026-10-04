@@ -11,8 +11,12 @@ Never write a lesson file by hand: the tool validates the format and logs the ev
 settles the session's debt.
 
 **Which `compound` to run.** The `[compound]` message that brought you here ends with a
-line `compound CLI: <absolute path>`. Run that path. If there is no such message, run
-`compound` from PATH. Below, `compound` stands for whichever applies.
+line `compound CLI: <absolute path>`. Run that path, written out in full as the first
+word of the command: a call by that path is the tool's own, while `compound` typed bare is
+checked like any other command, so a lesson whose text quotes a guarded mistake is
+refused once (send it again) and a command the tool refuses is taken for a failed call.
+If there is no such message, run `compound` from PATH. Below, `compound` stands for
+whichever applies.
 
 ## 1. Read the evidence. Do not work from memory.
 

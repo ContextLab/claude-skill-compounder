@@ -36,7 +36,7 @@ case "$repo" in
 esac
 if [ -n "$ref" ]; then
   case "$ref" in
-    [!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*|*..*|*//*|*/|*.lock) die "COMPOUND_REF is not the name of a branch or a tag: $ref" ;;
+    [!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*|*/[!A-Za-z0-9]*|*..*|*//*|*/|*.lock) die "COMPOUND_REF is not the name of a branch or a tag: $ref" ;;
   esac
 fi
 # The oldest release that can be installed: earlier tags hold no bin/compound.

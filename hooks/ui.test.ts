@@ -1089,7 +1089,8 @@ test('no check is made before a call of a tool no guard applies to', async ($, o
   expect(checks()).toBe(3)
   // The store changed: what was known about the guards is asked again.
   w.events = '[]'
-  await $.tool.call({ tool: 'Bash', command: 'compound add --update --name release-notes-format --match x --tool Write' })
+  // The CLI's own call, by the path the mod runs: it is not put to the check itself.
+  await $.tool.call({ tool: 'Bash', command: `${w.calls.find(c => c[1] === 'check')![0]} add --update --name release-notes-format --match x --tool Write` })
   await $.tool.call({ tool: 'Write', file_path: '/work/alpha/notes.md', content: 'x' } as never)
   expect(checks()).toBe(4)
 })

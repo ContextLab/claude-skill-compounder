@@ -8,14 +8,15 @@ import { boardFrom, eventWord } from './view'
 // what `compound log` was handed. And what the report showed to be wrong: a refusal of the
 // harness that was taken for a failed call.
 
-type World = { logged: Record<string, unknown>[]; check: string }
+// `cli` is the path of the CLI the mod runs, read off its first call.
+type World = { logged: Record<string, unknown>[]; check: string; cli: string }
 
 let worlds = 0
 
 function world(on: On, env: Record<string, string> = {}): World {
   worlds += 1
   const n = worlds
-  const w: World = { logged: [], check: '{"hits":[],"guards":1,"tools":["Bash"]}' }
+  const w: World = { logged: [], check: '{"hits":[],"guards":1,"tools":["Bash"]}', cli: '' }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_QUIET: '1', ...env })
   on('session.id', () => ({ value: `measure-session-${n}` }))
   on('session.root', () => ({ value: `/work/measure-${n}` }))
@@ -29,6 +30,7 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('process.run', (_$, e) => {
     const argv = [...e.argv]
     const verb = argv[0]?.endsWith('/compound') ? argv[1] : argv[0]
+    if (argv[0]?.endsWith('/bin/compound')) w.cli = argv[0]
     const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (verb === 'log') {
       w.logged.push(JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>)
@@ -110,7 +112,8 @@ test('through the hooks: a call of another tool, or of the CLI to read the lesso
   w.check = hit('no-marker-echo')
   await $.tool.call({ tool: 'Bash', command: 'echo ====' } as never)
   w.check = '{"hits":[],"guards":1,"tools":["Bash"]}'
-  await $.tool.call({ tool: 'Bash', command: 'compound show no-marker-echo' } as never)
+  // The CLI by the path the refusal names (the one the mod runs) is the CLI's own call.
+  await $.tool.call({ tool: 'Bash', command: `${w.cli} show no-marker-echo` } as never)
   await $.tool.call({ tool: 'Write', file_path: '/work/a.txt', content: 'x' } as never)
   expect(of(w, 'retry')).toEqual([])
   await $.tool.call({ tool: 'Bash', command: 'printf x' } as never)

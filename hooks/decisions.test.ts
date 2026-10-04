@@ -15,10 +15,14 @@ const CLI = '/opt/compound/bin/compound'
 // The exemption is an allowlist that fails closed: a call is the CLI's own only when the
 // recogniser PROVES it is one simple `compound ...` invocation. `OWN` is the package's CLI.
 const OWN = '/opt/compound/bin/compound'
-const sole = (command: string, bareIsOurs = true): string | undefined => soleCli(command, OWN, bareIsOurs)
+const sole = (command: string): string | undefined => soleCli(command, OWN)
 
-// One simple `compound ...` invocation: exempt, by its verb.
-const EXEMPT: [string, string][] = [
+// The shapes of one simple `compound ...` invocation, with the verb of each. They are
+// written here with the bare name where a person would type it. BY THE BARE NAME NONE OF
+// THEM IS EXEMPT (`BARE`): what `compound` runs is the running shell's to say (an alias, a
+// function, its PATH, the directory it is in). By the path of the package's own CLI each
+// one is (`EXEMPT`).
+const SHAPES: [string, string][] = [
   ['compound list', 'list'],
   ['compound status --json', 'status'],
   ['  compound show zsh-equals-word  \n', 'show'],
@@ -41,6 +45,10 @@ const EXEMPT: [string, string][] = [
   ['compound disable sed-in-place-bsd', 'disable'],
   ['compound events --since 2026-10-01T00:00:00Z --type recall --limit 5', 'events'],
 ]
+// The program word of a shape, written as the path `own`.
+const byPath = (command: string, own: string): string => command.replace(/(^|[ \t])compound(?=[ \t])/, (_m, lead: string) => `${lead}${own}`)
+const BARE: [string, string][] = SHAPES.filter(([command]) => !command.includes(OWN))
+const EXEMPT: [string, string][] = SHAPES.map(([command, verb]) => [byPath(command, OWN), verb])
 
 // Anything else is a call like any other: checked against the guards, recalled, captured.
 const NUL = String.fromCharCode(0)
@@ -158,16 +166,27 @@ test('D6: whatever is not proved to be one simple compound invocation is not exe
   for (const [command, why] of NOT_EXEMPT) expect(sole(command), `${why}: ${command.slice(0, 120)}`).toBe(undefined)
 })
 
-test('D6: only the package\'s own CLI qualifies, by its path or by a name that resolves to it', () => {
-  // The bare name, when `compound` on PATH is not the package's CLI, is not exempt.
-  expect(sole('compound list', false)).toBe(undefined)
-  expect(sole(`${OWN} list`, false)).toBe('list')
-  // With no path of its own to compare (the mod runs `compound` from PATH), no path qualifies.
-  expect(soleCli('/usr/local/bin/compound list', 'compound', true)).toBe(undefined)
-  expect(soleCli('compound list', 'compound', true)).toBe('list')
-  // The shape says which it is, and nothing about a call that is not one.
-  expect(soleCliShape(`COMPOUND_HOME=/h ${OWN} add --name x`)).toEqual({ program: OWN, bare: false, verb: 'add' })
-  expect(soleCliShape('compound add --name x')).toEqual({ program: 'compound', bare: true, verb: 'add' })
+test('S2: the bare name `compound` is never exempt, in any shape, whatever the mod runs', () => {
+  expect(BARE.length).toBeGreaterThanOrEqual(15)
+  for (const [command] of BARE) {
+    expect(sole(command), command).toBe(undefined)
+    // Not when the mod itself has no path of its own and runs `compound` from PATH either.
+    expect(soleCli(command, 'compound'), command).toBe(undefined)
+    expect(soleCliShape(command), command).toBe(undefined)
+  }
+})
+
+test('D6: only the package\'s own CLI qualifies, and only by the very path the mod runs', () => {
+  expect(sole(`${OWN} list`)).toBe('list')
+  // With no path of its own to compare (the mod runs `compound` from PATH), nothing qualifies.
+  expect(soleCli('/usr/local/bin/compound list', 'compound')).toBe(undefined)
+  // Another path to the same file is another path: nothing is resolved, so nothing can
+  // resolve differently for the shell.
+  expect(soleCli('/home/me/.local/bin/compound list', OWN)).toBe(undefined)
+  expect(soleCli(`/opt/compound/bin/../bin/compound list`, OWN)).toBe(undefined)
+  expect(soleCli(`/opt/compound//bin/compound list`, OWN)).toBe(undefined)
+  // The shape says which program it is, and nothing about a call that is not one.
+  expect(soleCliShape(`COMPOUND_HOME=/h ${OWN} add --name x`)).toEqual({ program: OWN, verb: 'add' })
   expect(soleCliShape('ls -la')).toBe(undefined)
 })
 
@@ -261,6 +280,15 @@ function world(on: On): World {
 
 const checks = (w: World): number => w.calls.filter(c => c.includes('check')).length
 
+// The path of the package's own CLI in this world: the one beside the hooks under test,
+// read off the first CLI call the mod makes (an ordinary call is put to `check`).
+async function ownPath(w: World, ordinary: () => Promise<unknown>): Promise<string> {
+  await ordinary()
+  const own = (w.calls.find(c => c[0]?.endsWith('/bin/compound')) ?? [''])[0]!
+  expect(own.startsWith('/')).toBe(true)
+  return own
+}
+
 test('D6: a compound call followed by another command is checked against the guards and refused', async ($, on) => {
   const w = world(on)
   mock.clock(on, { now: 1_800_000_000_000 })
@@ -291,35 +319,59 @@ test('D6: every shape that is not exempt is put to the check, and every exempt o
   }
 })
 
-test('D6: the bare name is exempt only while `compound` on PATH is the package\'s CLI', async ($, on) => {
+test('S2: the bare name is checked like any other call, whatever a shell would say `compound` is, and no shell is asked', async ($, on) => {
   const w = world(on)
   mock.clock(on, { now: 1_800_000_000_000 + 600_000 })
-  w.bare = false
-  await $.tool.call({ tool: 'Bash', command: 'compound list' })
-  expect(checks(w)).toBe(1)
-  // It is asked of `sh` once and kept: a second call starts no second question.
-  await $.tool.call({ tool: 'Bash', command: 'compound status' })
-  expect(checks(w)).toBe(2)
-  expect(w.calls.filter(c => c[0] === 'sh' && c.includes('-c') && c.some(a => a.includes('command -v compound'))).length).toBe(1)
+  // The world answers "yes, `compound` on PATH is the package's CLI" to anyone who asks.
+  // That answer is `sh`'s, in the mod's environment and directory. The call is run by the
+  // Bash tool's shell, with its own aliases, functions, PATH and directory.
+  w.bare = true
+  // A guard that matches the text of a bare call refuses it, as it would any call.
+  const refused = await $.tool.call({ tool: 'Bash', command: "compound add --name tidy --when 'Use when tidying.' --body 'never rm -rf build'" })
+  expect(refused.deny).toContain('lesson=no-rm-rf')
+  for (const [command] of BARE) {
+    const before = checks(w)
+    await $.tool.call({ tool: 'Bash', command })
+    expect(checks(w), command).toBe(before + 1)
+  }
+  // The question is not put at all.
+  expect(w.calls.filter(c => c[0] === 'sh' && c.some(a => a.includes('command -v'))).length).toBe(0)
+})
+
+test('S2: another path to the CLI, and another file called compound, are checked', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: 1_800_000_000_000 })
+  const own = await ownPath(w, () => $.tool.call({ tool: 'Bash', command: 'true' }))
+  for (const command of [`/home/me/.local/bin/compound list`, `${own.replace('/bin/compound', '/bin/../bin/compound')} list`, `/tmp/x/compound add --name a --when b --body c`, `${own}x list`]) {
+    const before = checks(w)
+    await $.tool.call({ tool: 'Bash', command })
+    expect(checks(w), command).toBe(before + 1)
+  }
+  const before = checks(w)
+  await $.tool.call({ tool: 'Bash', command: `${own} list` })
+  expect(checks(w)).toBe(before)
 })
 
 test('D6: a here-document body that holds "; rm -rf" is text: the lesson is written and no guard reads it', async ($, on) => {
   const w = world(on)
   mock.clock(on, { now: 1_800_000_000_000 })
-  const ran = await $.tool.call({ tool: 'Bash', command: "compound add --name tidy --when 'Use when tidying.' <<'EOF'\nDo not run make clean; rm -rf build. Move it.\nEOF" })
+  const own = await ownPath(w, () => $.tool.call({ tool: 'Bash', command: 'true' }))
+  const before = checks(w)
+  const ran = await $.tool.call({ tool: 'Bash', command: `${own} add --name tidy --when 'Use when tidying.' <<'EOF'\nDo not run make clean; rm -rf build. Move it.\nEOF` })
   expect(ran.deny).toBe(undefined)
-  expect(checks(w)).toBe(0)
+  expect(checks(w)).toBe(before)
   // The same text as a second command is a command.
-  const refused = await $.tool.call({ tool: 'Bash', command: "compound add --name tidy --when 'Use when tidying.' --body x; rm -rf build" })
+  const refused = await $.tool.call({ tool: 'Bash', command: `${own} add --name tidy --when 'Use when tidying.' --body x; rm -rf build` })
   expect(refused.deny).toContain('lesson=no-rm-rf')
 })
 
 test('D6: a failed call that contains the CLI is recalled and held like any other; the CLI alone is not', async ($, on) => {
   const w = world(on)
   mock.clock(on, { now: 1_800_000_000_000 })
+  const own = await ownPath(w, () => $.tool.call({ tool: 'Bash', command: 'true' }))
   w.fails = () => true
   // The CLI's own call failing (a refused `add`) is the CLI's business: no model is asked.
-  await $.tool.call({ tool: 'Bash', command: 'compound add --name a --when b --body c' })
+  await $.tool.call({ tool: 'Bash', command: `${own} add --name a --when b --body c` })
   expect(w.asked).toBe(0)
   // `make test && compound add ...` failing is a failed call: it is put to the judge.
   await $.tool.call({ tool: 'Bash', command: 'make test && compound add --name a --when b --body c' })

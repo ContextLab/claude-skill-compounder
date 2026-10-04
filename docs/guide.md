@@ -56,7 +56,7 @@ was. `...` marks lines left out.
 | ineffective | a lesson that was recalled in two sessions since it was last written: the failure keeps coming back |
 | recurring | the same, for a lesson of the general pool: it is counted, and nothing is asked of Claude |
 | not here | a lesson whose platform or shell is not this machine's; it is listed and does nothing |
-| shadowed | a project lesson that carries the name of one of your own lessons or of a general one; it is listed and does nothing |
+| shadowed | a project lesson or skill that carries the name of one of your own lessons or skills or of a general one; it is listed and does nothing |
 | prompt log | a searchable record of the prompts you type, kept by [history-surfer](https://github.com/ContextLab/claude-history-surfer) |
 
 ## Where to type things
@@ -179,7 +179,7 @@ In a terminal the table is coloured and fitted to its width; piped, as here, a
 description is cut at 70 characters. `compound list --scripts` adds the project's
 scripts. `compound list --level user` shows one level. The `FLAG` column says `ineffective`, `recurring`, `not here` (the lesson is
 for another platform or shell), `disabled` (you switched it off) or `shadowed` (a project
-lesson with the name of a user or general lesson, which is the one in force).
+lesson or skill with the name of a user or general one, which is the one in force).
 
 Read one lesson:
 
@@ -430,6 +430,11 @@ a branch and open the pull request:
 ```bash
 compound promote python3-no-tomllib-use-tomli --to general --yes
 ```
+
+That publishes to the package's own pool. If `COMPOUND_UPSTREAM` or
+`COMPOUND_UPSTREAM_GIT` names another place, `--yes` alone sends nothing: the plan and
+the refusal both print the destination, and it is published there only when the command
+says so too, with `--yes --upstream <that destination>`.
 
 ## Decline a lesson
 

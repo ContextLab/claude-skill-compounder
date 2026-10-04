@@ -66,7 +66,8 @@ EVENT LOG
     `masked_event`): the rules of the mod's own `redact` (hooks/safe.ts), rule for rule,
     for whatever looks like a credential, and EVENT_TEXT_CAP characters for one text.
     The fields an event is found by (ts, type, session, project, path, lesson, id, ...)
-    are written as they are. The memo's quoted requests are masked the same way.
+    are not free text; they are held to the rules that know a credential by its shape
+    alone (`found_by`). The memo's quoted requests are masked like an event's text.
 
     Fields every event carries:
         ts        string  UTC, "YYYY-MM-DDTHH:MM:SSZ"
@@ -403,8 +404,11 @@ WHAT A REPOSITORY CAN WRITE
         abandoned at a limit: on the probes when lessons are loaded (VET_BUDGET_MS, see
         vet_patterns), on the call in `check` (COMPOUND_CHECK_BUDGET_MS). In both, the
         user's and the package's patterns go before the project's.
-      - a project lesson with the name of a user or general lesson is `shadowed`:
-        listed, flagged, and not in force.
+      - a project lesson or skill with the name of a user or general lesson or skill
+        is `shadowed`: listed, flagged, and not in force.
+      - the project level is inside the project: a `.claude`, a lessons directory or a
+        skills directory that a symbolic link takes out of the project root is not
+        read, written through or removed through (`project_store_problem`).
     What is printed for a person passes through `one_line`, which drops control
     characters, and a name or a path in a command the CLI prints is quoted (sh_quote).
     `promote --to general` copies what it would publish into a staging directory,
@@ -412,6 +416,10 @@ WHAT A REPOSITORY CAN WRITE
     shape of a credential (SECRET_SHAPES), and publishes that copy. With `--yes` it
     refuses when it finds one, and when a file cannot be read or is larger than
     PUBLISH_BYTES: a file that is not scanned is not published. Nothing overrides it.
+    A file's name is read like its text, and so is its text without zero bytes
+    (UTF-16). A destination the environment names (COMPOUND_UPSTREAM,
+    COMPOUND_UPSTREAM_GIT) is published to only when `--upstream` names it too, and
+    the lesson is written into a real directory of the clone, never through a link.
 
     A value from outside is never an option of a program this file runs: every program
     is started from an argument vector with no shell, a ref, an owner/repo and a git
@@ -436,6 +444,8 @@ ENVIRONMENT
     COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
     COMPOUND_UPSTREAM_GIT  a git URL or path: `promote --to general --yes` pushes its
                          branch there with git alone (no gh, no fork, no pull request)
+                         Either one, when it is not the package's own pool, is
+                         published to only with `--upstream <the same value>`
     COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
     COMPOUND_NO_SURFER   install does not fetch history-surfer
     COMPOUND_SURFER_URL  where install clones history-surfer from
@@ -1560,8 +1570,23 @@ def scan(project, with_body=False):
     rank = {"project": 0, "user": 1, "general": 2}
     switched_off = set(read_disabled())
     loaded = []
-    for level, lessons, skills in level_dirs(project):
+    levels = level_dirs(project)
+    # The user's and the package's own directories, by their real paths: seen again as a
+    # project's (from the home directory), they are read once, where they are their own.
+    own = set(os.path.realpath(base) for level, lessons, skills in levels if level != "project"
+              for base in (lessons, skills))
+    for level, lessons, skills in levels:
         for kind, base in (("lesson", lessons), ("skill", skills)):
+            if level == "project":
+                if os.path.realpath(base) in own:
+                    continue
+                issue = project_store_problem(project, base)
+                if issue:
+                    # Nothing under it is read, and nothing is removed by a name under it.
+                    if os.path.isdir(base):
+                        broken.append({"level": level, "kind": kind, "name": os.path.basename(base), "path": base,
+                                       "problem": issue, "unparseable": False})
+                    continue
             try:
                 names = sorted(os.listdir(base))
             except OSError:
@@ -1573,6 +1598,14 @@ def scan(project, with_body=False):
                 if not os.path.isdir(directory):
                     continue
                 skill_md = os.path.join(directory, "SKILL.md")
+                if level == "project" and kind == "skill" and not _under(skill_md, project):
+                    # A project skill that is a link out of the project is not the project's.
+                    # One that leads to a skill of the user's or the package's is read there.
+                    if os.path.isfile(skill_md) and not any(_under(skill_md, mine) for mine in own):
+                        broken.append({"level": level, "kind": kind, "name": name, "path": directory,
+                                       "problem": "it is a symbolic link that leaves the project; it is not read",
+                                       "unparseable": False})
+                    continue
                 if not os.path.isfile(skill_md):
                     if kind == "lesson":
                         broken.append({"level": level, "kind": kind, "name": name, "path": directory,
@@ -1609,10 +1642,12 @@ def scan(project, with_body=False):
     for levels in lessons_by_name.values():
         if len(levels) == 2 and same_tree(found[levels["project"]]["path"], found[levels["user"]]["path"]):
             del found[levels["project"]]
-    # See the docstring: the user's and the package's names are theirs.
-    held = set(item["name"] for item in found.values() if item["kind"] == "lesson" and item["level"] != "project")
+    # See the docstring: the user's and the package's names are theirs, whether the name
+    # is a lesson's or a skill's on either side. A skill in a repository is a file there
+    # like a lesson, and with a `match` it is a guard like one.
+    held = set(item["name"] for item in found.values() if item["level"] != "project")
     for item in found.values():
-        if item["kind"] == "lesson" and item["level"] == "project" and item["name"] in held:
+        if item["level"] == "project" and item["name"] in held:
             item["shadowed"] = True
     items = sorted(found.values(), key=lambda it: (rank[it["level"]], it["kind"], it["name"]))
     return items, broken
@@ -1756,10 +1791,23 @@ _redact_compiled = []
 # the whole text first, the cut on what is left, so no secret is left half shown.
 EVENT_TEXT_CAP = 8000
 EVENT_LIST_CAP = 200
-# What an event is FOUND by is not free text and is written as it is: masking a project
-# path or a session id would lose the event.
+# What an event is FOUND by is not free text: masking a project path or a session id by the
+# rules for free text (`KEY=value`, `--token x`) would lose the event. THAT IS NOT A WAY
+# AROUND THE MASK. Whatever stands in such a field is still held to the rules that need no
+# context, the ones that know a credential by its own shape (`found_by`):
+#   - a path (PATH_KEYS): a PEM block and a password in a URL, neither of which a path
+#     holds. Not the token shapes: a directory may be called `sk-learn-experiments`;
+#   - a lesson's name that is a slug is a name. Anything else, and every other such field
+#     (a session, an id, a level, a kind): the PEM block, the URL password, a bearer token
+#     and the token shapes.
 UNMASKED_KEYS = frozenset(("ts", "type", "session", "project", "path", "from", "seen_in", "also", "merged", "id",
                            "settles", "lesson", "lessons", "level", "kind"))
+PATH_KEYS = frozenset(("project", "path", "from", "seen_in", "also", "merged"))
+NAME_KEYS = frozenset(("lesson", "lessons"))
+# The rules of REDACT_RULES that know a credential by its shape alone: (in a path, anywhere else).
+_PATH_SHAPES = (REDACT_RULES[0], REDACT_RULES[-2])
+_ALL_SHAPES = (REDACT_RULES[0], REDACT_RULES[-3], REDACT_RULES[-2], REDACT_RULES[-1])
+_shapes_compiled = {}
 
 
 def redact(text):
@@ -1769,6 +1817,26 @@ def redact(text):
     for pattern, to in _redact_compiled:
         text = pattern.sub(to, text)
     return text
+
+
+def found_by(key, value):
+    """The value of a field an event is found by, as it may be written: cut, and with a
+    credential's shape masked (see UNMASKED_KEYS). A value that is no text and no list of
+    texts is not what such a field holds, and is masked like any other."""
+    if isinstance(value, (list, tuple)):
+        return [found_by(key, one) if isinstance(one, str) else masked(one, 1) for one in value[:EVENT_LIST_CAP]]
+    if not isinstance(value, str):
+        return masked(value, 1)
+    value = value[:EVENT_TEXT_CAP]
+    if key in NAME_KEYS and SLUG_RE.match(value):
+        return value
+    rules = _PATH_SHAPES if key in PATH_KEYS else _ALL_SHAPES
+    compiled = _shapes_compiled.get(rules)
+    if compiled is None:
+        compiled = _shapes_compiled[rules] = [(re.compile(pattern, flags), to) for pattern, flags, to in rules]
+    for pattern, to in compiled:
+        value = pattern.sub(to, value)
+    return value
 
 
 def masked(value, depth=0):
@@ -1788,15 +1856,11 @@ def masked(value, depth=0):
 
 def masked_event(event):
     """The event as the log holds it: free text masked and capped, the fields an event is
-    found by (UNMASKED_KEYS) capped only."""
+    found by (UNMASKED_KEYS) capped and held to the shapes of a credential (`found_by`)."""
     out = {}
     for key, value in list(event.items())[:EVENT_LIST_CAP]:
         if key in UNMASKED_KEYS:
-            if isinstance(value, str):
-                value = value[:EVENT_TEXT_CAP]
-            elif isinstance(value, (list, tuple)):
-                value = [one[:EVENT_TEXT_CAP] if isinstance(one, str) else one for one in value[:EVENT_LIST_CAP]]
-            out[str(key)[:200]] = value
+            out[key] = found_by(key, value)
         else:
             out[str(key)[:200]] = masked(value)
     return out
@@ -2121,7 +2185,7 @@ def recall_item(event, project):
     path = event.get("path")
     if level == "project" and root and isinstance(path, str) and real(root) != real(project):
         path = path.rstrip(os.sep)
-        if os.path.basename(path) != name or not SLUG_RE.match(name):
+        if os.path.basename(path) != name or not SLUG_RE.match(name) or not _under(path, root):
             return None, None
         kind = "lesson" if os.path.dirname(path).endswith(PROJECT_STORES[0]) else "skill"
         item = _load_item("project", kind, path, False)
@@ -2265,6 +2329,20 @@ def _under(path, top):
     return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
 
 
+def project_store_problem(project, base):
+    """Why the project-level directory `base` (<project>/.claude/compound/lessons or
+    <project>/.claude/skills) is not the project's, or None. THE PROJECT LEVEL IS INSIDE
+    THE PROJECT: a repository chooses what its `.claude` is, and one that makes it, or a
+    directory under it, a symbolic link to somewhere else would have lessons read from
+    there, written there and removed there. A link that stays inside the project is the
+    project's own. Asked wherever the project level is read (`scan`) or written (`add`,
+    `skill`)."""
+    if _under(base, project):
+        return None
+    return ("%s resolves to %s, which leaves the project %s: a symbolic link on the way leads out of it. "
+            "Nothing is read, written or removed through it" % (base, os.path.realpath(base), project))
+
+
 def holders_elsewhere(name, events, project, skip=()):
     """The directories `holders` finds, without their project roots."""
     return [directory for _root, directory in holders(name, events, project, skip)]
@@ -2293,6 +2371,8 @@ def holders(name, events, project, skip=()):
             directory = os.path.join(base, name)
             if not os.path.isfile(os.path.join(directory, "SKILL.md")):
                 continue
+            if not _under(directory, root):
+                continue  # a link out of that project is not that project's lesson
             real = os.path.realpath(directory)
             if real in skipped or _under(directory, user_lessons) or _under(directory, user_skills):
                 continue
@@ -2801,6 +2881,9 @@ def project_level_problem(project):
         if real == path:
             return ("the project root is %s (%s), not a project, so a project-level lesson would land in "
                     "the user's own .claude. Pass --level user, or run inside a project" % (label, project))
+    issue = project_store_problem(project, dirs_of(project, "project")[0])
+    if issue:
+        return "%s. Nothing was written. Pass --level user, or remove the link" % issue
     return None
 
 
@@ -3610,6 +3693,10 @@ def cmd_skill(args):
     if item["level"] == "general":
         raise usage("%r is in the general pool, which changes through a pull request" % args.name)
     _lessons, skills = dirs_of(project, item["level"])
+    if item["level"] == "project":
+        issue = project_store_problem(project, skills)
+        if issue:
+            raise usage("%s. Nothing was moved" % issue)
     target = os.path.join(skills, item["name"])
     _move(item["path"], target)
     log_soft("skill", project, lesson=item["name"], level=item["level"], path=target)
@@ -3756,12 +3843,21 @@ def secret_findings(staging):
     like a credential, read in full. The secret itself is never repeated. A staged file
     that cannot be read back is a failure of the command, not a finding to skip."""
     out = []
-    for rel in staged_files(staging):
+    for index, rel in enumerate(staged_files(staging)):
         with open(os.path.join(staging, rel), "rb") as handle:
-            text = handle.read().decode("utf-8", "replace")
+            data = handle.read()
+        # Three readings of one file: its bytes as UTF-8; the same without their zero
+        # bytes, which is what text in a two-byte encoding (UTF-16, either order) is in
+        # the ASCII range; and its name, which is published with it.
+        texts = [data.decode("utf-8", "replace")]
+        if b"\0" in data:
+            texts.append(data.replace(b"\0", b"").decode("utf-8", "replace"))
         for label, shape in SECRET_SHAPES:
-            if shape.search(text):
+            if any(shape.search(text) for text in texts):
                 out.append("%s: %s" % (rel, label))
+            elif shape.search(rel):
+                # The name is the secret here, so the name is not repeated either.
+                out.append("file %d of the lesson, by its name: %s" % (index + 1, label))
     return out
 
 
@@ -3819,6 +3915,8 @@ def cmd_promote(args):
     name = item["name"]
     if args.to != "user" and (args.auto or args.rename or args.seen_in):
         raise usage("--auto, --seen-in and --as go with --to user only")
+    if args.to != "general" and args.upstream is not None:
+        raise usage("--upstream goes with --to general only")
     if args.to == "user":
         if item["level"] != "project":
             raise usage("%r is already at the %s level" % (name, item["level"]))
@@ -3945,6 +4043,25 @@ def cmd_promote(args):
     remote = os.environ.get("COMPOUND_UPSTREAM_GIT") or ""
     if remote and git_source_problem(remote):
         raise usage("COMPOUND_UPSTREAM_GIT is not a repository git can be given: %s" % git_source_problem(remote))
+    # WHERE IT IS PUBLISHED IS NEVER THE ENVIRONMENT'S WORD ALONE. The package's own pool
+    # needs no more than --yes. Any other destination comes from a variable (which a
+    # shell profile or a settings file's `env` block sets, out of sight), and is
+    # published to only when the command line names it too, word for word: the person
+    # who runs or approves the command has then seen where the lesson goes.
+    destination = remote or upstream
+    variable = "COMPOUND_UPSTREAM_GIT" if remote else "COMPOUND_UPSTREAM"
+    elsewhere = bool(remote) or upstream != UPSTREAM_DEFAULT
+    confirm = ["--upstream", destination] if elsewhere else []
+    if args.upstream is not None and args.upstream != destination:
+        raise usage("--upstream %s is not where this would be published: that is %s%s. --upstream does not choose "
+                    "the destination; it confirms the one the environment names. Nothing was sent" % (
+                        sh_quote(one_line(args.upstream)[:200]), one_line(destination),
+                        " (%s)" % variable if elsewhere else ", the package's own pool"))
+    if args.yes and elsewhere and args.upstream != destination:
+        raise usage("%r was not proposed: it would be published to %s, which is not the package's own pool (%s) "
+                    "but what %s names in the environment. Nothing was sent. If that is where it should go, run "
+                    "again with: --yes --upstream %s" % (
+                        name, one_line(destination), UPSTREAM_DEFAULT, variable, sh_quote(destination)))
     files, excluded = _lesson_files(item["path"])
     skill_md = published_text(item)
 
@@ -3970,6 +4087,7 @@ def cmd_promote(args):
             "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
             "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
             "skill_md": skill_md, "excluded": excluded, "secrets": secrets, "unpublishable": unpublishable,
+            "confirm": confirm,
         }
         if secrets and args.yes:
             raise usage("%r was not proposed: what would be published looks like it holds a credential (%s). "
@@ -3989,6 +4107,10 @@ def cmd_promote(args):
                 if unpublishable:
                     sys.stdout.write("NOT PUBLISHABLE as it is: %s. A file that cannot be scanned whole is not "
                                      "published, and --yes will refuse it.\n" % "; ".join(unpublishable))
+                if elsewhere:
+                    sys.stdout.write("The upstream below is NOT the package's own pool (%s): %s names it in the "
+                                     "environment. --yes publishes there only with: --upstream %s\n" % (
+                                         UPSTREAM_DEFAULT, variable, sh_quote(destination)))
                 sys.stdout.write(
                     "Plan (nothing has been written; run again with --yes to do it):\n"
                     "  upstream : %s\n  branch   : %s\n  from     : %s (%s level)\n  files    :\n%s"
@@ -4020,8 +4142,15 @@ def cmd_promote(args):
             _must(["git", "clone", "--quiet", "--", remote, clone], what="cloning " + remote)
         else:
             _must([gh, "repo", "clone", upstream, clone, "--", "--depth", "1"], what="cloning " + upstream)
-        target = os.path.join(clone, subdir, name)
-        if os.path.exists(target):
+        # The clone is another repository's tree, and that repository chooses what its
+        # `lessons` is. The lesson is written into a real directory of the clone or not
+        # at all: through a symbolic link it would land wherever the link leads.
+        pool = os.path.join(clone, subdir)
+        target = os.path.join(pool, name)
+        if os.path.islink(pool) or os.path.realpath(pool) != os.path.join(os.path.realpath(clone), subdir):
+            raise failure("%s in %s is a symbolic link, so nothing was written into it and nothing was pushed"
+                          % (subdir, remote or upstream))
+        if os.path.lexists(target):
             raise failure("%s/%s already exists in %s" % (subdir, name, remote or upstream))
         _must(["git", "checkout", "-b", branch], cwd=clone)
         # Exactly the staged bytes: the tree that was scanned is the tree that is committed.
@@ -5963,6 +6092,10 @@ def build_parser():
     one.add_argument("name")
     one.add_argument("--to", required=True, choices=("user", "general"))
     one.add_argument("--yes", action="store_true", help="with --to general: open the pull request")
+    one.add_argument("--upstream", metavar="DESTINATION",
+                     help="with --to general: confirms a destination the environment names (COMPOUND_UPSTREAM, "
+                          "COMPOUND_UPSTREAM_GIT), word for word; --yes publishes nowhere but the package's own "
+                          "pool without it")
     one.add_argument("--as", dest="rename", metavar="NEWNAME", help="with --to user: rename while moving")
     one.add_argument("--auto", action="store_true",
                      help="with --to user: leave a lesson git tracks where it is (exit 3) and log a candidate")

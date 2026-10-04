@@ -43,7 +43,8 @@ class InstallShArgumentsTest(Case):
         """`COMPOUND_REF=-f` reached `git checkout --detach -f`, which succeeded: the
         install went through at whatever HEAD was, with the value read as an option."""
         origin = self.origin()
-        for ref in ("-f", "--detach", "--orphan=x", "release;id", "release name", "a..b", "$(id)", "@{-1}"):
+        for ref in ("-f", "--detach", "--orphan=x", "release;id", "release name", "a..b", "$(id)", "@{-1}",
+                    "release/-f", "release/.hidden"):
             proc = self.piped(COMPOUND_REPO=origin, COMPOUND_REF=ref)
             self.assertEqual(proc.returncode, 1, (ref, proc.stdout, proc.stderr))
             self.assertIn("COMPOUND_REF", proc.stderr, ref)
