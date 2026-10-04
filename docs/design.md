@@ -303,7 +303,7 @@ killed:
 |-|-|
 | `check`, before a tool call | 1500 ms |
 | any other call while a tool call or a stop waits | 2000 ms |
-| at a typed prompt (the listing, `find`, the unsettled captures) | 5000 ms |
+| at a typed prompt (the listing, `find`, the unsettled captures), and the pane's `events --json`, `list --json` and `show --json` | 5000 ms |
 | `/compound status`, the report the user asked for, and the pane's own `status --json` | 15000 ms |
 
 A subcommand that ran out of time is not called again for the rest of the turn: the next
@@ -478,7 +478,8 @@ or recorded. Every new failure is reported, each one once.
   of `compound status` (see below) and the day of the log's first event; **Open**,
   everything that waits for someone (lessons owed, ineffective lessons, lessons that could
   move to the user level, errors of the last seven days, each with up to three entries,
-  and the count of lessons declined); **Levels**, a row a level, `user  33 lessons (7
+  and the count of lessons declined), each entry followed by the command that settles it;
+  **Levels**, a row a level, `user  33 lessons (7
   guards)  4 skills`: a guard is a lesson that carries a pattern, so the guards are counted
   among the lessons and the brackets say so; **Most used**, up to six lessons in a table
   whose three columns are reused (`◆`), guarded (`■`) and recalled (`↺`), each a count and
@@ -492,13 +493,64 @@ or recorded. Every new failure is reported, each one once.
   where a level's row does not fit, the levels are a table under the heading (`Levels
   lessons (guards) skills`), which fits 30 columns; the Most used legend keeps its glyphs and
   drops its words; and a timeline with less than 16 columns left for its text drops the
-  type words and keeps the glyphs. `Refresh` (`r` while the pane has the keyboard) reads it again, `Close` (`x`)
-  or `/compound close` closes it. The pane reads `compound status --json` and `compound
-  events --json`, when it opens, when `Refresh` is pressed, and 400 ms after the mod logs
-  an event or the session's own `compound` call returns, once for a burst of events and
-  only while the pane is open. None of those reads is made before a tool call runs, and a
-  slow one is not counted against the subcommand's time for the turn. `/compound status`
-  prints the report as text; so does `/compound` in a session nobody types into.
+  type words and keeps the glyphs.
+
+  *What settles an open entry.* Under each entry of Open is the command for it, the text
+  `compound status` prints, which the CLI gives in `status --json` (`command`, and
+  `decline` for the second way to settle a lesson owed): `/compound:learn settle <id>`
+  under a lesson owed, with `or compound skip --settles <id> --why "<reason>"` under that
+  from 60 columns; `compound add --update --name <name> --match RE` under an ineffective
+  lesson; the `compound promote` command under a lesson that could move. No command
+  settles an error: under the errors is `compound events --type error`, which reads them.
+  A command is never cut: a pane too narrow for it breaks it at its spaces.
+
+  *The views.* The pane has three: the dashboard; **all lessons**, every lesson and skill
+  by level (not only the most used), each row its name, its kind (`lesson`, `guard`,
+  `skill`), its three counters and when it applies, read from `compound list --json`; and
+  **one lesson**, read from `compound show <name> --json`: its name, level and kind,
+  whether it is marked ineffective, its three counters, when it last fired (the newest
+  reuse, guard or recall that names it, or `never fired`), its guard patterns, the files
+  attached to it, its path, when it applies, and its text. A lesson's name on the
+  dashboard (a Most used row, an ineffective entry of Open) and every row of the list is a
+  Button: pressing it opens that lesson. While the CLI is asked the view says `Reading the
+  lesson…`; a lesson the CLI cannot show (it was removed, the call ran out of time, the
+  answer does not parse) is the lesson's name and the reason, and is not logged as an
+  error of the mod. In the lesson view nothing is cut: a long line is wrapped under its own
+  indent, and a text of more than 300 lines ends in a line that says how many more there
+  are and names `compound show <name>`. A narrow list drops the description, then the
+  counters; only a name or a description is cut. Back from a lesson is the view it was
+  opened in, back from the list is the dashboard, and `/compound` typed again, or a pane
+  closed, starts at the dashboard.
+
+  *The keys.* The first row of every view lists the keys that work in it. It is the first
+  row and not the last because the pane's window is the engine's: a tree taller than the
+  window is scrolled, and a row at its foot would be out of sight. The Buttons of the row
+  are drawn with their hotkeys: `a: all lessons` (the dashboard) or `b: back` (the other
+  two views), `r: refresh`, which reads again what the view shown was read from, and
+  `x: close` (so does `/compound close`). The pane is opened without the keyboard, so what
+  is typed after `/compound` goes on to the prompt, and the row starts `ctrl+x tab for
+  keys`: a hotkey, Tab, the arrows and Enter reach a pane only while it holds the
+  keyboard, which the person gives it (ctrl+x tab, or a click on it) and takes back (Esc).
+  While it holds the keyboard the row says what the keys do: `↑↓ select · enter open` when
+  the view fits its window, where the arrows and Tab walk the Buttons and Enter presses the
+  one ringed; `↑↓ scroll · tab select · enter open` when it is taller, where the arrows
+  scroll it and Tab walks the Buttons, bringing each into the window; then `esc to the
+  prompt`. The ring starts on the first lesson row, not on the key row; a view that
+  changes starts at its top, with the ring on the row the person came back from or on its
+  first row. A row too wide for the pane shortens its words (`ctrl+x tab: keys`, `a: all`,
+  `esc prompt`) and then wraps; no key is dropped. A surface that is no terminal gets the
+  Buttons alone. With the mouse, a click on a Button presses it.
+
+  *The reads.* The pane reads `compound status --json` and `compound events --json` when
+  it opens, when `refresh` is pressed, and 400 ms after the mod logs an event or the
+  session's own `compound` call returns, once for a burst of events and only while the
+  pane is open; the list or the lesson on screen is read again with them. `compound list
+  --json` is read when the list is opened and `compound show <name> --json` when a lesson
+  is pressed. None of those reads is made before a tool call runs, and a slow one is not
+  counted against the subcommand's time for the turn. A press that fails is caught: the
+  pane stays as it was and the failure is the pane's one `ui.pane` error of the session.
+  `/compound status` prints the report as text; so does `/compound` in a session nobody
+  types into.
 - **Drawing failures**: a band or a pane that cannot be drawn leaves the engine's own
   drawing in its place and never stops a turn. One `error` event per session is logged for
   the band (`ui.band`) and one for the pane (`ui.pane`).
@@ -621,7 +673,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 |-|-|
 | `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the three counters (`REUSED`, `GUARDED`, `RECALLED`), the flag and the description, fitted to the terminal. |
-| `compound show N` | One lesson's path and text. With `--json` also its counts, `recalls_since` (the recalls that count toward ineffective), `recur_limit`, and `guarded_in_session` (its guard refused a call in the caller's session). |
+| `compound show N` | One lesson's path and text. With `--json` also its counts, `recalls_since` (the recalls that count toward ineffective), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard or recall that names it, or null). |
 | `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. `--json` carries each item's `score`, the number of words that matched. |
 | `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards that apply to that tool and match. `--guards` adds `"guards"`, the number of lessons that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |

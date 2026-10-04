@@ -53,6 +53,9 @@ export type CompoundBand = {
 
 export type CompoundLevel = { level: string; lessons: number; skills: number; guards: number }
 export type CompoundLesson = { name: string; level: string; guard: boolean; reuse: number; guards: number; recall: number; flag: string }
+// One row of what is open: what it is, the command that settles it (and a second one, where
+// there is a second way), and the lesson a press of the row opens.
+export type CompoundOpen = { text: string; command?: string; more?: string; lesson?: string }
 // `text` is what the event was about; `tail` is what the row adds when it has the room.
 export type CompoundRecent = { at: number; type: string; text: string; tail?: string }
 export type CompoundCheck = { check: string; status: string; detail: string }
@@ -71,9 +74,46 @@ export type CompoundBoard = {
   levels: CompoundLevel[]
   lessons: CompoundLesson[]
   recent: CompoundRecent[]
-  open: { unsettled: string[]; ineffective: string[]; candidates: string[]; errors: string[]; skips: number }
+  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number }
   // Why the CLI could not be read, when it could not.
   problem: string
+}
+
+// One lesson or skill of the all-lessons view, as `compound list --json` gave it. `kind` is
+// `lesson`, `guard` (a lesson that carries a pattern) or `skill`.
+export type CompoundItem = { name: string; level: string; kind: string; reuse: number; guards: number; recall: number; flag: string; description: string }
+// One lesson, as `compound show <name> --json` gave it. `loading` while the CLI is asked,
+// `failed` with `problem` when it could not say. `at` is when it was read, in milliseconds;
+// `last` is the newest reuse, guard or recall that names the lesson, its time in seconds.
+export type CompoundDetail = {
+  name: string
+  state: 'loading' | 'ready' | 'failed'
+  problem: string
+  at: number
+  level: string
+  kind: string
+  match: string[]
+  description: string
+  body: string
+  reuse: number
+  guards: number
+  recall: number
+  flag: string
+  last: { at: number; type: string } | null
+  path: string
+  files: string[]
+}
+// Which of the pane's views is shown: the dashboard, every lesson, or one lesson, and the
+// view `back` returns to from a lesson. `items` is null until the list was read.
+export type CompoundPaneView = 'board' | 'all' | 'lesson'
+export type CompoundPane = {
+  session: string
+  view: CompoundPaneView
+  back: 'board' | 'all'
+  detail: CompoundDetail | null
+  items: CompoundItem[] | null
+  // Why the list could not be read, when it could not.
+  itemsProblem: string
 }
 
 declare module 'claude-code' {
@@ -83,6 +123,7 @@ declare module 'claude-code' {
       // The time of the band's last animation frame, in milliseconds.
       frame: number
       board: CompoundBoard | null
+      pane: CompoundPane | null
     }
   }
 }
