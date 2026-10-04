@@ -39,6 +39,17 @@ Type "/compound"
 Sleep 1s
 Enter
 Sleep 10s
+# The pane's keys: ctrl+x tab gives it the keyboard with the ring on the first lesson
+# row, Enter opens that lesson, `b` goes back, Esc hands the keyboard to the prompt.
+Ctrl+X
+Tab
+Sleep 3s
+Enter
+Sleep 6s
+Type "b"
+Sleep 2s
+Escape
+Sleep 1s
 Ctrl+C
 Ctrl+C
 Sleep 2s

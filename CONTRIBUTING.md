@@ -28,6 +28,7 @@ these from its root:
 python3 tests/test_store.py    # one file
 claude plugin validate --strict .
 claude plugin test .           # hooks/*.test.ts: prompt building, parsing, rendering, the band and the pane
+npx tsc --noEmit -p .          # the hooks type-check; needs .claude-plugin/types, which Claude Code lays beside a mod it loaded
 python3 tests/journeys/journey_guard.py   # real sessions; spends model calls
 ```
 
@@ -78,6 +79,20 @@ screenshot of each phase to `$TMPDIR/compound-ui-check/shots`. Open the PNGs and
 the session's own pace decides which frame catches which phase. The header of
 `dev/ui-check.tape` says what it takes to get an interactive session running under vhs.
 
+The README's screencast and screenshots are recorded the same way, from real sessions:
+
+```bash
+dev/demo.sh world      # build the throwaway world in /tmp/cdemo
+dev/demo.sh cards      # the three title cards
+dev/demo.sh learn 1    # scenes 1 and 2: one session; prints the events it logged
+dev/demo.sh later 1    # scene 3: a new session in another project, over the store the learn take left
+dev/demo.sh join       # cut and join the takes named in dev/demo.cuts into docs/media
+```
+
+It needs vhs and ffmpeg and spends model calls. What a session does varies from take to
+take, so a take is looked at before it is kept, and `dev/demo.cuts` holds the seconds to
+keep of the takes that were. The header of `dev/demo.sh` has the details.
+
 To exercise `install` and `uninstall`, point them at throwaway directories and never at
 your own configuration:
 
@@ -95,8 +110,17 @@ bin/compound install --claude-dir "$T/claude" --bin-dir "$T/bin"
 | `docs/design.md` | a contributor | the technical contract: every command, option, event and environment variable |
 
 Every command shown in the documentation runs as written, and every output shown is real
-output, shortened only with `...`. To get real output without touching your own
-configuration, run the CLI in a throwaway home directory:
+output, shortened only with `...`. `dev/guide_examples.py` runs the commands the guide and
+the README show, in a throwaway store, and prints what each answers now:
+
+```bash
+python3 dev/guide_examples.py           # every part
+python3 dev/guide_examples.py status    # one part: install, guide, status or report
+```
+
+After a change to the CLI's text, run it and paste what changed into the documents. To
+get real output for a command it does not run, without touching your own configuration,
+run the CLI in a throwaway home directory:
 
 ```bash
 export HOME=$(mktemp -d) COMPOUND_NO_SURFER=1
@@ -120,4 +144,7 @@ npx -y @mermaid-js/mermaid-cli -i diagram.mmd -o diagram-dark.png -t dark -b '#0
 - Documentation describes what the package does now, for a reader who is new to it.
   `tests/test_docs.py` fails when `docs/design.md` lacks a `COMPOUND_*` name, a
   subcommand, an option or a claim kind that the code has, when this file lacks a journey
-  script, and when `README.md` uses one of its terms before defining it.
+  script, when `README.md` uses one of its terms before defining it, when the guide lacks
+  a subcommand, an event type or a row `compound status` prints, when the README or the
+  design lacks a lesson or a skill the pool ships, and when a relative link or an anchor
+  in one of the four documents does not resolve.

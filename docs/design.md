@@ -127,8 +127,9 @@ Quote it or use printf '%s\n' '====='.
   fails the `lessons parse` check and is not used (see "What a repository can write").
 - `description` says when the lesson applies. It is what the mod's model reads to decide
   relevance, so it is written as a trigger.
-- `match` is optional: a JSON array of Python regular expressions tested against the text
-  of a tool call before it runs. A lesson with `match` is a **guard**.
+- `match` is optional: a JSON array of Python regular expressions tested against a call
+  before it runs: the command of a Bash call, or the input of the tools `match-tools`
+  names (see moment 2). A lesson with `match` is a **guard**.
 - `match-tools` is optional: a JSON array of the tool names whose calls the patterns are
   tested against (`compound add --tool`). Without it they are tested against Bash calls
   only.
@@ -187,8 +188,9 @@ before a tool call; it costs no further call.
 
 ## Moments
 
-The mod acts at five moments. Each one writes an event and shows a status entry, so a
-firing is never silent.
+The mod acts at five moments, and notes one more thing, a skill being used (see "A skill
+that is used"). Each one writes an event and shows a status entry, so a firing is never
+silent.
 
 ### 1. Reuse check: a prompt is submitted
 
@@ -592,8 +594,11 @@ program's words. This section says what the package holds such text to, and what
 does not defend against.
 
 **What a lesson file is held to, where it is read.** A lesson that fails one of these is
-reported by the `lessons parse` check with its path, and is not used: no guard, not
-listed, not found, not recalled.
+reported by the `lessons parse` check with its path. One that fails the first, the second
+or the last is not used: no guard, not listed, not found, not recalled. One that fails
+the third stays a lesson, listed and recalled, without the patterns at fault: a pattern
+that does not compile or is too long is dropped and the others stay guards, and a
+`match` of more than 32 patterns is dropped whole.
 
 | Rule | Limit |
 |-|-|
@@ -614,8 +619,9 @@ and one that does not finish is no guard), and for `COMPOUND_CHECK_BUDGET_MS` in
 In both, the patterns of the user and general levels are run before the project's, so a
 pattern in a repository cannot keep the user's own guards from being tested. A pattern
 that cannot be compiled, for any reason, is reported and ends no command. On the
-ordinary path the load costs one more process fork: `compound check` with thirty guards
-takes about 60 ms of the 1500 ms the mod gives it.
+ordinary path the load costs one more process fork: `compound check` on a store of forty
+lessons, twelve of them guards, takes about 70 ms of the 1500 ms the mod gives it (the
+median of 20 runs on an Apple M2 Max).
 
 **A repository cannot stand in for the user.** A project lesson that takes the name of a
 user or general lesson is shadowed (see "What a lesson is"). A general guard yields only
@@ -1046,7 +1052,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   A time is how long ago it was, as on the pane; `--json` keeps every timestamp as it is
   in the log. `events` prints the log's type names, which are what `--type` takes;
   `status` prints the words below. With stdout a terminal the output is coloured (the
-  health statuses, the three counters and the event types in the pane's colours, what is
+  health statuses, the four counters and the event types in the pane's colours, what is
   secondary dim) unless `NO_COLOR` is set to anything or `TERM` is `dumb`; piped output
   and `--json` are never coloured. A line is fitted to the terminal: its width is
   `COLUMNS` when that is a number, else the terminal's, and a cut ends in `…`. `list`
@@ -1111,7 +1117,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound show N` | One lesson's path and text, and when it is not in force, why. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard, recall or use that names it, or null). |
 | `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`) and the asking session is added to the memo's `asked`. Each row under `prompts` carries `sessions`, the sessions that asked that text (its own first, at most 20). An empty stdin is exit 2; a request with no word in it has no candidates. |
 | `compound memo` | stdin `{"key","verdict","items","prompts","repeats"}`: keeps the verdict on a request under the `memo_key` that `find --request --json` printed, with the session that asked. `verdict` is `named`, `nothing` or `not-substantial`; `items` are names, `prompts` and `repeats` rows as `find` prints them. Anything else is exit 2. |
-| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match. A general guard that hit beside a project or user one is named under `"yielded"` and is not a hit. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
+| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match. A general guard that hit beside a user guard is named under `"yielded"` and is not a hit; a project guard makes nothing yield (see "Two guards on one call"). A guard that did not finish matching in `COMPOUND_CHECK_BUDGET_MS` is named under `"timed_out"`, and one the time ran out before under `"unchecked"`. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound use N` | Counts one use of the skill `N`, which is what Claude Code calls the skill a session invoked: a bare name for a skill of the project or the user level, `compound:NAME` for a skill of this package. Logs `use` for a skill `compound list` shows, except the package's `learn` and `reuse`. Any other name writes nothing; the exit status is 0 either way and `--json` says `used`. The mod runs it (see "A skill that is used"). |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential; with `--yes` forks, pushes a branch and opens the pull request, or exits 2 when `secrets` is not empty. Logs `promote` when it moved or proposed something. |
@@ -1274,5 +1280,11 @@ never touched.
 - `dev/ui-check.sh`: records a real interactive session with `vhs` in a throwaway world
   and writes a screenshot of each phase to `$TMPDIR/compound-ui-check/shots`, for looking
   at the band and the pane. Run by hand; it spends model calls.
+- `dev/demo.sh`: records the README's screencast and screenshots, `docs/media/demo.gif`
+  and `docs/media/demo-*.png`, from real interactive sessions in a throwaway world. Run
+  by hand; it spends model calls.
+- `dev/guide_examples.py`: runs every command the guide and the README show, in a
+  throwaway store, and prints what each answers. Run by hand when the CLI's text changes;
+  it spends no model call.
 - `tests/journeys/`: real `claude -p --plugin-dir .` sessions that drive each moment and
   assert on the event log. Run by hand; they spend model calls.

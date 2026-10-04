@@ -18,7 +18,9 @@ submit a prompt, when Claude calls a tool, and when Claude is about to stop.
 
 1. A request fails, then succeeds on a later attempt: converting a TOML file with a Python that lacks `tomllib`.
 2. compound has the lesson recorded. It shows in the **band**, one row directly above the prompt that says what compound is doing, and in the **pane**, a dashboard that typing `/compound` opens.
-3. A new session in another project is stopped before it repeats the mistake, and gets it right.
+3. A new session in another project is stopped before it repeats the mistake, and gets it right. The pane then counts the stop, and opens the lesson.
+
+The sessions in the screencast are real ones, recorded on Claude Code 2.1.289, with the waits cut out.
 
 ## Install
 
@@ -73,24 +75,41 @@ Right after install, the report looks like this (paths shown for a user named `m
 
 ```
 Health
-  PASS  python          3.9.13
+  PASS  python          3.9.6
   PASS  claude code     2.1.289
   PASS  mod             enabled in /Users/me/.claude/settings.json
-  WARN  mod last fired  never: the event log holds no event the mod wrote (reuse, guard, ...)
+  WARN  mod last fired  never: the event log holds no event the mod wrote (reuse, guard, recall, capture, remind, refuse, nudge, judge, use, repeat, error, retry)
   PASS  cli             /Users/me/.local/bin/compound
   PASS  prompt log      0 prompts in this project
   WARN  last event      no events yet in /Users/me/.claude/compound/events.jsonl
   PASS  duplicates      every name exists once
   PASS  lessons parse   every lesson reads
   PASS  errors          none in the last 7 days
-...
+
+Compound interest
+  nothing yet: the log holds no reuse, guard, recall or lesson
+
+Levels
+  project  0 lessons  (0 guards)  0 skills
+  user     0 lessons  (0 guards)  0 skills
+  general  6 lessons  (4 guards)  4 skills
+
+Lessons
+  6 lessons never used (`compound list` shows them)
+
+Recent
+  no events yet
+
+Open
+  nothing open
 ```
 
 The two `WARN` rows are expected on a new install. They turn to `PASS` once compound has
 acted in a session. Three more can show: `cli`, until the directory that holds `compound` is
 on your `PATH`, `prompt log`, when history-surfer is not installed, and `claude code`, when
 no `claude` command is on your `PATH` to ask for its version.
-[Troubleshooting](#troubleshooting) explains every row.
+[Troubleshooting](#troubleshooting) explains every row. The six lessons and four skills in
+the row `general` are [the ones that ship with compound](#the-lessons-that-ship-with-compound).
 
 **Update and uninstall:**
 
@@ -98,7 +117,7 @@ no `claude` command is on your `PATH` to ask for its version.
 |-|-|
 | update to the newest release | `compound update` |
 | follow the tip of `main` from now on | `compound update --ref main` |
-| move to one release | `compound update --ref v0.4.0` |
+| move to one release | `compound update --ref v0.4.1` |
 | uninstall and keep everything you recorded | `compound uninstall` |
 | uninstall and also delete `~/.claude/compound` | `compound uninstall --purge` |
 
@@ -250,6 +269,10 @@ The five questions and actions in the chart:
 | Capture | a call works after one failed | decides whether it is the fix, and if so tells Claude to record the lesson |
 | Stop check | Claude is about to finish | refuses the stop once if a lesson is owed and not yet recorded or declined |
 
+Two things happen beside the chart. A request that keeps coming back is offered a skill,
+as described above. And each time a session invokes a skill that compound lists, the use
+is counted and shown.
+
 ### Where lessons live
 
 A **level** is how far a lesson reaches. Each lesson lives at exactly one of three levels.
@@ -319,9 +342,13 @@ compound shows what it does in six places.
 **1. The band.** One row directly above the prompt shows what compound is doing now. It
 is empty when there is nothing to show.
 
-![The band after a fix: the learn-loop track shows a lesson owed](docs/media/demo-1-capture.png)
+![The band at a session's first prompt: compound is ready, and /compound opens the dashboard](docs/media/demo-0-ready.png)
 
-![The band after the lesson is recorded: every step of the track is ticked](docs/media/demo-2-recorded.png)
+![The band after a failed call no lesson describes: watching for the fix, with the learn-loop track at its first step](docs/media/demo-1-capture.png)
+
+![The band once a later call fixed it: a lesson is owed, and the row shows the call that worked](docs/media/demo-1-owed.png)
+
+![The band after the lesson is recorded: its name, and every step of the track ticked](docs/media/demo-2-recorded.png)
 
 | Glyph | Label | Meaning |
 |-|-|-|
@@ -341,8 +368,8 @@ is empty when there is nothing to show.
 | `↻` | `asked before` | the same kind of request was made in three sessions, and Claude was offered to make it a skill |
 | `✖` | `N compound errors` | compound itself failed; your work is not blocked |
 
-Results fade after 8 seconds. `lesson owed`, `lesson ineffective` and errors stay until
-they are dealt with. [The design](docs/design.md#seeing-it-work) lists every row.
+Results fade after 8 seconds (`nothing to reuse` after 3). `lesson owed`, `lesson
+ineffective` and errors stay until they are dealt with. [The design](docs/design.md#seeing-it-work) lists every row.
 
 **2. The learn-loop track.** After a failed call that no lesson describes, the band also
 shows four steps. The current step is bold:
@@ -352,7 +379,8 @@ shows four steps. The current step is bold:
 ```
 
 The track stays for as long as a lesson is owed. At every other step it fades after 8
-seconds, like the result beside it.
+seconds, like the result beside it. On a row too narrow for both, the track gives way to
+the call that worked, as in the third picture above.
 
 **3. The `/compound` pane.** Type `/compound` in a session to open a dashboard: health,
 the totals (how often compound offered existing work, stopped a call, gave a lesson
@@ -367,7 +395,9 @@ its guard patterns and its text. `a` lists every lesson and skill by level, `b` 
 back, `r` reads everything again and `x` closes the pane. `/compound close` closes it
 too. `/compound status` prints the same report as text.
 
-![The /compound pane: health, open items, levels, most used lessons, recent events](docs/media/demo-2-pane.png)
+![The /compound pane in a second session: the keys, the health line, Compound interest, Open, Levels, the Most used table with its four counters, and Recent](docs/media/demo-2-pane.png)
+
+![A lesson opened in the pane: its level and kind, its four counters, when it last fired, its guard pattern, its path and its text](docs/media/demo-2-lesson.png)
 
 **4. Toasts.** A short pop-up appears when a lesson is recorded, rewritten, moved,
 proposed, made a skill, removed, or marked ineffective.
@@ -385,7 +415,7 @@ them.
 
 When a guard stops a call, Claude sees the lesson and you see the band:
 
-![A guard stops a call in a new session and quotes the lesson](docs/media/demo-3-guard.png)
+![A guard stops a call in a new session, in another project, and quotes the lesson; Claude corrects the call](docs/media/demo-3-guard.png)
 
 <details>
 <summary>The full message the reuse check adds to a prompt</summary>
@@ -459,15 +489,17 @@ These are the ones you are likely to change.
 | `COMPOUND_OFF` | unset | `1` switches the mod off |
 | `COMPOUND_QUIET` | unset | `1` turns the band off; the status entry, the toasts and the `/compound` pane stay |
 | `COMPOUND_PROMPT_MIN_CHARS` | 80 | shortest prompt the reuse check looks at |
+| `COMPOUND_REUSE_FLOOR` | 1.5 | how much a lesson, skill or script must share with a request to be put to the model as a candidate; higher offers less, `0` makes everything that shares a word a candidate |
 | `COMPOUND_REPEAT_MIN` | 3 | sessions that made one kind of request before compound offers to make it a skill |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | tool calls in a turn before Claude is asked whether it learned anything |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
 | `COMPOUND_RECUR_LIMIT` | 2 | times a lesson is recalled before it is ineffective |
+| `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | the shell a lesson for one shell is held against (`zsh`, `bash`); set it when Claude Code runs your commands in another shell than your login shell |
 | `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for that model |
 
-`compound status` in a terminal reads `COMPOUND_OFF` and `COMPOUND_RECUR_LIMIT` from the
-same `env` block, so its report matches what the mod does.
+`compound status` in a terminal reads `COMPOUND_OFF`, `COMPOUND_RECUR_LIMIT` and
+`COMPOUND_SHELL` from the same `env` block, so its report matches what the mod does.
 
 ## Cost
 
@@ -476,16 +508,31 @@ the same account as your session.
 
 | When | Model calls | Added time |
 |-|-|-|
-| a substantial prompt | one; none when nothing recorded and no earlier request shares enough of its rare words, or when the same prompt was already judged against the same store | about 1 second; 0.3 to 0.7 seconds with no model call |
-| a call of a tool some guard applies to (Bash, unless a lesson names another) | none | about 45 ms |
-| a call of any other tool, or any call when no lesson has a pattern | none | the first call of a turn pays about 45 ms; the rest pay nothing |
-| a failed tool call (not one refused before it ran) | one | none before the call |
+| a substantial prompt | one; none when nothing recorded and no earlier request shares enough of its rare words, or when the same prompt was already judged against the same store | 0.6 to 0.8 seconds to gather the candidates, then the model's answer, a median of 0.76 seconds |
+| a call of a tool some guard applies to (Bash, unless a lesson names another) | none | about 70 ms |
+| a call of any other tool, or any call when no lesson has a pattern | none | the first call of a turn pays about 70 ms; the rest pay nothing |
+| a failed tool call (not one refused before it ran) | one | none before the call; the model's answer, a median of 0.69 seconds, comes after it |
 | each later success of the same tool, until one is the fix | one each, five at most | none before the call |
 
-The times were measured on Claude Code 2.1.289. compound never holds your work for long:
-a guard check that has not answered in 1.5 seconds is abandoned and the call runs. Any
-other check that makes a tool call or a stop wait has 2 seconds, and one that runs out is
-not tried again in that turn.
+How these were measured, on Claude Code 2.1.289 and macOS 26.6 (Apple M2 Max), with a
+store of 48 lessons and skills (12 of them guards) and a prompt log of about 16,000
+prompts:
+
+- The times without a model call are the median of 20 runs of each CLI call the mod
+  makes: `compound check --guards` before a tool call, 68 ms; at a prompt, `compound list
+  --json`, 73 ms, then `compound find --request --json`, 500 to 690 ms depending on the
+  request, most of it the search of the prompt log.
+- The model's times are the medians `compound report` prints from one day of that
+  machine's event log: 762 ms for the reuse question (36 calls) and 690 ms for the
+  question after a failed call (16 calls). For the prompts where something was offered
+  that day, the whole check took a median of 1.2 seconds (19 prompts).
+
+A smaller store and a shorter prompt log cost less, and `compound report` prints the
+figures of your own log. compound never holds your work for long: a guard check that has
+not answered in 1.5 seconds is abandoned and the call runs. Any other check that makes a
+tool call or a stop wait has 2 seconds, a check at a typed prompt has 5, the model has
+`COMPOUND_JUDGE_TIMEOUT` seconds, and a CLI call that runs out is not tried again in that
+turn.
 
 ## Troubleshooting
 
@@ -504,6 +551,7 @@ exits 1 when a row fails.
 | `mod last fired` | WARN: never, or nothing in the last 7 days | start a new Claude Code session and work in it; a new install shows this until compound first acts |
 | `cli` | WARN: not on `PATH` | add the line the row prints to your shell profile and open a new shell |
 | `cli` | WARN: `compound` on `PATH` is another program | remove or rename the other one, or put this package's directory first on `PATH` |
+| `cli` | WARN: `compound` is not on `PATH`, and no link is recorded | run `compound install` by its full path (`~/.claude/compound/app/bin/compound install`) |
 | `prompt log` | WARN: `surfer` is not on `PATH`, or it exited with an error | install [history-surfer](https://github.com/ContextLab/claude-history-surfer); without it the reuse check sees no earlier requests, and everything else works |
 | `last event` | WARN: no events yet | nothing; it passes after the first event |
 | `last event` | WARN: lines do not parse | the bad lines of `~/.claude/compound/events.jsonl` are skipped; delete them to clear the warning |

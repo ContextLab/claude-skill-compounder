@@ -285,5 +285,127 @@ class WordingTest(unittest.TestCase):
                 found = words.search(line)
                 self.assertIsNone(found, "%s:%d: %s" % (rel, number, line.strip()))
 
+
+DOCUMENTS = (("README.md",), ("docs", "guide.md"), ("docs", "design.md"), ("CONTRIBUTING.md",))
+
+
+def prose(text):
+    """A document without its fenced blocks: what is in one is an example, not a link or a heading."""
+    return re.sub(r"(?ms)^```.*?^```[^\n]*$", "", text)
+
+
+def anchors(text):
+    """The anchors GitHub gives the headings of a Markdown document."""
+    seen = {}
+    out = set()
+    for title in re.findall(r"(?m)^#{1,6} +(.+?)\s*$", prose(text)):
+        slug = re.sub(r"[^a-z0-9 _-]", "", title.lower()).replace(" ", "-")
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        out.add(slug if count == 0 else "%s-%d" % (slug, count))
+    return out
+
+
+class LinkTest(unittest.TestCase):
+    LINK = re.compile(r"\[[^\]\n]*\]\(([^)\s]+)\)|(?:src|href)=\"([^\"]+)\"")
+
+    def test_every_relative_link_and_anchor_in_the_documents_resolves(self):
+        checked = 0
+        for rel in DOCUMENTS:
+            text = read(*rel)
+            base = os.path.dirname(os.path.join(REPO, *rel))
+            for found in self.LINK.finditer(prose(text)):
+                target = found.group(1) or found.group(2)
+                if re.match(r"[a-z]+:", target):
+                    continue  # an external address: fetched by hand, not by a test
+                path, _, anchor = target.partition("#")
+                where = os.path.normpath(os.path.join(base, path)) if path else os.path.join(REPO, *rel)
+                self.assertTrue(os.path.exists(where), "%s links to %s, which does not exist" % ("/".join(rel), target))
+                if anchor:
+                    self.assertTrue(where.endswith(".md"), "%s: an anchor into a file that is not Markdown: %s" % ("/".join(rel), target))
+                    with open(where, encoding="utf-8") as handle:
+                        self.assertIn(anchor, anchors(handle.read()),
+                                      "%s links to %s, and that file has no such heading" % ("/".join(rel), target))
+                checked += 1
+        self.assertGreaterEqual(checked, 40, "the link pattern found too few links to be reading the documents")
+
+    def test_the_anchor_rule_is_githubs(self):
+        self.assertEqual(anchors("# A\n## Read `compound status`\n### 1. Reuse before building\n## A\n```\n# not one\n```\n"),
+                         {"a", "read-compound-status", "1-reuse-before-building", "a-1"})
+
+
+class GuideTest(Case):
+    def subcommands(self):
+        listing = self.box.run("--help").stdout.split("COMMAND\n", 1)[1].split("\n\n", 1)[0]
+        names = re.findall(r"^    ([a-z]+)(?:\s|$)", listing, re.M)
+        self.assertGreaterEqual(len(names), 20, names)
+        return names
+
+    def test_every_subcommand_is_in_the_guide(self):
+        guide = read("docs", "guide.md")
+        section = guide.split("## Every command", 1)[1]
+        for name in self.subcommands():
+            self.assertIn("`compound %s`" % name, section, "the guide's command table lacks `compound %s`" % name)
+        for name in re.findall(r"`compound ([a-z]+)`", section):
+            self.assertIn(name, self.subcommands(), "the guide's command table names a command the CLI does not have")
+
+    def test_every_event_type_is_in_the_guides_table(self):
+        cli = read("bin", "compound")
+        types = re.findall(r'"([a-z]+)"', cli.split("EVENT_TYPES = (", 1)[1].split(")", 1)[0])
+        rows = table_rows(read("docs", "guide.md"), "The columns are how long ago the event was")
+        self.assertEqual(sorted(cells[0].strip("`") for cells in rows), sorted(types))
+
+    def test_the_guide_names_the_rows_and_sections_status_prints(self):
+        guide = read("docs", "guide.md")
+        cli = read("bin", "compound")
+        status = guide.split("## Read `compound status`", 1)[1].split("\n## ", 1)[0]
+        for title in re.findall(r'head\("([A-Z][a-z ]+)"\)', cli.split("def cmd_status(", 1)[1].split("\ndef cmd_", 1)[0]):
+            self.assertIn("| %s |" % title, status, "the guide's table of sections lacks %r" % title)
+        labels = [cells[0].strip("`") for cells in table_rows(status, "The rows under `Open`:")]
+        self.assertGreaterEqual(len(labels), 7)
+        for label in labels:
+            self.assertRegex(cli, r'out\("  %s +%%s|paint\("%s", RED\)' % (label, label),
+                             "the guide names an Open row %r that `status` does not print" % label)
+        for gone in ("USE/GRD/RCL", "| `skipped` |", "| `unsettled` |", "\nStore\n"):
+            self.assertNotIn(gone, guide)
+
+    def test_the_guides_examples_can_be_printed_again(self):
+        """The guide says which script prints its outputs; the script exists and names no real directory."""
+        guide = read("docs", "guide.md")
+        self.assertIn("dev/guide_examples.py", guide)
+        script = read("dev", "guide_examples.py")
+        self.assertIn("--claude-dir", script)
+        self.assertNotIn("expanduser", script)
+
+
+class PoolTest(unittest.TestCase):
+    def test_the_readme_and_the_design_list_everything_the_pool_ships(self):
+        lessons = sorted(name for name in os.listdir(os.path.join(REPO, "lessons")) if not name.startswith("."))
+        skills = sorted(name for name in os.listdir(os.path.join(REPO, "skills")) if not name.startswith("."))
+        self.assertGreaterEqual(len(lessons), 6)
+        self.assertGreaterEqual(len(skills), 4)
+        readme = read("README.md").split("### The lessons that ship with compound", 1)[1].split("\n## ", 1)[0]
+        design = read("docs", "design.md").split("## The general pool", 1)[1].split("\n## ", 1)[0]
+        def named(text, header):
+            # The table whose header row starts with `header`: its first column.
+            return sorted(cells[0].strip("`") for cells in table_rows(text.replace(header, "TABLE\n" + header, 1), "TABLE\n"))
+
+        for text, name in ((readme, "README.md"), (design, "docs/design.md")):
+            self.assertEqual(named(text, "| Lesson |"), lessons, name)
+            self.assertEqual(named(text, "| Skill |"), skills, name)
+
+    def test_the_readme_shows_every_health_row(self):
+        readme = read("README.md")
+        checks = [cells[0].strip("`") for cells in table_rows(read("docs", "design.md"), "The health checks, in order:")]
+        self.assertEqual(len(checks), 10, checks)
+        sample = readme.split("Right after install, the report looks like this", 1)[1].split("```", 2)[1]
+        trouble = readme.split("## Troubleshooting", 1)[1].split("\n## ", 1)[0]
+        for name in checks:
+            self.assertRegex(sample, r"(?m)^  (PASS|WARN|FAIL)  %s  " % re.escape(name))
+            self.assertIn("| `%s` |" % name, trouble)
+        for title in ("Health", "Compound interest", "Levels", "Lessons", "Recent", "Open"):
+            self.assertRegex(sample, r"(?m)^%s$" % title)
+
+
 if __name__ == "__main__":
     unittest.main()

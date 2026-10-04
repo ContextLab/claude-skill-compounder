@@ -12,7 +12,8 @@
 #   dev/demo.sh join CUTS        cut and join the takes into docs/media/demo.gif
 #
 # A good `learn` take is one whose event log shows capture (a failure, then its fix) and
-# learn. Scene 1 is wanted with a real failure first: when the session converts the file
+# learn with "guard": true: scene 3 shows a guard, so the lesson must carry a pattern
+# (2026-10-04, after the fix judge was made stricter: 2 of 5 takes captured, 1 of them a guard). Scene 1 is wanted with a real failure first: when the session converts the file
 # on its first try there is no capture, so run `dev/demo.sh world` and `learn` again.
 # The request says "Use Python": without it the session often converts the file by hand
 # or checks the Python version first (headless, 2026-10-04: 0 of 5 without, 11 of 15 with).
@@ -185,17 +186,19 @@ join() { # join <cuts file>
   while read -r a b c d; do
     case "$a" in ''|'#'*) continue ;; esac
     if [ "$a" = still ]; then
-      ffmpeg -v error -y -ss "$c" -i "$takes/$b" -frames:v 1 "$out/$d" </dev/null
+      # A screen of text has few colours: a palette PNG is a third of the size and reads the same.
+      ffmpeg -v error -y -ss "$c" -i "$takes/$b" -frames:v 1 \
+        -vf "split[a][b];[a]palettegen=max_colors=255:stats_mode=single[p];[b][p]paletteuse=dither=none" "$out/$d" </dev/null
       continue
     fi
     n=$((n + 1))
     piece="$work/$(printf '%03d' "$n").mp4"
-    ffmpeg -v error -y -ss "$b" -to "$c" -i "$takes/$a" -an -r "${DEMO_FPS:-10}" \
+    ffmpeg -v error -y -ss "$b" -to "$c" -i "$takes/$a" -an -r "${DEMO_FPS:-8}" \
       -c:v libx264 -preset veryfast -crf 14 -pix_fmt yuv420p "$piece" </dev/null
     echo "file '$piece'" >> "$work/list.txt"
   done < "$1"
   ffmpeg -v error -y -f concat -safe 0 -i "$work/list.txt" -c copy "$work/all.mp4" </dev/null
-  filters="fps=${DEMO_FPS:-10},scale=${DEMO_WIDTH:-1000}:-1:flags=lanczos"
+  filters="fps=${DEMO_FPS:-8},scale=${DEMO_WIDTH:-1000}:-1:flags=lanczos"
   ffmpeg -v error -y -i "$work/all.mp4" -vf "$filters,palettegen=max_colors=${DEMO_COLORS:-128}:stats_mode=diff" "$work/palette.png" </dev/null
   ffmpeg -v error -y -i "$work/all.mp4" -i "$work/palette.png" \
     -lavfi "$filters [x]; [x][1:v] paletteuse=dither=none:diff_mode=rectangle" "$out/demo.gif" </dev/null
