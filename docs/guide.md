@@ -120,10 +120,15 @@ compound find toml python
 ```
 
 ```
-lesson python3-no-tomllib-use-tomli (project) [2/2 words]: Use when reading a TOML file with Python older than 3.11.
+lesson python3-no-tomllib-use-tomli (project) [2 of 2 words: toml, python]: Use when reading a TOML file with Python older than 3.11.
   -> /Users/me/proj/.claude/compound/lessons/python3-no-tomllib-use-tomli
 prompt log: no earlier request matches
 ```
+
+The bracket says how many of your words the entry holds, and which. Entries are ranked by
+how rare those words are among everything recorded, not by how many match: a word one
+lesson carries outweighs several that most of them carry. Word forms match, so `installs`
+finds `installing`.
 
 List everything. `USE/GRD/RCL` counts how often each one was reused, stopped a call as a
 guard, and was recalled:

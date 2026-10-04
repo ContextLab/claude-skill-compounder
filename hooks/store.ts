@@ -132,6 +132,43 @@ export function parseEarlier(stdout: string, session: string, mine: readonly str
   return out
 }
 
+// A request the CLI holds a verdict for: what the judge answered the last time this text was
+// asked in this project against this store.
+export type Memo = { verdict: 'named' | 'nothing' | 'not-substantial'; items: string[]; earlier: Earlier[] }
+// `compound find --request --json`: the words the prompt log was searched for, the
+// candidates that reached the floor, the candidate earlier requests, the key the verdict is
+// remembered under, and the verdict already remembered, if there is one.
+export type Found = { words: string[]; items: Item[]; earlier: Earlier[]; key: string; memo: Memo | undefined }
+
+export function parseFound(stdout: string, session: string, mine: readonly string[], most: number): Found | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined) return undefined
+  const earlier = parseEarlier(stdout, session, mine, most)
+  if (earlier === undefined) return undefined
+  const words = Array.isArray(o.words) ? o.words.filter((w): w is string => typeof w === 'string') : []
+  const items = (rows(o, ['items']) ?? []).map(itemOf).filter((i): i is Item => i !== undefined)
+  const m = record(o.memo)
+  const verdict = m?.verdict
+  let memo: Memo | undefined
+  if (m !== undefined && (verdict === 'named' || verdict === 'nothing' || verdict === 'not-substantial')) {
+    const names = Array.isArray(m.items) ? m.items.filter((n): n is string => typeof n === 'string') : []
+    // What was remembered is offered again as it was: nothing of it is this session's own prompt.
+    memo = { verdict, items: names, earlier: parseEarlier(JSON.stringify({ prompts: m.prompts ?? [] }), '', [], most) ?? [] }
+  }
+  return { words, items, earlier, key: str(o.memo_key), memo }
+}
+
+// What `compound memo` reads on stdin: the verdict on a request, with the names and the
+// earlier requests it named, as the CLI's own `find` rows.
+export function memoOf(key: string, verdict: Memo['verdict'], items: readonly Item[], earlier: readonly Earlier[]): string {
+  return JSON.stringify({
+    key,
+    verdict,
+    items: items.map(i => i.name),
+    prompts: earlier.map(e => ({ id: e.id, ts: e.date, project: e.project, session: e.session, prompt: e.text })),
+  })
+}
+
 // `since` is how many recalls are later than the lesson's last rewrite, and `limit` how many
 // make it ineffective; both are undefined when the CLI did not say. `guarded` is whether
 // the lesson's guard refused a call in this session, which is the CLI's to say too: a

@@ -59,6 +59,12 @@ compound find "<keywords from the command and the error>"
 If a lesson or skill already covers this, improve that one with `--update` (step 6). Do
 not add a second lesson for the same mistake. `compound show <name>` prints one in full.
 
+`compound add` refuses the plainest cases itself, with exit 2 and a message that says what
+it found: a text that is a copy of a lesson you can see (update the one it names, or pass
+`--new` if yours is a different lesson), and a text that names a scratch path, a session
+id or "this session" (say it so that a later session can follow it, or pass
+`--as-written`).
+
 ## 4. Choose the form.
 
 | Form | Choose it when | How |

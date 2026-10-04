@@ -142,22 +142,31 @@ firing is never silent.
 For a prompt the user typed that is at least `COMPOUND_PROMPT_MIN_CHARS` long, the mod
 works in this order:
 
-1. **Gather candidates.** It asks the CLI for the inventory (every lesson and skill at
-   all three levels, and the project's scripts; the package's own `learn` and `reuse`
-   skills are left out). It takes the prompt's significant words (its words in order,
-   minus a fixed list of stopwords, with no model involved) and runs them through
-   `compound find --json`. Logged prompts that share at least a third of those words,
-   and never fewer than two, are candidate earlier requests.
-2. **Ask once.** One model call sees the prompt, the inventory and the candidate earlier
-   requests together, and answers: is this a substantial build task, and which entries and
-   which earlier requests genuinely cover part of it? Sharing a word or a topic is not
-   covering, and an earlier request for a different change to the same thing is not one.
-   A request to run a named command, script, test or build and report its output is not
-   a build task, however long it is.
-3. **Add only what was named.** Whatever the model names is added to the prompt as
-   context. A prompt that is not a substantial build task, or for which the model names
-   nothing, adds nothing at all. With an empty inventory and no candidate, no model call
-   is made.
+1. **Gather candidates.** It hands the prompt to the CLI (`compound find --request
+   --json`, the prompt on stdin), which ranks every lesson and skill at all three levels
+   and the project's scripts against it (the package's own `learn` and `reuse` skills are
+   left out) and searches the prompt log, with no model involved. What comes back is
+   described under "How candidates are ranked": the entries whose weight reaches the
+   floor, and the logged prompts that carry enough of the prompt's rare words.
+2. **Ask once, or not at all.** With no candidate of either kind, no model call is made.
+   Otherwise one model call sees the prompt, the candidate entries and the candidate
+   earlier requests together, and answers: is this a substantial build task, and which
+   entries and which earlier requests genuinely cover part of it? Each one it names it
+   must name together with a quote, the words of the prompt that ask for the part it
+   covers. Sharing a word or a topic is not covering, and an earlier request for a
+   different change to the same thing is not one. A request to run a named command,
+   script, test or build and report its output is not a build task, however long it is.
+3. **Add only what was named, and tied to the prompt.** A name whose quote is not words
+   of the prompt (at least two words, or one of five letters or more, in the prompt's
+   order) is dropped, and the `judge` event counts those under `unquoted`. Whatever is
+   left is added to the prompt as context. A prompt that is not a substantial build
+   task, or for which nothing is left, adds nothing at all.
+4. **Remember the verdict.** The mod gives the verdict to the CLI (`compound memo`),
+   which keeps it under a key made of the project, the prompt's text, the floor and the
+   content of everything the prompt was ranked against. The same prompt in the same
+   project against an unchanged store gets its verdict from there: no model is asked,
+   the prompt log is not searched again, and what was named the first time is added
+   again. See "The memo".
 
 ```
 [compound] Reuse before building.
@@ -171,6 +180,44 @@ The compound:reuse skill has the procedure. `<cli> show <name>` prints a lesson.
 ```
 
 `<cli>` stands for the absolute path of the package's `bin/compound`.
+
+**How candidates are ranked.** `compound find` weighs words; it does not count them.
+
+- Words are compared by a light stem: the plural, `-ing` and `-ed` endings and a final
+  `e` are dropped, so `install`, `installs`, `installing` and `installed` are one word.
+- A word's **rarity** is read from the store itself: 1 for a word that one entry carries,
+  falling on a log scale to 0 for a word every entry carries (`1 - ln(entries that carry
+  it) / ln(entries)`; a store of fewer than 20 entries is read as 20). A word on the
+  CLI's list of common words (the everyday words of English and the verbs and nouns
+  nearly every request carries: `use`, `file`, `current`, `make`) counts for a tenth of
+  its rarity.
+- An entry's **weight** is the sum of the rarity of the words it shares with the query. A
+  word found only in the body counts for half, and everything found in the body together
+  for at most 1: a long body holds a little of every subject. Entries are ranked by
+  weight, and each row of `find --json` carries `weight`, `score` (how many of the
+  query's words it holds) and `matched` (which).
+- `compound find WORDS` lists every entry with a weight above zero. `compound find
+  --request` reads a whole request and lists **candidates** only: entries whose weight
+  reaches the floor (`COMPOUND_REUSE_FLOOR`, 1.5 by default, or `--floor`), and at least
+  a third of the best candidate's weight. With `--floor 0` every entry that shares a
+  word is listed.
+- The prompt log is searched for at most ten words of the request: none of the common
+  ones, the ones that are rare in the store first, in the request's order. A logged
+  prompt is matched on what is shown of it, its first 300 characters. A word counts for
+  its rarity among the prompts the search returned; a hit's `weight` is its share of the
+  weight of all the search words, and its `score` how many it holds. For a request, a
+  hit must hold two of the words and a third of their weight.
+
+**The memo.** `<COMPOUND_HOME>/memo.json` holds the verdicts of judged requests: for each
+key, the verdict (`named`, `nothing` or `not-substantial`), the names it named and the
+earlier requests it named. Only the CLI reads or writes it. The key is a digest of the
+project root, the request's text with its white space squeezed, the floor, the limit, and
+the level, kind, name, description and body of every lesson, skill and script the request
+was ranked against: adding, rewriting or removing any of them changes the key, so a
+changed store is asked about again, and a store put back as it was finds its verdict
+again. A verdict is kept for 7 days and the memo holds the newest 200. A memo that does
+not read is an empty one. An answer that was no verdict (no reply, or an unreadable one)
+is not kept.
 
 ### 2. Guard: a tool call is about to run
 
@@ -373,12 +420,35 @@ user wants recorded, it asks the user before writing anything.
 2. If what to record is unclear, ask the user.
 3. Run `compound find "<keywords>"`. If a lesson or skill already covers it, update or
    broaden that one (`compound add --update`, with `--body` for new text). Do not add a
-   second.
+   second. `compound add` refuses the plainest cases itself (see "What `add` refuses").
 4. Choose the form: a lesson; a guard, when the mistake is a recognizable command; a
    script attached to the lesson, when the fix is a procedure worth running; a skill,
    when there are steps and a routable trigger.
 5. Choose the level by the rule above.
 6. Write it with `compound add`, which validates the format and logs the event.
+
+### What `add` refuses
+
+Beyond a bad name, an empty body and a name already taken, `compound add` refuses two
+kinds of text, with exit 2, a message that says what it found, and nothing written:
+
+- **A second copy of a lesson.** A new lesson is compared with every lesson and skill the
+  session can see. It is a copy when its description and body are the same words as
+  another's (case, spacing and punctuation aside); or when 80% of the weight of the
+  words is shared in the description and in the body both (words weigh what they do in
+  `find`); or when it carries the same `--match` patterns under a description that shares
+  80%. Texts too short to tell are not compared: the similar-text rules need four
+  uncommon words in the description and eight in the body, the same-words rule one of
+  the two. Two lessons about one subject, or under one description with different
+  bodies, are two lessons. The message names the existing lesson, its path and
+  `compound add --update --name <it>`; `--new` records the lesson anyway. `--update` is
+  never compared.
+- **Text only its own session can read.** A description or a new body that holds a
+  temporary path of one session (`/tmp/claude-…`, `/private/tmp/claude-…`,
+  `/var/folders/…`, an absolute path through `/scratchpad/`, a path under
+  `.claude/worktrees/`), a session id (a UUID), or the words `in this session` or `in
+  this conversation`. The message quotes what it found; `--as-written` records the text
+  as it is. `--update` without a new body or description reads nothing.
 
 ## When a lesson does not work
 
@@ -503,7 +573,10 @@ or recorded. Every new failure is reported, each one once.
   whatever the answer: `moment` (`reuse`, `recall` or `fix`), `verdict` (`named`,
   `nothing` or `not-substantial` for reuse; `named` or `none` for recall; `fix`, `known`
   or `none` for a fix; `unanswered` or `unreadable` for any), `ms` (the milliseconds the
-  model call took), and where there are any `named`, `reason`, `tool` and `prompt_id`.
+  model call took), and where there are any `named`, `reason`, `tool`, `prompt_id` and
+  `unquoted` (reuse: how many names the answer gave without words of the prompt). A
+  reuse verdict taken from the memo writes one too, with `memo: true` and `ms` 0, and
+  the `reuse` event it leads to carries `memo: true`.
   `ms` means the same on a `recall` and a `capture` event. The rate of each verdict, the
   timeouts and the model's latency are read from these. They are left out of Recent, in
   `compound status` and in the pane, and are counted for no lesson.
@@ -547,10 +620,11 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Logs `learn`. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. |
 | `compound show N` | One lesson's path and text. With `--json` also its counts, `recalls_since` (the recalls that count toward ineffective), `recur_limit`, and `guarded_in_session` (its guard refused a call in the caller's session). |
-| `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. |
+| `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`). An empty stdin is exit 2; a request with no word in it has no candidates. |
+| `compound memo` | stdin `{"key","verdict","items","prompts"}`: keeps the verdict on a request under the `memo_key` that `find --request --json` printed. `verdict` is `named`, `nothing` or `not-substantial`; `items` are names, `prompts` rows as `find` prints them. Anything else is exit 2. |
 | `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards that apply to that tool and match. `--guards` adds `"guards"`, the number of lessons that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote` when it moved or proposed something. |
@@ -582,13 +656,14 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_OFF` | unset | mod, CLI | `1` switches the mod off: no hook does anything and no event is written. `compound status` reports it. |
 | `COMPOUND_QUIET` | unset | mod | `1` turns the band above the prompt off. The status entry, the toasts and the `/compound` pane stay. |
 | `COMPOUND_PROMPT_MIN_CHARS` | 80 | mod | The shortest typed prompt the reuse check looks at. |
+| `COMPOUND_REUSE_FLOOR` | 1.5 | mod, CLI | The weight a lesson, skill or script must reach to be a candidate for a request (`compound find --request`): about one rare word in its name or description and one more in its body. `0` makes every entry that shares a word a candidate. The mod passes it to the CLI as `--floor`. |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | mod | Tool calls the main loop makes in a turn before the stop asks whether anything was learned. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
 | `COMPOUND_RECUR_LIMIT` | 2 | mod, CLI | Recurrences of a lesson, since it was last written, that make it ineffective. |
 | `COMPOUND_MODEL` | `haiku` | mod | The model that answers the mod's three questions: an alias or a model id. |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | mod | Seconds to wait for that model's answer. |
 | `COMPOUND_BIN` | `compound` on `PATH` | mod | The CLI the mod runs when the package holds no `bin/compound` of its own. |
-| `COMPOUND_HOME` | `<claude dir>/compound` | mod, CLI, installer | The user level's root: user lessons, the event log, the claims, the install record, and the clone `install.sh` makes. |
+| `COMPOUND_HOME` | `<claude dir>/compound` | mod, CLI, installer | The user level's root: user lessons, the event log, the claims, the memo, the install record, and the clone `install.sh` makes. |
 | `COMPOUND_CLAUDE_DIR` | `~/.claude` | mod, CLI, installer | The Claude Code directory: `settings.json` and the user skills. `install.sh` reads it only for the default of `COMPOUND_HOME`. |
 | `COMPOUND_PROJECT` | the git top level of the working directory, else the working directory | mod, CLI | The project root. Setting it runs the CLI as that project from anywhere, which is how a lesson of another project is moved: `COMPOUND_PROJECT=<its project> compound promote <name> --to user`. |
 | `COMPOUND_NOW` | the clock | CLI | Pins the time: epoch seconds or an ISO 8601 time. For tests. |
@@ -679,7 +754,7 @@ are the user's knowledge and stay, and so does the clone at `~/.claude/compound/
 what was kept (`<package>/bin/compound uninstall --purge`). A history-surfer that install fetched
 stays installed, and the output prints the command that removes it. `compound uninstall
 --purge` also runs that history-surfer's own `scripts/setup.py --uninstall`, and removes
-`~/.claude/compound`: the user-level lessons, the event log, the claims, the package clone
+`~/.claude/compound`: the user-level lessons, the event log, the claims, the memo, the package clone
 and the history-surfer clone. The prompts history-surfer stored are kept, and a
 history-surfer that install found already present is never touched. A checkout elsewhere that the package was installed from is never removed. Both
 leave skills in `<claude dir>/skills` where they are, lessons that became skills

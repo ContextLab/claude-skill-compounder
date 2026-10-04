@@ -6,6 +6,8 @@
             earlier request, and the session can say what it was told to reuse.
   other     a substantial prompt about something else, with a lesson and an earlier
             request that only share words with it: nothing is added, and no `reuse` event.
+  memo      the first prompt again in a new session: the same thing is added, and no
+            model is asked for it.
   trivial   a short prompt in the same project: no `reuse` event.
   command   a slash command long enough to pass the length test: no `reuse` event.
 
@@ -50,8 +52,25 @@ def main():
     s = w.session(project, OTHER, args.model)
     rows = w.events(project, session=s.sid)
     w.show("event", rows)
-    w.check("other", "a prompt that only shares words with the store and the log got nothing", rows == [],
-            ", ".join(e["type"] for e in rows))
+    # The lesson shares `settings` and `page` with the prompt, so the judge is asked: its
+    # verdict is logged, and it names nothing.
+    w.check("other", "a prompt that only shares words with the store and the log got nothing",
+            [e for e in rows if e["type"] != "judge"] == [], ", ".join(e["type"] for e in rows))
+    w.check("other", "the judge, if it was asked, named nothing",
+            all(e.get("verdict") in ("nothing", "not-substantial") for e in rows if e["type"] == "judge"),
+            [e.get("verdict") for e in rows])
+
+    # The first prompt again, in a new session: the verdict is in the memo and no model is asked.
+    s = w.session(project, PROMPT, args.model)
+    judged = [e for e in w.events(project, session=s.sid, kind="judge") if e.get("moment") == "reuse"]
+    rows = w.events(project, session=s.sid, kind="reuse")
+    w.show("event", judged + rows)
+    w.check("memo", "the same prompt in another session asked no model", len(judged) == 1 and judged[0].get("memo") is True
+            and judged[0].get("ms") == 0, judged)
+    w.check("memo", "and was given the same lesson and earlier request",
+            len(rows) == 1 and rows[0].get("lessons") == [LESSON] and "older-session-1:1" in rows[0].get("prompts", [])
+            and rows[0].get("memo") is True, rows)
+    w.check("memo", "the session was told again", LESSON in s.result, s.result[:200])
 
     s = w.session(project, "Say the single word hi.", args.model)
     w.check("trivial", "a short prompt wrote no reuse event", w.events(project, session=s.sid, kind="reuse") == [])

@@ -1,7 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  firstObject, fixPrompt, INVENTORY_MAX, listed, listedEarlier, named, parseFix, parseRecall, parseReuse, quoted, recallPrompt, reusePrompt,
-  candidateFloor, significantWords, STOPWORDS,
+  firstObject, fixPrompt, fromRequest, INVENTORY_MAX, listed, listedEarlier, named, parseFix, parseRecall, parseReuse, quoted, recallPrompt, reusePrompt,
 } from './judge'
 import type { Earlier, Item } from './store'
 
@@ -10,6 +9,8 @@ const ITEMS: Item[] = [item('script', 'scripts/release.sh'), item('skill', 'cdl-
 const LESSONS = ITEMS.filter(i => i.kind === 'lesson')
 const earlier = (id: string, text: string, project = 'alpha'): Earlier => ({ id, date: '2026-09-01', project, session: '', text, score: 2 })
 const EARLIER: Earlier[] = [earlier('s1:1', 'write a release script that tags the version'), earlier('s2:4', 'centre the login button', 'web')]
+const REQUEST = 'Please build a release script for this repo that tags the version, and add the missing citations to the paper.'
+const quoting = (name: string, quote = 'release script') => ({ name, quote })
 const ERROR = 'Exit code 2\nbuild.sh: error: a profile is required, e.g. ./build.sh --profile dev'
 
 // ---- prompts ----
@@ -34,7 +35,8 @@ test('each prompt carries its data and the one-line reply shape', async () => {
   const reuse = reusePrompt('Please build a release script for this repo', ITEMS)
   expect(reuse.includes('REQUEST:\nPlease build a release script for this repo')).toBe(true)
   expect(reuse.includes('scripts/release.sh [script, project]')).toBe(true)
-  expect(reuse.includes('{"substantial":true|false,"items":["<exact name>"],"requests":["<label>"]}')).toBe(true)
+  expect(reuse.includes('{"substantial":true|false,"items":[{"name":"<exact name>","quote":"<words copied from the REQUEST>"}],"requests":[{"label":"<label>","quote":"<words copied from the REQUEST>"}]}')).toBe(true)
+  expect(reuse.includes('With nothing to name: {"substantial":true,"items":[],"requests":[]}')).toBe(true)
   const recall = recallPrompt('./build.sh', ERROR, LESSONS)
   expect(recall.includes('FAILED CALL:\n./build.sh')).toBe(true)
   expect(recall.includes('{"name":null}')).toBe(true)
@@ -59,10 +61,49 @@ test('the object is found inside a fence or a sentence, and nothing else is one'
 })
 
 test('a reuse reply names inventory items and the earlier requests by label', async () => {
-  const a = parseReuse('{"substantial":true,"items":["scripts/release.sh","cdl-bib-cite"],"requests":["r1"]}', ITEMS, EARLIER)
+  const reply = JSON.stringify({
+    substantial: true,
+    items: [quoting('scripts/release.sh'), quoting('cdl-bib-cite', 'add the missing citations to the paper')],
+    requests: [{ label: 'r1', quote: 'a release script for this repo that tags the version' }],
+  })
+  const a = parseReuse(reply, REQUEST, ITEMS, EARLIER)
   expect(a?.substantial).toBe(true)
   expect(a?.items.map(i => i.name)).toEqual(['scripts/release.sh', 'cdl-bib-cite'])
   expect(a?.earlier.map(e => e.id)).toEqual(['s1:1'])
+  expect(a?.unquoted).toBe(0)
+})
+
+test('what a reuse reply names without words of the request is dropped, and counted', async () => {
+  // The shape the judge was first asked for: names alone. Nothing ties them to the request.
+  const bare = parseReuse('{"substantial":true,"items":["scripts/release.sh","cdl-bib-cite"],"requests":["r1"]}', REQUEST, ITEMS, EARLIER)
+  expect(bare).toEqual({ substantial: true, items: [], earlier: [], unquoted: 3 })
+  const reply = JSON.stringify({
+    substantial: true,
+    items: [
+      quoting('scripts/release.sh', 'RELEASE   script,'),
+      quoting('cdl-bib-cite', 'cite the papers in the bibliography'),
+      quoting('build-needs-profile', ''),
+      { name: 'build-needs-profile' },
+    ],
+    requests: [{ label: 'r1', quote: 'tags the version' }, { label: 'r2', quote: 'it is about the same page' }, { label: 'r2' }],
+  })
+  const a = parseReuse(reply, REQUEST, ITEMS, EARLIER)
+  expect(a?.items.map(i => i.name)).toEqual(['scripts/release.sh'])
+  expect(a?.earlier.map(e => e.id)).toEqual(['s1:1'])
+  expect(a?.unquoted).toBe(5)
+  // An entry dropped for its quote can still be named again with a real one.
+  const twice = parseReuse(JSON.stringify({ substantial: true, items: [quoting('cdl-bib-cite', 'nothing like it'), quoting('cdl-bib-cite', 'missing citations')], requests: [] }), REQUEST, ITEMS, EARLIER)
+  expect(twice?.items.map(i => i.name)).toEqual(['cdl-bib-cite'])
+})
+
+test('a quote is words of the request, in order, whatever the case and the punctuation', async () => {
+  for (const quote of ['release script', 'Release  Script', 'build a release script for this repo', 'citations', 'tags the version, and add', '"release script"']) {
+    expect(fromRequest(quote, REQUEST)).toBe(true)
+  }
+  // Not in the request, in another order, half a word, one short word, or nothing.
+  for (const quote of ['deploy script', 'script release', 'releas', 'cit', 'repo', 'the', '', '   ', '...']) {
+    expect(fromRequest(quote, REQUEST)).toBe(false)
+  }
 })
 
 test('a name is read as the model decorates it, and never guessed from a fragment', async () => {
@@ -77,17 +118,19 @@ test('a name is read as the model decorates it, and never guessed from a fragmen
 })
 
 test('a reuse reply cannot invent an item, repeat one, or reuse anything for a trivial prompt', async () => {
-  const invented = parseReuse('{"substantial":true,"items":["made-up","scripts/release.sh","scripts/release.sh"],"requests":[]}', ITEMS, EARLIER)
+  const invented = parseReuse(JSON.stringify({ substantial: true, items: [quoting('made-up'), quoting('scripts/release.sh'), quoting('scripts/release.sh')], requests: [] }), REQUEST, ITEMS, EARLIER)
   expect(invented?.items.map(i => i.name)).toEqual(['scripts/release.sh'])
-  const trivial = parseReuse('{"substantial":false,"items":["scripts/release.sh"],"requests":["r1"]}', ITEMS, EARLIER)
-  expect(trivial).toEqual({ substantial: false, items: [], earlier: [] })
+  expect(invented?.unquoted).toBe(0)
+  const trivial = parseReuse(JSON.stringify({ substantial: false, items: [quoting('scripts/release.sh')], requests: [{ label: 'r1', quote: 'release script' }] }), REQUEST, ITEMS, EARLIER)
+  expect(trivial).toEqual({ substantial: false, items: [], earlier: [], unquoted: 0 })
 })
 
 test('an earlier request is named by its label or its id, never invented, never twice; a missing list names none', async () => {
-  const a = parseReuse('{"substantial":true,"items":[],"requests":["r2","R2","2","r9","r0","s1:1","nonsense",7]}', ITEMS, EARLIER)
+  const labels = ['r2', 'R2', '2', 'r9', 'r0', 's1:1', 'nonsense'].map(label => ({ label, quote: 'release script' }))
+  const a = parseReuse(JSON.stringify({ substantial: true, items: [], requests: [...labels, 7] }), REQUEST, ITEMS, EARLIER)
   expect(a?.earlier.map(e => e.id)).toEqual(['s2:4', 's1:1'])
-  expect(parseReuse('{"substantial":true,"items":[]}', ITEMS, EARLIER)).toEqual({ substantial: true, items: [], earlier: [] })
-  expect(parseReuse('{"substantial":true,"items":[],"requests":["r1"]}', ITEMS, [])?.earlier).toEqual([])
+  expect(parseReuse('{"substantial":true,"items":[]}', REQUEST, ITEMS, EARLIER)).toEqual({ substantial: true, items: [], earlier: [], unquoted: 0 })
+  expect(parseReuse('{"substantial":true,"items":[],"requests":[{"label":"r1","quote":"release script"}]}', REQUEST, ITEMS, [])?.earlier).toEqual([])
 })
 
 // ---- the one reuse question ----
@@ -100,6 +143,11 @@ test('the reuse question shows inventory and candidate requests together and ask
   expect(p.includes('asked for the SAME deliverable as this request')).toBe(true)
   expect(p.includes('asks for a DIFFERENT change is not one')).toBe(true)
   expect(p.includes('an empty list is the usual answer')).toBe(true)
+  // Whatever is named is tied to the request's own words, and a shared word is said to prove nothing.
+  expect(p.includes('Name an entry only together with a quote: the exact words of the REQUEST')).toBe(true)
+  expect(p.includes('Name one only together with a quote: the exact words of the REQUEST')).toBe(true)
+  expect(p.includes('so a shared word proves nothing')).toBe(true)
+  expect(p.includes('is the subject of the work, not existing work that covers it')).toBe(true)
   expect(p.indexOf('Inventory,') < p.indexOf('Earlier requests,') && p.indexOf('Earlier requests,') < p.indexOf('REQUEST:')).toBe(true)
   expect(reusePrompt('x', ITEMS).includes('Earlier requests, one per line as "label [project]: text":\n(none)')).toBe(true)
   expect(listedEarlier([earlier('a', `deploy with TOKEN=abcdef123456 ${'x'.repeat(400)}`)]).includes('TOKEN=<redacted>')).toBe(true)
@@ -127,25 +175,6 @@ test('every question declares the recorded names and descriptions as data, and a
   expect(listed([item('lesson', 'leaky', 'user', 'Use when API_KEY=abcdef123456 is set.')]).includes('abcdef123456')).toBe(false)
 })
 
-// ---- significant words ----
-
-test('a candidate earlier request shares a third of the significant words, and at least two', async () => {
-  expect([0, 1, 2, 3, 4, 6, 7, 8, 10].map(candidateFloor)).toEqual([0, 1, 2, 2, 2, 2, 3, 3, 4])
-})
-
-test('the significant words of a prompt are its content words, in order, once each, without a model', async () => {
-  const prompt = 'I need a shell script for this project that tags a new release, updates the changelog and pushes the tag to the remote.'
-  expect(significantWords(prompt)).toEqual(['shell', 'script', 'tags', 'release', 'changelog', 'pushes', 'tag', 'remote'])
-  expect(significantWords(prompt)).toEqual(significantWords(prompt))
-  expect(significantWords('Fix the Parser parser PARSER in src/parser.py, version 2 of 10')).toEqual(['parser', 'src', 'version'])
-  expect(significantWords('please can you just do it now')).toEqual([])
-  expect(significantWords('')).toEqual([])
-  expect(significantWords('alpha beta gamma delta epsilon zeta', 4)).toEqual(['alpha', 'beta', 'gamma', 'delta'])
-  expect(significantWords(Array.from({ length: 40 }, (_, i) => `word${i}x`).join(' ')).length).toBe(10)
-  for (const w of ['the', 'and', 'please', 'write', 'fix', 'code', 'file', 'project']) expect(STOPWORDS.has(w)).toBe(true)
-  for (const w of ['release', 'changelog', 'docker', 'bibliography']) expect(STOPWORDS.has(w)).toBe(false)
-})
-
 test('a malformed reuse reply is unreadable, not a no', async () => {
   for (const bad of [
     '',
@@ -158,7 +187,7 @@ test('a malformed reuse reply is unreadable, not a no', async () => {
     '{"substantial":true,"items":[],"keywords":[',
     '[true,[],[]]',
   ]) {
-    expect(parseReuse(bad, ITEMS)).toBe(undefined)
+    expect(parseReuse(bad, REQUEST, ITEMS)).toBe(undefined)
   }
 })
 
