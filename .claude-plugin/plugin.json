@@ -1,6 +1,6 @@
 {
   "name": "compound",
-  "version": "1.0.0",
+  "version": "0.4.0",
   "description": "Checks for existing work before a substantial task, and has the lesson written down after a problem is solved.",
   "author": { "name": "Jeremy Manning" },
   "types": "./types/index.d.ts"
