@@ -18,8 +18,8 @@ can write" in `docs/design.md`, with what is and is not defended.
 ## Findings
 
 Every one was reproduced by a test that fails on the base commit and passes now. The CLI
-tests are `tests/test_security.py` (16 tests; 14 fail on base, 2 are controls). The mod
-tests are `hooks/security.test.ts` (17 tests). How the base failures were shown: the base
+tests are `tests/test_security.py` (17 tests; 15 fail on base, 2 are controls). The mod
+tests are `hooks/security.test.ts` (20 tests). How the base failures were shown: the base
 tree was exported with `git archive`, the new test files copied in, and both suites run
 there (the hook file with the five tests of new exports left out: 12 of the remaining 12
 failed on an assertion).
@@ -35,7 +35,22 @@ failed on an assertion).
 | 7 | `promote --to general --yes` would publish a lesson holding a credential to a public fork | Medium | yes (the plan showed it and `--yes` did not stop) | `PublishTest` | `secret_findings`: the plan lists `secrets`, `--yes` exits 2 before anything is cloned |
 | 8 | A project lesson directory, or its `SKILL.md`, that is a symbolic link out of the project was loaded | Low | yes | `ShadowTest.test_a_project_lesson_that_is_a_link_out_of_the_project_is_not_used` | reported under `lessons parse`, not used; `rm` removes the link only |
 
+| 9 | Terminal escape injection on the band and the pane (a fourth notice, title only: "terminal-escape-injection in hooks/view.ts"), and in the CLI's text output. A lesson name, a call, an event field or a status detail carrying `ESC[..m`, an OSC title or hyperlink, `\r`, `\b` or a C1 control was drawn as it was: `view.ts` read the CLI's JSON through `str()` with no cleaning, and `bandRow`/`boardLines` returned it | Medium | yes | `no control character is in what the band draws ...`, `no control character is in what the pane draws ...`, `through the hooks: every text the band and the pane hand a surface ...`; `TerminalTest.test_on_a_terminal_no_command_writes_a_control_character_but_its_own_colours` (a real pseudo-terminal) | `view.ts`: `str()` cleans at intake, `bandRow` and `boardLines` clean every segment at output (`safe.ts drawn`). CLI: `TerminalText` wraps stdout and stderr when they are a terminal and drops every control character but a newline, a tab and an SGR colour sequence |
+
 Findings 5 to 8 are this review's own (the notices named two more without detail).
+Finding 9 arrived while the work was under way.
+
+**Track E.** The coordinator asked for `origin/main` to be merged once track E's lesson
+view landed, and for that view to be covered. At the time of the final commit
+`origin/main` was still `6210e49` (fetched; "Already up to date"), so track E's code was
+NOT seen and NOT tested here. What will cover it when it merges: any string it reads from
+`compound show --json` through `view.ts str()` is cleaned at intake, and any row it
+returns through `boardLines` is cleaned at output. If track E adds a new function that
+hands rows to `register.ts` without going through `boardLines`, wrap its return in
+`clean` the same way, and add its rows to the pane test in `hooks/security.test.ts`
+(`PAINTED_STATUS`). Expect a small conflict where `boardLines` is declared: it is now a
+wrapper around `boardRows`. Residual: a colour sequence (`ESC[..m`) in a lesson body is
+let through by the CLI's terminal filter when `compound show` prints it.
 
 ## Looked at, nothing to fix
 
@@ -71,9 +86,6 @@ Findings 5 to 8 are this review's own (the notices named two more without detail
   design); it can make a session owe a lesson. The evidence is now quoted.
 - A hostile project guard still refuses a call once per session, and a pattern slow on a
   call costs that call up to 500 ms, every call. Both are logged.
-- `hooks/view.ts` (track E's) shows some CLI strings through `str()` without `oneLine`
-  (ids, names). `oneLine` now strips control characters where it is used; the rest is for
-  track E's merge.
 
 ## Decisions left to the owner
 
@@ -107,12 +119,12 @@ before, 63 ms after. The budget is 1500 ms.
 
 ## Checks at the end
 
-`./run_tests.sh`: 15 files, 507 tests, OK (491 before). `claude plugin validate --strict
-.`: passed. `claude plugin test .`: 190 pass, 0 fail (173 before).
+`./run_tests.sh`: 15 files, 508 tests, OK (491 before). `claude plugin validate --strict
+.`: passed. `claude plugin test .`: 193 pass, 0 fail (173 before).
 
 ## Files
 
 `bin/compound`, `hooks/render.ts`, `hooks/store.ts`, `hooks/safe.ts`, `hooks/judge.ts`,
 `skills/learn/SKILL.md`, `docs/design.md`, `docs/guide.md`, `tests/test_security.py`
-(new), `hooks/security.test.ts` (new), and the three test files above. `hooks/register.ts`
-and `hooks/view.ts` were not touched.
+(new), `hooks/security.test.ts` (new), `hooks/view.ts` (intake and output cleaning only), and the three test files above.
+`hooks/register.ts` was not touched.

@@ -7,6 +7,7 @@ import {
 } from './render'
 import { oneLine, plain, shq } from './safe'
 import { parseHits, parseInventory, parseOwed, parseUnsettled, slug, type Item } from './store'
+import { bandRow, boardFrom, boardLines, captured, forSession, noted, reuseFound, weakened } from './view'
 
 // WHAT THE MOD READS IS NOT ITS OWN. A lesson is a file anyone who can commit to a repository
 // can write; a call's error is whatever a tool printed; the event log and the CLI's JSON are
@@ -190,17 +191,17 @@ test('the judge can name only a lesson it was offered, whatever the data told it
 
 // ---- the same, through the mod's hooks ----
 
-type World = { logged: Record<string, unknown>[]; judge: () => string; list: string; check: string; owed: string; unsettled: string; tool: () => { text: string; isError?: true }; asked: string[] }
+type World = { logged: Record<string, unknown>[]; judge: () => string; list: string; check: string; owed: string; unsettled: string; tool: () => { text: string; isError?: true }; asked: string[]; status: string; events: string }
 
 let worlds = 0
 
 // The world beneath the mod: the CLI's replies, the judge's answer and the tool's result
 // are the test's, and each test is a session and a project of its own.
-function world(on: On): World {
+function world(on: On, env: Record<string, string> = {}): World {
   worlds += 1
   const n = worlds
-  const w: World = { logged: [], judge: () => '{"name":null}', list: '[]', check: '{"hits":[],"guards":1,"tools":["Bash"]}', owed: '[]', unsettled: '[]', tool: () => ({ text: 'ok' }), asked: [] }
-  mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_QUIET: '1' })
+  const w: World = { logged: [], judge: () => '{"name":null}', list: '[]', check: '{"hits":[],"guards":1,"tools":["Bash"]}', owed: '[]', unsettled: '[]', tool: () => ({ text: 'ok' }), asked: [], status: '{}', events: '[]' }
+  mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_QUIET: '1', ...env })
   on('session.id', () => ({ value: `security-session-${n}` }))
   on('session.root', () => ({ value: `/work/security-${n}` }))
   on('session.repo', () => ({ value: null }))
@@ -209,7 +210,8 @@ function world(on: On): World {
   on('command.register', () => ({ value: undefined }) as never)
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.panes', () => ({ value: [] }))
+  on('ui.panes', () => ({ value: env.PANE === '1' ? [{ id: 'compound', title: 'compound', isShown: true, isFocused: false, isPlaced: true }] : [] }))
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
   on('process.run', (_$, e) => {
     const argv = [...e.argv]
     const verb = argv[0]?.endsWith('/compound') ? argv[1] : argv[0]
@@ -220,7 +222,8 @@ function world(on: On): World {
     }
     if (verb === 'list') return done(w.list)
     if (verb === 'check') return done(w.check)
-    if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? w.owed : w.unsettled) : '[]')
+    if (verb === 'status') return done(w.status)
+    if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? w.owed : w.unsettled) : w.events)
     return done('')
   })
   on('model.complete', (_$, e) => {
@@ -230,6 +233,13 @@ function world(on: On): World {
   on('tool.call', () => ({ result: {}, ...w.tool() }) as never)
   on('classic.Stop', () => ({}) as never)
   on('prompt.submit', (_$, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
+  // What the engine would draw where the mod draws nothing.
+  for (const component of ['AbovePrompt', 'Pane'] as const) {
+    on('ui.render', { component }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return h(Text, null, 'beneath') as never
+    })
+  }
   return w
 }
 
@@ -300,4 +310,87 @@ test('through the hooks: an earlier session\'s capture with an id that is not on
   const said = (told.context ?? []).join('\n')
   expect(said).toContain('--settles ab12cd34')
   expect(outside(said).includes('evil.example')).toBe(false)
+})
+
+// ---- terminal escapes: what the band and the pane draw ----
+
+// A colour, a title (OSC), a hyperlink (OSC 8), a carriage return, a backspace, a bell, C1
+// controls, a line separator and a newline: none may reach a terminal from recorded text.
+const PAINT = '\u001b[31mRED\u001b[0m\u001b]0;owned\u0007\u001b]8;;http://evil.example\u001b\\link\u001b]8;;\u001b\\\rover\u0008\u009b2J\u0085\u2028x\ny'
+const UNDRAWN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
+
+test('no control character is in what the band draws, whatever a note, a call or a name holds', async () => {
+  const now = 1_800_000_000_000
+  const start = forSession(null, 's1')
+  const bands = [
+    noted(start, 'guard', `lesson${PAINT}`, now, `echo ${PAINT}`),
+    reuseFound(start, [`scripts/a${PAINT}.sh`, `skill${PAINT}`], 2, now),
+    captured(start, now, `./deploy.sh ${PAINT}`),
+    weakened(start, `weak${PAINT}`, now),
+    { ...start, note: { kind: 'recall' as const, text: PAINT, at: now, detail: PAINT }, owedText: PAINT, weak: [PAINT] },
+  ]
+  for (const band of bands) {
+    for (const columns of [200, 95, 40]) {
+      const row = bandRow(band, now, columns)
+      expect(row.length > 0).toBe(true)
+      for (const seg of row) expect(UNDRAWN.test(seg.text)).toBe(false)
+    }
+  }
+})
+
+const PAINTED_STATUS = JSON.stringify({
+  ok: false,
+  totals: { reused: 3, guarded: 1, recalled: 1, recorded: 5, since: `2026-09-12${PAINT}` },
+  health: [{ check: `lessons parse${PAINT}`, status: 'FAIL', detail: `/p/lessons/x${PAINT}: not a slug` }, { check: `cli${PAINT}`, status: 'WARN', detail: PAINT }],
+  store: { project: { lessons: 1, skills: 0, guards: 0 }, user: { lessons: 0, skills: 0, guards: 0 }, general: { lessons: 0, skills: 2, guards: 0 } },
+  lessons: [{ name: `painted${PAINT}`, level: `project${PAINT}`, kind: 'lesson', guard: false, reuse: 3, guard_hits: 1, recall: 1, flag: PAINT }],
+  recent: [],
+  open: {
+    ineffective: [{ name: `weak${PAINT}`, level: 'user', path: `/u/${PAINT}`, recall: 2 }],
+    unsettled: [{ id: `id${PAINT}`, age: `2h${PAINT}`, project: `/work/alpha${PAINT}`, failed: PAINT, fixed: `./x ${PAINT}` }],
+    candidates: [{ lesson: `cand${PAINT}`, from: `/work/b${PAINT}`, seen_in: PAINT, command: PAINT }],
+    skips: [{ why: PAINT }],
+    errors: [{ where: `guard${PAINT}`, message: PAINT }],
+  },
+})
+const PAINTED_EVENTS = JSON.stringify(
+  ['reuse', 'guard', 'recall', 'capture', 'learn', 'skip', 'promote', 'error', 'candidate', 'skill', 'rm'].map((type, i) => ({
+    ts: `2026-10-03T12:00:0${i % 10}Z`, type, lesson: `l${PAINT}`, lessons: [`a${PAINT}`], prompts: [PAINT], text: PAINT, fixed: PAINT, why: PAINT, to: PAINT, where: PAINT, message: PAINT, from: PAINT,
+  })),
+)
+
+test('no control character is in what the pane draws, whatever the status and the events hold', async () => {
+  const board = boardFrom(PAINTED_STATUS, PAINTED_EVENTS, 's1', 1_800_000_000_000)!
+  for (const columns of [120, 60, 30]) {
+    const lines = boardLines(board, columns, 12)
+    expect(lines.length > 5).toBe(true)
+    for (const line of lines) for (const seg of line) expect(UNDRAWN.test(seg.text)).toBe(false)
+  }
+  const failed = boardLines({ ...board, problem: `compound status exit 1: ${PAINT}` }, 80)
+  for (const line of failed) for (const seg of line) expect(UNDRAWN.test(seg.text)).toBe(false)
+})
+
+test('through the hooks: every text the band and the pane hand a surface is free of control characters', async ($, on) => {
+  const w = world(on, { COMPOUND_QUIET: '', PANE: '1' })
+  mock.clock(on, { now: 1_800_000_000_000 })
+  w.status = PAINTED_STATUS
+  w.events = PAINTED_EVENTS
+  for (const surface of ['terminal', 'desktop'] as const) {
+    // A guard whose stopped call carries the sequences, drawn on the band.
+    w.check = JSON.stringify({ hits: [{ name: `painted-guard-${surface}`, level: 'project', path: '/p/g', text: 'Do not.' }], guards: 1, tools: ['Bash'] })
+    const band = await $.ui.mount({ plugin: 'compound', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 95, scroll: { offset: 0, bodyRows: 10 }, view: {} } })
+    const ran = await $.tool.call({ tool: 'Bash', command: `echo ${PAINT}` } as never)
+    expect(ran.deny).toContain(`lesson=painted-guard-${surface}`)
+    const drawn = (await band.findAll({ type: 'Text' })).map(t => t.text)
+    expect(drawn.join('')).toContain(`painted-guard-${surface}`)
+    for (const text of drawn) expect(UNDRAWN.test(text)).toBe(false)
+    await band.unmount()
+    // The dashboard, read from a status and a log that carry them everywhere.
+    await $.command.run({ command: 'compound', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+    const pane = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: { title: 'compound', isFocused: false, bodyColumns: 60, placement: 'inline' as const, scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+    const texts = (await pane.findAll({ type: 'Text' })).map(t => t.text)
+    expect(texts.join('')).toContain('painted')
+    for (const text of texts) expect(UNDRAWN.test(text)).toBe(false)
+    await pane.unmount()
+  }
 })

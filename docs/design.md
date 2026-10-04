@@ -509,10 +509,21 @@ mod asks for that move only for a lesson the event log holds a `learn` event for
 that `compound add` wrote in that project), and the CLI makes it only when git does not
 track the lesson. A lesson committed in a repository is never moved by the mod.
 
-**What is shown is quoted.** See "How lesson text is presented". What the CLI prints
-for a person has its control characters taken out, so recorded text cannot move the
-cursor or repaint a terminal, and a path or a name in a command the CLI prints is quoted
-for the shell.
+**What is shown is quoted.** See "How lesson text is presented". A path or a name in a
+command the CLI prints is quoted for the shell.
+
+**Nothing drawn carries a control character.** An escape sequence in a lesson's text, a
+call, an event's field or a file's name could recolour a row, move the cursor, repaint
+what is on the screen, set the terminal's title or write a link. It is taken out at one
+place for each thing that draws. In the mod, every string of the CLI's JSON is cleaned
+where `hooks/view.ts` reads it, and every row of the band and the pane is cleaned where
+it leaves `bandRow` and `boardLines`, which also covers the band's state read back from
+the session. In the CLI, when stdout or stderr is a terminal, everything any command
+writes passes one filter that drops every control character except a newline, a tab and
+a colour sequence (`ESC [ ... m`), which is what the CLI's own colouring writes; the
+fields a command prints on one line are cleaned whether or not it is a terminal. What is
+left: a colour sequence in a lesson's body recolours text that `compound show` prints on
+a terminal, and piped output and `--json` carry a lesson's body as it is.
 
 **What is published is read first.** `compound promote <name> --to general` reads every
 file it would publish for the shape of a credential: a private key block, a well-known

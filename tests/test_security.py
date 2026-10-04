@@ -287,6 +287,80 @@ class TerminalTest(HostileCase):
         self.assertIn("all checks passed", self.box.run("list").stdout)
 
 
+    def test_on_a_terminal_no_command_writes_a_control_character_but_its_own_colours(self):
+        """The same, at the one place all output passes: a real pseudo-terminal is the
+        CLI's stdout and stderr, with colour on. `show` prints a lesson's text as it is."""
+        import pty
+        import re
+
+        escape = ("\x1b[2J\x1b[1;1H\x1b]0;owned\x07\x1b]8;;http://evil.example\x1b\\link\x1b]8;;\x1b\\"
+                  "\rover\x08\x9b2J\x85 all checks passed")
+        self.hand_written("painted", description="Use when %s painting." % escape, body="Body %s.\nSecond line.\n" % escape,
+                          match=["paint"])
+        self.hand_written("bad name " + "\x1b[2J", body="x\n")
+        self.box.log({"type": "error", "where": "x" + escape, "message": "m" + escape})
+        self.box.log({"type": "guard", "lesson": "painted", "text": "t" + escape, "session": escape})
+        self.box.log({"type": "skip", "why": "w" + escape})
+        for args in (["show", "painted"], ["list"], ["find", "painting"], ["events"], ["status"],
+                     ["show", "no-such" + escape], ["list", "--json"], ["events", "--json"]):
+            master, slave = pty.openpty()
+            try:
+                proc = subprocess.Popen([sys.executable, self.box.script] + args, cwd=self.box.project,
+                                        env=self.box.env(TERM="xterm-256color", NO_COLOR=None, COLUMNS="200"),
+                                        stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, close_fds=True)
+                os.close(slave)
+                slave = None
+                chunks = []
+                while True:
+                    try:
+                        chunk = os.read(master, 65536)
+                    except OSError:  # the terminal's other end closed
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                proc.wait(timeout=60)
+            finally:
+                os.close(master)
+                if slave is not None:
+                    os.close(slave)
+            # A terminal ends a line with \r\n: that is the line discipline's, not the CLI's.
+            out = b"".join(chunks).decode("utf-8", "replace").replace("\r\n", "\n")
+            self.assertTrue(out.strip(), args)
+            rest = re.sub("\x1b\\[[0-9;]*m", "", out)
+            found = re.findall("[\x00-\x08\x0b-\x1f\x7f-\x9f]", rest)
+            self.assertEqual(found, [], "%r wrote control characters to the terminal" % (args,))
+            self.assertNotIn("\x1b[2J", out, args)
+            self.assertNotIn("\x1b[1;1H", out, args)
+        # The colours are the CLI's own, and they are still there.
+        self.assertIn("\x1b[", out + "".join(c.decode("utf-8", "replace") for c in chunks) + self._coloured())
+
+    def _coloured(self):
+        import pty
+
+        master, slave = pty.openpty()
+        try:
+            proc = subprocess.Popen([sys.executable, self.box.script, "list"], cwd=self.box.project,
+                                    env=self.box.env(TERM="xterm-256color", NO_COLOR=None), stdin=subprocess.DEVNULL,
+                                    stdout=slave, stderr=slave, close_fds=True)
+            os.close(slave)
+            data = b""
+            while True:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+            proc.wait(timeout=60)
+        finally:
+            os.close(master)
+        text = data.decode("utf-8", "replace")
+        self.assertRegex(text, "\x1b\\[[0-9;]+m", "on a terminal `list` is coloured")
+        return text
+
+
 class PublishTest(HostileCase):
     """`promote --to general` proposes a lesson to a public repository."""
 

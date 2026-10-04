@@ -530,6 +530,31 @@ def paint(text, *codes):
     return "\x1b[%sm%s\x1b[0m" % (";".join(codes), text)
 
 
+# What may reach a terminal: text, a newline, a tab, and the colour sequences `paint`
+# writes. Everything else that is a control character is dropped.
+TERMINAL_UNSAFE = re.compile("\x1b\\[[0-9;]*m|" + CONTROL_CHARS.pattern)
+
+
+class TerminalText(object):
+    """A terminal's stream, with every control character taken out of what is written
+    to it. A lesson's text, an event's fields and a file's name are someone else's
+    text, and on a terminal an escape sequence in them would move the cursor, repaint
+    what is there, set the window's title or write a link. `main` puts this around
+    stdout and stderr when they are a terminal, so it is the one place every command's
+    output passes, `show`'s raw lesson text included. A colour sequence is let through,
+    which is all `paint` writes."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(TERMINAL_UNSAFE.sub(
+            lambda found: found.group(0) if len(found.group(0)) > 1 else "", text))
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def term_width():
     """The columns a line may take: COLUMNS when it is a number, else the terminal's when
     stdout is one, else None (piped: nobody said how wide)."""
@@ -2299,10 +2324,6 @@ def cmd_show(args):
         sys.stdout.write("  disabled for this user; switch it back on: compound enable %s\n" % item["name"])
     if item.get("shadowed"):
         sys.stdout.write("  shadowed: a user or general lesson has this name, so this one is not in force\n")
-    if sys.stdout.isatty():
-        # A lesson's text is anyone's who can write the file: on a terminal it is shown
-        # without the control characters that could redraw what is already there.
-        text = CONTROL_CHARS.sub("?", text)
     gaps = condition_gaps(item)
     if gaps:
         sys.stdout.write("  does not apply here: %s\n" % "; ".join(
@@ -4302,6 +4323,12 @@ def main(argv):
             # UTF-8 whatever the locale, and a character that cannot be encoded (a lone
             # surrogate out of the event log) is escaped instead of raising.
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+    for name in ("stdout", "stderr"):
+        try:
+            if getattr(sys, name).isatty():
+                setattr(sys, name, TerminalText(getattr(sys, name)))
         except (AttributeError, ValueError, OSError):
             pass
     try:

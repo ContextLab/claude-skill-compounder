@@ -56,6 +56,11 @@ export function plain(text: string): string {
   return text.replace(HIDDEN, '').replace(CONTROL, ' ')
 }
 
+// Text for ONE row of the band or the pane: a newline and a tab are not drawn either.
+export function drawn(text: string): string {
+  return plain(text).replace(/[\n\t]/g, ' ')
+}
+
 export function redact(text: string): string {
   let out = text
   for (const [pattern, to] of RULES) out = out.replace(pattern, to)
