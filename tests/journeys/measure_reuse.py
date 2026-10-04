@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """How noisy the reuse check is. Real `claude -p` sessions; run by hand. A measurement, not a test.
 
-A store of eight lessons (six about other things, two that cover a request below), a
-prompt log with earlier requests (some like a request below, most not), and eight ordinary
-prompts of which two are covered. For each prompt it prints what the mod added, and at the
+A store of nine lessons (seven about other things, two that cover a request below), a
+prompt log with earlier requests (some like a request below, most not), and eleven ordinary
+prompts of which two are covered. Three of the uncovered ones ask only to RUN a named
+command and report its output, with a lesson or an earlier request about that very command
+in reach: running something that exists is not a build task, so nothing is added. For each prompt it prints what the mod added, and at the
 end: how many prompts got an injection, how many injections were relevant, and how many
 covered prompts got nothing.
 
@@ -24,6 +26,8 @@ UNRELATED = [
      "The remote-tracking ref was never fetched. Verify a push with git ls-remote origin <branch>.\n"),
     ("brew-doctor-exit", "Use when a compound shell command ends in brew doctor and reports failure.",
      "brew doctor exits 1 on any warning. Run it as its own call.\n"),
+    ("build-needs-profile", "Use when ./build.sh fails with 'a profile is required'.",
+     "Run ./build.sh --profile dev. A bare ./build.sh fails with 'error: a profile is required'.\n"),
 ]
 RELEVANT = [
     ("release-tagging", "Use when cutting, tagging or publishing a release of this project.",
@@ -40,6 +44,7 @@ LOG = [
     ("older-5", "write unit tests for the payment handlers"),
     ("older-6", "write a script that resizes the photos in the directory to thumbnails"),
     ("older-7", "update the README with install instructions for the project"),
+    ("older-8", "run ./run_tests.sh and tell me which tests failed"),
 ]
 # (covered by, prompt). `None` is a prompt nothing in the store or the log covers.
 PROMPTS = [
@@ -57,6 +62,11 @@ PROMPTS = [
     (None, "Set up a GitHub Actions workflow that runs the linter and the unit tests on every pull request to the "
            "main branch."),
     (None, "Write a script that walks the photos directory and renames every image file by the date in its EXIF data."),
+    # Running a named command and reporting its output: not a build task, whatever is in reach.
+    (None, common.BUILD_TASK),
+    (None, "Run the test suite with ./run_tests.sh and tell me how many tests failed and which ones. Do not change any "
+           "file, only report what it prints."),
+    (None, "Please execute scripts/release.sh --dry-run 2.0.0 for me and paste the last ten lines of its output here."),
 ]
 RIGHT = {"release": ({"release-tagging"}, {"older-1:1"}), "csv": ({"csv-dedupe"}, {"older-2:1"})}
 
@@ -64,7 +74,7 @@ RIGHT = {"release": ({"release-tagging"}, {"older-1:1"}), "csv": ({"csv-dedupe"}
 def main():
     args = common.arguments(__doc__)
     w = common.World("measure")
-    project = w.project("alpha")
+    project = w.project("alpha", build=True)
     for name, when, body in UNRELATED + RELEVANT:
         w.add(project, name, when, body)
     for session, prompt in LOG:

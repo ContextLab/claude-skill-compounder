@@ -2,14 +2,15 @@ import type { EngineInterface, Register } from 'claude-code'
 import { isOff, knobsFrom, type Knobs } from './knobs'
 import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
-  callText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, heldStep, inputOf,
-  isCommand, judged, knownContext, promotedText, recallContext, reusable, reuseContext, reuseStatus, stopDebt, stopNudge, turnAfterCall,
-  turnAfterPrompt, turnAfterStop, typedByUser, userOrigin,
+  callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, heldStep,
+  inputOf, isCommand, judged, knownContext, promotedText, recallContext, reusable, reuseContext, reuseStatus, stopDebt, stopNudge,
+  stopStrengthen, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut,
+  debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseLeft, parseShow, parseTimedOut, parseUnsettled,
+  strengthenings,
   type Earlier, type Event, type Item,
 } from './store'
 
@@ -20,7 +21,11 @@ import {
 //   2 guard    tool.call       a call matching a lesson's `match` is refused once per session
 //   3 recall   tool.call       a failed call gets the recorded lesson that describes it
 //   4 capture  tool.call       a success after a held failure makes the session owe a lesson
-//   5 stop     classic.Stop    an owed lesson refuses the stop once; a long turn is asked once
+//   5 stop     classic.Stop    an owed lesson, or an owed strengthening of one, refuses the stop
+//                              once; a long turn is asked once
+//
+// And once per session, at its first typed prompt, it tells the session what earlier
+// sessions in this project left unsettled.
 //
 // A REFUSAL HAPPENS AT MOST ONCE. A guard's deny and a stop's refusal each need a claim
 // (see `claim`), and a claim that cannot be made means the mod does not refuse.
@@ -52,6 +57,8 @@ const SETTINGS_TTL_MS = 30000
 const INVENTORY_TTL_MS = 60000
 // How many other projects' lessons are looked at when a call fails.
 const OTHER_PROJECTS = 6
+// How many unsettled captures a session's first prompt is told about.
+const UNSETTLED_SHOWN = 5
 
 type Ran = { code: number; stdout: string; stderr: string }
 type Reply = { text: string | undefined; ms: number; reason: string }
@@ -389,6 +396,25 @@ async function earlierCandidates($: EngineInterface, sid: string, text: string, 
   return earlier.map(e => ({ ...e, text: redact(e.text) }))
 }
 
+// What earlier sessions in this project fixed and neither recorded nor declined. Asked of
+// the CLI at the first typed prompt of a session and told once; it refuses no stop.
+async function unsettledReminder($: EngineInterface, sid: string): Promise<string> {
+  if (!(await firstTime($, sid, 'unsettled'))) return ''
+  const ran = await cli($, ['events', '--unsettled', '--project', await projectRoot($), '--json'])
+  if (ran === undefined) return ''
+  const open = parseUnsettled(ran.stdout, sid, nowS())
+  if (open === undefined) {
+    await fail($, 'unsettled.parse', `compound events --unsettled --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
+    return ''
+  }
+  if (open.length === 0) return ''
+  // The newest few: a long backlog is in `compound status`, not in every session's first prompt.
+  const shown = open.slice(-UNSETTLED_SHOWN).map(c => ({ ...c, failed: redact(c.failed), error: redact(c.error), fixed: redact(c.fixed) }))
+  await log($, { type: 'remind', captures: shown.map(c => c.id) })
+  $.ui.status(`compound: ${open.length} unsettled`)
+  return unsettledContext(shown, await cliPath($))
+}
+
 // Candidates first, then ONE question: the inventory and the candidate earlier requests go
 // to the judge together, and only what it names is added to the prompt.
 async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knobs): Promise<string> {
@@ -446,6 +472,12 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
     reports.set(sid, nth)
     out.push(errorReport(takeFailures(sid), await cliPath($), nth))
   }
+  try {
+    const owed = await unsettledReminder($, sid)
+    if (owed !== '') out.push(owed)
+  } catch (err) {
+    await fail($, 'unsettled', err)
+  }
   const k = await knobs($)
   if (text.length < k.promptMinChars) return out
   try {
@@ -496,35 +528,51 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
 
 // ---- moments 3 and 4: recall and capture ----------------------------------------------
 
-// A lesson met again. It is logged as a recurrence, moved to the user level when it was
-// another project's, and reported ineffective when the CLI now counts it so. Answers the
-// text Claude reads beside the call's result.
-async function recurred($: EngineInterface, found: Item, tool: string, error: string, k: Knobs, known: boolean): Promise<string[]> {
+// A lesson met again. When it is another project's, the CLI is asked to move it to the user
+// level, and does so only when git does not track it there: a tracked lesson stays, is read
+// from where it is, and is offered to the user as a move. The recurrence is logged, marked
+// ineffective when this one makes it so. Answers the text Claude reads beside the result.
+async function recurred($: EngineInterface, found: Item, tool: string, call: string, error: string, k: Knobs, known: boolean): Promise<string[]> {
   const cliAt = await cliPath($)
   const out: string[] = []
   let lesson = found
   let asProject = lesson.project
-  await log($, { type: 'recall', lesson: lesson.name, tool, error: error.slice(-LOGGED_ERROR), at: known ? 'fix' : 'failure' })
   if (asProject !== undefined) {
-    // Recorded in one project and now met in a second: it moves up. Moved, never copied.
-    const moved = await cli($, ['promote', lesson.name, '--to', 'user'], undefined, [0], asProject)
-    if (moved !== undefined) {
+    // Exit 3: tracked, left in place. Exit 2: not movable as it is (the name is taken in
+    // another project, or the lesson is gone): it is read from where it is, if it is there.
+    const moved = await cli($, ['promote', lesson.name, '--to', 'user', '--auto', '--seen-in', await projectRoot($), '--json'], undefined, [0, 2, 3], asProject)
+    if (moved !== undefined && moved.code === 0) {
       forgetInventory()
-      out.push(promotedText(lesson.name, asProject))
+      out.push(promotedText(lesson.name, asProject, cliAt))
       $.ui.toast(`compound: lesson ${lesson.name} moved to the user level`)
       lesson = { ...lesson, level: 'user', path: '' }
       asProject = undefined
+    } else if (moved !== undefined && moved.code === 3) {
+      out.push(candidateText(lesson.name, parseLeft(moved.stdout) ?? asProject, cliAt))
     }
   }
   const shown = await cli($, ['show', lesson.name, '--json'], undefined, [0], asProject)
   const read = shown === undefined ? undefined : parseShow(shown.stdout)
   const text = read === undefined || read.text === '' ? lesson.description : read.text
   if (read !== undefined && read.path !== '') lesson = { ...lesson, path: read.path }
-  const count = Math.max(1, read?.recalls ?? 1)
-  const ineffective = read?.ineffective ?? count >= k.recurLimit
+  // The CLI's counts are from before this recurrence is logged: this one is added.
+  const count = (read?.recalls ?? 0) + 1
+  // A lesson left in another project is that project's to rewrite: this session is not
+  // asked to strengthen it, and owes nothing for it.
+  const ineffective = asProject === undefined && (read?.since === undefined ? count >= k.recurLimit : read.since + 1 >= (read.limit ?? k.recurLimit))
+  await log($, {
+    type: 'recall',
+    lesson: lesson.name,
+    tool,
+    call: call.slice(0, LOGGED_CALL),
+    error: error.slice(-LOGGED_ERROR),
+    at: known ? 'fix' : 'failure',
+    guard: lesson.match.length > 0,
+    ineffective,
+  })
   if (ineffective) $.ui.toast(`compound: lesson ${lesson.name} is ineffective (recalled ${count} times)`)
   $.ui.status(ineffective ? `compound: ${lesson.name} ineffective` : `compound: recalled ${lesson.name}`)
-  out.push(known ? knownContext(lesson, text, count, ineffective, cliAt) : recallContext(lesson, text, count, ineffective, cliAt))
+  out.push(known ? knownContext(lesson, text, count, ineffective, cliAt, call) : recallContext(lesson, text, count, ineffective, cliAt, call))
   return out
 }
 
@@ -556,7 +604,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   }
   // A failure answered with a recorded lesson is not held: the fix teaches nothing new.
   held.delete(key)
-  return recurred($, hit, tool, error, k, false)
+  return recurred($, hit, tool, call, error, k, false)
 }
 
 async function onSuccess($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
@@ -581,9 +629,10 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   }
   if (answer.verdict === 'NONE') return []
   held.delete(key)
-  if (answer.verdict === 'KNOWN') return recurred($, answer.lesson, tool, was.error, k, true)
+  if (answer.verdict === 'KNOWN') return recurred($, answer.lesson, tool, was.call, was.error, k, true)
   await log($, {
     type: 'capture',
+    id: digest(`${sid}:${callId}`),
     tool,
     failed: was.call.slice(0, LOGGED_CALL),
     error: was.error.slice(-LOGGED_ERROR),
@@ -638,14 +687,29 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   for (const d of owed) {
     if (await mayRefuse($, sid, `stop-${d.key}`)) fresh.push(d.key)
   }
+  // A recalled lesson that did not prevent its failure is owed a strengthening, on the
+  // same terms: once per session per lesson, and only with the claim on record.
+  const weak = strengthenings(rows)
+  const weakFresh = []
+  for (const w of weak) {
+    if (await mayRefuse($, sid, `strengthen-${w.name}`)) weakFresh.push(w)
+  }
+  const refusals: string[] = []
   if (fresh.length > 0) {
     await log($, { type: 'refuse', why: 'debt', debts: fresh })
-    $.ui.status('compound: lesson owed')
-    return stopDebt(owed, cliAt)
+    refusals.push(stopDebt(owed, cliAt))
+  }
+  if (weakFresh.length > 0) {
+    await log($, { type: 'refuse', why: 'strengthen', lessons: weakFresh.map(w => w.name) })
+    refusals.push(stopStrengthen(weakFresh, cliAt))
+  }
+  if (refusals.length > 0) {
+    $.ui.status(fresh.length > 0 ? 'compound: lesson owed' : `compound: strengthen ${weakFresh[0]?.name ?? ''}`)
+    return refusals.join('\n\n')
   }
   const turn = turns.get(sid)
   const k = await knobs($)
-  if (followsBlock || owed.length > 0 || turn === undefined || turn.calls < k.turnMinCalls) return turnEnded(sid)
+  if (followsBlock || owed.length > 0 || weak.length > 0 || turn === undefined || turn.calls < k.turnMinCalls) return turnEnded(sid)
   // The cooldown is the user's, not the session's: the last nudge anywhere counts.
   const nudges = await events($, ['--type', 'nudge', '--limit', '1'])
   if (nudges === undefined || !mayNudge(rows, turn.start, nowS(), k.nudgeCooldown, nudges)) return turnEnded(sid)

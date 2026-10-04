@@ -41,6 +41,14 @@ class Sandbox(object):
         self.settings = os.path.join(self.claude, "settings.json")
         self.manifest = os.path.join(self.chome, "install.json")
 
+    def plugin(self):
+        """Give the package copy the files that make a checkout loadable as the plugin."""
+        for rel in (os.path.join(".claude-plugin", "plugin.json"), os.path.join("hooks", "hooks.json"),
+                    os.path.join("hooks", "register.ts")):
+            target = os.path.join(self.pkg, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(os.path.join(REPO, rel), target)
+
     def close(self):
         for base, dirs, _files in os.walk(self.root):
             for name in dirs:

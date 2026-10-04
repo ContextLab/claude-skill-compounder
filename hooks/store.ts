@@ -117,7 +117,9 @@ export function parseEarlier(stdout: string, session: string, mine: readonly str
   return out
 }
 
-export type Shown = { text: string; path: string; level: string; recalls: number; ineffective: boolean | undefined }
+// `since` is how many recalls are later than the lesson's last rewrite, and `limit` how many
+// make it ineffective; both are undefined when the CLI did not say.
+export type Shown = { text: string; path: string; level: string; recalls: number; ineffective: boolean | undefined; since: number | undefined; limit: number | undefined }
 
 // A SKILL.md without its frontmatter: the lesson as it is read.
 export function bodyOf(text: string): string {
@@ -129,7 +131,7 @@ export function bodyOf(text: string): string {
 // whether the CLI now counts it ineffective. Output that is not JSON is taken as the text.
 export function parseShow(stdout: string): Shown {
   const o = record(parsed(stdout))
-  if (o === undefined) return { text: bodyOf(stdout), path: '', level: '', recalls: 0, ineffective: undefined }
+  if (o === undefined) return { text: bodyOf(stdout), path: '', level: '', recalls: 0, ineffective: undefined, since: undefined, limit: undefined }
   const counts = record(o.counts)
   const recalls = counts !== undefined && typeof counts.recall === 'number' ? counts.recall : 0
   return {
@@ -138,6 +140,8 @@ export function parseShow(stdout: string): Shown {
     level: str(o.level),
     recalls,
     ineffective: typeof o.ineffective === 'boolean' ? o.ineffective : undefined,
+    since: typeof o.recalls_since === 'number' ? o.recalls_since : undefined,
+    limit: typeof o.recur_limit === 'number' ? o.recur_limit : undefined,
   }
 }
 
@@ -206,4 +210,55 @@ export function mayNudge(events: readonly Event[], turnStart: number, now: numbe
     if (e.type === 'nudge' && now - seconds(e) < cooldown) return false
   }
   return true
+}
+
+export type Strengthening = { name: string; guard: boolean; call: string }
+
+// The lessons a session still owes a strengthening for: each one a `recall` marked
+// ineffective, until a later `learn` with `update` for that lesson, or a later `skip`.
+// One entry per lesson, carrying the newest failing call.
+export function strengthenings(events: readonly Event[]): Strengthening[] {
+  let owed: Strengthening[] = []
+  for (const e of events) {
+    const name = str(e.lesson)
+    if (e.type === 'skip') owed = []
+    else if (e.type === 'learn' && e.update === true) owed = owed.filter(s => s.name !== name)
+    else if (e.type === 'recall' && e.ineffective === true && name !== '') {
+      owed = [...owed.filter(s => s.name !== name), { name, guard: e.guard === true, call: str(e.call) }]
+    }
+  }
+  return owed
+}
+
+export type Unsettled = { id: string; age: string; failed: string; error: string; fixed: string }
+
+function ageText(s: number): string {
+  if (s < 0) return '0s'
+  if (s < 60) return `${Math.floor(s)}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 86400)}d`
+}
+
+// `compound events --unsettled --json`: the captures no learn or skip has settled. This
+// session's own are left out (the stop moment handles those), and so is a row with no id.
+export function parseUnsettled(stdout: string, session: string, now: number): Unsettled[] | undefined {
+  const events = parseEvents(stdout)
+  if (events === undefined) return undefined
+  const out: Unsettled[] = []
+  for (const e of events) {
+    const id = str(e.id)
+    if (e.type !== 'capture' || id === '' || (session !== '' && str(e.session) === session)) continue
+    out.push({ id, age: ageText(now - seconds(e)), failed: str(e.failed), error: str(e.error), fixed: str(e.fixed) })
+  }
+  return out
+}
+
+// `compound promote <name> --to user --auto --json` when it left the lesson where it is:
+// the project root that holds it. undefined for a move, or for output that is not that.
+export function parseLeft(stdout: string): string | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined || o.moved !== false) return undefined
+  const from = str(o.from)
+  return from === '' ? undefined : from
 }

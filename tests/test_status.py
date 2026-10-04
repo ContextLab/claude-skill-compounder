@@ -32,7 +32,7 @@ class StatusTest(Case):
     def test_health_checks_come_in_the_documented_order(self):
         data = self.status()
         self.assertEqual([row["check"] for row in data["health"]],
-                         ["python", "mod", "cli", "prompt log", "last event", "duplicates",
+                         ["python", "mod", "mod last fired", "cli", "prompt log", "last event", "duplicates",
                           "lessons parse", "errors"])
         self.assertTrue(all(row["status"] in ("PASS", "WARN", "FAIL") for row in data["health"]))
 
@@ -40,13 +40,14 @@ class StatusTest(Case):
         data = self.status()
         for key in ("ok", "health", "store", "lessons", "recent", "open"):
             self.assertIn(key, data)
-        self.assertEqual(sorted(data["open"]), ["errors", "ineffective", "skips"])
+        self.assertEqual(sorted(data["open"]), ["candidates", "errors", "ineffective", "skips", "unsettled"])
 
     def test_a_fresh_sandbox_warns_and_does_not_fail(self):
         data = self.status()
         self.assertTrue(data["ok"])
         self.assertEqual(self.health(data, "python")["status"], "PASS")
         self.assertEqual(self.health(data, "mod")["status"], "WARN")
+        self.assertEqual(self.health(data, "mod last fired")["status"], "WARN")
         self.assertEqual(self.health(data, "cli")["status"], "WARN")
         self.assertEqual(self.health(data, "prompt log")["status"], "WARN")
         self.assertEqual(self.health(data, "last event")["status"], "WARN")
@@ -59,6 +60,7 @@ class StatusTest(Case):
         self.assertEqual(self.health(self.status(), "python")["detail"], "%d.%d.%d" % sys.version_info[:3])
 
     def test_after_install_mod_and_cli_pass(self):
+        self.box.plugin()
         self.assertExit(self.box.run("install", "--bin-dir", self.box.bin), 0)
         data = self.status(PATH=self.box.bin + ":/usr/bin:/bin")
         self.assertEqual(self.health(data, "mod")["status"], "PASS")

@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, debts, mayNudge, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, debts, mayNudge, parseLeft, parseUnsettled, strengthenings, otherProjects, parseEarlier, parseEvents, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -80,8 +80,10 @@ test('a shown lesson is its body, its recall count and the CLI\'s verdict', asyn
   expect(bodyOf(skill)).toBe('Do the thing.\nSecond line.')
   expect(bodyOf('no frontmatter here')).toBe('no frontmatter here')
   const shown = parseShow(JSON.stringify({ name: 'a', level: 'user', path: '/u/a', text: skill, counts: { reuse: 0, guard: 0, recall: 3, learn: 1 }, ineffective: true }))
-  expect(shown).toEqual({ text: 'Do the thing.\nSecond line.', path: '/u/a', level: 'user', recalls: 3, ineffective: true })
-  expect(parseShow('a (user lesson)\n/u/a\n')).toEqual({ text: 'a (user lesson)\n/u/a', path: '', level: '', recalls: 0, ineffective: undefined })
+  expect(shown).toEqual({ text: 'Do the thing.\nSecond line.', path: '/u/a', level: 'user', recalls: 3, ineffective: true, since: undefined, limit: undefined })
+  expect(parseShow('a (user lesson)\n/u/a\n')).toEqual({ text: 'a (user lesson)\n/u/a', path: '', level: '', recalls: 0, ineffective: undefined, since: undefined, limit: undefined })
+  const counted = parseShow(JSON.stringify({ text: 'x', counts: { recall: 4 }, recalls_since: 1, recur_limit: 2 }))
+  expect([counted.since, counted.limit]).toEqual([1, 2])
 })
 
 test('events are read from a list or from one object per line', async () => {
@@ -138,4 +140,36 @@ test('a long turn is asked only when nothing was recorded in it and the last nud
   expect(mayNudge([], 1000, 2000, 0, [at('nudge', 1999, 'another-session')])).toBe(true)
   // Only `nudge` rows count there, whatever the CLI was asked for.
   expect(mayNudge([], 1000, 2000, 1800, [at('reuse', 1999)])).toBe(true)
+})
+
+test('a strengthening is owed for an ineffective recall until that lesson is updated or the session declines', async () => {
+  const recall = (lesson: string, ineffective: boolean, call = './build.sh', guard = false): Event => ({ type: 'recall', lesson, ineffective, call, guard })
+  expect(strengthenings([])).toEqual([])
+  expect(strengthenings([recall('a', false)])).toEqual([])
+  expect(strengthenings([recall('a', true)])).toEqual([{ name: 'a', guard: false, call: './build.sh' }])
+  expect(strengthenings([recall('a', true), recall('a', true, 'second call', true)])).toEqual([{ name: 'a', guard: true, call: 'second call' }])
+  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'a', update: true }])).toEqual([])
+  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'a', update: false }]).length).toBe(1)
+  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'b', update: true }]).length).toBe(1)
+  expect(strengthenings([recall('a', true), recall('b', true), { type: 'skip', why: 'x' }])).toEqual([])
+  expect(strengthenings([{ type: 'skip', why: 'x' }, recall('a', true)]).map(s => s.name)).toEqual(['a'])
+  expect(strengthenings([recall('a', true), { type: 'learn', lesson: 'a', update: true }, recall('a', true)]).length).toBe(1)
+})
+
+test('unsettled captures are read from the CLI, leaving out this session\'s own', async () => {
+  const now = Date.UTC(2026, 9, 3) / 1000
+  const out = JSON.stringify([
+    { type: 'capture', id: 'aaaa1111', ts: '2026-10-01T00:00:00Z', session: 'old', failed: 'f', error: 'e', fixed: 'x' },
+    { type: 'capture', id: 'bbbb2222', ts: '2026-10-02T23:00:00Z', session: 'mine', failed: 'f2', error: 'e2', fixed: 'x2' },
+    { type: 'capture', ts: '2026-10-02T00:00:00Z', session: 'old' },
+  ])
+  expect(parseUnsettled(out, 'mine', now)).toEqual([{ id: 'aaaa1111', age: '2d', failed: 'f', error: 'e', fixed: 'x' }])
+  expect(parseUnsettled('[]', 'mine', now)).toEqual([])
+  expect(parseUnsettled('compound: error', 'mine', now)).toBe(undefined)
+})
+
+test('a lesson left in place by the automatic move is read with the project that holds it', async () => {
+  expect(parseLeft('{"name":"a","moved":false,"candidate":true,"from":"/work/alpha","seen_in":"/work/beta","command":"x"}')).toBe('/work/alpha')
+  expect(parseLeft('{"name":"a","moved":true}')).toBe(undefined)
+  expect(parseLeft('not json')).toBe(undefined)
 })

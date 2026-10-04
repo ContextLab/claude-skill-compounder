@@ -208,6 +208,7 @@ class FindPromptLogTest(Case):
         if not surfer_reachable():
             self.skipTest("history-surfer cannot be cloned from here (%s)" % SURFER_URL)
         box = self.box
+        box.plugin()  # status fails its mod check for a checkout that cannot load as the plugin
         proc = box.run("install", "--bin-dir", box.bin, COMPOUND_NO_SURFER=None)
         self.assertExit(proc, 0)
         surfer = os.path.join(box.bin, "surfer")
@@ -266,6 +267,7 @@ class FindPromptLogTest(Case):
         status = box.json("status", "--json", PATH=box.bin + ":/usr/bin:/bin")
         row = [check for check in status["health"] if check["check"] == "prompt log"][0]
         self.assertEqual(row["status"], "PASS", row)
+        self.assertRegex(row["detail"], r"^\d+ prompts? in this project$", "the real `surfer stats` is read as a count")
 
 
 if __name__ == "__main__":

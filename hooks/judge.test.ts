@@ -207,3 +207,11 @@ test('NONE keeps its reason, and a malformed fix reply is unreadable', async () 
     expect(parseFix(bad, LESSONS, ERROR)).toBe(undefined)
   }
 })
+
+test('running a named command and reporting its output is not a build task', async () => {
+  const p = reusePrompt('Build this project by running its build script, ./build.sh, and tell me the line it prints.', ITEMS, EARLIER)
+  expect(p.includes('A request to RUN something that already exists')).toBe(true)
+  expect(p.includes('./build.sh')).toBe(true)
+  expect(p.includes('however long the request is')).toBe(true)
+  expect(p.includes('substantial is false')).toBe(true)
+})

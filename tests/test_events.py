@@ -171,12 +171,17 @@ class CountsTest(Case):
             {"type": "recall", "lessons": ["alpha", "beta"]},
             {"type": "capture", "lesson": "alpha"},
             {"type": "error", "lesson": "alpha", "message": "x"},
-            {"type": "something-new", "lesson": "alpha"},
             {"type": "reuse", "lessons": "alpha"},
             {"type": "reuse", "lesson": ["alpha"]},
             {"type": "reuse", "lesson": "alpha", "lessons": ["alpha"]},
         ):
             self.box.log(event)
+        # `log` takes no type outside the documented table; a line of another type that is
+        # already in the log is still read past, and counted nowhere.
+        with open(self.box.events, "a") as handle:
+            handle.write(json.dumps({"ts": "2026-09-21T14:13:20Z", "type": "something-new", "session": "",
+                                     "project": self.box.project, "lesson": "alpha"}) + "\n")
+        self.assertEqual(len(self.box.json("events", "--type", "something-new", "--json")), 1)
         self.assertEqual(self.counts("alpha"), {"reuse": 4, "guard": 1, "recall": 1, "learn": 1})
         self.assertEqual(self.counts("beta"), {"reuse": 1, "guard": 0, "recall": 2, "learn": 1})
 

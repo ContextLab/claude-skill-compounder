@@ -38,10 +38,24 @@ A lesson lives at exactly one of three levels.
 outside a repository.
 
 A new lesson starts at `project` unless it is about the machine, the shell or a tool
-rather than the repository, in which case it starts at `user`. A project lesson that
-matches a failure in a second project is moved to `user` by the mod. A user lesson that
+rather than the repository, in which case it starts at `user`. A user lesson that
 would help anyone is proposed to `general` with `compound promote <name> --to general`,
 which opens a pull request against this package and runs only when the user says so.
+
+A project lesson that matches a failure in a second project has outgrown its project.
+What happens then depends on whether git tracks the lesson's directory in the repository
+it sits in, and the CLI decides (`compound promote <name> --to user --auto`):
+
+- **Not tracked** (untracked, ignored, or not in a repository): the mod moves it to
+  `user`. The `promote` event belongs to the session's project and names the project the
+  lesson left as `from`. Claude is asked to reword the lesson with `compound add --update`
+  if its text speaks of "this repository".
+- **Tracked**: the lesson stays where it is. A session in one project never changes a
+  committed file of another. The lesson is still returned beside the error, read from its
+  own project in place, with no copy. The CLI exits 3 and logs a `candidate` event
+  (`lesson`, `from`, `seen_in`), `compound status` lists it under Open with the exact
+  command that moves it (`COMPOUND_PROJECT=<its project> compound promote <name> --to
+  user`), and Claude is told to offer that move to the user and not to make it.
 
 The same levels scope the prompt log: a search looks at the current project first and at
 every project second.
@@ -67,7 +81,16 @@ zsh expands a bare word starting with "=" as a command lookup and fails with "no
 Quote it or use printf '%s\n' '====='.
 ```
 
-- `name` is a lowercase slug, unique across all three levels.
+- `name` is a lowercase slug, unique among what a session can see: its project, the user
+  level and the general pool. Two projects may each hold a lesson of one name, because
+  neither sees the other's. The user level is seen from every project, so a lesson moves
+  or is added there only under a name no project holds for a different lesson:
+  `compound promote --to user` and `compound add --level user` exit 2 when any project
+  known to the event log (a project named in a `learn` event whose lesson directory still
+  exists) holds another lesson of that name. `compound promote <name> --to user --as
+  NEWNAME` renames the lesson while moving it. When a project lesson and a user lesson of
+  one name are visible together anyway, `compound status` fails its `duplicates` check and
+  names both paths.
 - `description` says when the lesson applies. It is what the mod's model reads to decide
   relevance, so it is written as a trigger.
 - `match` is optional: a JSON array of Python regular expressions tested against the text
@@ -99,6 +122,8 @@ works in this order:
    requests together, and answers: is this a substantial build task, and which entries and
    which earlier requests genuinely cover part of it? Sharing a word or a topic is not
    covering, and an earlier request for a different change to the same thing is not one.
+   A request to run a named command, script, test or build and report its output is not
+   a build task, however long it is.
 3. **Add only what was named.** Whatever the model names is added to the prompt as
    context. A prompt that is not a substantial build task, or for which the model names
    nothing, adds nothing at all. With an empty inventory and no candidate, no model call
@@ -126,9 +151,12 @@ per session.
 
 ### 3. Recall: a tool call failed
 
-A model is asked whether a recorded lesson describes this failure. A match is returned
-beside the error, quoted, and counted as a **recurrence** of that lesson. With no match
-the failure is held, per agent, as the possible start of a new lesson.
+A model is asked whether a recorded lesson describes this failure. The lessons it is
+shown are the ones the session can see and the project lessons of the other projects the
+event log knows. A match is returned beside the error, quoted, and counted as a
+**recurrence** of that lesson; a match from another project is moved to the user level or
+left in place as described under Levels. With no match the failure is held, per agent, as
+the possible start of a new lesson.
 
 ### 4. Capture: a call succeeded after a held failure
 
@@ -140,26 +168,46 @@ after it, then dropped.
 
 When the model says a success is the fix, the mod returns, beside the result, the failing call, its error and
 the working call word for word, with the instruction to record the lesson now using the
-`compound:learn` skill. The session then owes a lesson.
+`compound:learn` skill. The session then owes a lesson. The `capture` event carries an
+`id`, a short stable hash.
+
+A capture is **settled** by a later `learn` or `skip` event that comes from the same
+session, or that carries `settles: <id>` (`compound add --settles ID`, `compound skip
+--settles ID`). Until then it is a debt, and it does not disappear when its session ends:
+`compound status` lists every unsettled capture of the last 14 days under Open, with its
+id, age, project and the failed and working commands.
 
 ### 5. Stop: Claude is about to finish
 
 If the session owes a lesson and none was recorded (`compound add`) or declined
-(`compound skip --why`), the stop is refused once and the debt is restated. Separately, a
+(`compound skip --why`), the stop is refused once and the debt is restated. If a lesson
+recalled in the session is ineffective (see "When a lesson does not work") and the session
+has neither rewritten it nor declined, the stop is refused once with the lesson named and
+the ways to settle it. Separately, a
 turn in which the main loop made at least `COMPOUND_TURN_MIN_CALLS` tool calls with no
 lesson recorded is asked once whether it learned anything worth keeping. A subagent's
 calls are not counted, a prompt typed while the turn is running does not restart the
 count, and the question is asked at most every `COMPOUND_NUDGE_COOLDOWN` seconds across
 all sessions.
 
-Each refusal writes a `refuse` event that says why: `debt` or `nudge`. A refused stop
-takes the place of the answer Claude was giving, so both messages end by asking for the
-final answer of the turn again.
+Each refusal writes a `refuse` event that says why: `debt`, `strengthen` or `nudge`. A
+refused stop takes the place of the answer Claude was giving, so every such message ends
+by asking for the final answer of the turn again.
+
+### What an earlier session left unsettled
+
+At the first typed prompt of a session the mod asks the CLI for the unsettled captures of
+this project (`compound events --unsettled --project P --json`). If there are any, it adds
+one message to that prompt, once per session, and writes a `remind` event. The message
+quotes each capture between marker lines as recorded reference material, and tells Claude
+to record it with the `compound:learn` skill, passing `--settles <id>`, or to decline it
+with `compound skip --settles <id> --why`. It refuses no stop.
 
 ### Once, and only once
 
 A refusal never repeats. Each guard refuses once per session per lesson, each debt
-refuses one stop, and each turn is asked about lessons once. The mod keeps that record in
+refuses one stop, each ineffective lesson refuses one stop per session, and each turn is
+asked about lessons once. The mod keeps that record in
 two places: in the running process, which is checked first, and as a directory under
 `<COMPOUND_HOME>/claims/<session id>/`, which holds when the package is loaded twice in
 one session or the module is reloaded. When the directory cannot be made, the mod does
@@ -214,10 +262,24 @@ user wants recorded, it asks the user before writing anything.
 ## When a lesson does not work
 
 A lesson that is recalled after the same failure happens again has not prevented
-anything. After `COMPOUND_RECUR_LIMIT` recurrences the mod marks it **ineffective** and
-asks Claude to strengthen it: add a `match` so it is enforced before the call, attach a
-script, or rewrite the description. `compound status` lists ineffective lessons until
-that happens.
+anything. A lesson with `COMPOUND_RECUR_LIMIT` recurrences since it was last written is
+**ineffective**. A recall that makes or finds a lesson ineffective is marked so in its
+`recall` event, and the session then owes a strengthening. The message beside the error
+says so, and if the session tries to finish without one, the stop is refused once with
+the lesson named and the options stated:
+
+- add a `match` so the call is stopped before it runs
+  (`compound add --update --name N --match RE`);
+- attach a script that does the step the right way;
+- rewrite the description;
+- or decline with `compound skip --why`.
+
+The debt is settled by a `learn` event with `update: true` for that lesson, or by a
+`skip`, in the same session. A lesson that already carries a `match` and still recurs
+gets a different message: its pattern is not catching the failing call, which is quoted
+beside the pattern. `compound status` lists ineffective lessons until they are rewritten.
+A lesson left in another project (see Levels) is that project's to rewrite: the session
+that met it owes nothing for it.
 
 The mod's own failures are handled the same way. A hook that throws, a model answer that
 does not parse, a CLI call that fails: each is written to the event log as an `error`,
@@ -232,34 +294,52 @@ or recorded. Every new failure is reported, each one once.
   the start of each new typed prompt.
 - **Toast**: a lesson recorded, moved or marked ineffective.
 - **Event log**: `~/.claude/compound/events.jsonl`, one JSON object per line: `ts`,
-  `type` (`reuse`, `guard`, `recall`, `capture`, `refuse`, `learn`, `skip`, `nudge`,
-  `promote`, `skill`, `rm`, `error`), `session`, `project`, and the fields of that type.
+  `type` (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `learn`, `skip`,
+  `nudge`, `promote`, `candidate`, `skill`, `rm`, `error`), `session`, `project`, and the
+  fields of that type. `compound log` refuses any other type.
 - **Claims**: `~/.claude/compound/claims/<session id>/`, one empty directory per thing
-  the mod did once in that session (`guard-<lesson>`, `stop-<call id>`, `nudge-<turn>`).
-  A session's claims are removed two weeks after its last one.
-- **`compound status`** (also `/compound`): store counts per level; for each lesson how
-  often it was reused, guarded, recalled; ineffective lessons; debts declined and why;
-  errors in the last seven days; and health checks (python, the mod enabled in settings,
-  the prompt log reachable, the last event's age, duplicate names across levels).
+  the mod did once in that session (`guard-<lesson>`, `stop-<call id>`,
+  `strengthen-<lesson>`, `nudge-<turn>`, `unsettled`). A session's claims are removed two
+  weeks after its last one.
+- **`compound status`** (also `/compound`): health checks; store counts per level; for
+  each lesson how often it was reused, guarded, recalled; recent events; and under Open
+  everything that waits for someone: unsettled captures, promotion candidates with the
+  command that moves each, ineffective lessons, debts declined and why, and errors in the
+  last seven days.
+
+The health checks, in order:
+
+| Check | Passes when |
+|-|-|
+| `python` | the interpreter is 3.8 or later |
+| `mod` | the package is in `env.CLAUDE_CODE_PLUGIN_DIRS` of `settings.json`, and that directory holds `.claude-plugin/plugin.json` and `hooks/hooks.json` with the module file it names (FAIL when one is missing). WARN "switched off" when `COMPOUND_OFF` is `1` in the settings `env` or in the environment. |
+| `mod last fired` | the newest event of a type the mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `error`) is at most 7 days old. WARN when there is none or it is older. |
+| `cli` | `compound` on `PATH` is this package's. WARN with the line to add to the shell profile when the installed link's directory is not on `PATH`. |
+| `prompt log` | history-surfer answers; the row reads `N prompts in this project`, or `reachable` when its answer holds no count |
+| `last event` | the event log can be written and every line of it parses |
+| `duplicates` | no name is visible at two levels (FAIL for a lesson, WARN for two skills) |
+| `lessons parse` | every lesson reads |
+| `errors` | the mod logged no error in the last 7 days |
 
 ## CLI contract
 
 Every command takes `--json` where it prints data. Exit 0 on success, 2 on a usage or
-validation error, 1 on any other failure. Errors go to stderr.
+validation error, 1 on any other failure. `promote --to user --auto` alone exits 3, when
+it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--level L] [--match RE]... [--attach F]... [--origin T] [--update]` | Body on stdin. Writes the lesson. Refuses a name that exists at any level unless `--update`, which rewrites that lesson where it is. Logs `learn`. |
+| `compound add --name N --when D [--level L] [--match RE]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Body on stdin. Writes the lesson. Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--no-match`, with `--update`, drops the lesson's guard patterns. `--settles ID` settles that capture. Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. |
 | `compound show N` | One lesson's path and text. |
 | `compound find WORDS` | Lessons, skills and scripts ranked by word overlap, then prompt-log hits. |
 | `compound check` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for matching guards. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. |
-| `compound promote N --to user\|general [--yes]` | `user`: moves it. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote`. |
-| `compound rm N` | Removes a lesson. |
-| `compound skip --why T` | Declines an owed lesson. Logs `skip`. |
-| `compound log` | stdin: one event object. Appends it with `ts` filled in. |
-| `compound events [--since TS] [--type T] [--session S]` | Reads the log. |
+| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name another project holds. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote`. |
+| `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed. |
+| `compound skip --why T [--settles ID]` | Declines an owed lesson, or with `--settles` the capture of that id. Logs `skip`. |
+| `compound log` | stdin: one event object of a known type. Appends it with `ts`, `session` and `project` filled in, and an `id` for a `capture`. |
+| `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled]` | Reads the log. `--unsettled`: only the captures of the last 14 days that nothing has settled. |
 | `compound status` | The report above. Exit 1 when a health check fails. |
 | `compound install` / `update` / `uninstall [--purge]` | See below. |
 
@@ -279,7 +359,10 @@ run from) and runs `bin/compound install`, which:
 
 - adds the checkout to `env.CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, which
   is what loads the mod and its skills in every session;
-- links `compound` into the first of `~/.local/bin`, `~/bin` that is on `PATH`;
+- links `compound` into the first of `~/.local/bin`, `~/bin` that is on `PATH`. When
+  neither is, it creates `~/.local/bin`, links there, and prints the exact line to add to
+  the shell profile (`export PATH="$HOME/.local/bin:$PATH"`). Its closing "Check it with"
+  line gives the link's absolute path, so it runs either way;
 - installs [history-surfer](https://github.com/ContextLab/claude-history-surfer), the
   prompt log, when it is not already present;
 - records what it did in `~/.claude/compound/install.json`.
@@ -291,7 +374,10 @@ path element is added or removed. Running install twice changes nothing.
 name and text now exist at `general` is removed, so the pool stays the only copy.
 
 `compound uninstall` removes the settings element, the link and `install.json`. Lessons
-are the user's knowledge and stay unless `--purge` is given.
+are the user's knowledge and stay. `compound uninstall --purge` also removes
+`~/.claude/compound`: the user-level lessons, the event log and the claims. It leaves
+skills in `<claude dir>/skills` where they are, lessons that became skills included: they
+are the user's skills. Project lessons belong to their projects and are never touched.
 
 ## Tests
 

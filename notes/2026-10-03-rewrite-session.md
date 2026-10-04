@@ -46,3 +46,29 @@ the blocks and `~/.claude/lessons`.
 The twelve seed skills the old package shipped (`ai-tell-audit`, `session-handoff`, ...)
 are not in the new general pool. They are in git at `ee0d596:skills/`. Which, if any,
 should come back?
+
+## Second review: fixes A to H (2026-10-03, late; uncommitted when written)
+
+Eight reviewed defects fixed, test or journey first. Not committed: the working tree
+holds them (`git status`). `README.md` was left alone on purpose.
+
+- A: `promote --to user --auto [--seen-in P]` moves only a lesson git does not track;
+  tracked is exit 3 plus a `candidate` event; status Open lists the command.
+- B: a name is unique among what a session sees; a move or add at the user level is
+  refused while another project known to the log holds the name; `--as NEWNAME`.
+- C: status `mod` row checks the plugin files and `COMPOUND_OFF`; new `mod last fired` row.
+- D: `capture.id`, `--settles ID` on add and skip, `events --unsettled [--project P]`,
+  status Open lists unsettled captures, and a once-per-session `remind` at the first prompt.
+- E: an ineffective recall (`recall.ineffective`) owes a strengthening; the stop is refused
+  once (`refuse` why `strengthen`). `show --json` gained `recalls_since`, `recur_limit`.
+- F: install always links (creates `~/.local/bin`) and prints the PATH line.
+- G: `log` refuses unknown types; prompt-log row is a count; `lessons/.gitkeep`; design.
+- H: the reuse judge is told that running a named command is not a build task.
+
+New: `tests/test_reach.py`, `tests/journeys/journey_strengthen.py`,
+`tests/journeys/journey_unsettled.py`. Event types added: `remind`, `candidate`.
+
+Observed in the journeys: with the stronger wording a session usually strengthens the
+lesson at once, so the stop refusal is reached only when it tries to finish first. One
+session wrote a `--match` from the ERROR text, which never matches a call; the messages
+now say what a match is tested against.

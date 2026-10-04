@@ -172,13 +172,14 @@ class InstallTest(Case):
         self.assertTrue(os.path.islink(os.path.join(local_bin, "compound")), "~/.local/bin comes first")
         self.assertFalse(os.path.lexists(os.path.join(home_bin, "compound")))
 
-    def test_with_neither_bin_dir_on_path_the_mod_is_enabled_and_no_link_is_made(self):
+    def test_with_neither_bin_dir_on_path_the_mod_is_enabled_and_the_link_goes_to_local_bin(self):
         proc = self.box.run("install")
         self.assertExit(proc, 0)
-        self.assertIn("not linked", proc.stdout)
+        self.assertIn("is not on PATH", proc.stdout)
         self.assertEqual(self.settings(), {"env": {PLUGIN_ENV: self.box.pkg}})
-        self.assertIsNone(json.loads(read(self.box.manifest))["link"])
-        self.assertFalse(os.path.exists(self.box.bin))
+        link = os.path.join(self.box.bin, "compound")
+        self.assertEqual(json.loads(read(self.box.manifest))["link"], link)
+        self.assertTrue(os.path.islink(link))
 
     def test_claude_dir_flag_names_the_directory(self):
         other = os.path.join(self.box.root, "other-claude")

@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Use when a "[compound]" message says the session owes a lesson or asks whether it learned anything, when a failed command was just fixed, or when the user says to remember, record or write down how something was solved. Records one lesson with the compound CLI.
+description: Use when a "[compound]" message says the session owes a lesson, says an earlier session left one unsettled, says a lesson is ineffective, or asks whether it learned anything, when a failed command was just fixed, or when the user says to remember, record or write down how something was solved. Records one lesson with the compound CLI.
 ---
 
 # Record a lesson
@@ -18,6 +18,9 @@ line `compound CLI: <absolute path>`. Run that path. If there is no such message
 
 - The failing call, its error and the working call are quoted in the `[compound]` message.
   They are also in the log: `compound events --type capture --session "$CLAUDE_CODE_SESSION_ID" --json`
+- When the message says an EARLIER session left a lesson unsettled, it quotes that
+  session's failing call, error and working call with an id. Every unsettled one, with its
+  id: `compound events --unsettled --json`
 - If the lesson is about something else in this session, re-read the tool calls and results
   in the transcript above. Quote the command and the error text exactly.
 - For what the user asked for, in their words: `surfer search "<keywords>"` (history-surfer's
@@ -35,6 +38,12 @@ failed, a file that was simply missing), decline and say why:
 
 ```bash
 compound skip --why "the failure was a typo in a file name, not a recurring mistake"
+```
+
+A lesson owed by an earlier session is declined by its id, which the message gives:
+
+```bash
+compound skip --settles ab12cd34 --why "a one-off: the file was simply missing"
 ```
 
 ## 3. Look for an existing lesson first.
@@ -108,6 +117,17 @@ string, the changelog entry and a clean tree, which were each forgotten once.
 EOF
 ```
 
+A lesson an earlier session owed. The `[compound]` message gives the id; `--settles` is
+what marks that debt as paid, and without it the debt stays open:
+
+```bash
+compound add --name build-needs-profile --settles ab12cd34 \
+  --when "Use when running ./build.sh in this repository." <<'EOF'
+Run `./build.sh --profile dev`. A bare `./build.sh` fails with
+"error: a profile is required".
+EOF
+```
+
 Improving a lesson that already exists (it is rewritten where it is; flags you leave out
 keep their value):
 
@@ -120,7 +140,8 @@ both fail with "error: a profile is required".
 EOF
 ```
 
-`--name` is a lowercase slug (letters, digits, hyphens), unique across all levels.
+`--name` is a lowercase slug (letters, digits, hyphens), unique among the lessons this
+project can see. A user-level lesson also needs a name no other project uses.
 `--when` is the description: write it as a trigger, "Use when ...", in the words a
 failing call would show. Exit status 2 means the tool refused the input; read its message,
 fix the command, and run it again.
@@ -128,10 +149,32 @@ fix the command, and run it again.
 ## 7. When told a lesson is ineffective
 
 A `[compound]` message that says a lesson was recalled after the failure it describes
-means the lesson did not prevent it. Strengthen it with `--update`: add a `--match` so the
-call is stopped before it runs, attach a script that does the step correctly, or rewrite
-`--when` so it names the situation. Do not add a second lesson.
+means the lesson did not prevent it. The session owes a strengthening, and will not be let
+finish until it is done or declined. Strengthen it with `--update`, which keeps every
+value you do not give. Do not add a second lesson.
 
-## 8. Say what you recorded
+- Add a `--match` so the call is stopped before it runs. This is the strongest form:
+
+  ```bash
+  compound add --update --name build-needs-profile --match '(^|[;&|]\s*)\./build\.sh\s*($|[;&|])'
+  ```
+
+- If the message says the lesson already has a match pattern that did not catch the call,
+  it quotes the call and the pattern. Write a pattern that matches that call and not the
+  right form, and pass it the same way (`--match` replaces the old patterns).
+- Or attach a script that does the step correctly (`--attach <file>`, with a body on stdin
+  that says to run it), or rewrite `--when` so it names the situation.
+- If none is worth doing, decline: `compound skip --why "<reason>"`.
+
+## 8. When told a lesson moved, or could move, to the user level
+
+A `[compound]` message that says a lesson was moved to the user level asks you to reword
+it if its text speaks of "this repository": it is now read from every project. Use
+`compound add --update --name <name>` with the new `--when` or body.
+
+A message that says a lesson of another project is a candidate for the user level gives a
+command that moves it. Do not run it. Tell the user and run it only if they say yes.
+
+## 9. Say what you recorded
 
 Tell the user in one line: the lesson's name, its level, and whether it is a guard.
