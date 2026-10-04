@@ -140,3 +140,8 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
 - 2026-10-04: the open decisions were settled with codex: `2026-10-04-decisions.md`. To
   implement after the bug-fix agent merges (track J): D1, D5, D6, D7, D8, the promote scan,
   the settlement scope, recurrence by level and path. Then release v0.5.1.
+- 2026-10-04: learn-loop fixes merged (b620d5f, merge 40bd569); 19 test files, 260 plugin
+  tests, tsc clean. Track J (the decisions) dispatched on that base.
+- 2026-10-04: a fifth security notice (titles only): "argument-injection /
+  command-execution in bin/compound" and "sensitive-data-to-log in bin/compound". Sent to
+  the running track J agent to confirm with a failing test and fix.
