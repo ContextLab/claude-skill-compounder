@@ -69,6 +69,9 @@ class Sandbox(object):
             "COMPOUND_NO_SURFER": "1",
             "CLAUDE_CODE_SESSION_ID": "sess-0001-aaaa",
             "GH_CONFIG_DIR": os.path.join(self.home, "gh-config"),
+            "XDG_STATE_HOME": os.path.join(self.home, "gh-config", "state"),
+            "XDG_DATA_HOME": os.path.join(self.home, "gh-config", "data"),
+            "XDG_CACHE_HOME": os.path.join(self.home, "gh-config", "cache"),
             "GIT_CONFIG_NOSYSTEM": "1",
             "LC_ALL": "C",
             # `created` and `updated` are LOCAL dates, so the zone is pinned with the clock.
