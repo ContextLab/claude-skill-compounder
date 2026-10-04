@@ -52,3 +52,7 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 - Still to do after the tracks: re-record README screenshots and demo.gif (dev/demo.sh,
   dev/ui-check.sh); decide with the owner on the stand-in `claude` executables in track
   B's version tests (no-mocks rule); final release.
+- 2026-10-04: a third security notice, after the track C merge: prompt injection through
+  unvalidated persisted state reaching the model's context, in `hooks/register.ts`. No
+  detail given. For track S: trace every value read back from `$.state`, the claims, the
+  event log and the store that ends up in text added to a prompt or a stop message.
