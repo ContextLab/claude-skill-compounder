@@ -475,6 +475,7 @@ The health checks, in order:
 | Check | Passes when |
 |-|-|
 | `python` | the interpreter is 3.9 or later |
+| `claude code` | `claude --version`, asked of the `claude` on `PATH` with a 5-second limit, is Claude Code 2.1.288 or later. FAIL when it is older, with the command that updates it. WARN when no `claude` is on `PATH` or it gives no version. |
 | `mod` | the package is in `env.CLAUDE_CODE_PLUGIN_DIRS` of `settings.json`, and that directory holds `.claude-plugin/plugin.json`, `hooks/hooks.json`, the module file it names, and every file that module and the files it imports name in a relative import (FAIL when one is missing). WARN "switched off" when `COMPOUND_OFF` resolves to `1` (see Environment variables). |
 | `mod last fired` | the newest event of a type the mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `error`) is at most 7 days old. WARN when there is none or it is older. |
 | `cli` | `compound` on `PATH` is this package's. WARN with the line to add to the shell profile when the installed link's directory is not on `PATH`. |
@@ -505,7 +506,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. Exit 1 when a health check fails. |
 | `compound install [--claude-dir D] [--bin-dir D]` | See below. `--claude-dir` names the Claude Code directory and `--bin-dir` the directory the link goes into. |
-| `compound update` | See below. |
+| `compound update [--ref REF]` | See below. `--ref` names the branch or tag to move the checkout to. |
 | `compound uninstall [--claude-dir D] [--purge]` | See below. |
 
 ## Environment variables
@@ -534,7 +535,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | mod | Seconds to wait for that model's answer. |
 | `COMPOUND_BIN` | `compound` on `PATH` | mod | The CLI the mod runs when the package holds no `bin/compound` of its own. |
 | `COMPOUND_HOME` | `<claude dir>/compound` | mod, CLI, installer | The user level's root: user lessons, the event log, the claims, the install record, and the clone `install.sh` makes. |
-| `COMPOUND_CLAUDE_DIR` | `~/.claude` | mod, CLI | The Claude Code directory: `settings.json` and the user skills. |
+| `COMPOUND_CLAUDE_DIR` | `~/.claude` | mod, CLI, installer | The Claude Code directory: `settings.json` and the user skills. `install.sh` reads it only for the default of `COMPOUND_HOME`. |
 | `COMPOUND_PROJECT` | the git top level of the working directory, else the working directory | mod, CLI | The project root. Setting it runs the CLI as that project from anywhere, which is how a lesson of another project is moved: `COMPOUND_PROJECT=<its project> compound promote <name> --to user`. |
 | `COMPOUND_NOW` | the clock | CLI | Pins the time: epoch seconds or an ISO 8601 time. For tests. |
 | `COMPOUND_CHECK_BUDGET_MS` | 500 | CLI | Milliseconds `compound check` spends matching patterns before it gives up on the ones not finished. |
@@ -543,7 +544,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_NO_SURFER` | unset | CLI | When set, `compound install` does not fetch history-surfer. |
 | `COMPOUND_SURFER_URL` | `https://github.com/ContextLab/claude-history-surfer.git` | CLI | Where `compound install` clones history-surfer from. |
 | `COMPOUND_REPO` | `https://github.com/ContextLab/claude-skill-compounder.git` | installer | The repository `install.sh` clones when it is not run from a checkout. |
-| `COMPOUND_REF` | `main` | installer | The branch or tag `install.sh` clones or pulls. `compound update` follows a branch only. |
+| `COMPOUND_REF` | the newest release | installer | The branch or tag `install.sh` clones, or moves an existing clone to. Unset, it is the newest release tag of the repository (see Install, update, uninstall), or `main` when there is none. |
 
 `CLAUDE_CODE_SESSION_ID`, which Claude Code sets in every shell it starts, stamps
 `session` on events the CLI writes.
@@ -554,8 +555,23 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash
 ```
 
+The mod needs Claude Code 2.1.288 or later, Python 3.9 or later and `git`.
+
 `install.sh` clones the package to `~/.claude/compound/app` (or uses the checkout it is
-run from) and runs `bin/compound install`, which:
+run from) and runs `bin/compound install`. Its first argument may be `install`, which is
+the default, or `uninstall`; the rest go to that command.
+
+**Which version.** With `COMPOUND_REF` unset, `install.sh` asks the repository for its
+tags (`git ls-remote --tags`) and takes the newest release: the highest tag of the form
+`vX.Y.Z`, compared as three numbers, that is not older than `v0.4.0`. Tags before
+`v0.4.0` hold no `bin/compound`. When there is no such tag, or the tags cannot be listed,
+it takes the branch `main`. A release is checked out at its tag, on no branch.
+`COMPOUND_REF` names a branch or a tag to take instead. An existing clone is moved to
+the same choice: a branch is pulled, a tag is checked out. The oldest release is stated
+twice, as `min_release` in `install.sh` and `RELEASE_MIN` in `bin/compound`, and
+`tests/test_docs.py` holds the two equal.
+
+`bin/compound install`:
 
 - adds the checkout to `env.CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, which
   is what loads the mod and its skills in every session;
@@ -563,22 +579,50 @@ run from) and runs `bin/compound install`, which:
   neither is, it creates `~/.local/bin`, links there, and prints the exact line to add to
   the shell profile (`export PATH="$HOME/.local/bin:$PATH"`). Its closing "Check it with"
   line gives the link's absolute path, so it runs either way, and the line before it says
-  to start a new session;
+  to start a new session. When another `compound` comes first on `PATH`, it names that
+  program and says that typing `compound` runs it;
 - installs [history-surfer](https://github.com/ContextLab/claude-history-surfer), the
   prompt log, when no `surfer` command is found and `COMPOUND_NO_SURFER` is not set: it
   clones it to `~/.claude/compound/history-surfer` and runs its `scripts/setup.py` for the
   same Claude Code directory and bin directory. A failure here never fails the install;
-- records what it did in `~/.claude/compound/install.json`.
+- records what it did in `~/.claude/compound/install.json`, with every directory it had
+  to create under `dirs_created`;
+- asks `claude --version` and prints one `claude` line: the version, a warning when it
+  is older than the minimum (with `claude update`), or that no `claude` is on `PATH`. A
+  version that is too old does not fail the install.
 
 `settings.json` is written atomically, through a symlink if it is one, and only the one
 path element is added or removed. Running install twice changes nothing.
 
-`compound update` pulls the checkout and reports the new version. A user lesson whose
-name and text now exist at `general` is removed, so the pool stays the only copy.
+`compound update` moves the checkout to the newest version of what it follows and
+reports the old and the new one. On a branch it runs `git pull --ff-only`. On a detached
+HEAD, which is where a release install leaves the clone, it fetches the tags and checks
+out the newest release (the same rule as `install.sh`), printing `updated v0.4.0 ->
+v0.4.1 (<old commit> -> <new commit>)` or `already the newest release: v0.4.1 (<commit>)`;
+with no release to move to it exits 1 and names `--ref`. `compound update --ref REF`
+moves the checkout to `REF` and follows it from then on: a branch of `origin` is checked
+out and pulled, a tag is checked out; a name `origin` does not have is exit 1 and nothing
+moves. `--json` carries `old`, `new` (commits), `old_ref`, `ref` (the branch or tag
+before and after) and `changed`. After any of them, a user lesson whose name and text
+now exist at `general` is removed, so the pool stays the only copy.
 
-`compound uninstall` removes the settings element, the link and `install.json`. Lessons
+Uninstall is also one line that needs no `compound` on `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash -s -- uninstall --purge
+```
+
+`install.sh uninstall` clones nothing. It runs `bin/compound uninstall`, with the rest
+of its arguments, of the first of these that holds a `bin/compound`: the `package` the
+install record names, the clone at `<COMPOUND_HOME>/app`, the checkout the script sits
+in. When none does, it says that compound is not installed, changes nothing and exits 0.
+
+`compound uninstall` removes the settings element, the link and `install.json`, and
+then each directory in `dirs_created` that is empty. Lessons
 are the user's knowledge and stay, and so does the clone at `~/.claude/compound/app` when
-`install.sh` made one: the output names its path. A history-surfer that install fetched
+`install.sh` made one: the output names its path, and ends with the command that deletes
+what was kept (`<package>/bin/compound uninstall --purge`). A history-surfer that install fetched
 stays installed, and the output prints the command that removes it. `compound uninstall
 --purge` also runs that history-surfer's own `scripts/setup.py --uninstall`, and removes
 `~/.claude/compound`: the user-level lessons, the event log, the claims, the package clone
