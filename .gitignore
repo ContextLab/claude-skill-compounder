@@ -10,3 +10,6 @@ __pycache__/
 
 # types the engine lays beside a loaded mod
 .claude-plugin/types/
+
+# Agent worktrees
+.claude/worktrees/
