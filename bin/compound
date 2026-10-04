@@ -54,7 +54,19 @@ EVENT LOG
     <COMPOUND_HOME>/events.jsonl, append-only, one JSON object per line, one write()
     per line. `compound log` reads ONE object on stdin and appends it. It fills three
     fields when they are absent: `ts`, `session` (from CLAUDE_CODE_SESSION_ID) and
-    `project` (the project root). `type` is required.
+    `project` (the project root). `type` is required, and is one of the types the table
+    below gives to the mod. A type a command of this CLI writes (`learn`, `skip`, `rm`,
+    `skill`, `promote`, `candidate`, `use`) is refused with exit 2 and the name of that
+    command (CLI_WRITES): an event that settles a debt, or says a lesson was written,
+    moved or removed, is in the log because the command ran. That keeps the log whole
+    against accident and against a session settling its debt with `log`. It is no
+    defence against a process running as the user, which can edit the file.
+
+    Every text an event holds is masked and cut where it is written (`append_event`,
+    `masked_event`): the rules of the mod's own `redact` (hooks/safe.ts), rule for rule,
+    for whatever looks like a credential, and EVENT_TEXT_CAP characters for one text.
+    The fields an event is found by (ts, type, session, project, path, lesson, id, ...)
+    are written as they are. The memo's quoted requests are masked the same way.
 
     Fields every event carries:
         ts        string  UTC, "YYYY-MM-DDTHH:MM:SSZ"
@@ -96,6 +108,9 @@ EVENT LOG
                                     text     string    this call
         recall    mod               lesson*  string    the lesson returned beside a
                                                        failure (one recurrence)
+                                    level*   string    the lesson's level, and
+                                    path*    string    its directory: which lesson of
+                                                       that name it was (see Counting)
                                     tool     string
                                     call     string    the call that failed
                                     error    string    the failure's text
@@ -108,11 +123,20 @@ EVENT LOG
                                                        `guard` events and does not
                                                        read the field
                                     ms       int       milliseconds the judge took
-                                    ineffective* bool  this recurrence made or found
-                                                       the lesson ineffective, and
+                                    counted  bool      `log` fills it in: this recall
+                                                       is one that counts toward
+                                                       ineffective (see Ineffective).
+                                                       Stored for the reader; the
+                                                       CLI works it out again
+                                    ineffective* bool  `log` fills it in when it is
+                                                       absent, and prints it: this
+                                                       recall counts, the lesson now
+                                                       has the limit of them, and
                                                        the session can rewrite it
-                                                       (never set for a lesson left
-                                                       in another project)
+                                                       (never for a general lesson
+                                                       or one left in another
+                                                       project). The mod reads it
+                                                       from the reply to `log`
         capture   mod               id*      string    a short stable hash; `log` fills
                                                        it in when it is absent
                                     tool     string
@@ -221,18 +245,29 @@ EVENT LOG
     A line that does not parse is skipped by every reader and counted by `status`.
     An append to a log whose last line has no newline starts on a new line.
 
-    Counting. `counts` for a name is {reuse, guard, recall, learn, use}: the number of
-    events of that type whose `lesson` equals the name or whose `lessons` list
-    contains it. Both fields are read on all five types, so a recall that matched two
-    lessons may carry `lessons`. Events are selected by type NAME. `compound log`
-    refuses a type that is not in the table above; a line of another type already in
-    the log is shown by `events` and counted nowhere.
+    Counting. `counts` for a lesson is {reuse, guard, recall, learn, use}: the number of
+    events of that type whose `lesson` equals its name or whose `lessons` list
+    contains it, AND that are about that lesson (`about`). Both fields are read on all
+    five types, so a recall that matched two lessons may carry `lessons`. A name is not
+    a lesson: two projects may each hold a lesson of one name. A project lesson counts
+    the events of its own project: the event's `project`, or, for an event that says
+    which lesson it means (`level` and `path`, on recall, learn, use, skill), the
+    project that path is in. A user or general lesson is one lesson in every project
+    and counts every event of its name, except one that names a project lesson which
+    is still where the event says; a lesson that moved to the user level keeps what it
+    was counted for. Events are selected by type NAME. A line of a type that is not in
+    the table above is shown by `events` and counted nowhere.
 
     Settling. There is one definition, in `unsettled`, and `status`, `events
     --unsettled`, a bare `skip` and the mod's stop check all read it.
     A `capture` is a lesson owed. It is settled by a later `learn` or `skip` event
     that carries `settles` equal to its `id` (from any session, or from none), or that
-    comes from the same (non-empty) session.
+    carries no `settles` and comes from the same (non-empty) session. ONE EVENT SETTLES
+    ONE CAPTURE: an event that names a capture settles that one and no other, and `add`
+    and `skip` refuse (exit 2, listing each id with the first line of its failing call)
+    to write an event that names none while their session has more than one capture
+    unsettled (`settling`). A line without `settles` written before that rule, from a
+    session that owed several, still settles what that session owed.
     A `recall` with `ineffective: true` is a strengthening its session owes for that
     lesson (one per session and lesson: the newest). It is settled by a later `learn`
     with `update: true` for the lesson, by a later `skip` from the same session, or by
@@ -330,12 +365,19 @@ EVENT LOG
     (`residue_problem`; --as-written records it anyway). Both are exit 2.
 
     Ineffective. A lesson is ineffective when at least COMPOUND_RECUR_LIMIT (default
-    2) `recall` events naming it have a `ts` later than its SKILL.md's modification
-    time. Rewriting the lesson (`compound add --update`) clears the flag. A `recall`
-    that follows a `guard` event of the same lesson in the same (non-empty) session
-    is not one of them: a guard refuses once per session and the call sent again
-    runs, so a failure after the refusal is not the lesson failing to prevent it.
-    `show --json` says so for the caller's session as `guarded_in_session`.
+    2) of its recalls COUNT. Every `recall` is logged and shown; the ones that count
+    (`counted_recalls`) are about this lesson, have a `ts` later than its SKILL.md's
+    modification time, and are AT MOST ONE FOR EACH SESSION: several failures of one
+    session (calls sent together, a loop that retries) say once that the lesson did
+    not prevent them. Rewriting the lesson (`compound add --update`) is a new revision:
+    the count starts over, and the same session counts once more. A `recall` that
+    follows a `guard` event of the same lesson in the same (non-empty) session does
+    not count: a guard refuses once per session and the call sent again runs, so a
+    failure after the refusal is not the lesson failing to prevent it. `show --json`
+    says so for the caller's session as `guarded_in_session`. Whether one recall
+    counts, and whether it makes its lesson ineffective, is decided in one place,
+    `recall_verdict`, when `log` writes the event; `log --json` prints the answer and
+    the mod reads it there.
 
     Recurring. A lesson of the general pool is never ineffective and is never a
     strengthening owed: `add --update` does not rewrite it, so a session could not pay
@@ -344,10 +386,10 @@ EVENT LOG
     do, `compound disable NAME` and a report to the package's repository. `unsettled`
     leaves out a `recall` of a general lesson whatever the event says.
 
-    Two guards on one call. When a call is matched by a guard of the user level and by a
-    guard of the general pool, `check` returns the user's and names the general ones
-    under "yielded": a user who has a lesson of their own for a mistake the pool also
-    covers is refused once, with their own text. A project guard makes nothing yield.
+    Several guards on one call. No guard yields to another: every guard in force that
+    matches a call is a hit of `check`, whatever its level, and the mod quotes them in
+    one refusal. A user who keeps a lesson of their own for a mistake the pool also
+    covers switches the general one off (`compound disable NAME`).
 
 WHAT A REPOSITORY CAN WRITE
     A project lesson is a file in a repository, and whoever can commit to it can write
@@ -365,8 +407,16 @@ WHAT A REPOSITORY CAN WRITE
         listed, flagged, and not in force.
     What is printed for a person passes through `one_line`, which drops control
     characters, and a name or a path in a command the CLI prints is quoted (sh_quote).
-    `promote --to general` reads what it would publish for the shape of a credential
-    (SECRET_SHAPES) and refuses with `--yes` when it finds one.
+    `promote --to general` copies what it would publish into a staging directory,
+    each file read once and whole (`stage_files`), reads that copy in full for the
+    shape of a credential (SECRET_SHAPES), and publishes that copy. With `--yes` it
+    refuses when it finds one, and when a file cannot be read or is larger than
+    PUBLISH_BYTES: a file that is not scanned is not published. Nothing overrides it.
+
+    A value from outside is never an option of a program this file runs: every program
+    is started from an argument vector with no shell, a ref, an owner/repo and a git
+    source are held to a pattern first (REF_RE, UPSTREAM_RE, git_source_problem), and
+    each goes after `--` where the program takes one.
 
     One lesson in two places. Two lesson directories of one name whose trees are byte
     for byte the same are one lesson. A project copy identical to the user-level
@@ -384,6 +434,8 @@ ENVIRONMENT
     COMPOUND_REUSE_FLOOR the weight a candidate of `find --request` must reach (default 1.5)
     COMPOUND_OFF         1 switches the mod off; `status` reports it
     COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
+    COMPOUND_UPSTREAM_GIT  a git URL or path: `promote --to general --yes` pushes its
+                         branch there with git alone (no gh, no fork, no pull request)
     COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
     COMPOUND_NO_SURFER   install does not fetch history-surfer
     COMPOUND_SURFER_URL  where install clones history-surfer from
@@ -420,9 +472,15 @@ import time
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn", "use")
-# Every type the table in the docstring names; `compound log` takes no other.
+# Every type the table in the docstring names.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
                "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry")
+# The types a command of this CLI writes, and the command: `compound log` refuses them, so
+# an event that settles a debt or says a lesson was written, moved or removed is in the log
+# only because that command ran. `log` takes the other types, which are the mod's.
+CLI_WRITES = {"learn": "add", "skip": "skip", "rm": "rm", "skill": "skill", "promote": "promote",
+              "candidate": "promote", "use": "use"}
+LOG_TYPES = tuple(kind for kind in EVENT_TYPES if kind not in CLI_WRITES)
 # The types the mod writes, or has the CLI write (`use`): the newest of them is when the
 # mod last fired.
 MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "use", "repeat", "error",
@@ -446,6 +504,12 @@ CLAUDE_CODE_MIN = (2, 1, 288)
 # carries the same number as `min_release`.
 RELEASE_MIN = (0, 4, 0)
 RELEASE_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+# A VALUE FROM OUTSIDE IS NEVER AN OPTION OF A PROGRAM THIS FILE RUNS. Every program is
+# started from an argument vector, with no shell. A branch or tag name, an owner/repo and
+# a git source are held to these before `git` or `gh` sees them, and each goes after `--`
+# where the program takes one.
+REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
+UPSTREAM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 SCRIPT_DIRS = ("scripts", "bin", "tools")
 SCRIPT_CAP = 200
 WEEK = 7 * 86400
@@ -1641,6 +1705,103 @@ def scan_scripts(project):
     return out
 
 
+# ----------------------------------------------------------------------------- masking
+
+# WHAT IS WRITTEN TO THE EVENT LOG OR THE MEMO IS MASKED WHERE IT IS WRITTEN. The mod masks
+# a call and its error before it logs them (hooks/safe.ts `redact`); these are the same
+# rules, rule for rule, applied in `append_event` and `write_memo` to every text the file
+# will hold, so that an event another program hands to `log`, a field the mod did not mask
+# and an event a command writes itself (`skip --why`) are masked as well. It is a LOWER
+# BOUND: a secret with no recognisable name or shape is not found. It errs toward masking.
+MASK = "<redacted>"
+_SECRET_NAME = r"(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|KEY|CREDENTIALS?|AUTH)"
+_SECRET_MEMBER = (r"(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|password|passwd|credentials?"
+                  r"|authorization)")
+_VALUE = r"""("[^"]*"|'[^']*'|[^\s;&|]+)"""
+# (pattern, flags, replacement). Compiled when first used: `check`, which every tool call
+# waits for, writes no event and pays nothing for them.
+REDACT_RULES = (
+    # A PEM block, whole, or from its first line to the end when its last line was cut off.
+    (r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)[A-Z0-9 ]*-----[\s\S]*?(?:-----END [A-Z0-9 ]*-----|\Z)", 0, MASK),
+    # TOKEN=..., MY_API_KEY=..., password=...: an assignment or a query parameter.
+    (r"\b([A-Za-z0-9_]*" + _SECRET_NAME + r"[A-Za-z0-9_]*)=" + _VALUE, re.I, r"\1=" + MASK),
+    # --token X, --password=X, --api-key X.
+    (r"(--?(?:token|password|passwd|secret|api[-_]?key|auth|credentials?)(?:=|\s+))" + _VALUE, re.I, r"\1" + MASK),
+    # curl -u user:password, curl --user user:password.
+    (r"(\bcurl\b[^|;&\n]*?\s(?:-u|--user)(?:=|\s*))" + _VALUE, 0, r"\1" + MASK),
+    # mysql -pPASSWORD (attached).
+    (r"(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^|;&\n]*?\s-p)([^\s;&|]+)", 0, r"\1" + MASK),
+    # docker login -p PASSWORD, sshpass -p PASSWORD.
+    (r"(\b(?:docker\s+login|sshpass)\b[^|;&\n]*?\s-p\s*)" + _VALUE, 0, r"\1" + MASK),
+    # Authorization: Bearer X, Proxy-Authorization: Basic X, Authorization: X.
+    (r"""(\b(?:Proxy-)?Authorization\\?["']?\s*:\s*\\?["']?(?:(?:Bearer|Basic|Token|Digest|Negotiate)\s+)?)"""
+     r"""[^\s"'\\,}]+""", re.I, r"\1" + MASK),
+    # X-Api-Key: X, X-Auth-Token: X, Api-Key: X.
+    (r"""(\b(?:X-[A-Za-z-]*(?:Key|Token|Auth|Secret)[A-Za-z-]*|Api-Key)\s*:\s*)[^\s"'\\]+""", re.I, r"\1" + MASK),
+    # "api_key": "X", 'token': 'X', and the same inside a shell string: \"password\": \"X\".
+    (r"(\\\"[^\"\s\\]*" + _SECRET_MEMBER + r"[^\"\s\\]*\\\"\s*:\s*\\\")[^\"\\]*(\\\")", re.I, r"\1" + MASK + r"\2"),
+    (r"(\"[^\"\s]*" + _SECRET_MEMBER + r"[^\"\s]*\"\s*:\s*\")(?:[^\"\\]|\\.)*(\")", re.I, r"\1" + MASK + r"\2"),
+    (r"('[^'\s]*" + _SECRET_MEMBER + r"[^'\s]*'\s*:\s*')[^']*(')", re.I, r"\1" + MASK + r"\2"),
+    # Bearer X wherever it sits.
+    (r"(\bBearer\s+)[A-Za-z0-9._~+/=-]{12,}", 0, r"\1" + MASK),
+    # scheme://user:password@host.
+    (r"(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", re.I, r"\1" + MASK + "@"),
+    # Token shapes: OpenAI/Anthropic, GitHub, AWS, Slack, GitLab, Google, Hugging Face, npm, a JWT.
+    (r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}"
+     r"|xox[abprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,}|hf_[A-Za-z0-9]{30,}"
+     r"|npm_[A-Za-z0-9]{30,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})", 0, MASK),
+)
+_redact_compiled = []
+# The longest text one field keeps, and the most elements one list keeps. The mask goes on
+# the whole text first, the cut on what is left, so no secret is left half shown.
+EVENT_TEXT_CAP = 8000
+EVENT_LIST_CAP = 200
+# What an event is FOUND by is not free text and is written as it is: masking a project
+# path or a session id would lose the event.
+UNMASKED_KEYS = frozenset(("ts", "type", "session", "project", "path", "from", "seen_in", "also", "merged", "id",
+                           "settles", "lesson", "lessons", "level", "kind"))
+
+
+def redact(text):
+    """`text` with what looks like a secret masked (see REDACT_RULES)."""
+    if not _redact_compiled:
+        _redact_compiled.extend((re.compile(pattern, flags), to) for pattern, flags, to in REDACT_RULES)
+    for pattern, to in _redact_compiled:
+        text = pattern.sub(to, text)
+    return text
+
+
+def masked(value, depth=0):
+    """`value` as it may be written: every string masked and cut at EVENT_TEXT_CAP, every
+    list cut at EVENT_LIST_CAP, to any depth."""
+    if isinstance(value, str):
+        text = redact(value)
+        return text if len(text) <= EVENT_TEXT_CAP else text[:EVENT_TEXT_CAP - 1] + "…"
+    if depth > 20:
+        return None
+    if isinstance(value, dict):
+        return {str(key)[:200]: masked(item, depth + 1) for key, item in list(value.items())[:EVENT_LIST_CAP]}
+    if isinstance(value, (list, tuple)):
+        return [masked(item, depth + 1) for item in value[:EVENT_LIST_CAP]]
+    return value
+
+
+def masked_event(event):
+    """The event as the log holds it: free text masked and capped, the fields an event is
+    found by (UNMASKED_KEYS) capped only."""
+    out = {}
+    for key, value in list(event.items())[:EVENT_LIST_CAP]:
+        if key in UNMASKED_KEYS:
+            if isinstance(value, str):
+                value = value[:EVENT_TEXT_CAP]
+            elif isinstance(value, (list, tuple)):
+                value = [one[:EVENT_TEXT_CAP] if isinstance(one, str) else one for one in value[:EVENT_LIST_CAP]]
+            out[str(key)[:200]] = value
+        else:
+            out[str(key)[:200]] = masked(value)
+    return out
+
+
 # ----------------------------------------------------------------------------- events
 
 
@@ -1699,7 +1860,12 @@ def dumps(data, **options):
 
 def append_event(event):
     """One event, one line, one write(). A log whose last line was cut short (no
-    newline) gets one first, in that same write, so this event is not lost with it."""
+    newline) gets one first, in that same write, so this event is not lost with it.
+    The event is masked here (`masked_event`), in place, so the caller prints what the
+    log holds: this is the one way into the log."""
+    held = masked_event(event)
+    event.clear()
+    event.update(held)
     path = events_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     line = (dumps(event, separators=(",", ":")) + "\n").encode("utf-8")
@@ -1774,35 +1940,110 @@ def event_names(event):
     return names
 
 
-def tally(events):
-    """({name: {reuse, guard, recall, learn, use}}, {name: [recall epochs]})."""
-    counts = {}
-    recalls = {}
-    guarded = set()
+_real_paths = {}
+
+
+def real(path):
+    """os.path.realpath, remembered: the same few project roots are compared for every
+    event of a log."""
+    found = _real_paths.get(path)
+    if found is None:
+        found = _real_paths[path] = os.path.realpath(path)
+    return found
+
+
+PROJECT_STORES = (os.path.join(".claude", "compound", "lessons"), os.path.join(".claude", "skills"))
+
+
+def event_home(event):
+    """(level, project root) of the lesson an event says it is about. `learn`, `use`,
+    `rm`, `skill` and `recall` events carry the lesson's `level`; for a project lesson the
+    root is read from its `path` (<root>/.claude/compound/lessons/<name>), else it is the
+    event's `project`. (None, None) for an event that names no level."""
+    level = event.get("level")
+    if level not in LEVELS:
+        return None, None
+    if level != "project":
+        return level, None
+    path = event.get("path")
+    if isinstance(path, str):
+        for store in PROJECT_STORES:
+            root, found, name = path.rstrip(os.sep).rpartition(os.sep + store + os.sep)
+            if found and root and name and os.sep not in name:
+                return level, root
+    return level, _text(event.get("project"))
+
+
+_held_paths = {}
+
+
+def about(item, event, project):
+    """Whether `event`, which names `item` by name, is about `item` and not about another
+    lesson of that name. See Counting.
+
+    A project lesson is its project's: two projects may each hold a lesson of one name,
+    and an event belongs to the one whose project it names (by the lesson's `path` when
+    the event carries one, else by the event's `project`). A user or general lesson is
+    one lesson everywhere; the only events of its name that are not its own are those
+    that name a project lesson which is still where the event says."""
+    level, root = event_home(event)
+    if item["level"] == "project":
+        if level is None:
+            root = _text(event.get("project"))
+        elif level != "project":
+            return False
+        return bool(root) and real(root) == real(project)
+    if level != "project":
+        return True
+    path = event.get("path")
+    if not isinstance(path, str) or not path:
+        return True
+    held = _held_paths.get(path)
+    if held is None:
+        held = _held_paths[path] = os.path.isfile(os.path.join(path, "SKILL.md"))
+    return not held or real(path) == real(item["path"])
+
+
+def tally(events, items, project):
+    """[(counts, recalls)], one pair for each of `items`, in their order. `counts` is
+    {reuse, guard, recall, learn, use}: the events that are about the item (`about`).
+    `recalls` is [(epoch, session, event)] for its recalls that may count toward
+    ineffective, before the lesson's last rewrite is looked at (see Ineffective): not one
+    that follows the lesson's own guard in its session. `counted_recalls` takes one for
+    each session from them."""
+    named = {}
     for event in events:
-        kind = event.get("type")
-        if kind not in COUNT_TYPES:
-            continue
-        session = _text(event.get("session"))
-        for name in event_names(event):
-            row = counts.setdefault(name, dict.fromkeys(COUNT_TYPES, 0))
-            row[kind] += 1
+        if event.get("type") in COUNT_TYPES:
+            for name in event_names(event):
+                named.setdefault(name, []).append(event)
+    out = []
+    for item in items:
+        counts = dict.fromkeys(COUNT_TYPES, 0)
+        recalls = []
+        guarded = set()
+        for event in named.get(item["name"], ()):
+            if not about(item, event, project):
+                continue
+            kind = event["type"]
+            session = _text(event.get("session"))
+            counts[kind] += 1
             if kind == "guard" and session:
-                guarded.add((session, name))
+                guarded.add(session)
             # See Ineffective: a recall after the lesson's guard refused in that session
             # is a recall, and is not a recurrence the lesson failed to prevent.
-            if kind == "recall" and (session, name) not in guarded:
+            if kind == "recall" and session not in guarded:
                 stamp = parse_ts(event.get("ts"))
                 if stamp is not None:
-                    recalls.setdefault(name, []).append(stamp)
-    return counts, recalls
+                    recalls.append((stamp, session, event))
+        out.append((counts, recalls))
+    return out
 
 
-def guarded_in(events, name, session):
-    """Whether the guard of lesson `name` refused a call in `session`."""
+def guarded_in(events, item, project, session):
+    """Whether the guard of `item` refused a call in `session`."""
     return bool(session) and any(
-        event.get("type") == "guard" and event.get("session") == session and name in event_names(event)
-        for event in events)
+        event.get("type") == "guard" and event.get("session") == session and item["name"] in event_names(event)
+        and about(item, event, project) for event in events)
 
 
 _settings_env = []
@@ -1838,20 +2079,78 @@ def recur_limit():
     return 2
 
 
-def recalls_since(item, recalls):
-    """How many recalls of `item` are later than its SKILL.md's modification time."""
-    stamps = recalls.get(item["name"])
-    if not stamps:
-        return 0
+def counted_recalls(item, recalls):
+    """The recalls of `item` that count toward ineffective: later than its SKILL.md's
+    modification time (its last rewrite), and at most ONE for each session. Several
+    failures of one session (calls sent in parallel, a loop that retries) say once that
+    the lesson did not prevent them. A recall with no session counts by itself."""
+    if not recalls:
+        return []
     try:
         modified = int(os.stat(item["_file"]).st_mtime)
     except OSError:
-        return 0
-    return sum(1 for stamp in stamps if stamp > modified)
+        return []
+    seen = set()
+    out = []
+    for stamp, session, event in recalls:
+        if stamp <= modified or (session and session in seen):
+            continue
+        seen.add(session)
+        out.append(event)
+    return out
+
+
+def recalls_since(item, recalls):
+    """How many recalls of `item` count toward ineffective."""
+    return len(counted_recalls(item, recalls))
 
 
 def is_ineffective(item, recalls, limit):
     return recalls_since(item, recalls) >= limit
+
+
+def recall_item(event, project):
+    """(item, elsewhere) for the lesson a `recall` event names: the lesson in force of
+    that name in the event's project, or, when the event's `level` and `path` say it is
+    another project's lesson, that one, read where it is (`elsewhere` is then its
+    project root). (None, None) when there is no such lesson."""
+    name = _text(event.get("lesson"))
+    if not name:
+        return None, None
+    level, root = event_home(event)
+    path = event.get("path")
+    if level == "project" and root and isinstance(path, str) and real(root) != real(project):
+        path = path.rstrip(os.sep)
+        if os.path.basename(path) != name or not SLUG_RE.match(name):
+            return None, None
+        kind = "lesson" if os.path.dirname(path).endswith(PROJECT_STORES[0]) else "skill"
+        item = _load_item("project", kind, path, False)
+        return (None, None) if item.get("_problem") else (item, root)
+    items, _ = scan(project)
+    for item in items:
+        if item["name"] == name and active(item) and not item.get("shadowed"):
+            return item, None
+    return None, None
+
+
+def recall_verdict(event, events):
+    """{counted, ineffective} for a `recall` event about to be appended after `events`.
+    THE place where it is decided whether a recall counts: `log` writes the answer into
+    the event and prints it, and the mod reads it there.
+
+    `counted`: this recall is one of those that count toward ineffective (see
+    Ineffective). `ineffective`: it counts, the lesson now has COMPOUND_RECUR_LIMIT of
+    them, and the session can rewrite the lesson: never for a lesson of the general pool
+    (see Recurring), nor for one left in another project."""
+    project = event["project"]
+    item, elsewhere = recall_item(event, project)
+    if item is None:
+        return {"counted": False, "ineffective": False}
+    _counts, recalls = tally(events + [event], [item], elsewhere or project)[0]
+    counting = counted_recalls(item, recalls)
+    counted = any(one is event for one in counting)
+    owed = counted and len(counting) >= recur_limit() and item["level"] != "general" and elsewhere is None
+    return {"counted": counted, "ineffective": owed}
 
 
 def short_hash(text):
@@ -1879,8 +2178,11 @@ def settled_by(debt, event):
     if debt.get("type") == "capture":
         if kind not in ("learn", "skip"):
             return False
+        # One event settles one capture: the one it names. An event that names none is
+        # its session's, and `add` and `skip` write such an event only while the session
+        # has one capture unsettled (`settling`).
         settles = _text(event.get("settles"))
-        return same_session or (bool(settles) and settles == capture_id(debt))
+        return settles == capture_id(debt) if settles else same_session
     # A strengthening: an ineffective recall of a lesson.
     name = debt.get("lesson")
     if kind == "skip":
@@ -1935,6 +2237,27 @@ def check_settles(value, events):
         raise usage("--settles %r names no unsettled capture (see `compound events --unsettled`%s)" % (
             one_line(value)[:40], "; unsettled: " + ", ".join(owed[-8:]) if owed else "; there is none"))
     return value
+
+
+def first_line(text):
+    lines = _text(text).strip().splitlines()
+    return one_line(lines[0])[:OPEN_TEXT] if lines else ""
+
+
+def settling(value, events):
+    """What `--settles` named, checked, for a `learn` or `skip` about to be written. In a
+    session with more than one unsettled capture the event must name the one it settles:
+    without `--settles` that is Fail(2), listing each with the first line of its failing
+    call. With exactly one, the event settles it without naming it."""
+    settles = check_settles(value, events)
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if settles is None and session:
+        mine = [cap for cap in unsettled_captures(events, now()) if cap.get("session") == session]
+        if len(mine) > 1:
+            raise usage("%d captures are unsettled in this session, and one lesson or one decline settles one "
+                        "of them. Say which with --settles ID:\n%s" % (len(mine), "\n".join(
+                            "  %s  `%s` failed" % (capture_id(cap), first_line(cap.get("failed"))) for cap in mine)))
+    return settles
 
 
 def _under(path, top):
@@ -2004,13 +2327,12 @@ def on_path(directory):
                for part in os.environ.get("PATH", "").split(os.pathsep) if part)
 
 
-def annotate(items, events):
+def annotate(items, events, project):
     """Public dicts carrying `counts` and `ineffective`."""
-    counts, recalls = tally(events)
     limit = recur_limit()
     out = []
-    for item in items:
-        extra = {"counts": dict(counts.get(item["name"], dict.fromkeys(COUNT_TYPES, 0)))}
+    for item, (counts, recalls) in zip(items, tally(events, items, project)):
+        extra = {"counts": counts}
         # See Recurring: a lesson the package ships is counted, and is never ineffective.
         recurs = item["kind"] != "script" and is_ineffective(item, recalls, limit)
         extra["ineffective"] = recurs and item["level"] != "general"
@@ -2340,7 +2662,7 @@ def cmd_add(args):
     items, _ = scan(project, with_body=True)
     existing = [item for item in items if item["name"] == name]
     events, _bad = read_events()
-    settles = check_settles(args.settles, events)
+    settles = settling(args.settles, events)
 
     if args.update:
         if not existing:
@@ -2525,7 +2847,7 @@ def cmd_list(args):
         items = [item for item in items if item["level"] == args.level]
         unreadable = [row for row in unreadable if row["level"] == args.level]
     events, _ = read_events()
-    rows = annotate(items, events)
+    rows = annotate(items, events, project)
     if args.json:
         # The list stays a list of what reads; what does not is said on stderr.
         for row in unreadable:
@@ -2590,9 +2912,9 @@ def cmd_show(args):
     files = sorted(name for name in os.listdir(item["path"]) if name != "SKILL.md" and not name.startswith("."))
     if args.json:
         events, _ = read_events()
-        row = annotate([item], events)[0]
-        row["recalls_since"] = recalls_since(item, tally(events)[1])
-        row["guarded_in_session"] = guarded_in(events, item["name"], os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
+        row = annotate([item], events, project)[0]
+        row["recalls_since"] = recalls_since(item, tally(events, [item], project)[0][1])
+        row["guarded_in_session"] = guarded_in(events, item, project, os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
         row["recur_limit"] = recur_limit()
         row["here"] = {"platform": this_platform(), "shell": this_shell()}
         row["text"] = text
@@ -2936,8 +3258,16 @@ def _memo_sessions(value):
 
 
 def write_memo(entries):
+    """Keeps the newest entries. What an entry quotes (the earlier requests, word for
+    word from the prompt log, and the names) is masked like an event's text."""
     newest = sorted(entries.items(), key=lambda pair: pair[1]["at"])[-MEMO_MAX:]
-    atomic_write(memo_path(), dumps({"version": 1, "entries": dict(newest)}) + "\n")
+    kept = {}
+    for key, entry in newest:
+        kept[key] = dict(entry)
+        for field in ("items", "prompts", "repeats"):
+            if field in kept[key]:
+                kept[key][field] = masked(kept[key][field])
+    atomic_write(memo_path(), dumps({"version": 1, "entries": kept}) + "\n")
     return len(newest)
 
 
@@ -3039,7 +3369,7 @@ def cmd_find(args):
     items = [item for item in items if active(item)]
     candidates = items + scan_scripts(project)
     events, _ = read_events()
-    ranked, counts = rank_items(query, candidates, annotate(candidates, events))
+    ranked, counts = rank_items(query, candidates, annotate(candidates, events, project))
     bar = floor
     if args.request and floor > 0 and ranked:
         bar = max(floor, ranked[0]["weight"] * REUSE_NEAR)
@@ -3229,13 +3559,10 @@ def cmd_check(args=None, count=False):
         order = sorted(range(len(guarded)), key=lambda index: guarded[index]["level"] == "project")
         hits, unfinished, never = run_guards([guarded[index]["match"] for index in order], text, began + budget)
         hits, unfinished, never = ([order[index] for index in found] for found in (hits, unfinished, never))
-        # See "Two guards on one call": a guard of the general pool yields to the user's own.
-        nearer = any(guarded[index]["level"] == "user" for index in hits)
+        # See "Several guards on one call": no guard yields to another. Every guard in
+        # force that matched is a hit.
         for index in sorted(hits):
             item = guarded[index]
-            if nearer and item["level"] == "general":
-                result.setdefault("yielded", []).append(item["name"])
-                continue
             result["hits"].append({"name": item["name"], "level": item["level"],
                                    "path": item["path"], "text": item["_body"].strip()})
         if unfinished or never:
@@ -3369,19 +3696,69 @@ SECRET_SHAPES = (
 )
 
 
-def secret_findings(item, files, skill_md):
-    """["<file>: <what it looks like>"] for every published file that holds something
-    shaped like a credential. The secret itself is never repeated."""
-    out = []
+# The largest file `promote --to general` publishes. A file is scanned whole or not at
+# all, and one that is not scanned is not published.
+PUBLISH_BYTES = 8 * 1024 * 1024
+
+
+def stage_files(item, files, skill_md, staging):
+    """Freezes what would be published: each file is read ONCE, whole, into `staging`.
+    The copy is what is scanned and what is published, so nothing that changes in the
+    lesson's directory afterwards reaches the pool unread. Returns ["<file>: <why>"] for
+    every file that cannot be published: one that cannot be read, one that is not a
+    regular file, and one larger than PUBLISH_BYTES. Such a file is not in `staging`."""
+    import stat
+
+    problems = []
     for rel in files:
+        target = os.path.join(staging, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
         if rel == "SKILL.md":
-            text = skill_md
-        else:
-            try:
-                with open(os.path.join(item["path"], rel), "rb") as handle:
-                    text = handle.read(4 * LESSON_BYTES).decode("utf-8", "replace")
-            except OSError:
-                continue
+            with open(target, "w", encoding="utf-8", newline="") as handle:
+                handle.write(skill_md)
+            continue
+        try:
+            fd = os.open(os.path.join(item["path"], rel), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as exc:
+            problems.append("%s: cannot be read (%s)" % (rel, exc.strerror or exc))
+            continue
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    problems.append("%s: is not a regular file" % rel)
+                    continue
+                data = b"" if info.st_size > PUBLISH_BYTES else handle.read(PUBLISH_BYTES + 1)
+                if info.st_size > PUBLISH_BYTES or len(data) > PUBLISH_BYTES:
+                    problems.append("%s: %d bytes, too large to scan (the limit is %d)" % (
+                        rel, max(info.st_size, len(data)), PUBLISH_BYTES))
+                    continue
+        except OSError as exc:
+            problems.append("%s: cannot be read (%s)" % (rel, exc.strerror or exc))
+            continue
+        with open(target, "wb") as handle:
+            handle.write(data)
+        os.chmod(target, 0o755 if info.st_mode & 0o111 else 0o644)
+    return problems
+
+
+def staged_files(staging):
+    """The relative paths of the files in a staging copy, sorted."""
+    out = []
+    for root, _dirnames, filenames in os.walk(staging):
+        for filename in filenames:
+            out.append(os.path.relpath(os.path.join(root, filename), staging))
+    return sorted(out)
+
+
+def secret_findings(staging):
+    """["<file>: <what it looks like>"] for every staged file that holds something shaped
+    like a credential, read in full. The secret itself is never repeated. A staged file
+    that cannot be read back is a failure of the command, not a finding to skip."""
+    out = []
+    for rel in staged_files(staging):
+        with open(os.path.join(staging, rel), "rb") as handle:
+            text = handle.read().decode("utf-8", "replace")
         for label, shape in SECRET_SHAPES:
             if shape.search(text):
                 out.append("%s: %s" % (rel, label))
@@ -3395,6 +3772,26 @@ def published_text(item):
         return edit_frontmatter(item.get("_text", ""), {}, removals=("origin",))
     except Fail as exc:
         raise usage("%s cannot be published: %s" % (item["_file"], exc.message))
+
+
+def ref_ok(name):
+    """Whether `name` is a branch or tag name this file hands to git: letters, digits,
+    `.`, `_`, `-` and `/` between parts, starting with a letter or digit, with none of
+    git's own forms (`..`, `@{`, a `.lock` ending)."""
+    return bool(REF_RE.match(name)) and ".." not in name and not name.endswith(".lock") and len(name) <= 200
+
+
+def git_source_problem(value):
+    """Why `value` is not a repository `git clone` is given, or None. One that begins
+    with `-` would be read as an option, one of the form `<helper>::<address>` runs a
+    remote helper, and a control character has no place in either."""
+    if not value or value.startswith("-"):
+        return "it begins with `-`, which git would read as an option"
+    if CONTROL_CHARS.search(value) or "\n" in value or "\t" in value:
+        return "it holds a control character"
+    if re.match(r"^[A-Za-z0-9+.-]+::", value):
+        return "it names a remote helper (`<helper>::`), which runs a program"
+    return None
 
 
 def _run(argv, cwd=None, timeout=300):
@@ -3540,93 +3937,115 @@ def cmd_promote(args):
     if item["level"] == "general":
         raise usage("%r is already in the general pool" % name)
     upstream = os.environ.get("COMPOUND_UPSTREAM") or UPSTREAM_DEFAULT
-    if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", upstream):
+    if not UPSTREAM_RE.match(upstream):
         raise usage("COMPOUND_UPSTREAM is not owner/repo: %r" % upstream)
     subdir = "lessons" if item["kind"] == "lesson" else "skills"
     branch = "compound/%s-%s" % (item["kind"], name)
+    # A git URL or a path to push the branch to with git alone, in place of GitHub.
+    remote = os.environ.get("COMPOUND_UPSTREAM_GIT") or ""
+    if remote and git_source_problem(remote):
+        raise usage("COMPOUND_UPSTREAM_GIT is not a repository git can be given: %s" % git_source_problem(remote))
     files, excluded = _lesson_files(item["path"])
     skill_md = published_text(item)
-    secrets = secret_findings(item, files, skill_md)
-    title = "Add %s: %s" % (item["kind"], name)
-    body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
-        item["kind"], name, item["description"])
-    if item["match"]:
-        body += "\nGuard patterns:\n" + "".join("- `%s`\n" % pattern for pattern in item["match"])
-    body += "\nFiles:\n" + "".join("- `%s/%s/%s`\n" % (subdir, name, rel) for rel in files)
-    body += "\nThe text:\n\n```\n%s\n```\n" % item["_body"].strip()
-    plan = {
-        "name": name, "from": item["level"], "to": "general", "upstream": upstream,
-        "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
-        "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
-        "skill_md": skill_md, "excluded": excluded, "secrets": secrets,
-    }
-    if secrets and args.yes:
-        raise usage("%r was not proposed: what would be published looks like it holds a credential (%s). "
-                    "The general pool is public. Take it out of the lesson and run again" % (name, "; ".join(secrets)))
-    if not args.yes:
-        if args.json:
-            emit(plan)
-        else:
-            if secrets:
-                sys.stdout.write("NOT PUBLISHABLE as it is: it looks like it holds a credential (%s), and --yes "
-                                 "will refuse it.\n" % "; ".join(secrets))
-            sys.stdout.write(
-                "Plan (nothing has been written; run again with --yes to do it):\n"
-                "  upstream : %s\n  branch   : %s\n  from     : %s (%s level)\n  files    :\n%s"
-                "  excluded : %s\n%s"
-                "  PR title : %s\n  PR body  :\n%s\n"
-                "  SKILL.md as it will be published:\n%s\n" % (
-                    upstream, branch, item["path"], item["level"],
-                    "".join("    %s\n" % path for path in plan["files"]),
-                    "dotfiles and links, never published" if excluded else "nothing",
-                    "".join("    %s\n" % path for path in excluded), title,
-                    "".join("    %s\n" % line for line in body.splitlines()),
-                    "".join("    %s\n" % line for line in skill_md.splitlines())))
-        return 0
 
     import shutil
     import tempfile
 
-    gh = shutil.which("gh")
-    if not gh:
-        raise failure("`gh` is not on PATH; `promote --to general --yes` needs the GitHub CLI")
-    if not shutil.which("git"):
-        raise failure("`git` is not on PATH")
-    code, _out, err = _run([gh, "auth", "status"], timeout=60)
-    if code != 0:
-        raise failure("`gh` is not authenticated (run `gh auth login`): %s" % one_line(err)[:200])
-    code, can_push, err = _run([gh, "api", "repos/" + upstream, "--jq", ".permissions.push"], timeout=60)
-    if code != 0:
-        raise failure("cannot read %s: %s" % (upstream, one_line(err)[:200]))
     work = tempfile.mkdtemp(prefix="compound-promote-")
     try:
+        # What is read from here on is the staging copy, never the lesson's directory.
+        staging = os.path.join(work, "staged")
+        os.makedirs(staging)
+        unpublishable = stage_files(item, files, skill_md, staging)
+        secrets = secret_findings(staging)
+        title = "Add %s: %s" % (item["kind"], name)
+        body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
+            item["kind"], name, item["description"])
+        if item["match"]:
+            body += "\nGuard patterns:\n" + "".join("- `%s`\n" % pattern for pattern in item["match"])
+        body += "\nFiles:\n" + "".join("- `%s/%s/%s`\n" % (subdir, name, rel) for rel in files)
+        body += "\nThe text:\n\n```\n%s\n```\n" % item["_body"].strip()
+        plan = {
+            "name": name, "from": item["level"], "to": "general", "upstream": remote or upstream,
+            "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
+            "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
+            "skill_md": skill_md, "excluded": excluded, "secrets": secrets, "unpublishable": unpublishable,
+        }
+        if secrets and args.yes:
+            raise usage("%r was not proposed: what would be published looks like it holds a credential (%s). "
+                        "The general pool is public. Take it out of the lesson and run again" % (
+                            name, "; ".join(secrets)))
+        if unpublishable and args.yes:
+            raise usage("%r was not proposed: %s. A file is scanned whole before it is published, and one that "
+                        "cannot be is not published. Fix or remove it and run again" % (
+                            name, "; ".join(unpublishable)))
+        if not args.yes:
+            if args.json:
+                emit(plan)
+            else:
+                if secrets:
+                    sys.stdout.write("NOT PUBLISHABLE as it is: it looks like it holds a credential (%s), and --yes "
+                                     "will refuse it.\n" % "; ".join(secrets))
+                if unpublishable:
+                    sys.stdout.write("NOT PUBLISHABLE as it is: %s. A file that cannot be scanned whole is not "
+                                     "published, and --yes will refuse it.\n" % "; ".join(unpublishable))
+                sys.stdout.write(
+                    "Plan (nothing has been written; run again with --yes to do it):\n"
+                    "  upstream : %s\n  branch   : %s\n  from     : %s (%s level)\n  files    :\n%s"
+                    "  excluded : %s\n%s"
+                    "  PR title : %s\n  PR body  :\n%s\n"
+                    "  SKILL.md as it will be published:\n%s\n" % (
+                        plan["upstream"], branch, item["path"], item["level"],
+                        "".join("    %s\n" % path for path in plan["files"]),
+                        "dotfiles and links, never published" if excluded else "nothing",
+                        "".join("    %s\n" % path for path in excluded), title,
+                        "".join("    %s\n" % line for line in body.splitlines()),
+                        "".join("    %s\n" % line for line in skill_md.splitlines())))
+            return 0
+
+        gh = None if remote else shutil.which("gh")
+        if not remote and not gh:
+            raise failure("`gh` is not on PATH; `promote --to general --yes` needs the GitHub CLI")
+        if not shutil.which("git"):
+            raise failure("`git` is not on PATH")
+        if not remote:
+            code, _out, err = _run([gh, "auth", "status"], timeout=60)
+            if code != 0:
+                raise failure("`gh` is not authenticated (run `gh auth login`): %s" % one_line(err)[:200])
+            code, can_push, err = _run([gh, "api", "repos/" + upstream, "--jq", ".permissions.push"], timeout=60)
+            if code != 0:
+                raise failure("cannot read %s: %s" % (upstream, one_line(err)[:200]))
         clone = os.path.join(work, "repo")
-        _must([gh, "repo", "clone", upstream, clone, "--", "--depth", "1"], what="cloning " + upstream)
+        if remote:
+            _must(["git", "clone", "--quiet", "--", remote, clone], what="cloning " + remote)
+        else:
+            _must([gh, "repo", "clone", upstream, clone, "--", "--depth", "1"], what="cloning " + upstream)
         target = os.path.join(clone, subdir, name)
         if os.path.exists(target):
-            raise failure("%s/%s already exists in %s" % (subdir, name, upstream))
+            raise failure("%s/%s already exists in %s" % (subdir, name, remote or upstream))
         _must(["git", "checkout", "-b", branch], cwd=clone)
-        for rel in files:
+        # Exactly the staged bytes: the tree that was scanned is the tree that is committed.
+        for rel in staged_files(staging):
             os.makedirs(os.path.dirname(os.path.join(target, rel)), exist_ok=True)
-            if rel == "SKILL.md":
-                with open(os.path.join(target, rel), "w", encoding="utf-8", newline="") as handle:
-                    handle.write(skill_md)
-            else:
-                shutil.copy2(os.path.join(item["path"], rel), os.path.join(target, rel))
+            shutil.copy2(os.path.join(staging, rel), os.path.join(target, rel))
         _must(["git", "add", "--", os.path.join(subdir, name)], cwd=clone)
         _must(["git", "commit", "-m", title], cwd=clone, what="git commit")
-        helper = ["-c", "credential.helper=", "-c", "credential.helper=!%s auth git-credential" % gh]
-        if can_push.strip() == "true":
-            _must(["git"] + helper + ["push", "origin", branch], cwd=clone, what="git push")
-            head = branch
+        if remote:
+            _must(["git", "push", "--quiet", "origin", "--", branch], cwd=clone, what="git push")
+            url = "%s#%s" % (remote, branch)
         else:
-            _must([gh, "repo", "fork", "--remote", "--remote-name", "fork"], cwd=clone, what="gh repo fork")
-            login = _must([gh, "api", "user", "--jq", ".login"], what="gh api user")
-            _must(["git"] + helper + ["push", "fork", branch], cwd=clone, what="git push")
-            head = "%s:%s" % (login, branch)
-        url = _must([gh, "pr", "create", "--repo", upstream, "--head", head,
-                     "--title", title, "--body", body], cwd=clone, what="gh pr create")
-        url = url.splitlines()[-1].strip() if url else ""
+            helper = ["-c", "credential.helper=", "-c", "credential.helper=!%s auth git-credential" % gh]
+            if can_push.strip() == "true":
+                _must(["git"] + helper + ["push", "origin", branch], cwd=clone, what="git push")
+                head = branch
+            else:
+                _must([gh, "repo", "fork", "--remote", "--remote-name", "fork"], cwd=clone, what="gh repo fork")
+                login = _must([gh, "api", "user", "--jq", ".login"], what="gh api user")
+                _must(["git"] + helper + ["push", "fork", branch], cwd=clone, what="git push")
+                head = "%s:%s" % (login, branch)
+            url = _must([gh, "pr", "create", "--repo", upstream, "--head", head,
+                         "--title", title, "--body", body], cwd=clone, what="gh pr create")
+            url = url.splitlines()[-1].strip() if url else ""
     finally:
         shutil.rmtree(work, ignore_errors=True)
     log_soft("promote", project, lesson=name, to="general", path=item["path"], url=url,
@@ -3727,7 +4146,7 @@ def cmd_skip(args):
     if not why:
         raise usage("--why cannot be empty: say why no lesson is being recorded")
     events, _bad = read_events()
-    settles = check_settles(args.settles, events)
+    settles = settling(args.settles, events)
     project = project_root()
     if settles is None and not os.environ.get("CLAUDE_CODE_SESSION_ID"):
         # Outside a session nothing says which capture is meant: the project's one
@@ -3747,7 +4166,7 @@ def cmd_skip(args):
     if args.json:
         emit(event)
     else:
-        sys.stdout.write("declined: %s\n" % why)
+        sys.stdout.write("declined: %s\n" % event["why"])
         if settles:
             sys.stdout.write("  settles capture %s\n" % settles)
     return 0
@@ -3764,8 +4183,11 @@ def cmd_log(args):
     kind = event.get("type")
     if not isinstance(kind, str) or not re.match(r"^[a-z][a-z0-9_-]{0,31}$", kind):
         raise usage("the event needs a `type` (a lowercase name such as reuse, guard, recall)")
-    if kind not in EVENT_TYPES:
-        raise usage("%r is not an event type; the types are: %s" % (kind, ", ".join(EVENT_TYPES)))
+    if kind in CLI_WRITES:
+        raise usage("%r is written by `compound %s`, not by `compound log`: run that command. `log` takes the "
+                    "types the mod writes: %s" % (kind, CLI_WRITES[kind], ", ".join(LOG_TYPES)))
+    if kind not in LOG_TYPES:
+        raise usage("%r is not an event type `log` takes; the types are: %s" % (kind, ", ".join(LOG_TYPES)))
     out = {"ts": event.get("ts") if isinstance(event.get("ts"), str) and parse_ts(event.get("ts")) is not None
            else iso(now()), "type": kind}
     session = event.get("session")
@@ -3777,6 +4199,14 @@ def cmd_log(args):
             out[key] = value
     if kind == "capture":
         out["id"] = capture_id(out)
+    if kind == "recall":
+        # Whether this recall counts, and whether it makes the lesson ineffective, is
+        # decided here and nowhere else: see `recall_verdict`. A field the event already
+        # carries is kept, as `ts` and `id` are.
+        verdict = recall_verdict(out, read_events()[0])
+        for key in ("counted", "ineffective"):
+            if not isinstance(out.get(key), bool):
+                out[key] = verdict[key]
     append_event(out)
     if args.json:
         emit(out)
@@ -4040,8 +4470,11 @@ def install_surfer(claude, bin_dir, previous):
         if not os.path.isfile(setup):
             if os.path.exists(home):
                 return {"status": "failed", "detail": "%s exists and is not a history-surfer checkout" % home}
+            if git_source_problem(url):
+                return {"status": "failed", "detail": "COMPOUND_SURFER_URL is not a repository git can be given: %s"
+                                                      % git_source_problem(url)}
             os.makedirs(os.path.dirname(home), exist_ok=True)
-            code, out, err = _run(["git", "clone", "--depth", "1", url, home], timeout=180)
+            code, out, err = _run(["git", "clone", "--depth", "1", "--", url, home], timeout=180)
             if code != 0:
                 shutil.rmtree(home, ignore_errors=True)
                 return {"status": "failed", "detail": "git clone %s: %s" % (url, one_line(err or out)[:200])}
@@ -4362,7 +4795,7 @@ def cmd_update(args):
     import shutil
 
     package = pkg_root()
-    if args.ref is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$", args.ref):
+    if args.ref is not None and not ref_ok(args.ref):
         raise usage("--ref takes the name of a branch or a tag, not %r" % args.ref)
     if not shutil.which("git"):
         raise failure("`git` is not on PATH")
@@ -4407,7 +4840,7 @@ def cmd_update(args):
         if code == 0:
             # A branch of origin: be on it, then pull.
             if not (on_branch and branch == target):
-                code, out, err = git("checkout", "--quiet", target)
+                code, out, err = git("checkout", "--quiet", target, "--")
                 if code != 0:
                     raise failure("cannot check out %s in %s: %s" % (target, package, one_line(err or out)[:300]))
             code, out, err = git("pull", "--ff-only", "origin", target, timeout=300)
@@ -4417,7 +4850,7 @@ def cmd_update(args):
             code, _out, _err = git("rev-parse", "-q", "--verify", target + "^{commit}")
             if code != 0:
                 raise failure("origin of %s has no branch or tag named %s; nothing was moved" % (package, target))
-            code, out, err = git("checkout", "--quiet", "--detach", target)
+            code, out, err = git("checkout", "--quiet", "--detach", target, "--")
             if code != 0:
                 raise failure("cannot check out %s in %s: %s" % (target, package, one_line(err or out)[:300]))
         new_ref = target
@@ -4529,7 +4962,7 @@ def build_status():
     clock = now()
     items, broken = scan(project)
     events, bad_lines = read_events()
-    rows = annotate(items, events)
+    rows = annotate(items, events, project)
     health = []
 
     def check(name, state, detail):

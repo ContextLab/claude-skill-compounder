@@ -5,7 +5,7 @@ import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import {
   bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
-  sameCall,
+  sameCall, soleCli, soleCliShape,
   heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
   reuseContext, reuseStatus, shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
   unsettledContext, usedStatus, userOrigin,
@@ -13,7 +13,7 @@ import {
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseMoved, parseOwed, parseShow,
+  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseLogged, parseMoved, parseOwed, parseShow,
   parseTimedOut, parseUnsettled, parseUsed, settlers,
   type Earlier, type Event, type Found, type Item,
 } from './store'
@@ -194,6 +194,36 @@ async function cliPath($: EngineInterface): Promise<string> {
   return (await $.env.get('COMPOUND_BIN')) || 'compound'
 }
 
+// Whether the bare name `compound` is this package's CLI for a command the session runs:
+// the first `compound` on PATH is the same file as the CLI the mod calls. Asked of `sh`
+// once and kept for a while; asked only for a call that is otherwise proved to be one
+// simple `compound` invocation. When the mod itself runs `compound` from PATH, the name
+// is the CLI. A question that fails is a no: the call is then checked like any other.
+const BARE_TTL_MS = 300000
+const BARE_SH = 'p=$(command -v compound) && [ "$p" -ef "$1" ]'
+let bareOurs: { at: number; own: string; ok: boolean } | undefined
+
+async function bareIsOurs($: EngineInterface, own: string): Promise<boolean> {
+  if (!own.startsWith('/')) return true
+  if (bareOurs !== undefined && bareOurs.own === own && Date.now() - bareOurs.at < BARE_TTL_MS) return bareOurs.ok
+  let ok = false
+  try {
+    ok = (await $.process.run(['sh', '-c', BARE_SH, 'sh', own], { timeoutMs: BUDGET.claim })).exitCode === 0
+  } catch {
+    ok = false
+  }
+  bareOurs = { at: Date.now(), own, ok }
+  return ok
+}
+
+// The verb of a Bash call that is the CLI's own call, or undefined: see ./render soleCli.
+async function ownCall($: EngineInterface, command: string): Promise<string | undefined> {
+  const shape = soleCliShape(command)
+  if (shape === undefined) return undefined
+  const own = await cliPath($)
+  return soleCli(command, own, shape.bare ? await bareIsOurs($, own) : false)
+}
+
 // Where CLI calls run: the repository's root, or where the session started. Never the
 // shell's current directory, which moves with every `cd`.
 async function projectRoot($: EngineInterface): Promise<string> {
@@ -210,7 +240,6 @@ async function readSettings($: EngineInterface): Promise<{ off: boolean; quiet: 
     promptMinChars: await $.env.get('COMPOUND_PROMPT_MIN_CHARS'),
     turnMinCalls: await $.env.get('COMPOUND_TURN_MIN_CALLS'),
     nudgeCooldown: await $.env.get('COMPOUND_NUDGE_COOLDOWN'),
-    recurLimit: await $.env.get('COMPOUND_RECUR_LIMIT'),
     model: await $.env.get('COMPOUND_MODEL'),
     judgeTimeout: await $.env.get('COMPOUND_JUDGE_TIMEOUT'),
     repeatMin: await $.env.get('COMPOUND_REPEAT_MIN'),
@@ -603,6 +632,18 @@ async function log($: EngineInterface, event: Record<string, unknown>): Promise<
   const ran = await spawn($, ['log'], JSON.stringify(event))
   if (ran.code !== 0) await cliFailed($, 'log', ran)
   boardStale($)
+}
+
+// Appends one event and answers it as the CLI wrote it, with the fields the CLI filled in,
+// or undefined when the CLI did not say. One call, the one `log` makes anyway.
+async function written($: EngineInterface, event: Record<string, unknown>): Promise<Event | undefined> {
+  const ran = await spawn($, ['log', '--json'], JSON.stringify(event))
+  boardStale($)
+  if (ran.code !== 0) {
+    await cliFailed($, 'log', ran)
+    return undefined
+  }
+  return parseLogged(ran.stdout)
 }
 
 async function events($: EngineInterface, args: readonly string[], timeoutMs: number = BUDGET.call): Promise<Event[] | undefined> {
@@ -1092,7 +1133,7 @@ function refusedBefore(loop: string, tool: string, input: Record<string, unknown
 // level, and does so only when git does not track it there: a tracked lesson stays, is read
 // from where it is, and is offered to the user as a move. The recurrence is logged, marked
 // ineffective when this one makes it so. Answers the text Claude reads beside the result.
-async function recurred($: EngineInterface, sid: string, found: Item, tool: string, call: string, error: string, k: Knobs, known: boolean, ms: number): Promise<string[]> {
+async function recurred($: EngineInterface, sid: string, found: Item, tool: string, call: string, error: string, known: boolean, ms: number): Promise<string[]> {
   const cliAt = await cliPath($)
   const out: string[] = []
   let lesson = found
@@ -1128,25 +1169,29 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   // failing to stop it: it is recalled, and it does not count toward "ineffective". The CLI
   // says whether that refusal is in the log, and leaves such a recall out of its own count.
   const afterGuard = read?.guarded === true
-  // A lesson left in another project is that project's to rewrite: this session is not
-  // asked to strengthen it, and owes nothing for it.
-  // A lesson of the general pool ships with the package and is not rewritten in place, so a
-  // session could not pay that debt: its recurrences are counted, `compound status` says
-  // what a user can do about them, and nothing is owed.
-  const shipped = (read?.level || lesson.level) === 'general'
-  const ineffective = asProject === undefined && !afterGuard && !shipped && (read?.since === undefined ? count >= k.recurLimit : read.since + 1 >= (read.limit ?? k.recurLimit))
-  await log($, {
+  // WHETHER THIS RECALL COUNTS, AND WHETHER IT MAKES THE LESSON INEFFECTIVE, IS THE CLI'S TO
+  // SAY, and it says so in its reply to the `log` that writes the recall: one place, and no
+  // prediction here. The event names the lesson by `level` and `path`, which is how the CLI
+  // tells a lesson left in another project (that project's to rewrite: nothing is owed for
+  // it) and a lesson of the general pool (not rewritten in place: nothing is owed either)
+  // from one this session can strengthen. At most one recall per session counts for a
+  // lesson since it was last written, so failures that arrive together are one. With no
+  // readable reply the recall asks for nothing.
+  const level = read?.level || lesson.level
+  const wrote = await written($, {
     type: 'recall',
     lesson: lesson.name,
+    ...(level === '' ? {} : { level }),
+    ...(lesson.path === '' ? {} : { path: lesson.path }),
     tool,
     call: call.slice(0, LOGGED_CALL),
     error: error.slice(-LOGGED_ERROR),
     at: known ? 'fix' : 'failure',
     guard: lesson.match.length > 0,
     after_guard: afterGuard,
-    ineffective,
     ms,
   })
+  const ineffective = wrote?.ineffective === true
   if (ineffective) {
     owes(sid, [], [lesson.name])
     $.ui.toast(toast('ineffective', lesson.name, `recalled ${count} times`))
@@ -1200,7 +1245,7 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   const was = held.get(key)
   if (was !== undefined && was.tool === tool && sameCall(was.call, call)) held.delete(key)
   else if (was !== undefined) ranBetween(was, betweenLine(tool, call, true))
-  const out = await recurred($, sid, hit, tool, call, error, k, false, ms)
+  const out = await recurred($, sid, hit, tool, call, error, false, ms)
   await watch($, sid)
   return out
 }
@@ -1271,7 +1316,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
       await watch($, sid)
       return []
     }
-    const out = await recurred($, sid, answer.lesson, tool, was.call, was.error, k, true, reply.ms)
+    const out = await recurred($, sid, answer.lesson, tool, was.call, was.error, true, reply.ms)
     await watch($, sid)
     return out
   }
@@ -1292,7 +1337,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   $.ui.status(owedStatus(redact(call)))
   await paint($, (band, now) => captured(band, now, redact(call)))
   await watch($, sid)
-  return [captureContext({ failed: was.call, error: was.error, fixed: call }, await cliPath($))]
+  return [captureContext({ failed: was.call, error: was.error, fixed: call, id }, await cliPath($))]
 }
 
 // Events the CLI wrote, told to the person once each: a toast, the status entry, the band's
@@ -1543,6 +1588,9 @@ export const register: Register = on => {
     const tool = String(e.tool)
     const input = inputOf(e as unknown as Record<string, unknown>)
     const verb = tool === 'Bash' && typeof input.command === 'string' ? cliCall(input.command) : undefined
+    // The call is the CLI's own only when it is PROVED to be one simple `compound ...`
+    // invocation and nothing else (./render soleCliShape). Any other call is checked.
+    let own: string | undefined
     let sid = ''
     let recording: string | undefined
     let retry: Record<string, unknown> | undefined
@@ -1551,8 +1599,9 @@ export const register: Register = on => {
       sid = await $.session.id()
       // A subagent's calls are its own loop's: they do not count toward the main turn.
       turns.set(sid, turnAfterCall(turns.get(sid) ?? turnAfterPrompt(undefined, nowS(), false), e.agentId))
-      // The CLI's own calls are not guarded: a lesson's text quotes the mistake it is about.
-      if (guarded(tool) && verb === undefined) {
+      own = tool === 'Bash' && typeof input.command === 'string' ? await ownCall($, input.command) : undefined
+      // The CLI's own call is not guarded: a lesson's text quotes the mistake it is about.
+      if (guarded(tool) && own === undefined) {
         const loop = `${sid}:${e.agentId ?? 'main'}`
         retry = refusedBefore(loop, tool, input)
         const deny = await guard($, sid, loop, tool, input)
@@ -1594,12 +1643,14 @@ export const register: Register = on => {
     }
     if (ran.deny !== undefined) return ran
     try {
-      if (verb !== undefined) {
-        await onCliCall($, sid, verb, began)
+      // What is told about a `compound` command follows the events it wrote. The call that
+      // is the CLI's own is read by its verb; one that runs the CLI among other things, or
+      // reaches it through a variable or a wrapper, may have written anything.
+      if (own !== undefined) {
+        await onCliCall($, sid, own, began)
         return ran
       }
-      // The CLI reached through a variable or a wrapper: what it wrote is in the log.
-      if (tool === 'Bash' && typeof input.command === 'string' && mentionsCli(input.command)) await onCliCall($, sid, 'add', began)
+      if (verb !== undefined || (tool === 'Bash' && typeof input.command === 'string' && mentionsCli(input.command))) await onCliCall($, sid, 'add', began)
       const key = `${sid}:${e.agentId ?? 'main'}`
       // What this loop holds now: a call that runs while it is held ran between the failure
       // and whatever fixes it, and the judge is shown it.

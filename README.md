@@ -92,7 +92,7 @@ Compound interest
 Levels
   project  0 lessons  (0 guards)  0 skills
   user     0 lessons  (0 guards)  0 skills
-  general  6 lessons  (4 guards)  4 skills
+  general  6 lessons  (3 guards)  4 skills
 
 Lessons
   6 lessons never used (`compound list` shows them)
@@ -314,7 +314,7 @@ it is about, so on Linux with bash the first five do nothing:
 | `zsh-status-path-variables` | zsh | stops an assignment to `status` (read-only in zsh) or `path` (tied to `PATH`), and `for` or `read` with either name |
 | `zsh-no-matches-found` | zsh | recalled when a command fails with "no matches found" (an unquoted glob that matched nothing) |
 | `sed-in-place-bsd` | macOS | stops `sed -i 's/a/b/' file`, which BSD sed reads as a backup suffix and a file name |
-| `macos-gnu-only-commands` | macOS | stops `timeout N cmd`, which a stock Mac does not have; recalled when `date -d`, `grep -P` or `stat -c` fails |
+| `macos-gnu-only-commands` | macOS | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails: a stock Mac has the BSD tools. It stops no call |
 | `pip-externally-managed` | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
 
 `compound list` shows them with the rest. One that does not apply on your machine is
@@ -330,10 +330,11 @@ compound also ships four skills, which a session sees as `compound:<name>`:
 | `verify-assumptions-first` | a large effort starts | call `compound:reuse`, state the assumptions the plan rests on, check each against the real file, API or command, say which were false, build the smallest thing that proves the approach, then build out one addition at a time, and end with `compound:finish-task` |
 
 A stop happens once per session, and the same call sent again runs. If one of these
-lessons is wrong for your machine (you installed `timeout`, or your `sed` is GNU sed),
+lessons is wrong for your machine (your `sed` is GNU sed),
 switch it off for yourself with `compound disable <name>`; `compound enable <name>` brings
-it back. If you already have a lesson of your own for the same mistake, yours is the one
-that stops the call.
+it back. If you already have a lesson of your own for the same mistake, both stop the
+call, in one refusal that quotes each; to keep only yours, switch the shipped one off
+with `compound disable <name>`.
 
 ## How you see it working
 
@@ -459,7 +460,8 @@ each one with its output.
 | hide the band | set `COMPOUND_QUIET` to `1` (see [Settings](#settings)) |
 | switch compound off | set `COMPOUND_OFF` to `1` (see [Settings](#settings)) |
 
-A lesson is **ineffective** when it has been recalled twice since it was last written:
+A lesson is **ineffective** when it has been recalled in two sessions since it was last
+written (several recalls in one session count once):
 the failure it describes keeps coming back. Claude is asked to strengthen it before it
 finishes, and `compound status` lists it until it is rewritten. A lesson that ships with
 compound cannot be rewritten on your machine, so it is never ineffective and Claude is
@@ -493,7 +495,7 @@ These are the ones you are likely to change.
 | `COMPOUND_REPEAT_MIN` | 3 | sessions that made one kind of request before compound offers to make it a skill |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | tool calls in a turn before Claude is asked whether it learned anything |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
-| `COMPOUND_RECUR_LIMIT` | 2 | times a lesson is recalled before it is ineffective |
+| `COMPOUND_RECUR_LIMIT` | 2 | sessions a lesson is recalled in before it is ineffective |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | the shell a lesson for one shell is held against (`zsh`, `bash`); set it when Claude Code runs your commands in another shell than your login shell |
 | `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for that model |

@@ -48,7 +48,9 @@ it, this settles the debt:
 compound skip --why "the failure was a typo in a file name, not a recurring mistake"
 ```
 
-A lesson owed by an earlier session is declined by its id, which the message gives:
+A lesson owed by an earlier session is declined by its id, which the message gives. The
+same form is needed when this session owes more than one lesson: one decline settles one
+of them, and without `--settles` the command is refused and lists the ids.
 
 ```bash
 compound skip --settles ab12cd34 --why "a one-off: the file was simply missing"
@@ -167,6 +169,11 @@ Run release-check.sh (beside this lesson) before tagging. It checks the version
 string, the changelog entry and a clean tree, which were each forgotten once.
 EOF
 ```
+
+One lesson settles one owed lesson. When this session owes exactly one, a plain `compound
+add` settles it. When it owes more than one, pass `--settles <id>` with the id of the one
+this lesson is for (the `[compound]` message gives each id): without it `compound add`
+exits 2, writes nothing and lists the ids with the call that failed for each.
 
 A lesson an earlier session owed. The `[compound]` message gives the id; `--settles` is
 what marks that debt as paid, and without it the debt stays open:

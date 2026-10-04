@@ -196,14 +196,24 @@ export function simpleCommands(command: string): string[] {
   return out.map(c => c.trim()).filter(c => c !== '')
 }
 
-const CLI_VERBS = 'add|skip|promote|skill|rm|update|install|uninstall|find|list|show|status|events|check|log'
+const CLI_VERBS = 'add|skip|promote|skill|rm|update|install|uninstall|find|list|show|status|events|check|log|disable|enable|use|memo|report'
 // Assignments, then the program (quoted or bare), then the verb.
 const CLI_HEAD = new RegExp(`^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\\S*)\\s+)*(?:"([^"]+)"|'([^']+)'|(\\S+))\\s+(${CLI_VERBS})(?=\\s|$)`)
 
-// A Bash command that runs this package's CLI. Its own calls are never guarded, held or
-// judged, and `add` turns the "recording" spinner. The CLI counts only as the program being
-// run: the first word of a simple command, alone or after `&&` or `;`. Its name inside an
-// argument (`echo "compound add"`, `grep compound add.txt`) is not a call.
+// The verb of a simple command whose program is this package's CLI, by its name or by a
+// path that ends in it.
+function cliVerb(simple: string): string | undefined {
+  const m = CLI_HEAD.exec(simple)
+  if (m === null) return undefined
+  const program = m[1] ?? m[2] ?? m[3] ?? ''
+  return program === 'compound' || program.endsWith('/compound') ? m[4] : undefined
+}
+
+// A Bash command in which SOME simple command runs this package's CLI: `add` turns the
+// "recording" spinner, and after the call the log is read for what it wrote. The CLI counts
+// only as the program being run: the first word of a simple command, alone or after `&&`
+// or `;`. Its name inside an argument (`echo "compound add"`, `grep compound add.txt`) is
+// not a call. It exempts nothing: see `soleCliShape`.
 //
 // THIS IS A HINT, AND NOTHING IS SETTLED BY IT. A command line can reach the CLI in more
 // ways than any reader of its text will follow (a subshell, `$(...)`, a variable, `bash
@@ -211,18 +221,132 @@ const CLI_HEAD = new RegExp(`^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\\S*)
 // while one is owed (./register `settle`), whatever the call's text was.
 export function cliCall(command: string): string | undefined {
   for (const simple of simpleCommands(command)) {
-    const m = CLI_HEAD.exec(simple)
-    if (m === null) continue
-    const program = m[1] ?? m[2] ?? m[3] ?? ''
-    if (program === 'compound' || program.endsWith('/compound')) return m[4]
+    const verb = cliVerb(simple)
+    if (verb !== undefined) return verb
   }
   return undefined
+}
+
+// THE EXEMPTION IS AN ALLOWLIST, AND IT FAILS CLOSED. A Bash call is the CLI's own call only
+// when this recogniser can PROVE it is one simple `compound ...` invocation; a call it
+// cannot prove is a call like any other: tested against the guards, recalled, captured.
+// Being wrong in that direction costs one refusal, which the session sends again. So
+// nothing here follows the shell's grammar further than it must, and whatever a shell
+// would expand, substitute, redirect or split is simply not in the allowlist.
+//
+// What is proved, and nothing else passes:
+//   - the text holds no control character but a newline and a tab, and is not huge;
+//   - the command line is words separated by blanks. A word is made of pieces: letters,
+//     digits and `_ @ % + = : , . / -`; a single-quoted text; a double-quoted text with no
+//     `$`, no backtick and no backslash in it. So no variable, no substitution, no glob,
+//     no brace, no `~`, no `#`, no `!`, no `;`, `&`, `|`, parenthesis or redirection can
+//     appear outside a quote, and no word begins with `=` (zsh's `=cmd`);
+//   - a backslash is allowed only as a line continuation between two words;
+//   - before the program there may be assignments to COMPOUND_PROJECT, COMPOUND_HOME and
+//     COMPOUND_CLAUDE_DIR and to nothing else (`PATH=`, `LD_PRELOAD=`, or one that names a program
+//     would decide what runs);
+//   - the program is the first word after them: the bare name `compound`, or an absolute
+//     path, which the caller holds to the package's own CLI. No `command`, `env`, `exec`,
+//     `sudo`, `time` or `nohup` in front of it;
+//   - the next word is one of the CLI's subcommands;
+//   - the one redirection allowed is ONE here-document as the last thing on the line, with
+//     a QUOTED delimiter (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`), which the shell passes as text
+//     without expanding it. Its body ends at the delimiter's line, and only blank lines
+//     follow. An unquoted delimiter is expanded by the shell and is not exempt;
+//   - with no here-document, nothing follows the command line but blank lines.
+export type CliShape = { program: string; bare: boolean; verb: string }
+
+const SOLE_MAX = 400000
+const SOLE_CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/
+const SOLE_WORD = /[A-Za-z0-9_@%+=:,.\/-]/
+const SOLE_ENV: readonly string[] = ['COMPOUND_PROJECT', 'COMPOUND_HOME', 'COMPOUND_CLAUDE_DIR']
+const SOLE_DOC = /^<<(-?)(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)")/
+const SOLE_VERB = new RegExp(`^(?:${CLI_VERBS})$`)
+
+export function soleCliShape(command: string): CliShape | undefined {
+  if (command.length > SOLE_MAX || SOLE_CONTROL.test(command)) return undefined
+  // Each word's literal value, and how many of its first characters were written unquoted
+  // (an assignment is one only when its `NAME=` is).
+  const words: { value: string; lead: number }[] = []
+  let value: string | undefined
+  let lead = 0
+  let quoted = false
+  const flush = (): void => {
+    if (value !== undefined) words.push({ value, lead })
+    value = undefined
+    lead = 0
+    quoted = false
+  }
+  let doc: { word: string; strip: boolean } | undefined
+  let i = 0
+  for (; i < command.length; i += 1) {
+    const ch = command[i]!
+    if (ch === '\n') break
+    if (doc !== undefined) {
+      // The here-document is the last thing on its line.
+      if (ch !== ' ' && ch !== '\t') return undefined
+    } else if (ch === ' ' || ch === '\t') flush()
+    else if (ch === '\\') {
+      if (command[i + 1] !== '\n' || value !== undefined) return undefined
+      i += 1
+    } else if (ch === "'" || ch === '"') {
+      const end = command.indexOf(ch, i + 1)
+      if (end < 0) return undefined
+      const inside = command.slice(i + 1, end)
+      if (ch === '"' && /[$`\\]/.test(inside)) return undefined
+      value = (value ?? '') + inside
+      quoted = true
+      i = end
+    } else if (ch === '<') {
+      const m = SOLE_DOC.exec(command.slice(i, i + 80))
+      if (m === null || value !== undefined) return undefined
+      doc = { word: m[2] ?? m[3] ?? '', strip: m[1] === '-' }
+      i += m[0].length - 1
+    } else {
+      if (!SOLE_WORD.test(ch) || (value === undefined && ch === '=')) return undefined
+      value = (value ?? '') + ch
+      if (!quoted) lead += 1
+    }
+  }
+  flush()
+  const rest = command.slice(i)
+  if (doc === undefined) {
+    if (rest.trim() !== '') return undefined
+  } else {
+    const { word, strip } = doc
+    const lines = rest.slice(1).split('\n')
+    const end = rest.startsWith('\n') ? lines.findIndex(line => (strip ? line.replace(/^\t+/, '') : line) === word) : -1
+    if (end < 0 || lines.slice(end + 1).join('').trim() !== '') return undefined
+  }
+  let at = 0
+  for (; at < words.length; at += 1) {
+    const w = words[at]!
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(w.value)
+    if (m === null || m[0].length > w.lead) break
+    if (!SOLE_ENV.includes(m[1]!)) return undefined
+  }
+  const program = words[at]?.value ?? ''
+  const verb = words[at + 1]?.value ?? ''
+  const bare = program === 'compound'
+  if ((!bare && !program.startsWith('/')) || !SOLE_VERB.test(verb)) return undefined
+  return { program, bare, verb }
+}
+
+// The verb of a call that is the CLI's own, given what the mod knows: `cli` is the absolute
+// path of the package's CLI (a call by any other path is not exempt, whatever its file is
+// called), and `bareIsOurs` is whether the bare name `compound` resolves to that same file
+// on PATH. What a shell alias or function named `compound` would run cannot be known from
+// here: a guard is advice and not a barrier, and whoever can define one is past it already.
+export function soleCli(command: string, cli: string, bareIsOurs: boolean): string | undefined {
+  const shape = soleCliShape(command)
+  if (shape === undefined) return undefined
+  return (shape.bare ? bareIsOurs : cli.startsWith('/') && shape.program === cli) ? shape.verb : undefined
 }
 
 // A command that names the CLI anywhere, including through a variable (`C=/path/compound;
 // $C add ...`), which `cliCall` does not read as a call. It may have written events, so
 // the log is read after it for what to toast; it is still guarded and judged like any
-// other command.
+// other command (`soleCli` is the only exemption).
 export function mentionsCli(command: string): boolean {
   return /(^|[\/\s="'])compound(?=$|[\s"';&|)])/.test(command)
 }
@@ -500,19 +624,45 @@ export function owedStatus(fixed = ''): string {
   return text === '' ? OWED.label : `${OWED.label}: ${text}`
 }
 
+// How many lessons one refusal quotes in full. The ones past it are named, with the command
+// that prints each, so a refusal stays short enough to read.
+export const GUARD_QUOTED = 4
+const GUARD_NAMES = 600
+
 // Moment 2. The reason a call is refused: what it matched, the note quoted, how to proceed.
+// NO GUARD YIELDS TO ANOTHER: every guard in force that matched is in `hits`, and the one
+// refusal says how many matched and quotes each once. When a lesson of the user's own and
+// one of the general pool both matched, the last line names `compound disable`, which is
+// how a user keeps only their own.
 export function guardReason(hits: readonly Hit[], cli: string): string {
+  const named = (h: Hit): string => `${flat(h.name, NAME_CHARS)} (${flat(h.level, 20) || 'unknown'})`
+  const quoted = hits.slice(0, GUARD_QUOTED)
+  const more = hits.slice(GUARD_QUOTED)
   const out = [
-    "[compound] This call was stopped before it ran: its text matches the pattern of a recorded lesson.",
+    hits.length <= 1
+      ? '[compound] This call was stopped before it ran: its text matches the pattern of a recorded lesson.'
+      : `[compound] This call was stopped before it ran: its text matches the patterns of ${hits.length} recorded lessons: ${flat(hits.map(named).join(', '), GUARD_NAMES)}.`,
     NOTE_RULE,
   ]
-  for (const h of hits) out.push('', quotedNote(h.name, h.level, h.path, h.text))
+  for (const h of quoted) out.push('', quotedNote(h.name, h.level, h.path, h.text))
+  if (more.length > 0) out.push('', `The first ${quoted.length} are quoted above. The other ${more.length === 1 ? 'one is' : `${more.length} are`} named in the first line, and \`${cli} show <name>\` prints one.`)
   out.push(
     '',
-    'If the note applies to this call, adjust it; if not, send the call again and it will run.',
+    hits.length <= 1
+      ? 'If the note applies to this call, adjust it; if not, send the call again and it will run.'
+      : 'If a note applies to this call, adjust it; if none does, send the call again and it will run.',
     'Each lesson stops a call once per session.',
     cliLine(cli),
   )
+  const shipped = hits.filter(h => h.level === 'general')
+  if (shipped.length > 0 && hits.some(h => h.level === 'user')) {
+    out.push(
+      `A lesson of the user's own and a lesson of the general pool both matched. A user who wants only their own for this mistake switches the general one off, and that is the user's to decide: ${shipped
+        .slice(0, GUARD_QUOTED)
+        .map(h => `${cli} disable ${shq(h.name)}`)
+        .join('; ')}`,
+    )
+  }
   return out.join('\n')
 }
 
@@ -613,8 +763,11 @@ export const EVIDENCE_RULE =
 const CAPTURE_OPEN = '<<<RECORDED-CAPTURE'
 const CAPTURE_CLOSE = 'RECORDED-CAPTURE>>>'
 
-// Moment 4. Returned beside the result of the call that fixed a held failure.
-export function captureContext(pair: { failed: string; error: string; fixed: string }, cli: string): string {
+// Moment 4. Returned beside the result of the call that fixed a held failure. `id` is the
+// capture's: one lesson or one decline settles one capture, and names it with --settles
+// when the session owes more than one.
+export function captureContext(pair: { failed: string; error: string; fixed: string; id?: string }, cli: string): string {
+  const id = pair.id === undefined || pair.id === '' ? undefined : pair.id
   return [
     '[compound] A failed call was just fixed. This session now owes a lesson, so the next session does not repeat the failure.',
     EVIDENCE_RULE,
@@ -631,6 +784,9 @@ export function captureContext(pair: { failed: string; error: string; fixed: str
     '',
     'Record the lesson now, using the compound:learn skill (Skill tool, skill "compound:learn").',
     `If this is not worth keeping, decline it: ${cli} skip --why "<reason>"`,
+    ...(id === undefined
+      ? []
+      : [`This one's id is ${flat(id, 64)}. One lesson or one decline settles one owed lesson: while this session owes more than one, \`compound add\` and \`skip\` are refused without --settles ${shq(id)}.`]),
     cliLine(cli),
   ].join('\n')
 }
@@ -651,7 +807,9 @@ export function knownContext(lesson: Item, text: string, count: number, ineffect
 export const AGAIN = 'After recording or declining, give the user your final answer for this turn again.'
 
 // Moment 5. Why a stop is refused: the debt, restated, and exactly what settles it.
-export function stopDebt(owed: readonly Omit<Debt, 'id'>[], cli: string): string {
+export function stopDebt(owed: readonly (Omit<Debt, 'id'> & { id?: string })[], cli: string): string {
+  const several = owed.length > 1
+  const idOf = (d: { id?: string }): string => (d.id === undefined ? '' : oneLine(d.id, 64))
   const out = [
     owed.length === 1
       ? '[compound] This session owes a lesson: a failed call was fixed and nothing was recorded or declined.'
@@ -662,7 +820,7 @@ export function stopDebt(owed: readonly Omit<Debt, 'id'>[], cli: string): string
   owed.forEach((d, i) => {
     out.push(
       '',
-      CAPTURE_OPEN,
+      several && idOf(d) !== '' ? `${CAPTURE_OPEN} id=${inert(idOf(d))}` : CAPTURE_OPEN,
       owed.length === 1 ? 'THE CALL THAT FAILED:' : `${i + 1}. THE CALL THAT FAILED:`,
       inert(excerpt(d.failed, 1500, 500)),
       'ITS ERROR:',
@@ -672,15 +830,23 @@ export function stopDebt(owed: readonly Omit<Debt, 'id'>[], cli: string): string
       CAPTURE_CLOSE,
     )
   })
-  out.push(
-    '',
-    'Before finishing, do exactly one of these:',
-    '- record it: use the compound:learn skill (Skill tool, skill "compound:learn")',
-    `- decline it: run ${cli} skip --why "<reason>"`,
-    'This is asked once per owed lesson. The next stop is not refused.',
-    cliLine(cli),
-    AGAIN,
-  )
+  out.push('', 'Before finishing, do exactly one of these:')
+  if (!several) {
+    out.push('- record it: use the compound:learn skill (Skill tool, skill "compound:learn")', `- decline it: run ${cli} skip --why "<reason>"`)
+  } else {
+    // One `learn` or one `skip` settles ONE capture, and the CLI refuses either without
+    // --settles while more than one is owed: each is listed with its id.
+    out.push(
+      '- record it: use the compound:learn skill (Skill tool, skill "compound:learn"), passing --settles <id> to `compound add`',
+      `- decline it: run ${cli} skip --settles <id> --why "<reason>"`,
+      'for each of them. One lesson or one decline settles one of them, and --settles says which; without it the command is refused while more than one is owed. The ids:',
+    )
+    owed.forEach((d, i) => {
+      const id = idOf(d)
+      out.push(id === '' ? `- ${i + 1}: (no id in the log; \`${cli} events --unsettled\` lists it)` : `- ${i + 1}: --settles ${shq(id)}`)
+    })
+  }
+  out.push('This is asked once per owed lesson. The next stop is not refused.', cliLine(cli), AGAIN)
   return out.join('\n')
 }
 

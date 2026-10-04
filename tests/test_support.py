@@ -13,12 +13,59 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 SCRIPT = os.path.join(REPO, "bin", "compound")
 NOW = 1790000000  # 2026-09-21T14:13:20Z
+# The event types `compound log` refuses: each is written by a command of the CLI.
+CLI_TYPES = ("learn", "skip", "rm", "skill", "promote", "candidate", "use")
 BASE_PATH = "/usr/bin:/bin"
+
+
+def iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _real_home():
+    """The home directory of the user running the tests, whatever HOME says."""
+    try:
+        import pwd
+        return os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError):
+        return os.path.realpath(os.path.expanduser("~"))
+
+
+def sandbox_problem(log_path):
+    """Why `log_path` is not an event log a test may write by hand, or None. It must lie in
+    a temporary directory, and never under the real `~/.claude`."""
+    real = os.path.realpath(log_path)
+    if os.path.basename(real) != "events.jsonl":
+        return "%s is not an events.jsonl" % real
+    claude = os.path.join(_real_home(), ".claude")
+    if real == claude or real.startswith(claude + os.sep):
+        return "%s is inside the real %s" % (real, claude)
+    roots = set(os.path.realpath(root) for root in (tempfile.gettempdir(), "/tmp", "/var/tmp", "/var/folders")
+                if os.path.isdir(root))
+    if not any(real.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
+        return "%s is not inside a temporary directory (%s)" % (real, ", ".join(sorted(roots)))
+    return None
+
+
+def seed_event(log_path, event):
+    """Append one event to an event log by hand, one line, as the CLI writes one.
+
+    `compound log` takes only the types the mod writes; an event of a type that a command
+    of the CLI writes (`learn`, `skip`, `rm`, `skill`, `promote`, `candidate`, `use`) gets
+    into a TEST's log through here. It refuses, with an AssertionError, any log that is not
+    inside a temporary directory, so it can never write to a real store."""
+    problem = sandbox_problem(log_path)
+    if problem:
+        raise AssertionError("seed_event refuses to write: " + problem)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n")
 
 
 class Sandbox(object):
@@ -114,6 +161,29 @@ class Sandbox(object):
         if proc.returncode != 0:
             raise AssertionError("log exited %d: %s" % (proc.returncode, proc.stderr))
         return proc
+
+    def seed(self, event, **kw):
+        """Put one event into this sandbox's log directly, filled in as `compound log` fills
+        one in. For the types `log` refuses (`learn`, `skip`, `rm`, `skill`, `promote`,
+        `candidate`, `use`), which only their own commands write: a test that needs such an
+        event in the log, and cannot or should not run the command, seeds it here."""
+        env = self.env(**kw)
+        out = {"ts": event["ts"] if isinstance(event.get("ts"), str) else iso(int(float(env["COMPOUND_NOW"]))),
+               "type": event["type"]}
+        out["session"] = event["session"] if isinstance(event.get("session"), str) else env.get(
+            "CLAUDE_CODE_SESSION_ID", "")
+        out["project"] = event.get("project") or env["COMPOUND_PROJECT"]
+        for key, value in event.items():
+            out.setdefault(key, value)
+        seed_event(self.events, out)
+        return out
+
+    def put(self, event, **kw):
+        """One event into the log by whichever way its type gets there: `compound log` for a
+        type the mod writes, `seed` for a type only a command of the CLI writes."""
+        if event.get("type") in CLI_TYPES:
+            return self.seed(event, **kw)
+        return self.log(event, **kw)
 
     def read_events(self):
         if not os.path.exists(self.events):
@@ -254,6 +324,33 @@ class SupportTest(Case):
                 os.close(writer)
             self.assertEqual(proc.stderr, "", args)
             self.assertEqual(proc.returncode, 0, args)
+
+    def test_a_seeded_event_reads_like_one_the_cli_wrote(self):
+        self.box.seed({"type": "skip", "why": "seeded"})
+        self.box.log({"type": "nudge", "calls": 3})
+        rows = self.box.json("events", "--json")
+        self.assertEqual([(row["type"], row["session"], row["project"], row["ts"]) for row in rows],
+                         [("skip", "sess-0001-aaaa", self.box.project, "2026-09-21T14:13:20Z"),
+                          ("nudge", "sess-0001-aaaa", self.box.project, "2026-09-21T14:13:20Z")])
+
+    def test_the_seeding_helper_refuses_a_log_that_is_not_in_a_sandbox(self):
+        """It can never touch a real store: not the real ~/.claude, not a checkout, not a
+        file that is no event log."""
+        real = os.path.join(_real_home(), ".claude", "compound", "events.jsonl")
+        before = os.path.getsize(real) if os.path.exists(real) else None
+        for path in (real, os.path.join(REPO, "events.jsonl"), os.path.join(_real_home(), "events.jsonl"),
+                     os.path.join(self.box.chome, "other.jsonl")):
+            with self.assertRaises(AssertionError) as caught:
+                seed_event(path, {"type": "skip", "why": "must not be written"})
+            self.assertIn("seed_event refuses", str(caught.exception))
+            self.assertFalse(os.path.exists(path) and path != real, path)
+        self.assertEqual(os.path.getsize(real) if os.path.exists(real) else None, before)
+        # A link in a temporary directory that leads out of it is followed before the check.
+        link = os.path.join(self.box.root, "events.jsonl")
+        os.symlink(os.path.join(REPO, "events.jsonl"), link)
+        with self.assertRaises(AssertionError):
+            seed_event(link, {"type": "skip", "why": "must not be written"})
+        self.assertFalse(os.path.exists(os.path.join(REPO, "events.jsonl")))
 
     def test_a_bad_pinned_clock_is_refused(self):
         proc = self.box.run("skip", "--why", "x", COMPOUND_NOW="yesterday")

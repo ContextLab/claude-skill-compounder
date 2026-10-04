@@ -114,9 +114,14 @@ class UseTest(Case):
         fired = [row for row in status["health"] if row["check"] == "mod last fired"][0]
         self.assertEqual((fired["status"], fired["detail"]), ("PASS", "30s ago (use)"))
 
-    def test_the_log_takes_a_use_and_a_repeat_event(self):
+    def test_the_log_holds_a_use_and_a_repeat_event(self):
+        """`repeat` is the mod's, and `log` takes it. `use` is written by `compound use`
+        alone: `log` refuses it, and here it is seeded."""
         self.box.log({"type": "repeat", "times": 3, "prompts": ["s1:1", "s2:1"], "prompt_id": "0badcafe"})
-        self.box.log({"type": "use", "lesson": "x-skill", "level": "user"})
+        refused = self.box.run("log", stdin=json.dumps({"type": "use", "lesson": "x-skill", "level": "user"}))
+        self.assertExit(refused, 2)
+        self.assertIn("`compound use`", refused.stderr)
+        self.box.seed({"type": "use", "lesson": "x-skill", "level": "user"})
         self.assertEqual([e["type"] for e in self.box.read_events()], ["repeat", "use"])
         recent = [line for line in self.box.run("status").stdout.split("\nRecent\n")[1].split("\n\n")[0].splitlines()]
         self.assertEqual([line.split()[1] for line in recent], ["repeated", "used"])

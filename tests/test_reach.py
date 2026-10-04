@@ -278,8 +278,8 @@ class SameLessonTest(TwoProjects):
         self.in_gamma = os.path.join(self.gamma, ".claude", "compound", "lessons", "shared")
         import shutil
         shutil.copytree(self.in_a, self.in_gamma)
-        self.box.log({"type": "learn", "lesson": "shared", "level": "project", "kind": "lesson",
-                      "project": self.gamma, "path": self.in_gamma})
+        self.box.seed({"type": "learn", "lesson": "shared", "level": "project", "kind": "lesson",
+                       "project": self.gamma, "path": self.in_gamma})
         self.user = self.box.lesson_dir("shared", "user")
 
     def user_lessons(self):
@@ -400,7 +400,8 @@ class KnobTest(Case):
     def test_status_and_the_ineffective_flag_use_the_same_limit(self):
         self.box.add("flaky")
         for offset in (10, 20):
-            self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + offset)
+            self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + offset,
+                         CLAUDE_CODE_SESSION_ID="sess-at-%d" % offset)
         proc = self.box.run("status", "--json", COMPOUND_NOW=NOW + 30)
         self.assertEqual([row["name"] for row in json.loads(proc.stdout)["open"]["ineffective"]], ["flaky"])
         self.settings_env(COMPOUND_RECUR_LIMIT="3")
@@ -636,7 +637,7 @@ class RecallsSinceTest(Case):
         self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 10)
         row = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 20)
         self.assertEqual((row["recalls_since"], row["recur_limit"], row["ineffective"]), (1, 2, False))
-        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 30)
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 30, CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
         row = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 40)
         self.assertEqual((row["recalls_since"], row["ineffective"]), (2, True))
         self.box.add("flaky", "Use when.", "Better.\n", "--update", "--body", "-", COMPOUND_NOW=NOW + 50)
@@ -691,14 +692,24 @@ class SmallThingsTest(Case):
         self.assertIn("recall", proc.stderr, "the known types are named")
         self.assertFalse(os.path.exists(self.box.events))
 
-    def test_every_documented_type_is_accepted(self):
+    def test_every_documented_type_the_mod_writes_is_accepted_and_no_other(self):
+        """`log` takes the types the table says the mod writes. A type the table gives to a
+        command of the CLI is refused, and the refusal names that command."""
         with open(self.box.script) as handle:
             doc = handle.read().split('"""')[1]
         table = doc.split("Fields per type.")[1].split("A line that does not parse")[0]
-        types = re.findall(r"^        ([a-z]+) {2,}(?:mod|CLI|`)", table, re.M)
-        self.assertGreaterEqual(len(types), 13, types)
-        for kind in types:
-            self.assertExit(self.box.run("log", stdin=json.dumps({"type": kind})), 0)
+        rows = re.findall(r"^        ([a-z]+) +(mod|CLI `[a-z]+`)", table, re.M)
+        self.assertEqual(len(rows), 18, rows)
+        for kind, writer in rows:
+            proc = self.box.run("log", stdin=json.dumps({"type": kind}))
+            if writer == "mod":
+                self.assertExit(proc, 0)
+            else:
+                self.assertExit(proc, 2)
+                self.assertIn("`compound %s`" % writer.split("`")[1], proc.stderr, kind)
+        self.assertEqual(sorted(writer for _kind, writer in rows if writer != "mod"),
+                         ["CLI `add`", "CLI `promote`", "CLI `promote`", "CLI `rm`", "CLI `skill`", "CLI `skip`",
+                          "CLI `use`"])
 
     def surfer(self, text, code=0):
         path = os.path.join(self.box.root, "surfer")

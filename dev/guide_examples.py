@@ -12,6 +12,10 @@ printed the world's directory reads `/Users/me` and this checkout reads
 
 No session runs here. The events a session would have written (a guard's refusal, a
 recall, a capture) are written with `compound log`, which is what the mod itself calls.
+`compound log` refuses the types a command of the CLI writes (`learn`, `skip`, ...): where
+the `report` part needs those at pinned times, they are appended to the throwaway world's
+log by `seed_event` of tests/test_support.py, which refuses any log outside a temporary
+directory.
 The log of the `report` part is built the same way, with the clock pinned (COMPOUND_NOW),
 so its figures are the same on every run. Standard library only, Python 3.9.
 """
@@ -26,6 +30,8 @@ import tempfile
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "tests"))
+from test_support import CLI_TYPES, seed_event  # noqa: E402
 ANCHOR = r"(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)"
 
 
@@ -74,6 +80,13 @@ class World(object):
         return proc
 
     def log(self, event, **extra):
+        if event.get("type") in CLI_TYPES:
+            env = self.env(**extra)
+            row = {"ts": event["ts"], "type": event["type"], "session": event.get("session", ""),
+                   "project": event.get("project") or self.project}
+            row.update((key, value) for key, value in event.items() if key not in row)
+            seed_event(os.path.join(env["COMPOUND_HOME"], "events.jsonl"), row)
+            return
         proc = self.run(["log"], stdin=json.dumps(event), quiet=True, **extra)
         if proc.returncode != 0:
             raise SystemExit("compound log failed: %s" % proc.stdout)

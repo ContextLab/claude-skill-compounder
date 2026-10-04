@@ -3,12 +3,14 @@ import { DEFAULTS, DEFAULT_MODEL, isOff, isQuiet, knobsFrom, modelName, whole } 
 
 test('with nothing set every knob is its default', async () => {
   expect(knobsFrom({})).toEqual(DEFAULTS)
-  expect(DEFAULTS).toEqual({ promptMinChars: 80, turnMinCalls: 25, nudgeCooldown: 1800, recurLimit: 2, model: DEFAULT_MODEL, judgeTimeoutMs: 10000, repeatMin: 3 })
+  expect(DEFAULTS).toEqual({ promptMinChars: 80, turnMinCalls: 25, nudgeCooldown: 1800, model: DEFAULT_MODEL, judgeTimeoutMs: 10000, repeatMin: 3 })
+  // How many recalls make a lesson ineffective is no knob of the mod: the CLI holds it and decides.
+  expect('recurLimit' in DEFAULTS).toBe(false)
 })
 
 test('a well-formed value is taken', async () => {
-  const k = knobsFrom({ promptMinChars: '0', turnMinCalls: '3', nudgeCooldown: '0', recurLimit: '5', model: 'sonnet', judgeTimeout: '4' })
-  expect(k).toEqual({ promptMinChars: 0, turnMinCalls: 3, nudgeCooldown: 0, recurLimit: 5, model: 'sonnet', judgeTimeoutMs: 4000, repeatMin: 3 })
+  const k = knobsFrom({ promptMinChars: '0', turnMinCalls: '3', nudgeCooldown: '0', model: 'sonnet', judgeTimeout: '4' })
+  expect(k).toEqual({ promptMinChars: 0, turnMinCalls: 3, nudgeCooldown: 0, model: 'sonnet', judgeTimeoutMs: 4000, repeatMin: 3 })
 })
 
 test('a value of the wrong shape takes the default, never a guess', async () => {
@@ -20,9 +22,8 @@ test('a value of the wrong shape takes the default, never a guess', async () => 
 })
 
 test('a knob that cannot be zero takes its default at zero', async () => {
-  const k = knobsFrom({ turnMinCalls: '0', recurLimit: '0', judgeTimeout: '0' })
+  const k = knobsFrom({ turnMinCalls: '0', judgeTimeout: '0' })
   expect(k.turnMinCalls).toBe(25)
-  expect(k.recurLimit).toBe(2)
   expect(k.judgeTimeoutMs).toBe(10000)
 })
 

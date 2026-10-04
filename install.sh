@@ -28,6 +28,17 @@ repo="${COMPOUND_REPO:-https://github.com/ContextLab/claude-skill-compounder.git
 ref="${COMPOUND_REF:-}"
 home="${COMPOUND_HOME:-${COMPOUND_CLAUDE_DIR:-$HOME/.claude}/compound}"
 app="$home/app"
+# A value from the environment is never read by git as an option: the repository may not
+# begin with "-" or name a remote helper ("<helper>::"), and the ref is a branch or tag
+# name of letters, digits, ".", "_", "-" and "/", starting with a letter or digit.
+case "$repo" in
+  -*|*::*) die "COMPOUND_REPO is not a repository git can be given: $repo" ;;
+esac
+if [ -n "$ref" ]; then
+  case "$ref" in
+    [!A-Za-z0-9]*|*[!A-Za-z0-9._/-]*|*..*|*//*|*/|*.lock) die "COMPOUND_REF is not the name of a branch or a tag: $ref" ;;
+  esac
+fi
 # The oldest release that can be installed: earlier tags hold no bin/compound.
 min_release="0.4.0"
 
@@ -110,12 +121,12 @@ else
     die "$app exists and is not a git checkout; move it away and run again"
   else
     if [ -z "$ref" ]; then
-      ref="$( (git ls-remote --tags "$repo" 2>/dev/null || true) | newest_release)"
+      ref="$( (git ls-remote --tags -- "$repo" 2>/dev/null || true) | newest_release)"
       [ -n "$ref" ] || ref="main"
     fi
     say "cloning $repo ($ref) to $app"
     mkdir -p "$home"
-    git clone --quiet --no-checkout "$repo" "$app" || die "git clone failed"
+    git clone --quiet --no-checkout -- "$repo" "$app" || die "git clone failed"
     cloned=1
   fi
   # A clone this run made and cannot use is not left in the way of the next run.
@@ -126,12 +137,12 @@ else
   # A branch of origin is checked out and pulled. Anything else is a tag: the clone is
   # put at it, on no branch.
   if git -C "$app" show-ref --verify --quiet "refs/remotes/origin/$ref"; then
-    git -C "$app" checkout --quiet "$ref" || unusable "cannot check out $ref in $app"
+    git -C "$app" checkout --quiet "$ref" -- || unusable "cannot check out $ref in $app"
     if [ -z "$cloned" ]; then
       git -C "$app" pull --quiet --ff-only origin "$ref" || die "git pull --ff-only failed in $app"
     fi
   else
-    git -C "$app" -c advice.detachedHead=false checkout --quiet --detach "$ref" \
+    git -C "$app" -c advice.detachedHead=false checkout --quiet --detach "$ref" -- \
       || unusable "cannot check out $ref (is $ref a branch or tag of $repo?)"
   fi
   if [ ! -f "$app/bin/compound" ]; then

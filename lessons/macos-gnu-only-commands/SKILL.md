@@ -1,7 +1,6 @@
 ---
 name: macos-gnu-only-commands
 description: "Use when a command fails on macOS with \"command not found: timeout\", \"date: illegal option -- d\", \"grep: invalid option -- P\", \"stat: illegal option -- c\", or another GNU-only command or flag."
-match: ["(^\\s*|[;&|(]\\s*|\\b(?:do|then|else)\\s+)timeout\\s+(-\\S+\\s+)*\\d"]
 platform: darwin
 created: 2026-10-04
 ---
@@ -20,5 +19,5 @@ When the same line must run on Linux too, `python3 -c` or `perl` behaves the sam
 both. `gtimeout` and `gdate` exist only where Homebrew's coreutils is installed, and
 `gsed` only with its gnu-sed.
 
-A call of `timeout` is stopped before it runs on macOS. If this Mac does have a
-`timeout` on PATH (`command -v timeout` prints a path), the call was right: send it again.
+A Mac with Homebrew's coreutils does have `timeout`: when `command -v timeout` prints a
+path, a call of it is right, and its failure has another cause.

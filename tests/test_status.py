@@ -192,7 +192,7 @@ class StatusTest(Case):
         self.box.log({"type": "reuse", "lessons": ["used", "used-skill"]}, COMPOUND_NOW=NOW + 10)
         self.box.log({"type": "guard", "lesson": "used"}, COMPOUND_NOW=NOW + 20)
         self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 30)
-        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 40)
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 40, CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
         data = self.status(COMPOUND_NOW=NOW + 50)
         table = {row["name"]: (row["level"], row["reuse"], row["guard_hits"], row["recall"], row["flag"])
                  for row in data["lessons"]}
@@ -243,7 +243,8 @@ class StatusTest(Case):
         report prints, so the two cannot differ."""
         self.box.add("flaky")
         for offset in (10, 20):
-            self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + offset)
+            self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + offset,
+                         CLAUDE_CODE_SESSION_ID="sess-at-%d" % offset)
         self.box.log({"type": "capture", "call": "c1", "failed": "./build.sh", "fixed": "./build.sh --profile dev"},
                      COMPOUND_NOW=NOW + 30)
         data = self.status(COMPOUND_NOW=NOW + 40)

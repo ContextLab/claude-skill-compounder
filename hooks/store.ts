@@ -230,10 +230,11 @@ export function askedTimes(rows: readonly Earlier[], asked: readonly string[], s
   return seen.size === 0 ? 0 : seen.size + 1
 }
 
-// `since` is how many recalls are later than the lesson's last rewrite, and `limit` how many
-// make it ineffective; both are undefined when the CLI did not say. `guarded` is whether
-// the lesson's guard refused a call in this session, which is the CLI's to say too: a
-// recall after that is not counted against the lesson.
+// `since` is how many recalls count toward ineffective since the lesson's last rewrite, and
+// `limit` how many make it ineffective; both are undefined when the CLI did not say, and
+// both are for showing: whether a recall counts is answered by `compound log` when the
+// recall is written (`parseLogged`), and the mod predicts nothing from these. `guarded` is
+// whether the lesson's guard refused a call in this session, which is the CLI's to say too.
 export type Shown = { text: string; path: string; level: string; recalls: number; ineffective: boolean | undefined; since: number | undefined; limit: number | undefined; guarded: boolean | undefined }
 
 // A SKILL.md without its frontmatter: the lesson as it is read.
@@ -259,6 +260,17 @@ export function parseShow(stdout: string): Shown {
     limit: typeof o.recur_limit === 'number' ? o.recur_limit : undefined,
     guarded: typeof o.guarded_in_session === 'boolean' ? o.guarded_in_session : undefined,
   }
+}
+
+// `compound log --json`: the event as the CLI wrote it, with what the CLI filled in. For a
+// `recall` that is `counted` and `ineffective`. WHETHER A RECALL COUNTS, AND WHETHER IT
+// MAKES ITS LESSON INEFFECTIVE, IS THE CLI'S TO SAY: it takes at most one recall for each
+// session since the lesson was last written, none after the lesson's own guard refused, and
+// never marks a lesson the session cannot rewrite. A reply that does not read is undefined,
+// and the caller takes the recall as one that asks for nothing.
+export function parseLogged(stdout: string): Event | undefined {
+  const o = record(parsed(stdout))
+  return o !== undefined && typeof o.type === 'string' ? (o as Event) : undefined
 }
 
 // Project-level lessons recorded in OTHER projects, from the log's `learn` events: the

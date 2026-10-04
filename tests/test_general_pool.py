@@ -57,9 +57,12 @@ class PoolCase(Case):
         os.rename(self.box.lesson_dir(name, "user"), target)
         return target
 
-    def recall(self, name, session="sess-0001-aaaa", ts=NOW + 60, **fields):
-        event = {"type": "recall", "lesson": name, "session": session, "tool": "Bash",
-                 "ts": "2026-09-21T14:%02d:00Z" % (15 + (ts - NOW) // 60)}
+    def recall(self, name, session=None, ts=NOW + 60, **fields):
+        """One recall, in a session of its own unless one is named: a session counts once
+        toward ineffective and recurring."""
+        stamp = "2026-09-21T14:%02d:00Z" % (15 + (ts - NOW) // 60)
+        event = {"type": "recall", "lesson": name, "session": session or "sess-%s" % stamp[11:16], "tool": "Bash",
+                 "ts": stamp}
         event.update(fields)
         self.box.log(event)
 
@@ -327,8 +330,8 @@ class GeneralDebtTest(PoolCase):
     def test_a_general_lesson_is_never_a_strengthening_owed(self):
         """Whatever a `recall` event says, a session owes nothing for a lesson it cannot rewrite."""
         self.box.add("mine", "Use when mine.", "Body.\n", "--level", "user")
-        self.recall("shipped-note", ts=NOW + 60, ineffective=True)
-        self.recall("mine", ts=NOW + 120, ineffective=True)
+        self.recall("shipped-note", "sess-0001-aaaa", ts=NOW + 60, ineffective=True)
+        self.recall("mine", "sess-0001-aaaa", ts=NOW + 120, ineffective=True)
         owed = self.box.json("events", "--unsettled", "--session", "sess-0001-aaaa", "--json")
         self.assertEqual([(event["type"], event["lesson"]) for event in owed], [("recall", "mine")])
 
@@ -346,18 +349,24 @@ class GeneralDebtTest(PoolCase):
 
 
 class SameSubjectTest(PoolCase):
-    """A user who already has a lesson for a mistake the pool also covers gets one refusal."""
+    """A user who already has a lesson for a mistake the pool also covers: no guard yields,
+    so both are hits of the one refusal, and `compound disable` keeps only the user's."""
 
     def setUp(self):
         PoolCase.setUp(self)
         self.ship("zsh-equals-not-found", "--match", ECHO, body="The pool's text.\n")
 
-    def test_the_users_own_guard_wins_over_a_general_one_on_the_same_call(self):
+    def test_the_users_own_guard_and_the_general_one_are_both_hits_on_the_same_call(self):
         self.box.add("zsh-equals-word", "Use when mine.", "My text.\n", "--level", "user", "--match", ANCHOR + r"echo\s+={4,}")
         reply = self.check("ls; echo =====")
-        self.assertEqual([(hit["name"], hit["level"]) for hit in reply["hits"]], [("zsh-equals-word", "user")])
-        self.assertEqual(reply["yielded"], ["zsh-equals-not-found"])
+        self.assertEqual([(hit["name"], hit["level"]) for hit in reply["hits"]],
+                         [("zsh-equals-word", "user"), ("zsh-equals-not-found", "general")])
+        self.assertNotIn("yielded", reply)
         self.assertEqual(reply["guards"], 2)
+        # The user who keeps only their own switches the general one off.
+        self.assertExit(self.box.run("disable", "zsh-equals-not-found"), 0)
+        reply = self.check("ls; echo =====")
+        self.assertEqual([(hit["name"], hit["level"]) for hit in reply["hits"]], [("zsh-equals-word", "user")])
 
     def test_a_project_guard_does_not_silence_the_general_one(self):
         """A project lesson is a file in a repository, which anyone who can commit to it can
@@ -401,15 +410,6 @@ GUARDS = {
          "kubectl get pods -o jsonpath='{.status}'", "python3 -c \"open(path='x')\"",
          "echo 'please read path docs'", "grep -n 'for path in' build.sh", "gh pr view --json status=1",
          "docker ps --filter status=running", "while read -r line; do echo $line; done < f"]),
-    "macos-gnu-only-commands": (
-        ["timeout 60 npm test", "cd x && timeout 10s make", "out=$(timeout 5 curl -s http://h)",
-         "timeout -k 5 30 ./run.sh", "ls |timeout 3 cat", "cd /tmp\ntimeout 30 ./run.sh",
-         "for i in 1 2; do timeout 5 ./try.sh; done", "timeout --signal=KILL 10 ./run.sh"],
-        ["pytest --timeout 30", "curl --connect-timeout 5 http://h", "gtimeout 5 make",
-         "echo 'timeout 5 is unavailable'", "npm test -- --timeout=10000", "grep -rn 'timeout 30' src/",
-         "sleep 1 # timeout 5", "python3 -c 'requests.get(u, timeout 5)'", "date -v-1d +%F", "stat -f %z file",
-         "cat <<'EOF' > notes.md\nThe timeout 5 that was tried is GNU-only.\nEOF",
-         "perl -e 'alarm shift; exec @ARGV' 60 make", "timeout=30 ./run.sh", "git log --grep timeout -5"]),
     "sed-in-place-bsd": (
         ["sed -i 's/foo/bar/' f.txt", "sed -i \"s|a|b|g\" src/*.py", "find . -name '*.md' | xargs sed -i 's/x/y/'",
          "sed -E -i 's/a+/b/' f", "sed -i '3d' f.txt", "sed -i -e 's/a/b/' f", "sed -i '/^#/d' f",
@@ -441,8 +441,15 @@ ORDINARY = [
     "test -f status.txt && cat status.txt", "awk -F= '/^path/ {print $2}' config.ini",
 ]
 
+# What `macos-gnu-only-commands` is about. It is recalled when one of them fails and stops
+# none of them: on a Mac with Homebrew's coreutils `timeout` is there, and the call is right.
+GNU_ONLY = ["timeout 60 npm test", "cd x && timeout 10s make", "out=$(timeout 5 curl -s http://h)",
+            "timeout -k 5 30 ./run.sh", "ls |timeout 3 cat", "cd /tmp\ntimeout 30 ./run.sh",
+            "for i in 1 2; do timeout 5 ./try.sh; done", "timeout --signal=KILL 10 ./run.sh",
+            "date -d yesterday +%F", "grep -P '\\d+' f", "stat -c %s f"]
+
 SHIPPED = {
-    "macos-gnu-only-commands": ("guard", ["darwin"], []),
+    "macos-gnu-only-commands": ("lesson", ["darwin"], []),
     "pip-externally-managed": ("lesson", [], []),
     "sed-in-place-bsd": ("guard", ["darwin"], []),
     "zsh-equals-not-found": ("guard", [], ["zsh"]),
@@ -485,7 +492,7 @@ class ShippedPoolTest(PoolCase):
         duplicates = [row for row in status["health"] if row["check"] == "duplicates"][0]
         self.assertEqual(duplicates["status"], "PASS")
         self.assertEqual(status["store"]["general"]["lessons"], 6)
-        self.assertEqual(status["store"]["general"]["guards"], 4)
+        self.assertEqual(status["store"]["general"]["guards"], 3)
 
     def test_a_shipped_lesson_carries_no_origin_and_is_as_the_cli_writes_it(self):
         """The file is what `compound promote --to general` publishes: rewriting it at the
@@ -517,6 +524,23 @@ class ShippedPoolTest(PoolCase):
                     wrong.append("%s should not match: %r -> %r" % (name, command, self.shipped_hits(command)))
         self.assertEqual(wrong, [])
 
+    def test_the_gnu_only_lesson_is_recalled_and_stops_no_call(self):
+        """D7: it carries no pattern, so `timeout N cmd` runs, on a Mac with Homebrew's
+        coreutils as on any other. It is still found for the failure it describes."""
+        row = self.pool()["macos-gnu-only-commands"]
+        self.assertEqual((row["match"], row["platform"], row["applies"]), ([], ["darwin"], True))
+        self.assertGreaterEqual(len(GNU_ONLY), 8)
+        for command in GNU_ONLY:
+            self.assertEqual(self.shipped_hits(command), [], command)
+        found = self.box.json("find", "command", "not", "found", "timeout", "--json", script=SCRIPT, **ZSH)
+        self.assertIn("macos-gnu-only-commands", [row["name"] for row in found["items"]])
+        with open(os.path.join(REPO, "lessons", "macos-gnu-only-commands", "SKILL.md"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertNotIn("\nmatch:", text)
+        self.assertNotIn("stopped before it runs", text, "the text must not say it is a guard")
+        for form in ("timeout 60 cmd", "date -d", "grep -P", "stat -c"):
+            self.assertIn(form, text)
+
     def test_no_shipped_pattern_hits_an_ordinary_command(self):
         self.assertGreaterEqual(len(ORDINARY), 25)
         wrong = [(command, self.shipped_hits(command)) for command in ORDINARY if self.shipped_hits(command)]
@@ -535,18 +559,23 @@ class ShippedPoolTest(PoolCase):
         self.assertEqual(self.shipped_hits("echo ====", COMPOUND_PLATFORM="linux"), ["zsh-equals-not-found"])
         self.assertEqual(self.shipped_hits("timeout 5 make", COMPOUND_PLATFORM="linux"), [])
         self.assertEqual(self.shipped_hits("sed -i 's/a/b/' f", COMPOUND_PLATFORM="linux"), [])
-        # bash on macOS: the macOS guards apply, the zsh ones do not.
-        self.assertEqual(self.shipped_hits("timeout 5 make", SHELL="/bin/bash"), ["macos-gnu-only-commands"])
+        # bash on macOS: the macOS guard applies, the zsh ones do not.
+        self.assertEqual(self.shipped_hits("sed -i 's/a/b/' f", SHELL="/bin/bash"), ["sed-in-place-bsd"])
+        self.assertEqual(self.shipped_hits("timeout 5 make", SHELL="/bin/bash"), [])
         self.assertEqual(self.shipped_hits("status=$?", SHELL="/bin/bash"), [])
 
-    def test_a_users_own_lesson_for_the_same_mistake_is_the_one_that_refuses(self):
+    def test_a_users_own_lesson_for_the_same_mistake_refuses_beside_the_shipped_one(self):
         self.box.add("zsh-equals-word", 'Use when a zsh command line has a bare word starting with "=".',
                      "Quote it.\n", "--level", "user", "--match", ANCHOR + r"echo\s+=+", script=SCRIPT, **ZSH)
         self.box.add("macos-no-timeout", "Use when timeout is called on macOS.", "Not installed.\n",
                      "--level", "user", "--match", ANCHOR + r"timeout\s+\d", script=SCRIPT, **ZSH)
-        self.assertEqual(self.shipped_hits("ls; echo ====="), ["zsh-equals-word"])
+        self.assertEqual(self.shipped_hits("ls; echo ====="), ["zsh-equals-word", "zsh-equals-not-found"])
+        # `timeout` is no shipped guard: the user's own lesson is the only one that refuses.
         self.assertEqual(self.shipped_hits("timeout 5 make"), ["macos-no-timeout"])
-        self.assertEqual(self.shipped_hits("timeout -k 5 30 ./run.sh"), ["macos-gnu-only-commands"])
+        self.assertEqual(self.shipped_hits("timeout -k 5 30 ./run.sh"), [])
+        # Switched off, the shipped lesson leaves the user's alone on the call.
+        self.assertExit(self.box.run("disable", "zsh-equals-not-found", script=SCRIPT, **ZSH), 0)
+        self.assertEqual(self.shipped_hits("ls; echo ====="), ["zsh-equals-word"])
 
     def test_one_shipped_lesson_can_be_switched_off(self):
         self.assertExit(self.box.run("disable", "sed-in-place-bsd", script=SCRIPT, **ZSH), 0)

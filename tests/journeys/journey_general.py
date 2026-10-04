@@ -2,10 +2,12 @@
 """The general pool: the lessons this package ships, met in real `claude -p` sessions. Run
 by hand, on macOS with zsh as the login shell: that is where the shipped guards apply.
 
-  guards    one session sends the four wrong forms the shipped guards are about (a bare
-            ===== after echo, an assignment to `status`, GNU `sed -i`, `timeout`). Each is
-            refused once, with the general lesson of the package quoted as the reason, and
-            one `guard` event names each lesson.
+  guards    one session sends the three wrong forms the shipped guards are about (a bare
+            ===== after echo, an assignment to `status`, GNU `sed -i`) and then `timeout`.
+            Each of the three is refused once, with the general lesson of the package
+            quoted as the reason, and one `guard` event names each lesson. `timeout` is
+            refused by no guard: `macos-gnu-only-commands` is recalled when it fails, and
+            where this Mac has a `timeout` (Homebrew's coreutils) it simply runs.
   glob      a session runs `rm -f` on a glob that matches nothing. zsh refuses it, and the
             failure is given the shipped recall lesson `zsh-no-matches-found`.
   pip       a session runs `pip install --dry-run` against a Python its package manager
@@ -84,7 +86,7 @@ def main():
     rows = w.events(project, session=s.sid, kind="guard")
     w.show("guard", rows)
     print("      calls: %s" % " | ".join("%s -> %s" % (c[0][:60], "refused/error" if c[1] else "ok") for c in s.bash()))
-    for name, command in WRONG:
+    for name, command in WRONG[:3]:
         sent = [c for c in s.bash() if c[0].strip() == command]
         w.check("guards", "%s: the wrong form was sent and refused" % name, bool(sent) and sent[0][1] is True,
                 sent[0][2][:200] if sent else "the session did not send %r" % command)
@@ -93,6 +95,19 @@ def main():
                     name, os.path.join(common.PLUGIN, "lessons", name))) in sent[0][2])
         w.check("guards", "%s: exactly one guard event names it" % name,
                 len([e for e in rows if e.get("lesson") == name]) == 1, [e.get("lesson") for e in rows])
+    name, command = WRONG[3]
+    sent = [c for c in s.bash() if c[0].strip() == command]
+    w.check("guards", "%s: `timeout` was sent and no guard refused it" % name,
+            bool(sent) and "RECORDED-NOTE lesson=%s" % name not in sent[0][2] and "stopped before it ran" not in sent[0][2],
+            sent[0][2][:200] if sent else "the session did not send %r" % command)
+    w.check("guards", "%s: no guard event names it" % name, not any(e.get("lesson") == name for e in rows),
+            [e.get("lesson") for e in rows])
+    if sent and sent[0][1] is True:
+        recalled = [e.get("lesson") for e in w.events(project, session=s.sid, kind="recall")]
+        w.check("guards", "%s: this Mac has no `timeout`, the call failed, and the lesson was recalled" % name,
+                name in recalled, recalled)
+    else:
+        print("      this Mac has a `timeout`: the call ran (%s)" % (sent[0][2][:80] if sent else "not sent"))
     w.check("guards", "the pre-call path wrote no error", w.events(project, session=s.sid, kind="error") == [],
             w.events(project, session=s.sid, kind="error"))
     with open(os.path.join(project, "notes.txt")) as fh:

@@ -48,6 +48,15 @@ python3 tests/journeys/journey_<name>.py
 - A render hook draws from `$.state` and answers `next(e)` on any failure. The band's one
   timer runs only while a spinner turns or a result fades. The pane's CLI reads are never
   made on a path a tool call waits on.
+- A Bash call is exempt from the guards, recall and capture only when `soleCliShape` in
+  `hooks/render.ts` proves it is one simple `compound ...` invocation. It is an allowlist
+  and fails closed: add to it only what can be proved, with a case in
+  `hooks/decisions.test.ts` in each direction.
+- Whether a recall counts toward ineffective is decided in the CLI (`recall_verdict`), when
+  `compound log` writes the event. The mod reads the reply and predicts nothing.
+- `compound log` takes only the types the mod writes. A test that needs an event a command
+  writes uses `seed_event` in `tests/test_support.py`, which refuses a store that is not
+  in a temporary directory.
 - Before a tool call the mod makes one CLI call, `check`, and no listing. Every CLI call
   the mod makes takes its budget from `BUDGET` in `hooks/render.ts`: 2 s at most while a
   tool call or a stop waits, 5 s at most at a typed prompt.

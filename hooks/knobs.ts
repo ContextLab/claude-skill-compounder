@@ -5,7 +5,6 @@ export type Knobs = {
   promptMinChars: number
   turnMinCalls: number
   nudgeCooldown: number
-  recurLimit: number
   model: string
   judgeTimeoutMs: number
   repeatMin: number
@@ -15,7 +14,6 @@ export type RawKnobs = {
   promptMinChars?: string
   turnMinCalls?: string
   nudgeCooldown?: string
-  recurLimit?: string
   model?: string
   judgeTimeout?: string
   repeatMin?: string
@@ -31,7 +29,6 @@ export const DEFAULTS: Knobs = {
   promptMinChars: 80,
   turnMinCalls: 25,
   nudgeCooldown: 1800,
-  recurLimit: 2,
   model: DEFAULT_MODEL,
   judgeTimeoutMs: 10000,
   // How many sessions must have made one kind of request, this one included, before the
@@ -56,7 +53,6 @@ export function knobsFrom(raw: RawKnobs): Knobs {
     promptMinChars: whole(raw.promptMinChars, DEFAULTS.promptMinChars),
     turnMinCalls: whole(raw.turnMinCalls, DEFAULTS.turnMinCalls, 1),
     nudgeCooldown: whole(raw.nudgeCooldown, DEFAULTS.nudgeCooldown),
-    recurLimit: whole(raw.recurLimit, DEFAULTS.recurLimit, 1),
     model: modelName(raw.model),
     // Seconds in the environment, milliseconds to the engine. Zero is no timeout at all,
     // which the prompt path cannot afford, so it takes the default.

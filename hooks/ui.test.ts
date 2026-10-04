@@ -51,12 +51,12 @@ type Answer = { text: string; isError?: true }
 // `listed` is what the CLI prints for the pane's `list --json`, `showCode` and `listCode` their exit
 // codes, `wait` is awaited before either answers, `closed` are the panes the mod closed, and
 // `focusAsked` is what each open asked of the keyboard.
-type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[]; used: (name: string) => string }
+type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[]; used: (name: string) => string; verdict: (event: Record<string, unknown>) => { counted: boolean; ineffective: boolean } }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [], used: () => '{"used":false,"name":""}' }
+  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [], used: () => '{"used":false,"name":""}', verdict: () => ({ counted: true, ineffective: false }) }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -88,12 +88,16 @@ function world(on: On, env: Record<string, string> = {}): World {
     const verb = argv[0]?.endsWith('/compound') ? argv[1] : argv[0]
     const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (verb === 'log') {
-      const event = JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>
+      // Whether a recall counts, and whether it makes its lesson ineffective, is the CLI's to
+      // say: `w.verdict` is its answer, written into the event and printed back, as `log
+      // --json` does. The mod sends neither field.
+      const sent = JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>
+      const event = sent.type === 'recall' ? { ...sent, ...w.verdict(sent) } : sent
       w.logged.push(event)
       if (event.type === 'capture' || (event.type === 'recall' && event.ineffective === true)) {
         w.owed.push({ ts: '2026-10-03T12:00:00Z', session: 'session-under-test', ...event })
       }
-      return done('')
+      return done(argv.includes('--json') ? JSON.stringify({ ts: '2026-10-03T12:00:00Z', session: 'session-under-test', ...event }) : '')
     }
     const failed = (exitCode: number, stderr: string) => ({ value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } })
     // The pane lists without the scripts; the reuse check lists with them.
@@ -823,6 +827,7 @@ test('with a lesson and a strengthening both owed, rewriting the weak lesson lea
   await owe($, w)
   // The same call fails again, and this time a recorded lesson describes it: it did not prevent it.
   w.judge = async () => '{"name":"release-notes-format"}'
+  w.verdict = () => ({ counted: true, ineffective: true })
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(w.logged.filter(e => e.type === 'recall').map(e => e.ineffective)).toEqual([true])
   expect(w.owed.map(e => e.type)).toEqual(['capture', 'recall'])
@@ -844,6 +849,7 @@ test('a strengthening whose lesson was removed is no longer owed, on the band or
   const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
   w.judge = async () => '{"name":"release-notes-format"}'
+  w.verdict = () => ({ counted: true, ineffective: true })
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(await shown()).toContain('release-notes-format')
   expect(w.owed.map(e => e.type)).toEqual(['recall'])
@@ -987,6 +993,7 @@ test('a failure after the lesson\'s guard refused in this session is recalled an
   expect(w.asked).toBe(0)
   w.judge = async () => '{"name":"release-notes-format"}'
   // The CLI's account: the guard refused in this session, so no recall of it counts.
+  w.verdict = () => ({ counted: false, ineffective: false })
   w.show = JSON.stringify({ name: 'release-notes-format', level: 'project', path: '/p/l/release-notes-format', text: 'Print it with printf.', counts: { recall: 0 }, recalls_since: 0, recur_limit: 1, guarded_in_session: true })
   const again = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   const recall = w.logged.find(e => e.type === 'recall')
@@ -996,7 +1003,8 @@ test('a failure after the lesson\'s guard refused in this session is recalled an
   expect(JSON.stringify(again.context)).not.toContain('is not preventing that failure')
   const stop = await $.classic.Stop({ stop_hook_active: false } as never)
   expect(stop.block).toBe(undefined)
-  // Without a refusal in the session, the same answer from the CLI is a recurrence that counts.
+  // Without a refusal in the session, the CLI says the recurrence counts.
+  w.verdict = () => ({ counted: true, ineffective: true })
   w.show = JSON.stringify({ name: 'release-notes-format', text: 'Print it with printf.', counts: { recall: 1 }, recalls_since: 0, recur_limit: 1, guarded_in_session: false })
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(w.logged.filter(e => e.type === 'recall').map(e => [e.ineffective, e.after_guard])).toEqual([[false, true], [true, false]])
@@ -1009,6 +1017,8 @@ test('a general lesson that recurs past the limit is recalled, and the session o
   mock.clock(on, { now: T0 })
   w.judge = async () => '{"name":"release-notes-format"}'
   // The CLI's account: the lesson ships with the package and was recalled far past the limit.
+  // Its recall counts, and it is never marked ineffective.
+  w.verdict = event => ({ counted: true, ineffective: event.level !== 'general' })
   w.show = JSON.stringify({ name: 'release-notes-format', level: 'general', path: '/pkg/lessons/release-notes-format', text: 'Print it with printf.', counts: { recall: 5 }, recalls_since: 5, recur_limit: 1, guarded_in_session: false, ineffective: false, recurring: true })
   const failed = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   const recall = w.logged.find(e => e.type === 'recall')

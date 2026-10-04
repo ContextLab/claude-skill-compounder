@@ -64,8 +64,9 @@ LESSONS = [
     {
         "name": "macos-gnu-only-commands",
         "when": 'Use when a command fails on macOS with "command not found: timeout", "date: illegal option -- d", "grep: invalid option -- P", "stat: illegal option -- c", or another GNU-only command or flag.',
+        # Recall only (decision D7): `timeout` exists where Homebrew's coreutils is
+        # installed, and a pattern cannot look at PATH.
         "platform": ["darwin"],
-        "match": [A + r"timeout\s+(-\S+\s+)*\d"],
     },
 ]
 

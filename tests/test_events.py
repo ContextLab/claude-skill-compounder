@@ -206,8 +206,11 @@ class IneffectiveTest(Case):
     def row(self, name="flaky", **kw):
         return [row for row in self.box.json("list", "--json", **kw) if row["name"] == name][0]
 
-    def recall(self, offset, name="flaky"):
-        self.box.log({"type": "recall", "lesson": name, "tool": "Bash", "error": "boom"}, COMPOUND_NOW=NOW + offset)
+    def recall(self, offset, name="flaky", session=None):
+        """One recall, each in a session of its own unless one is named: a session counts
+        once toward ineffective (tests/test_decisions.py has that rule's own tests)."""
+        self.box.log({"type": "recall", "lesson": name, "tool": "Bash", "error": "boom"}, COMPOUND_NOW=NOW + offset,
+                     CLAUDE_CODE_SESSION_ID=session or "sess-at-%d" % offset)
 
     def test_two_recalls_after_the_lesson_was_written_make_it_ineffective(self):
         self.box.add("flaky")
@@ -272,8 +275,8 @@ class IneffectiveTest(Case):
         that is not the lesson failing to prevent it."""
         self.box.add("flaky", "Use when.", "Body.\n", "--match", "the-bad-command")
         self.box.log({"type": "guard", "lesson": "flaky", "tool": "Bash", "text": "the-bad-command"}, COMPOUND_NOW=NOW + 50)
-        self.recall(60)
-        self.recall(120)
+        self.recall(60, session="sess-0001-aaaa")
+        self.recall(120, session="sess-0001-aaaa")
         row = self.row()
         self.assertFalse(row["ineffective"])
         self.assertEqual(row["counts"]["recall"], 2, "they are still recalls")
@@ -284,7 +287,7 @@ class IneffectiveTest(Case):
         self.assertFalse(self.box.json("show", "flaky", "--json", CLAUDE_CODE_SESSION_ID=None)["guarded_in_session"])
         # In a session the guard did not refuse in, the failure got past the lesson.
         self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 130, CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
-        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 140, CLAUDE_CODE_SESSION_ID="sess-0002-bbbb")
+        self.box.log({"type": "recall", "lesson": "flaky"}, COMPOUND_NOW=NOW + 140, CLAUDE_CODE_SESSION_ID="sess-0003-cccc")
         self.assertTrue(self.row()["ineffective"])
         self.assertEqual(self.box.json("show", "flaky", "--json")["recalls_since"], 2)
 

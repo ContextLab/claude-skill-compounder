@@ -38,7 +38,7 @@ Outputs below are real: `python3 dev/guide_examples.py` runs every command shown
 a throwaway store and prints what the CLI answers. Paths are shown for a user named `me`
 working in a project named `proj`, with compound installed at `~/.claude/compound/app`.
 Where a session would have written an event (a guard's refusal, a recall, a lesson owed),
-that script writes it with `compound log`. A time such as `1s` is how long ago the event
+that script writes it with `compound log`, which takes the events the mod writes. A time such as `1s` is how long ago the event
 was. `...` marks lines left out.
 
 ## Words used here
@@ -53,7 +53,7 @@ was. `...` marks lines left out.
 | level | how far a lesson reaches: `project` (one repository), `user` (all your projects) or `general` (everyone) |
 | general pool | the lessons and skills that ship inside the compound package |
 | owed | a session owes a lesson when a fix was found and the lesson is not yet recorded or declined |
-| ineffective | a lesson that was recalled twice since it was last written: the failure keeps coming back |
+| ineffective | a lesson that was recalled in two sessions since it was last written: the failure keeps coming back |
 | recurring | the same, for a lesson of the general pool: it is counted, and nothing is asked of Claude |
 | not here | a lesson whose platform or shell is not this machine's; it is listed and does nothing |
 | shadowed | a project lesson that carries the name of one of your own lessons or of a general one; it is listed and does nothing |
@@ -163,7 +163,7 @@ project  lesson  build-needs-profile           0       0        0         0     
 project  guard   no-env-edit                   0       0        0         0           Use when editing a .env file.
 project  lesson  python3-no-tomllib-use-tomli  0       0        0         0           Use when reading a TOML file with Python older than 3.11.
 user     guard   zsh-equals-word               0       0        0         0           Use when a zsh command line has a bare word starting with "=".
-general  guard   macos-gnu-only-commands       0       0        0         0           Use when a command fails on macOS with "command not found: timeout", …
+general  lesson  macos-gnu-only-commands       0       0        0         0           Use when a command fails on macOS with "command not found: timeout", …
 general  lesson  pip-externally-managed        0       0        0         0           Use when pip install fails with "error: externally-managed-environmen…
 general  guard   sed-in-place-bsd              0       0        0         0           Use when sed -i fails on macOS or BSD with an error that quotes the f…
 general  guard   zsh-equals-not-found          0       0        0         0           Use when a command fails in zsh with "==== not found" or "=word not f…
@@ -465,7 +465,8 @@ Which lesson a decline settles depends on where you run it:
 
 | Where | What `compound skip --why` settles |
 |-|-|
-| in a session (Claude runs it) | what that session owes |
+| in a session that owes one lesson (Claude runs it) | that lesson, and any strengthening the session owes |
+| in a session that owes several | nothing: it lists their ids, and one is named with `--settles <id>`. One decline settles one lesson |
 | in a terminal, with one unsettled lesson in the project | that lesson; the output names its id |
 | in a terminal, with several | nothing: it lists their ids, and you name one with `--settles <id>` |
 
@@ -498,7 +499,8 @@ the call that worked. `compound status` prints the id each one is settled by.
 
 ## Strengthen an ineffective lesson
 
-A lesson that was recalled twice since it was last written has not prevented anything.
+A lesson that was recalled in two sessions since it was last written has not prevented
+anything. Several recalls in one session count once.
 compound marks it ineffective. The band shows `▲ lesson ineffective`, and Claude is asked
 to strengthen it before it finishes. `compound status` lists it under `Open` until it is
 rewritten.
@@ -514,7 +516,7 @@ There are three ways to strengthen it, strongest first:
 If none is worth doing, decline: `compound skip --why "<reason>"`. A lesson that is
 removed, turned into a skill or moved under a new name is no longer owed a strengthening.
 
-`COMPOUND_RECUR_LIMIT` sets how many recalls make a lesson ineffective. The default is 2.
+`COMPOUND_RECUR_LIMIT` sets how many recalls, one for a session, make a lesson ineffective. The default is 2.
 
 A lesson of the general pool is not rewritten on your machine (`compound add --update`
 refuses it), so it is never ineffective and Claude is never asked to strengthen it.
@@ -650,7 +652,7 @@ Compound interest
 Levels
   project  2 lessons  (1 guard)   0 skills
   user     2 lessons  (1 guard)   1 skill
-  general  6 lessons  (4 guards)  4 skills
+  general  6 lessons  (3 guards)  4 skills
 
 Lessons
   name                          level    kind    reused  guarded  recalled  used  flag
@@ -710,8 +712,8 @@ width.
 event log shows compound did with it: how captures ended, what a session sent after a
 guard refused a call, how often a recalled lesson was the wrong one, what the reuse check
 answered and what all of it cost in time. It reads the log and writes nothing. The log
-behind this example was written for this guide, with `compound log`, by
-`dev/guide_examples.py`; your own report has your figures.
+behind this example was written for this guide by `dev/guide_examples.py`; your own
+report has your figures.
 
 ```
 $ compound report
@@ -922,4 +924,4 @@ Four commands exist for the mod, which runs them itself. You never need them:
 | `compound check` | before a tool call, to test the call against every guard; it reads `{"tool", "input"}` on standard input |
 | `compound memo` | after a reuse check, to keep the verdict on a request so the same request is not judged twice |
 | `compound use` | when a session invokes a skill, to count the use |
-| `compound log` | to append one event to the event log |
+| `compound log` | to append one event to the event log. It takes the events the mod writes; `learn`, `skip`, `rm`, `skill`, `promote` and `use` are written only by their own commands |

@@ -25,9 +25,10 @@ def spread(n, median=None, p90=None):
 
 class ReportCase(Case):
     def ev(self, kind, ago, session="s1", **fields):
-        """One event `ago` seconds before NOW, appended by the real `compound log`."""
+        """One event `ago` seconds before NOW: appended by the real `compound log`, or, for a
+        type only a command of the CLI writes, seeded into the sandbox's log."""
         event = dict(fields, type=kind, ts=iso(NOW - ago), session=session)
-        self.box.log(event)
+        self.box.put(event)
         return self.box.read_events()[-1]
 
     def report(self, *args, **kw):

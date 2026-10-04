@@ -121,7 +121,9 @@ Quote it or use printf '%s\n' '====='.
   both paths, and the project's one is **shadowed**: it is listed and flagged `shadowed`
   (`list --json` carries `shadowed: true`), and it is not in force. It is no guard, it is
   not found, recalled or offered, and `compound show <name>` prints the user's or the
-  general lesson. `compound rm <name>` removes the project's copy, which is the nearest.
+  general lesson. There is no override: a repository cannot take a name the user or the
+  package holds, and the lesson is not renamed when it is read.
+  `compound rm <name>` removes the project's copy, which is the nearest.
   The name is the directory's name, and it is held to the slug where a lesson is read,
   not only where `compound add` writes it: a lesson whose directory name is not a slug
   fails the `lessons parse` check and is not used (see "What a repository can write").
@@ -342,15 +344,15 @@ or `(` (which covers `$(`), and after `do`, `then` or `else`.
 condition holds on this machine (see "Where a lesson applies") and that the user has not
 switched off (see "The general pool").
 
-**Two guards on one call.** A call that is matched by a guard of the user level and by a
-guard of the general pool is refused by the user's alone: `compound check` returns the
-user's hit and names the general ones under `"yielded"`. A user who already has a lesson
-of their own for a mistake the pool also covers is refused once, with their own text. A
-project guard makes nothing yield: a call that a project guard and a general guard both
-match is one refusal that quotes each, so a file in a repository never takes the place
-of a guard the package ships. A call only the general guard matches is refused by it.
-Several hits (two general guards, a project and a user guard) are one refusal that
-quotes each.
+**Several guards on one call.** No guard yields to another. Every guard in force that
+matches a call is a hit of `compound check`, whatever its level, and the call gets one
+refusal: it says how many lessons matched and names them, quotes each once (the first
+four in full, each cut at the length a single one is; the rest are named, with the
+command that prints one), and each of them has then refused for the session. A user who
+keeps a lesson of their own for a mistake the general pool also covers switches the
+general one off with `compound disable <name>`: when a user's guard and a general guard
+both matched, the refusal's last line names that command and says the choice is the
+user's.
 
 **Whose patterns go first.** The patterns of the user and general levels are matched
 before the project's. A project pattern that is slow on a call uses up what is left of
@@ -460,13 +462,21 @@ the working call word for word, with the instruction to record the lesson now us
 `compound:learn` skill. The session then owes a lesson. The `capture` event carries an
 `id`, a short stable hash.
 
-A capture is **settled** by a later `learn` or `skip` event that comes from the same
-session, or that carries `settles: <id>` from any session or from none (`compound add
---settles ID`, `compound skip --settles ID`). `compound skip --why` run outside a session
-settles the one unsettled capture of the project it is run in; with several it exits 2 and
-lists their ids. Until then the capture is a debt, and it does not disappear when its
-session ends: `compound status` lists every unsettled capture of the last 14 days under
-Open, with its id, age, project and the failed and working commands.
+A capture is **settled** by a later `learn` or `skip` event that carries `settles: <id>`,
+from any session or from none (`compound add --settles ID`, `compound skip --settles
+ID`), or that carries no `settles` and comes from the same session. **One event settles
+one capture.** An event that names a capture settles that one and no other. In a session
+with exactly one unsettled capture, a plain `compound add` or `compound skip` settles
+it. In a session with more than one, `--settles ID` is required: without it both
+commands exit 2, write nothing, and list each id with the first line of its failing
+call. The message beside a fix gives the capture's id, and a stop refused for several
+owed lessons lists each with its id and names `--settles`. A line of the log written
+before this rule, without `settles`, from a session that owed several, still settles
+what that session owed. `compound skip --why` run outside a session settles the one
+unsettled capture of the project it is run in; with several it exits 2 and lists their
+ids. Until then the capture is a debt, and it does not disappear when its session ends:
+`compound status` lists every unsettled capture of the last 14 days under Open, with its
+id, age, project and the failed and working commands.
 
 That definition exists once, in the CLI. `compound status`, `compound events --unsettled`
 and the mod all take what is owed from it, and the mod decides nothing about settling for
@@ -522,9 +532,49 @@ The text of a command settles nothing. A session can reach the CLI through `&&`,
 subshell, `$(...)`, a variable, `bash -c` or a script, and a debt can be settled from a
 terminal; the log holds the settlement in every case, and the log is what the mod reads.
 A command's text is read for three things only: `compound add` as the program of a simple
-command turns the `recording the lesson` spinner, a command whose program is the CLI is
-not tested against the guards, and after a command that names the CLI the log is read for
-events to toast.
+command turns the `recording the lesson` spinner, after a command that names the CLI the
+log is read for events to toast, and a call that is the CLI's own is exempt, as follows.
+
+**The CLI's own call.** A lesson's text quotes the mistake it is about, so the call that
+writes a lesson is not tested against the guards; it is not a failure to recall a lesson
+for, it is not held or judged as a fix, and it is not listed among the calls between a
+failure and its fix. That exemption is an allowlist, and it fails closed: a Bash call is
+exempt only when the mod can prove it is ONE simple `compound ...` invocation and
+nothing else (`soleCliShape` in `hooks/render.ts`). Any call it cannot prove that of is
+a call like any other, which costs at most one refusal that the session sends again.
+What is proved:
+
+- The text holds no control character but a newline and a tab, and is at most 400000
+  characters.
+- The command line is words separated by blanks. A word is made of letters, digits and
+  `_ @ % + = : , . / -`, of single-quoted text, and of double-quoted text that holds no
+  `$`, no backtick and no backslash. Outside a quote there is therefore no `;`, `&&`,
+  `||`, `|`, `&`, no `$(...)`, backtick, `$((...))`, `<(...)`, parenthesis or brace, no
+  variable (its value is unknown), no glob, `~` or `#`, no `$'...'`, and no redirection
+  (`>`, `>>`, `2>`, `&>`, `>|`, `2>&1`, `<`, `<<<`). No word begins with `=`.
+- A backslash is allowed only as a line continuation between two words. A newline
+  inside a quote is part of the quoted text; one outside ends the command.
+- Before the program there may be assignments to `COMPOUND_PROJECT`, `COMPOUND_HOME` and
+  `COMPOUND_CLAUDE_DIR` (the commands the mod prints use the first) and to nothing else:
+  `PATH=`, `LD_PRELOAD=`, `IFS=` or `COMPOUND_SURFER=` would decide what runs.
+- The program is the next word, with nothing in front of it (`command`, `env`, `exec`,
+  `sudo`, `time`, `nohup` are other programs). It is the absolute path of the package's
+  own `bin/compound`, exactly, or the bare name `compound` while the first `compound` on
+  `PATH` is that same file, which the mod asks of `sh` once and keeps for five minutes.
+  Another file called `compound`, a relative path and a path that only ends in
+  `/compound` do not qualify. What a shell alias or function named `compound` would run
+  cannot be known from the mod; a guard is advice and not a barrier, and whoever can
+  define one is past it already.
+- The word after the program is one of the CLI's subcommands.
+- The one redirection allowed is one here-document, last on the line, with a quoted
+  delimiter (`<<'EOF'`, `<<"EOF"`, `<<-'EOF'`): the shell passes its body as text,
+  without expanding it, so a body that holds `; rm -rf` or `$(...)` is the lesson's
+  text. Only blank lines may follow its closing line. A here-document with an unquoted
+  delimiter is expanded by the shell and is not exempt. `--body-file` needs none.
+
+So `compound list; rm -rf x`, `x && compound add ...`, `compound list > ~/.zshrc` and
+`C=/path/compound; $C add ...` are checked like any other call. What the user is told
+about a `compound` command still follows the event it wrote.
 
 ### The CLI's time
 
@@ -534,6 +584,7 @@ killed:
 | Where the call is made | Budget |
 |-|-|
 | `check`, before a tool call | 1500 ms |
+| `sh`, asked whether `compound` on `PATH` is the package's CLI, before a tool call that is one bare `compound ...` invocation, at most once in five minutes | 2000 ms |
 | any other call while a tool call or a stop waits, and `use` after a skill's prompt was expanded | 2000 ms |
 | at a typed prompt (the listing, `find`, the unsettled captures), and the pane's `events --json`, `list --json` and `show --json` | 5000 ms |
 | `/compound status`, the report the user asked for, and the pane's own `status --json` | 15000 ms |
@@ -667,8 +718,10 @@ lessons, twelve of them guards, takes about 70 ms of the 1500 ms the mod gives i
 median of 20 runs on an Apple M2 Max).
 
 **A repository cannot stand in for the user.** A project lesson that takes the name of a
-user or general lesson is shadowed (see "What a lesson is"). A general guard yields only
-to a user guard. A project lesson reaches the user level only by `compound promote`: the
+user or general lesson is shadowed (see "What a lesson is"), and a lesson whose directory
+is no slug, or whose `name` is not its directory's, is reported and not used. No guard
+yields to another, so a guard in a repository silences none of the user's or the
+package's. A project lesson reaches the user level only by `compound promote`: the
 mod asks for that move only for a lesson the event log holds a `learn` event for (one
 that `compound add` wrote in that project), and the CLI makes it only when git does not
 track the lesson. A lesson committed in a repository is never moved by the mod.
@@ -689,12 +742,41 @@ fields a command prints on one line are cleaned whether or not it is a terminal.
 left: a colour sequence in a lesson's body recolours text that `compound show` prints on
 a terminal, and piped output and `--json` carry a lesson's body as it is.
 
-**What is published is read first.** `compound promote <name> --to general` reads every
-file it would publish for the shape of a credential: a private key block, a well-known
-token form, a password in a URL, a bearer token. The plan lists what it found under
-`secrets` (the file and the kind, never the text), and `--yes` exits 2 without cloning
-or pushing anything. It is a lower bound: a secret with no recognisable shape is not
-found, and the plan prints the text to be published so it can be read.
+**What is published is read first, and what was read is what is published.** `compound
+promote <name> --to general` copies every file it would publish into a staging
+directory, reading each once and whole, and from then on reads only that copy. It reads
+the copy in full for the shape of a credential: a private key block, a well-known token
+form, a password in a URL, a bearer token. The plan lists what it found under `secrets`
+(the file and the kind, never the text), and under `unpublishable` every file that
+cannot be published: one that cannot be read, one that is not a regular file, and one
+larger than 8388608 bytes, which is too large to scan and so is not published. With
+either list not empty `--yes` exits 2 without cloning or pushing anything, and names
+each file. No option overrides the refusal. What is committed is the staging copy, byte
+for byte, so a file that changes after it was read does not reach the pool unread. The
+staging copy is removed when the command ends. It is a lower bound: a secret with no
+recognisable shape is not found, and the plan prints the text to be published so it can
+be read.
+
+**A value from outside is never an option.** The CLI and `install.sh` start `git`, `gh`
+and history-surfer from an argument vector, never through a shell. A branch or tag name
+(`compound update --ref`, `COMPOUND_REF`) is letters, digits, `.`, `_`, `-` and `/`
+between parts, starting with a letter or digit, with no `..` and no `.lock` ending; an
+owner/repo (`COMPOUND_UPSTREAM`) starts with a letter or digit; a repository given to
+`git clone` (`COMPOUND_REPO`, `COMPOUND_SURFER_URL`, `COMPOUND_UPSTREAM_GIT`) does not
+begin with `-` and names no remote helper (`<helper>::`). A value that fails is refused
+before the program is started, and a value that passes goes after `--` where the
+program takes one. The words of a request reach the prompt-log search as one pattern of
+letters and digits.
+
+**What is logged is masked where it is written.** A call and its error are masked by
+the mod before it sends them to the judge or logs them. The CLI applies the same rules,
+rule for rule, where an event is appended and where the memo is written, to every text
+the file will hold, and cuts a text at 8000 characters and a list at 200 elements. So a
+field the mod did not mask, an event another program hands to `compound log`, and the
+reason given to `compound skip --why` are masked too. The fields an event is found by
+(`ts`, `type`, `session`, `project`, `path`, `lesson`, `lessons`, `level`, `kind`, `id`,
+`settles`, `from`, `seen_in`, `also`, `merged`) are written as they are. A line already
+in the log is not rewritten.
 
 **What the package does not defend against.**
 
@@ -702,8 +784,8 @@ found, and the plan prints the text to be published so it can be read.
   quotation. Whether Claude gives it weight is Claude's judgement, as with any file it
   reads in the repository.
 - A guard is advice, not a barrier: it refuses a call once per session and the call sent
-  again runs. A Bash command whose program is the `compound` CLI is not tested against
-  the guards.
+  again runs. A Bash call that is one simple invocation of the `compound` CLI is not
+  tested against the guards (see "The CLI's own call").
 - A project guard can refuse a call once per session per lesson, and a project pattern
   that is slow on a call costs that call up to `COMPOUND_CHECK_BUDGET_MS`. Both are
   reported (`guard` and `error` events), and `compound rm` removes the lesson.
@@ -712,8 +794,12 @@ found, and the plan prints the text to be published so it can be read.
   with `compound skip`.
 - The event log, the claims and `disabled.json` under `COMPOUND_HOME`, and
   `settings.json`, are the user's own files. Anything that can write them, the session's
-  own shell included (`compound log` appends any event), is trusted: a debt can be
-  settled, or an event forged, by a process running as the user.
+  own shell included, is trusted: a debt can be settled, or an event forged, by a
+  process running as the user that edits the file. `compound log` takes only the types
+  the mod writes, and refuses `learn`, `skip`, `rm`, `skill`, `promote`, `candidate`
+  and `use`, each of which only its own command writes. That is integrity against
+  accident, and against a session settling its debt with `log`. It is not a defence
+  against that process.
 - `compound check` that fails or does not answer in 1500 ms lets the call run (see
   moment 2). The mod never blocks a turn on its own failure.
 - The masking of secrets in what is logged and sent to the judge is a lower bound.
@@ -730,7 +816,9 @@ found, and the plan prints the text to be published so it can be read.
    script attached to the lesson, when the fix is a procedure worth running; a skill,
    when there are steps and a routable trigger.
 5. Choose the level by the rule above.
-6. Write it with `compound add`, which validates the format and logs the event.
+6. Write it with `compound add`, which validates the format and logs the event. One
+   lesson settles one owed lesson: when the session owes more than one, pass `--settles
+   ID` with the id the `[compound]` message gave.
 
 ### What `add` refuses
 
@@ -758,8 +846,23 @@ kinds of text, with exit 2, a message that says what it found, and nothing writt
 ## When a lesson does not work
 
 A lesson that is recalled after the same failure happens again has not prevented
-anything. A lesson with `COMPOUND_RECUR_LIMIT` recurrences since it was last written is
-**ineffective**. A recall that makes or finds a lesson ineffective is marked so in its
+anything. A lesson with `COMPOUND_RECUR_LIMIT` recurrences that count since it was last
+written is **ineffective**. Every recall is logged and shown, and **at most one recall
+per lesson, per revision of the lesson, per session counts**: several failures of one
+session (calls sent in parallel, a loop that retries) say once that the lesson did not
+prevent them, and the default limit of 2 means two sessions. Rewriting the lesson starts
+a new revision, and the same session can count once more. A recall is **of a lesson, not
+of a name**: two projects may each hold a lesson of one name, and each has its own
+count (a `recall` event carries the lesson's `level` and `path`; a project lesson counts
+the events of its own project, a user or general lesson is one lesson everywhere, and a
+lesson that moved to the user level keeps what it was counted for). The other counters
+are kept apart the same way.
+
+Whether a recall counts, and whether it makes its lesson ineffective, is decided in one
+place: the CLI, when `compound log` writes the `recall` event. It fills in `counted` and
+`ineffective` and prints the event (`log --json`), and the mod reads the answer from
+that reply, which is the call it makes to write the event anyway. The mod predicts
+nothing. A recall that makes or finds a lesson ineffective is marked so in its
 `recall` event, and the session then owes a strengthening. The message beside the error
 says so, and if the session tries to finish without one, the stop is refused once with
 the lesson named and the options stated:
@@ -792,7 +895,8 @@ request, and `compound add --update` refuses it, so a session could not pay a
 strengthening owed for one. Its recalls are counted like any other lesson's, and that is
 all: no recall of it is marked ineffective, the message beside the error asks for nothing,
 no stop is refused, and `compound events --unsettled` never lists one, whatever a `recall`
-event says. With `COMPOUND_RECUR_LIMIT` recalls since the file last changed the lesson is
+event says. With `COMPOUND_RECUR_LIMIT` recalls that count (one for a session) since the
+file last changed the lesson is
 **recurring**: `compound list` and `compound status` flag it so, `list --json` and `show
 --json` carry `recurring: true` (and `ineffective: false`), and `compound status` lists
 it under Open with the two things a user can do: switch it off for themselves (`compound
@@ -816,14 +920,16 @@ add` wrote, without its `origin` (what `compound promote --to general` publishes
 | `zsh-status-path-variables` | guard | `shell: zsh` | an assignment to `status` or `path`, `for status in`/`for path in`, `read status`/`read path` |
 | `zsh-no-matches-found` | lesson | `shell: zsh` | recalled when a command fails with "no matches found" |
 | `sed-in-place-bsd` | guard | `platform: darwin` | `sed -i` followed by a script and no backup suffix |
-| `macos-gnu-only-commands` | guard | `platform: darwin` | `timeout N ...` as a command; `date -d`, `grep -P` and `stat -c` are recalled when they fail |
+| `macos-gnu-only-commands` | lesson | `platform: darwin` | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails |
 | `pip-externally-managed` | lesson | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
 
-Two of the guards assume the stock tool. On a Mac where `timeout` is installed
-(Homebrew's coreutils) or where `sed` is GNU sed, the guarded call is right; a pattern is
-tested against the command's text and cannot look at `PATH`. The guard refuses once per
-session, its text says to send the call again when the tool is there, and the call sent
-again runs. A user for whom that is every session switches the lesson off.
+Three of the six are guards. `macos-gnu-only-commands` is recalled and stops nothing:
+on a Mac with Homebrew's coreutils `timeout` is installed and the call is right, and a
+pattern is tested against the command's text and cannot look at `PATH`. For the same
+reason `sed-in-place-bsd` assumes the stock tool: where `sed` is GNU sed the guarded call
+is right. The guard refuses once per session, its text says to send the call again when
+the tool is there, and the call sent again runs. A user for whom that is every session
+switches the lesson off.
 
 `skills/` in this package holds four skills, which a session sees as `compound:<name>`:
 
@@ -840,8 +946,9 @@ counted (see "A skill that is used"). `tests/journeys/journey_compose.py` runs t
 two in real sessions on small real projects.
 
 `tests/test_general_pool.py` runs each shipped pattern through `compound check --guards`
-against a table of calls it must stop and a table of calls it must let through, and every
-shipped pattern against a list of ordinary commands.
+against a table of calls it must stop and a table of calls it must let through, every
+shipped pattern against a list of ordinary commands, and the calls `macos-gnu-only-commands`
+is about, none of which is stopped.
 
 **The switch.** `compound disable <name>` switches one general lesson off for this user,
 and `compound enable <name>` switches it back on. The names are kept in
@@ -1027,7 +1134,12 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
 - **Event log**: `~/.claude/compound/events.jsonl`, one JSON object per line: `ts`,
   `type` (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `learn`, `skip`,
   `nudge`, `judge`, `promote`, `candidate`, `skill`, `rm`, `use`, `repeat`, `error`, `retry`),
-  `session`, `project`, and the fields of that type. `compound log` refuses any other type.
+  `session`, `project`, and the fields of that type. `compound log` takes the types the
+  mod writes (`reuse`, `guard`, `recall`, `capture`, `remind`, `refuse`, `nudge`, `judge`,
+  `repeat`, `error`, `retry`) and refuses the others with exit 2, naming the command that
+  writes each: `learn` (`compound add`), `skip`, `rm`, `skill`, `promote` and `candidate`
+  (`compound promote`), `use`. Every text in an event is masked and cut where it is
+  written (see "What a repository can write").
 - **Verdicts**: every question the mod puts to the model writes one `judge` event,
   whatever the answer: `moment` (`reuse`, `recall` or `fix`), `verdict` (`named`,
   `nothing` or `not-substantial` for reuse; `named` or `none` for recall; `fix`, `known`
@@ -1164,20 +1276,20 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture, and is required when the session has more than one unsettled (exit 2 otherwise, listing their ids). Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, `platform`, `shell`, `applies`, `disabled`, `counts` (`reuse`, `guard`, `recall`, `learn`, `use`), `ineffective`, `recurring`, and `shadowed: true` on a project lesson that carries a user or general lesson's name. A lesson not in force is listed, flagged `not here`, `disabled` or `shadowed`. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the four counters (`REUSED`, `GUARDED`, `RECALLED`, `USED`), the flag and the description, fitted to the terminal; where the columns themselves do not fit, the flag goes before the description on the line under the row. |
-| `compound show N` | One lesson's path and text, and when it is not in force, why. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard, recall or use that names it, or null). |
+| `compound show N` | One lesson's path and text, and when it is not in force, why. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective: at most one for a session, since the lesson was last written), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard, recall or use that names it, or null). |
 | `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`) and the asking session is added to the memo's `asked`. Each row under `prompts` carries `sessions`, the sessions that asked that text (its own first, at most 20). An empty stdin is exit 2; a request with no word in it has no candidates. |
 | `compound memo` | stdin `{"key","verdict","items","prompts","repeats"}`: keeps the verdict on a request under the `memo_key` that `find --request --json` printed, with the session that asked. `verdict` is `named`, `nothing` or `not-substantial`; `items` are names, `prompts` and `repeats` rows as `find` prints them. Anything else is exit 2. |
-| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match. A general guard that hit beside a user guard is named under `"yielded"` and is not a hit; a project guard makes nothing yield (see "Two guards on one call"). A guard that did not finish matching in `COMPOUND_CHECK_BUDGET_MS` is named under `"timed_out"`, and one the time ran out before under `"unchecked"`. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
+| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match: every one of them, since no guard yields to another (see "Several guards on one call"). A guard that did not finish matching in `COMPOUND_CHECK_BUDGET_MS` is named under `"timed_out"`, and one the time ran out before under `"unchecked"`. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound use N` | Counts one use of the skill `N`, which is what Claude Code calls the skill a session invoked: a bare name for a skill of the project or the user level, `compound:NAME` for a skill of this package. Logs `use` for a skill `compound list` shows, except the package's `learn` and `reuse`. Any other name writes nothing; the exit status is 0 either way and `--json` says `used`. The mod runs it (see "A skill that is used"). |
-| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential; with `--yes` forks, pushes a branch and opens the pull request, or exits 2 when `secrets` is not empty. Logs `promote` when it moved or proposed something. |
+| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential and `unpublishable` each file that cannot be read or is too large to scan; with `--yes` forks, pushes a branch and opens the pull request (or, with `COMPOUND_UPSTREAM_GIT`, pushes the branch there with git alone), or exits 2 when either list is not empty. Logs `promote` when it moved or proposed something. |
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed: the refusal names `compound disable`. Logs `rm`. |
 | `compound disable N` | Switches the general lesson `N` off for this user (see "The general pool"). Exit 2 for a lesson that is not in the general pool. Logs nothing. |
 | `compound enable N` | Switches it back on. |
-| `compound skip --why T [--settles ID]` | Declines what the session owes, or with `--settles` the capture of that id. Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
-| `compound log` | stdin: one event object of a known type. Appends it with `ts`, `session` and `project` filled in, and an `id` for a `capture`. |
+| `compound skip --why T [--settles ID]` | Declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
+| `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |
 | `compound report [--since TS] [--until TS] [--project P]` | What the event log says the package did, section by section (see "Seeing it work"): each figure a count over what it is counted among, and `n is too small` in place of a rate for fewer than 10. `--since` and `--until` take epoch seconds or an ISO 8601 time; a value that is neither is exit 2. Reads the log only and writes nothing. |
@@ -1192,12 +1304,13 @@ Code process, which includes the `env` block of `~/.claude/settings.json`; that 
 where a user sets the mod's settings. The CLI reads the environment of the process that
 runs it. A name both read is passed by the mod to every CLI call it makes.
 
-`COMPOUND_RECUR_LIMIT` and `COMPOUND_OFF` decide what both the mod and `compound status`
+`COMPOUND_RECUR_LIMIT` and `COMPOUND_OFF` decide what both a session and `compound status`
 report, and a terminal has no `env` block applied. The CLI therefore resolves each of the
 two from the process environment first, then from `env` in `<claude dir>/settings.json`,
 then the default, so `compound status` in a terminal and the mod in a session agree.
 `COMPOUND_PLATFORM` and `COMPOUND_SHELL` are resolved the same way. The mod does not read
-them: the CLI it runs inherits the session's environment.
+them, nor `COMPOUND_RECUR_LIMIT`: the CLI it runs inherits the session's environment, and
+the CLI is what decides whether a recall makes a lesson ineffective.
 
 A value of the wrong shape (not a whole number where one is expected) is the default.
 
@@ -1210,7 +1323,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_REPEAT_MIN` | 3 | mod | Sessions that must have made one kind of request, this one included, before the reuse check offers to make it a skill (see "A request that keeps coming back"). At least 2; a smaller value is the default. |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | mod | Tool calls the main loop makes in a turn before the stop asks whether anything was learned. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
-| `COMPOUND_RECUR_LIMIT` | 2 | mod, CLI | Recurrences of a lesson, since it was last written, that make it ineffective. |
+| `COMPOUND_RECUR_LIMIT` | 2 | CLI | Recurrences of a lesson that count, since it was last written, that make it ineffective. One recall counts for a session. |
 | `COMPOUND_PLATFORM` | this machine's | CLI | The platform a lesson's `platform` is held against: `darwin`, `linux`, `windows`. Resolved like `COMPOUND_RECUR_LIMIT`. For tests, and for a machine the CLI names wrongly. |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | CLI | The shell a lesson's `shell` is held against (`zsh`, `bash`), when the Bash tool's shell is not the one inferred. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_MODEL` | `haiku` | mod | The model that answers the mod's three questions: an alias or a model id. |
@@ -1222,6 +1335,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_NOW` | the clock | CLI | Pins the time: epoch seconds or an ISO 8601 time. For tests. |
 | `COMPOUND_CHECK_BUDGET_MS` | 500 | CLI | Milliseconds `compound check` spends matching patterns before it gives up on the ones not finished. |
 | `COMPOUND_UPSTREAM` | `ContextLab/claude-skill-compounder` | CLI | The `owner/repo` that `compound promote --to general` proposes to. |
+| `COMPOUND_UPSTREAM_GIT` | unset | CLI | A git URL or a path. When set, `compound promote --to general --yes` clones it and pushes the branch to it with git alone: no `gh`, no fork and no pull request, and the `promote` event's `url` is `<it>#<branch>`. For a pool kept somewhere other than GitHub, and for the tests, which publish to a local bare repository. |
 | `COMPOUND_SURFER` | `surfer` on `PATH` | CLI | The history-surfer executable that `find` and `status` run. |
 | `COMPOUND_NO_SURFER` | unset | CLI | When set, `compound install` does not fetch history-surfer. |
 | `COMPOUND_SURFER_URL` | `https://github.com/ContextLab/claude-history-surfer.git` | CLI | Where `compound install` clones history-surfer from. |
@@ -1322,7 +1436,13 @@ never touched.
   `tests/test_security.py` writes hostile lesson files, skills and scripts into a project
   by hand and checks what the CLI makes of them; `hooks/security.test.ts` puts hostile
   text where the mod reads a tool's output, the CLI's JSON and the event log, and checks
-  what reaches Claude. `tests/test_report.py` builds event logs with the CLI and holds
+  what reaches Claude. An event of a type `compound log` refuses reaches a test's log
+  through `seed_event` in `tests/test_support.py`, which appends the line itself and
+  refuses any log that is not inside a temporary directory. `tests/test_decisions.py`
+  and `hooks/decisions.test.ts` hold the rules above on guards, recalls, settling, the
+  CLI's own call and publishing; `tests/test_arguments.py` and `tests/test_redaction.py`
+  hold what is passed to other programs and what is written to the log.
+  `tests/test_report.py` builds event logs with the CLI and holds
   `compound report` to them, figure by figure; `hooks/measure.test.ts` sends calls through
   the mod's hooks and checks the `retry` event that follows a refusal.
 - `hooks/*.test.ts`: `claude plugin test .` for prompt building, answer parsing, message
