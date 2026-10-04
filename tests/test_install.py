@@ -461,6 +461,39 @@ class InstallShTest(Case):
         self.assertFalse(os.path.exists(self.box.chome))
         self.assertIn("the package clone", proc.stdout)
 
+    def test_a_tag_installs_without_gits_detached_head_advice(self):
+        origin = self.origin()
+        git_ok("tag", "v9.9.9", cwd=origin)
+        script = read(os.path.join(REPO, "install.sh"))
+        for run in ("first", "second"):
+            proc = self.sh(["bash", "-s", "--", "--bin-dir", self.box.bin], stdin=script,
+                           COMPOUND_REPO=origin, COMPOUND_REF="v9.9.9")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("detached HEAD", proc.stderr, "%s run" % run)
+            self.assertNotIn("detached HEAD", proc.stdout, "%s run" % run)
+        self.assertTrue(os.path.isfile(os.path.join(self.box.chome, "app", "bin", "compound")))
+
+    def test_a_ref_without_the_cli_is_refused_and_its_clone_is_not_left_behind(self):
+        origin = self.origin()
+        git_ok("checkout", "-q", "-b", "empty", cwd=origin)
+        git_ok("rm", "-q", "-r", "bin", cwd=origin)
+        git_ok("commit", "-q", "-m", "no cli", cwd=origin)
+        script = read(os.path.join(REPO, "install.sh"))
+        proc = self.sh(["bash", "-s"], stdin=script, COMPOUND_REPO=origin, COMPOUND_REF="empty")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("has no bin/compound", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.box.chome, "app")))
+        self.assertFalse(os.path.exists(self.box.settings))
+        # The next run, with a ref that has the CLI, is not blocked by what the first left.
+        again = self.sh(["bash", "-s", "--", "--bin-dir", self.box.bin], stdin=script,
+                        COMPOUND_REPO=origin, COMPOUND_REF="release")
+        self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_install_says_to_start_a_new_session(self):
+        proc = self.sh(["bash", os.path.join(self.checkout(), "install.sh"), "--bin-dir", self.box.bin])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Start a new Claude Code session", proc.stdout)
+
     def test_a_clone_that_fails_exits_non_zero_and_installs_nothing(self):
         script = read(os.path.join(REPO, "install.sh"))
         proc = self.sh(["bash", "-s"], stdin=script, COMPOUND_REPO=os.path.join(self.box.root, "nowhere"))

@@ -543,7 +543,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_NO_SURFER` | unset | CLI | When set, `compound install` does not fetch history-surfer. |
 | `COMPOUND_SURFER_URL` | `https://github.com/ContextLab/claude-history-surfer.git` | CLI | Where `compound install` clones history-surfer from. |
 | `COMPOUND_REPO` | `https://github.com/ContextLab/claude-skill-compounder.git` | installer | The repository `install.sh` clones when it is not run from a checkout. |
-| `COMPOUND_REF` | `main` | installer | The branch `install.sh` clones or pulls. |
+| `COMPOUND_REF` | `main` | installer | The branch or tag `install.sh` clones or pulls. `compound update` follows a branch only. |
 
 `CLAUDE_CODE_SESSION_ID`, which Claude Code sets in every shell it starts, stamps
 `session` on events the CLI writes.
@@ -562,7 +562,8 @@ run from) and runs `bin/compound install`, which:
 - links `compound` into the first of `~/.local/bin`, `~/bin` that is on `PATH`. When
   neither is, it creates `~/.local/bin`, links there, and prints the exact line to add to
   the shell profile (`export PATH="$HOME/.local/bin:$PATH"`). Its closing "Check it with"
-  line gives the link's absolute path, so it runs either way;
+  line gives the link's absolute path, so it runs either way, and the line before it says
+  to start a new session;
 - installs [history-surfer](https://github.com/ContextLab/claude-history-surfer), the
   prompt log, when no `surfer` command is found and `COMPOUND_NO_SURFER` is not set: it
   clones it to `~/.claude/compound/history-surfer` and runs its `scripts/setup.py` for the

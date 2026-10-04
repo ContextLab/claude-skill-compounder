@@ -68,7 +68,9 @@ Health
 ```
 
 The two `WARN` rows are expected on a new install. They turn to `PASS` once compound has
-acted in a session. [Troubleshooting](#troubleshooting) explains every row.
+acted in a session. Two more can show: `cli`, until the directory that holds `compound` is
+on your `PATH`, and `prompt log`, when history-surfer is not installed.
+[Troubleshooting](#troubleshooting) explains every row.
 
 **Update and uninstall:**
 
@@ -367,8 +369,8 @@ the same account as your session.
 | When | Model calls | Added time |
 |-|-|-|
 | a substantial prompt | one | about 1 second |
-| a tool call, when any lesson has a pattern | none | about 30 ms |
-| a tool call, when no lesson has a pattern | none | the first call of a turn pays about 30 ms; the rest pay nothing |
+| a tool call, when any lesson has a pattern | none | about 45 ms |
+| a tool call, when no lesson has a pattern | none | the first call of a turn pays about 45 ms; the rest pay nothing |
 | a failed tool call | one | none before the call |
 | each later success of the same tool, until one is the fix | one each, five at most | none before the call |
 

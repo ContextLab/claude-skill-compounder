@@ -2684,6 +2684,7 @@ def cmd_install(args):
         sys.stdout.write("compound installed from %s\n" % package)
         for line in report:
             sys.stdout.write("  " + line + "\n")
+        sys.stdout.write("Start a new Claude Code session: sessions that are already open do not load the mod.\n")
         sys.stdout.write("Check it with: %s status\n" % (link or script))
     return 0
 

@@ -1,0 +1,92 @@
+
+### g-zsh-equals  add exit 0 updated guard g-zsh-equals (user)
+    match: (?m)(^|[;&|]\s*)echo\s+(-[neE]+\s+)?=+(\s|$|;|&)
+
+### g-zsh-status-path  add exit 0 updated guard g-zsh-status-path (user)
+    match: (?m)(^|(;|&&|\|\||[({])\s*|\b(do|then|else)\s+)((local|export|typeset|readonly|declare)\s+)?(status|path)=
+    match: \bfor\s+(status|path)\s+in\b
+    match: \bread\s+(-\w+\s+)*(status|path)\b
+
+### g-macos-timeout  add exit 0 updated guard g-macos-timeout (user)
+    match: (?m)(^|[;&|(]\s*|\$\(\s*)timeout\s+(-\S+\s+)*\d
+
+### g-sed-inplace-gnu  add exit 0 updated guard g-sed-inplace-gnu (user)
+    match: \bsed\s+(-[A-Za-hj-z]+\s+)*-i\s+(-[A-Za-z]+\s+)*['\"]?(s[/|#,@:]|\d|/|\$)
+
+### g-zsh-equals
+  ok   MATCH     echo =====                                                 hits=['g-zsh-equals']
+  ok   MATCH     ls; echo ====== ; pwd                                      hits=['g-zsh-equals']
+  ok   MATCH     make && echo ==== && make test                             hits=['g-zsh-equals']
+  ok   MATCH     echo -e ====\nls                                           hits=['g-zsh-equals']
+  ok   no-match  echo '====='                                               hits=[]
+  ok   no-match  echo "=== done ==="                                        hits=[]
+  ok   no-match  printf '%s\n' '====='                                      hits=[]
+  ok   no-match  echo a=b                                                   hits=[]
+  ok   no-match  FOO==bar echo hi                                           hits=[]
+  ok   no-match  grep -c '^echo ==' file                                    hits=[]
+  ok   no-match  echo --- step 2                                            hits=[]
+  ok   no-match  python3 -c 'print(1 == 2)'                                 hits=[]
+
+### g-zsh-status-path
+  ok   MATCH     status=$?                                                  hits=['g-zsh-status-path']
+  ok   MATCH     make; status=$?; echo $status                              hits=['g-zsh-status-path']
+  ok   MATCH     path=/tmp/x && ls $path                                    hits=['g-zsh-status-path']
+  ok   MATCH     for path in a b; do echo $path; done                       hits=['g-zsh-status-path']
+  ok   MATCH     f(){ local path=$1; cat $path; }                           hits=['g-zsh-status-path']
+  ok   MATCH     echo /tmp | read -r path                                   hits=['g-zsh-status-path']
+  ok   MATCH     if true; then status=1; fi                                 hits=['g-zsh-status-path']
+  ok   no-match  git status                                                 hits=[]
+  ok   no-match  exit_status=$?                                             hits=[]
+  ok   no-match  file_path=/tmp/x                                           hits=[]
+  ok   no-match  PATH=/usr/bin:$PATH ls                                     hits=[]
+  ok   no-match  curl 'https://h/x?path=1&status=2'                         hits=[]
+  ok   no-match  ./configure --path=/usr --status=ok                        hits=[]
+  ok   no-match  rc=$?; echo $rc                                            hits=[]
+  ok   no-match  for p in a b; do echo $p; done                             hits=[]
+  ok   no-match  python3 -c "import os; print(os.path)"                     hits=[]
+  ok   no-match  kubectl get pods -o jsonpath='{.status}'                   hits=[]
+
+### g-macos-timeout
+  ok   MATCH     timeout 60 npm test                                        hits=['g-macos-timeout']
+  ok   MATCH     cd x && timeout 10s make                                   hits=['g-macos-timeout']
+  ok   MATCH     out=$(timeout 5 curl -s http://h)                          hits=['g-macos-timeout']
+  ok   MATCH     timeout -k 5 30 ./run.sh                                   hits=['g-macos-timeout']
+  ok   MATCH     ls |timeout 3 cat                                          hits=['g-macos-timeout']
+  ok   no-match  pytest --timeout 30                                        hits=[]
+  ok   no-match  curl --connect-timeout 5 http://h                          hits=[]
+  ok   no-match  gtimeout 5 make                                            hits=[]
+  ok   no-match  echo 'timeout 5 is unavailable'                            hits=[]
+  ok   no-match  npm test -- --timeout=10000                                hits=[]
+  ok   no-match  grep -rn 'timeout 30' src/                                 hits=[]
+  ok   no-match  sleep 1 # timeout 5                                        hits=[]
+  ok   no-match  python3 -c 'requests.get(u, timeout 5)'                    hits=[]
+
+### g-sed-inplace-gnu
+  ok   MATCH     sed -i 's/foo/bar/' f.txt                                  hits=['g-sed-inplace-gnu']
+  ok   MATCH     sed -i "s|a|b|g" src/*.py                                  hits=['g-sed-inplace-gnu']
+  ok   MATCH     find . -name '*.md' | xargs sed -i 's/x/y/'                hits=['g-sed-inplace-gnu']
+  ok   MATCH     sed -E -i 's/a+/b/' f                                      hits=['g-sed-inplace-gnu']
+  ok   MATCH     sed -i '3d' f.txt                                          hits=['g-sed-inplace-gnu']
+  ok   MATCH     sed -i -e 's/a/b/' f                                       hits=['g-sed-inplace-gnu']
+  ok   MATCH     sed -i '/^#/d' f                                           hits=['g-sed-inplace-gnu']
+  ok   no-match  sed -i '' 's/foo/bar/' f.txt                               hits=[]
+  ok   no-match  sed -i.bak 's/foo/bar/' f.txt                              hits=[]
+  ok   no-match  sed -n '1,5p' f                                            hits=[]
+  ok   no-match  sed 's/a/b/' f > g                                         hits=[]
+  ok   no-match  sed -E 's/-i s/x/' f                                       hits=[]
+  ok   no-match  gsed -i 's/a/b/' f                                         hits=[]
+  ok   no-match  perl -pi -e 's/a/b/' f                                     hits=[]
+  ok   no-match  echo 'used -i s/x/y/'                                      hits=[]
+  ok   no-match  sed -i'' -e 's/a/b/' f                                     hits=[]
+
+mismatches: 0
+status exit 0
+  PASS  python          3.9.13
+  PASS  cli             /Users/jmanning/.local/bin/compound
+  PASS  prompt log      0 prompts in this project
+  PASS  last event      3s ago (8 events)
+  PASS  duplicates      every name exists once
+  PASS  lessons parse   every lesson reads
+  PASS  errors          none in the last 7 days
+  level    lessons  skills  guards
+  user     4        0       4
