@@ -23,8 +23,8 @@ branch into `main`, runs `./run_tests.sh`, `claude plugin validate --strict .` a
 |-|-|-|-|
 | D | 2. general pool | platform and shell condition on a lesson; a general lesson can be strengthened locally or switched off; ship the six drafts (four as guards) | MERGED (df69796, merge 509c35a); notes in `2026-10-04-track-d-general-pool.md` |
 | E | 5. pane drill-down | open a lesson from the pane; settling command on Open rows; all-lessons view | MERGED (c2e048a, merge 2ce0262); renders in `2026-10-04-track-e-pane.md`. Mouse clicks, a real desktop session and the docked placement are unverified |
-| F | 6. reuse precision | rarity-weighted words; memo for repeated prompts; stemming in `find`; duplicate gate in `add` | dispatched |
-| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | dispatched on base after 509c35a. Third finding, from a second notice: untrusted tool output reaches the LLM judge (lesson poisoning) in `hooks/register.ts` |
+| F | 6. reuse precision | rarity-weighted words; memo for repeated prompts; stemming in `find`; duplicate gate in `add` | MERGED (36c6b93, merge 1e9c8cf); notes in `2026-10-04-track-f-reuse.md`. Known cost: `find --request` 667 ms on the real prompt log (was 120 ms) |
+| S | security review of a commit (arrived 2026-10-04 as a background notice; 4 findings, 2 named) | 1. a lesson's `name` is validated as a slug only at `add`/`promote`, not when a lesson file is loaded, and `hooks/render.ts` puts the name (and a project path) into commands it tells the model to run (`add --update --name <name>`, `COMPOUND_PROJECT=<from> ... promote <name>`): a lesson file committed in a repository can carry a hostile name. Confirmed by reading `bin/compound` (SLUG_RE used at 1377 and 1985 only) and `render.ts` 349-401. 2. a slow pattern in a project lesson can use up the 1.5 s guard budget so user guards go unchecked (`check` has `timed_out`/`unchecked`; what the mod does with them is to be read). 3-4. not named in the notice: run a fresh security review to find them. | MERGED (1e355c4, ef2fba9, merge e3e6ba8); notes in `2026-10-04-track-s-security.md`; 8 findings fixed. Third finding, from a second notice: untrusted tool output reaches the LLM judge (lesson poisoning) in `hooks/register.ts` |
 
 ## Wave 3 (from the open-issue audit, 2026-10-04)
 
@@ -34,10 +34,10 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
 
 | Track | From | Scope | Status |
 |-|-|-|-|
-| G1 | #19 point 4 | a `use` event when a skill made from a lesson (or any recorded skill) is invoked, with its notice on the band and its count in `status` and the pane | waits on F (same reuse path in `register.ts`) |
-| G2 | #19 point 1 | notice a repeated request (the same procedure asked for several times, from the prompt log) and propose making it a skill | waits on F |
-| G3 | #19 point 3 | a skill in the shipped pool that composes other skills. The owner chose (2026-10-04): BOTH `finish-task` (review the change, run every check, update docs and notes, commit; calls compound:learn when something failed and was fixed) and `verify-assumptions-first` (check base assumptions with real calls before a large effort, then an MVP, then the full build; calls compound:reuse first) | waits on F |
-| H | #30 | after some weeks of ordinary use, a sweep of the log: capture to lesson / skip / unsettled rates, guard refusals corrected vs re-sent, recall precision, reuse relevance. A `compound` report that prints them | not started; needs elapsed time for the data, the report can be built now |
+| G1 | #19 point 4 | a `use` event when a skill made from a lesson (or any recorded skill) is invoked, with its notice on the band and its count in `status` and the pane | dispatched (track G) |
+| G2 | #19 point 1 | notice a repeated request (the same procedure asked for several times, from the prompt log) and propose making it a skill | dispatched (track G) |
+| G3 | #19 point 3 | a skill in the shipped pool that composes other skills. The owner chose (2026-10-04): BOTH `finish-task` (review the change, run every check, update docs and notes, commit; calls compound:learn when something failed and was fixed) and `verify-assumptions-first` (check base assumptions with real calls before a large effort, then an MVP, then the full build; calls compound:reuse first) | dispatched (track G) |
+| H | #30 | after some weeks of ordinary use, a sweep of the log: capture to lesson / skip / unsettled rates, guard refusals corrected vs re-sent, recall precision, reuse relevance. A `compound` report that prints them | dispatched (track H): the report; the sweep itself needs weeks of data |
 | I | #42 | a credential for sessions in a throwaway `CLAUDE_CONFIG_DIR` (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`), then prove the marketplace install route and run the journeys fully isolated. ONLY THE OWNER can create the token | blocked on the owner |
 
 ## Not to do without the owner
@@ -86,3 +86,17 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
   view) before its final commit.
 - Running: F, S. Then: G1, G2, G3 (one track), H (the report), re-record README media,
   final release. Blocked on the owner: I (the token).
+- 2026-10-04: tracks F and S merged in a scratch worktree and fast-forwarded (main 5376e31).
+  All checks green: 17 test files, 217 plugin tests, tsc clean. Merge fixes: tracks E and S
+  each added a `clean` function to view.ts (E's is now `cleanLine`); find's text row is
+  `, matched 2 of 3 words (a, b)`.
+- Pre-call `check --guards` is now about 60 ms on this machine (guards run in a child
+  process); README still says 45 ms: fix in the final docs pass.
+- OWNER DECISIONS left by track S (safe defaults are in): (1) a general guard yields to a
+  user guard only, not to a project guard; (2) a project lesson with the name of a user or
+  general one is `shadowed` and not in force; (3) a lesson directory whose name is not a
+  slug is unused; (4) `promote --to general --yes` refuses text that looks like a
+  credential, with no override; (5) open: `compound log` accepts a forged `learn`/`skip`;
+  a Bash command that starts with `compound` skips the guards.
+- 2026-10-04: tracks G (G1, G2, G3) and H dispatched on base after 5376e31.
+- After G and H: re-record README media, final docs pass (latency, screenshots), release.
