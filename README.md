@@ -136,7 +136,7 @@ works in two ways:
   the lesson that describes that failure, beside the error.
 
 > Session one: `import tomllib` fails on Python 3.9. Claude finds the fix and records the
-> lesson `python39-no-tomllib`. The lesson is about your machine, so it is kept for all
+> lesson `python3-no-tomllib-use-tomli`. The lesson is about your machine, so it is kept for all
 > your projects.
 > Session two, another project: Claude is about to make the same call. compound stops it
 > and quotes the lesson. Claude uses the fix on its first try.
@@ -231,6 +231,8 @@ compound shows what it does in six places.
 is empty when there is nothing to show.
 
 ![The band after a fix: the learn-loop track shows a lesson owed](docs/media/demo-1-capture.png)
+
+![The band after the lesson is recorded: every step of the track is ticked](docs/media/demo-2-recorded.png)
 
 | Glyph | Label | Meaning |
 |-|-|-|

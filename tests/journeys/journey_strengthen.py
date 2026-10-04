@@ -4,11 +4,13 @@
   first     a lesson is recorded. A session fails the build the way the lesson describes:
             the lesson is recalled, it is not yet ineffective, and no stop is refused for it.
   refuse    a second session fails the same way and is told to finish at once. The recall
-            is marked ineffective, and the stop is refused once with why "strengthen" and
-            the lesson named (the `strengthen-<lesson>` claim says so).
-  clear     the session then rewrites the lesson (`learn` with `update`) or declines
-            (`skip`). After an update the CLI no longer lists the lesson as ineffective.
-            The session still ends with its answer.
+            is marked ineffective. Then either the session strengthens the lesson before
+            it tries to finish and no stop is refused, or the stop is refused once with
+            why "strengthen" and the lesson named (the `strengthen-<lesson>` claim says
+            so). A second refusal, or neither outcome, fails.
+  clear     the session rewrites the lesson (`learn` with `update`) or declines (`skip`),
+            after the refusal when there was one. After an update the CLI no longer lists
+            the lesson as ineffective. The session still ends with its answer.
   guard     a lesson that already has a match pattern which does not catch the failing call
             recurs: its recall is marked `guard` and ineffective, and the session does not
             end with the strengthening owed (it rewrites or declines, at once or after the
@@ -56,15 +58,30 @@ def main():
     recalls = [e for e in rows if e["type"] == "recall"]
     w.check("refuse", "the second recurrence is marked ineffective",
             bool(recalls) and recalls[0].get("lesson") == NAME and recalls[0].get("ineffective") is True, recalls[:1])
+    # Two outcomes are right. The session strengthens the lesson before it tries to finish,
+    # and no stop is refused; or it tries to finish, the stop is refused once with the
+    # lesson named, and it strengthens the lesson then. Neither, or a second refusal, fails.
     refused = [e for e in rows if e["type"] == "refuse" and e.get("why") == "strengthen"]
-    w.check("refuse", "the stop was refused once, with the lesson named",
-            len(refused) == 1 and refused[0].get("lessons") == [NAME], [e for e in rows if e["type"] == "refuse"])
-    w.check("refuse", "the claim that keeps it to once exists", "strengthen-%s" % NAME in w.claims(s.sid), w.claims(s.sid))
-    after = rows[rows.index(refused[0]) + 1:] if refused else []
+    at = rows.index(recalls[0]) if recalls else len(rows)
+
+    def settles(e):
+        return (e["type"] == "learn" and e.get("update") is True and e.get("lesson") == NAME) or e["type"] == "skip"
+
+    if not refused:
+        after = rows[at + 1:]
+        w.check("refuse", "the lesson was strengthened before the stop, so no stop was refused",
+                any(settles(e) for e in after), ", ".join(kinds))
+        w.check("refuse", "no claim was taken for a refusal that did not happen",
+                "strengthen-%s" % NAME not in w.claims(s.sid), w.claims(s.sid))
+    else:
+        after = rows[rows.index(refused[0]) + 1:]
+        w.check("refuse", "the stop was refused once, with the lesson named",
+                len(refused) == 1 and refused[0].get("lessons") == [NAME], [e for e in rows if e["type"] == "refuse"])
+        w.check("refuse", "the claim that keeps it to once exists", "strengthen-%s" % NAME in w.claims(s.sid), w.claims(s.sid))
     updates = [e for e in after if e["type"] == "learn" and e.get("update") is True and e.get("lesson") == NAME]
     skips = [e for e in after if e["type"] == "skip"]
-    w.check("clear", "after the refusal the session updated the lesson or declined", bool(updates or skips),
-            ", ".join(e["type"] for e in after) or "nothing after the refusal (%s)" % ", ".join(kinds))
+    w.check("clear", "the session updated the lesson or declined (after the refusal, when there was one)", bool(updates or skips),
+            ", ".join(e["type"] for e in after) or "nothing after it (%s)" % ", ".join(kinds))
     item = [i for i in w.items(project) if i["name"] == NAME]
     w.check("clear", "the session's update cleared it: the lesson is no longer ineffective",
             bool(updates) and bool(item) and item[0].get("ineffective") is False,

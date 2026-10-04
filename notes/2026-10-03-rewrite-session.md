@@ -99,3 +99,20 @@ now say what a match is tested against.
 
 Open: re-record scenes 1-2 to show the recorded flash; look at the band and pane on the
 desktop surface; eight project repositories each hold one unpushed local commit.
+
+## 2026-10-04, later: fourth review and the re-recorded screencast
+
+- Fourth cold review: nothing blocking; fixes in `3b4ea05` (one definition of "settled" in
+  the CLI, the display follows the event log, `add` never hangs on stdin).
+- Screencast re-recorded on the fixed code: scene 2 shows the recorded flash and the status
+  entry clearing. The lesson in it is `python3-no-tomllib-use-tomli`. Prompt wording
+  "Use Python to ..." fails reliably (11 of 15 headless); scenes hit 2 of 2.
+- Toast texts no longer start with `compound: ` (the engine adds the plugin name). The GIF
+  predates that one change, so its toast reads `compound: compound: lesson recorded`.
+- A demo session pip-installed `tomli` into `~/Library/Python/3.9`
+  (`/usr/bin/python3 -m pip uninstall tomli` removes it).
+- `journey_strengthen.py` accepts either outcome (strengthened before the stop, or refused
+  once then strengthened).
+
+Open: the band and pane on the desktop surface are unseen; eleven zero-byte project
+`.claude/CLAUDE.md` files; eight project repositories each hold one unpushed commit.

@@ -194,12 +194,12 @@ export function storeNews(events: readonly Event[], told: ReadonlySet<string>): 
     if (told.has(key) || out.some(n => n.key === key)) continue
     if (e.type === 'skip') out.push({ key, toast: undefined, status: undefined })
     if (name === '') continue
-    if (e.type === 'learn') out.push({ key, toast: `compound: lesson ${e.update === true ? 'rewritten' : 'recorded'}: ${name}`, status: undefined })
+    if (e.type === 'learn') out.push({ key, toast: `lesson ${e.update === true ? 'rewritten' : 'recorded'}: ${name}`, status: undefined })
     else if (e.type === 'promote' && e.auto !== true) {
       const where = e.to === 'general' ? 'proposed to the general pool' : 'moved to the user level'
-      out.push({ key, toast: `compound: lesson ${name} ${where}`, status: `${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
-    } else if (e.type === 'skill') out.push({ key, toast: `compound: lesson ${name} is now a skill`, status: `skill ${name}` })
-    else if (e.type === 'rm') out.push({ key, toast: `compound: ${name} removed`, status: `removed ${name}` })
+      out.push({ key, toast: `lesson ${name} ${where}`, status: `${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
+    } else if (e.type === 'skill') out.push({ key, toast: `lesson ${name} is now a skill`, status: `skill ${name}` })
+    else if (e.type === 'rm') out.push({ key, toast: `${name} removed`, status: `removed ${name}` })
   }
   return out
 }

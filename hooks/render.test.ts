@@ -418,22 +418,22 @@ test('a toast follows an event in the log, never the text of a command', async (
   // Events of other kinds are not news of the store.
   expect(storeNews([at('guard', { lesson: 'x' }), at('recall', { lesson: 'x' }), at('capture', {})], new Set())).toEqual([])
   const moved = storeNews([at('promote', { lesson: 'zsh-equals-word', to: 'user', from: 'project' })], new Set())
-  expect(moved.map(n => n.toast)).toEqual(['compound: lesson zsh-equals-word moved to the user level'])
+  expect(moved.map(n => n.toast)).toEqual(['lesson zsh-equals-word moved to the user level'])
   expect(moved[0]!.status).toBe('moved zsh-equals-word')
   const proposed = storeNews([at('promote', { lesson: 'zsh-equals-word', to: 'general', url: 'https://github.com/o/r/pull/7' })], new Set())
-  expect(proposed.map(n => n.toast)).toEqual(['compound: lesson zsh-equals-word proposed to the general pool'])
+  expect(proposed.map(n => n.toast)).toEqual(['lesson zsh-equals-word proposed to the general pool'])
   // The mod's own automatic move raises its toast where it is made.
   expect(storeNews([at('promote', { lesson: 'x', to: 'user', auto: true })], new Set())).toEqual([])
 })
 
 test('a lesson recorded, made a skill or removed each sets a status entry and raises a toast', async () => {
   const learned = storeNews([at('learn', { lesson: 'build-needs-profile', update: false })], new Set())
-  expect(learned).toEqual([{ key: '2026-10-03T12:00:00Z|learn|build-needs-profile', toast: 'compound: lesson recorded: build-needs-profile', status: undefined }])
-  expect(storeNews([at('learn', { lesson: 'a', update: true })], new Set())[0]!.toast).toBe('compound: lesson rewritten: a')
+  expect(learned).toEqual([{ key: '2026-10-03T12:00:00Z|learn|build-needs-profile', toast: 'lesson recorded: build-needs-profile', status: undefined }])
+  expect(storeNews([at('learn', { lesson: 'a', update: true })], new Set())[0]!.toast).toBe('lesson rewritten: a')
   const skill = storeNews([at('skill', { lesson: 'release-checklist', level: 'user' })], new Set())
-  expect(skill.map(n => [n.toast, n.status])).toEqual([['compound: lesson release-checklist is now a skill', 'skill release-checklist']])
+  expect(skill.map(n => [n.toast, n.status])).toEqual([['lesson release-checklist is now a skill', 'skill release-checklist']])
   const gone = storeNews([at('rm', { lesson: 'stale-note', level: 'project' })], new Set())
-  expect(gone.map(n => [n.toast, n.status])).toEqual([['compound: stale-note removed', 'removed stale-note']])
+  expect(gone.map(n => [n.toast, n.status])).toEqual([['stale-note removed', 'removed stale-note']])
   // A declined debt clears the entry and raises nothing.
   expect(storeNews([at('skip', { why: 'a typo' })], new Set())).toEqual([{ key: '2026-10-03T12:00:00Z|skip|', toast: undefined, status: undefined }])
 })

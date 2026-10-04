@@ -28,7 +28,10 @@ Sleep 1s
 Down
 Enter
 Sleep 4s
-Type "Merge defaults.toml and local.toml (values in local win) and show me the merged result as JSON."
+# Under 80 characters, so the reuse check (COMPOUND_PROMPT_MIN_CHARS) leaves it alone and
+# the lesson is met at the call. A longer request is told of the lesson up front instead
+# (band: "reuse found"), and the session then avoids the mistake without being stopped.
+Type "Use Python to merge defaults.toml and local.toml and print the result as JSON."
 Sleep 600ms
 Enter
 Sleep 75s

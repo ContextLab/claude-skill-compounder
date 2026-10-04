@@ -14,6 +14,8 @@
 # A good `learn` take is one whose event log shows capture (a failure, then its fix) and
 # learn. Scene 1 is wanted with a real failure first: when the session converts the file
 # on its first try there is no capture, so run `dev/demo.sh world` and `learn` again.
+# The request says "Use Python": without it the session often converts the file by hand
+# or checks the Python version first (headless, 2026-10-04: 0 of 5 without, 11 of 15 with).
 # `later` is recorded against the store the kept `learn` take left, and may be repeated:
 # each repeat is a new session, and a guard refuses once per session.
 #
@@ -23,20 +25,21 @@
 # the published GIF are dev/demo.cuts. A line `still <take file> <seconds> <name>.png`
 # writes one frame to docs/media.
 #
-# The world: $TMPDIR/compound-demo holds a copy of this package (so no path on screen is
+# The world: /tmp/cdemo (DEMO_WORLD names another) holds a copy of this package (so no path on screen is
 # under the real home), a store, a Claude directory the copy is installed into (never the
 # real one), and two projects, acme-api and billing-svc. The session itself still uses
 # the real account. env.sh there defines `claude` as a function that adds
-#   --plugin-dir <the copy> --setting-sources project --tools Bash,Skill --allowedTools Bash,Skill
+#   --plugin-dir <the copy> --setting-sources project --tools Bash,Skill,Read,Write,Edit --allowedTools Bash,Skill,Read,Write,Edit
 # so the command typed on screen is `claude --model sonnet`; see dev/ui-check.tape for why
-# each flag and each unset variable is needed. The session has the Bash and Skill tools
-# only: with Write it converts the file by hand and runs nothing. Its shell reads a
+# each flag and each unset variable is needed. Its shell reads a
 # profile in the world (ZDOTDIR) whose PATH is the system directories and Homebrew, so
 # python3 is the system's 3.9 (no tomllib) and `which` prints no home path. It spends
 # model calls.
 set -eu
 repo="$(cd "$(dirname "$0")/.." && pwd -P)"
-world="$(cd "${TMPDIR:-/tmp}" && pwd -P)/compound-demo"
+# A short path, because it is on screen (the session's banner, the CLI's path). /tmp is
+# /private/tmp on macOS, and the session names the project by the physical path.
+world="${DEMO_WORLD:-$(cd /tmp && pwd -P)/cdemo}"
 # Outside the world, so `world` (which starts the store over) keeps the takes.
 takes="$(cd "${TMPDIR:-/tmp}" && pwd -P)/compound-demo-takes"
 
@@ -131,7 +134,7 @@ export COMPOUND_PROJECT="$world/\${1:-acme-api}"
 export CLAUDE_HISTORY_SURFER_DIR="$world/surfer" CLAUDE_CODE_PLUGIN_DIRS=""
 export PATH="$path" ZDOTDIR="$world/zdot" PS1='\$ '
 unset COMPOUND_OFF COMPOUND_QUIET CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT
-claude() { "$real_claude" --plugin-dir "$world/compound" --setting-sources project --tools Bash,Skill --allowedTools Bash,Skill "\$@"; }
+claude() { "$real_claude" --plugin-dir "$world/compound" --setting-sources project --tools Bash,Skill,Read,Write,Edit --allowedTools Bash,Skill,Read,Write,Edit "\$@"; }
 cd "\$COMPOUND_PROJECT"
 SH
   # The title cards: a shell function the cards tape calls, printed by printf.

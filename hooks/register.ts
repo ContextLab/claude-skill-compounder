@@ -831,7 +831,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
       moved = true
       forgetInventory(sid)
       out.push(promotedText(lesson.name, left?.from ?? asProject, cliAt, left?.also ?? []))
-      $.ui.toast(`compound: lesson ${lesson.name} moved to the user level`)
+      $.ui.toast(`lesson ${lesson.name} moved to the user level`)
       lesson = { ...lesson, level: 'user', path: '' }
       asProject = undefined
     } else if (promoted !== undefined && promoted.code === 3) {
@@ -861,7 +861,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   })
   if (ineffective) {
     owes(sid, [], [lesson.name])
-    $.ui.toast(`compound: lesson ${lesson.name} is ineffective (recalled ${count} times)`)
+    $.ui.toast(`lesson ${lesson.name} is ineffective (recalled ${count} times)`)
   }
   $.ui.status(ineffective ? `${lesson.name} ineffective` : `recalled ${lesson.name}`)
   await paint($, (band, now) => (ineffective ? weakened(band, lesson.name, now) : noted(unfixed(band), moved ? 'moved' : 'recall', lesson.name, now)))

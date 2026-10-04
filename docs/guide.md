@@ -120,8 +120,8 @@ compound find toml python
 ```
 
 ```
-lesson python39-no-tomllib (project) [2/2 words]: Use when reading a TOML file with Python older than 3.11.
-  -> /Users/me/proj/.claude/compound/lessons/python39-no-tomllib
+lesson python3-no-tomllib-use-tomli (project) [2/2 words]: Use when reading a TOML file with Python older than 3.11.
+  -> /Users/me/proj/.claude/compound/lessons/python3-no-tomllib-use-tomli
 prompt log: no earlier request matches
 ```
 
@@ -134,7 +134,7 @@ compound list
 
 ```
 LEVEL    KIND    NAME                USE/GRD/RCL  FLAG  WHEN
-project  lesson  python39-no-tomllib  0/0/0              Use when reading a TOML file with Python older than 3.11.
+project  lesson  python3-no-tomllib-use-tomli  0/0/0              Use when reading a TOML file with Python older than 3.11.
 user     guard   zsh-equals-word     0/0/0              Use when a zsh command line has a bare word starting with "=".
 general  skill   learn               0/0/0              Use when a "[compound]" message says the session owes a lesson, says a
 general  skill   reuse               0/0/0              Use when starting a substantial task (building a script, tool, skill,
@@ -146,15 +146,15 @@ one level.
 Read one lesson:
 
 ```bash
-compound show python39-no-tomllib
+compound show python3-no-tomllib-use-tomli
 ```
 
 ```
-python39-no-tomllib (project lesson)
-/Users/me/proj/.claude/compound/lessons/python39-no-tomllib
+python3-no-tomllib-use-tomli (project lesson)
+/Users/me/proj/.claude/compound/lessons/python3-no-tomllib-use-tomli
 
 ---
-name: python39-no-tomllib
+name: python3-no-tomllib-use-tomli
 description: Use when reading a TOML file with Python older than 3.11.
 created: 2026-10-04
 origin: project proj
@@ -259,12 +259,12 @@ compound moves a project lesson to the user level on its own, when the lesson ma
 failure in a second project. To move one yourself:
 
 ```bash
-compound promote python39-no-tomllib --to user
+compound promote python3-no-tomllib-use-tomli --to user
 ```
 
 ```
-moved python39-no-tomllib from project to user
-  /Users/me/.claude/compound/lessons/python39-no-tomllib
+moved python3-no-tomllib-use-tomli from project to user
+  /Users/me/.claude/compound/lessons/python3-no-tomllib-use-tomli
 ```
 
 Two cases need your decision. `compound status` lists both under `Open`, with the exact
@@ -287,18 +287,18 @@ ask for it: Claude is told to offer it to you and not to run it.
 First look at the plan. This writes nothing:
 
 ```bash
-compound promote python39-no-tomllib --to general
+compound promote python3-no-tomllib-use-tomli --to general
 ```
 
 ```
 Plan (nothing has been written; run again with --yes to do it):
   upstream : ContextLab/claude-skill-compounder
-  branch   : compound/lesson-python39-no-tomllib
-  from     : /Users/me/.claude/compound/lessons/python39-no-tomllib (user level)
+  branch   : compound/lesson-python3-no-tomllib-use-tomli
+  from     : /Users/me/.claude/compound/lessons/python3-no-tomllib-use-tomli (user level)
   files    :
-    lessons/python39-no-tomllib/SKILL.md
+    lessons/python3-no-tomllib-use-tomli/SKILL.md
   excluded : nothing
-  PR title : Add lesson: python39-no-tomllib
+  PR title : Add lesson: python3-no-tomllib-use-tomli
   ...
 ```
 
@@ -306,7 +306,7 @@ The plan prints every file and the full pull request text. Read it. Then, to for
 a branch and open the pull request:
 
 ```bash
-compound promote python39-no-tomllib --to general --yes
+compound promote python3-no-tomllib-use-tomli --to general --yes
 ```
 
 ## Decline a lesson
@@ -451,13 +451,13 @@ Store
 
 Lessons
   name                level  kind    reuse  guard  recall  flag
-  python39-no-tomllib  user   lesson  0      0      0       never used
+  python3-no-tomllib-use-tomli  user   lesson  0      0      0       never used
   zsh-equals-word     user   skill   0      0      0       never used
 
 Recent
-  2026-10-04T05:02:13Z learn    -        proj                 python39-no-tomllib (project)
+  2026-10-04T05:02:13Z learn    -        proj                 python3-no-tomllib-use-tomli (project)
   2026-10-04T05:02:13Z learn    -        proj                 zsh-equals-word (user)
-  2026-10-04T05:02:13Z promote  -        proj                 python39-no-tomllib project -> user
+  2026-10-04T05:02:13Z promote  -        proj                 python3-no-tomllib-use-tomli project -> user
   ...
 
 Open
@@ -496,9 +496,9 @@ compound events --limit 5
 ```
 
 ```
-2026-10-04T05:02:13Z learn    -        proj                 python39-no-tomllib (project)
+2026-10-04T05:02:13Z learn    -        proj                 python3-no-tomllib-use-tomli (project)
 2026-10-04T05:02:13Z learn    -        proj                 zsh-equals-word (user)
-2026-10-04T05:02:13Z promote  -        proj                 python39-no-tomllib project -> user
+2026-10-04T05:02:13Z promote  -        proj                 python3-no-tomllib-use-tomli project -> user
 2026-10-04T05:02:13Z skill    -        proj                 zsh-equals-word (user) -> /Users/me/.claude/skills/zsh-equals-word
 2026-10-04T05:02:14Z skip     -        proj                 a one-off typo
 ```

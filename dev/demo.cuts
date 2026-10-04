@@ -1,23 +1,24 @@
 # The cuts of the published docs/media/demo.gif: `dev/demo.sh join` reads this file.
 # <take> <start> <end> in seconds, joined in order; `still <take> <second> <file>`.
-# They fit the takes recorded on 2026-10-04 (learn-41, later-1) and no others: a new
+# They fit the takes recorded on 2026-10-04 (learn-2, later-2) and no others: a new
 # take needs new times, picked by looking at its frames.
 
 # 1 · A request goes wrong, then right
 cards.mp4     0.5   2.9
-learn-41.mp4  1.5   5.0
-learn-41.mp4  8.6  27.6
+learn-2.mp4   2.0   4.8
+learn-2.mp4   9.2  32.4
 # 2 · The lesson is recorded
 cards.mp4     4.4   6.8
-learn-41.mp4 27.6  37.6
-learn-41.mp4 97.0 105.5
+learn-2.mp4  32.4  45.0
+learn-2.mp4  99.6 105.8
 # 3 · A new session, a different project
 cards.mp4     8.2  10.6
-later-1.mp4   1.0   3.2
-later-1.mp4   8.6  31.6
-later-1.mp4  83.8  91.0
-later-1.mp4  98.4 104.6
+later-2.mp4   1.5   4.6
+later-2.mp4   9.2  29.5
+later-2.mp4  85.0  91.5
+later-2.mp4  99.2 105.0
 
-still learn-41.mp4 27.4  demo-1-capture.png
-still learn-41.mp4 104.0 demo-2-pane.png
-still later-1.mp4  22.6  demo-3-guard.png
+still learn-2.mp4  33.6  demo-1-capture.png
+still learn-2.mp4  38.6  demo-2-recorded.png
+still learn-2.mp4  105.0 demo-2-pane.png
+still later-2.mp4  20.6  demo-3-guard.png

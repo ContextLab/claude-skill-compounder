@@ -32,7 +32,7 @@ Sleep 1s
 Down
 Enter
 Sleep 4s
-Type "Convert config.toml to JSON and save it as config.json." 
+Type "Use Python to convert config.toml to JSON and save it as config.json."
 Sleep 600ms
 Enter
 # vhs cannot be made to wait for the band: Wait+Screen never matched its text here, and
