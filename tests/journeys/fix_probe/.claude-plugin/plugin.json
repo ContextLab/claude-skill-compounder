@@ -1,0 +1,6 @@
+{
+  "name": "compound-fix-probe",
+  "version": "0.0.1",
+  "description": "Puts pairs of calls to the fix judge, for tests/journeys/measure_fix.py. Not part of the mod.",
+  "author": { "name": "Jeremy Manning" }
+}

@@ -4,7 +4,7 @@ import {
   inputOf, isCommand, judged, knownContext, NOTE_RULE, owedStatus, quotedNote, recallContext, reusable, reuseContext, reuseStatus, simpleCommands, toast,
   promotedText, stopDebt, stopNudge, stopStrengthen, unsettledContext, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, userOrigin, worthChecking,
   BUDGET, ranOut, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, shellError, shellFailure, storeNews, usedStatus,
-  type Held, mentionsCli
+  type Held, mentionsCli, bareRetry, betweenLine, BETWEEN_MAX, ranBetween,
 } from './render'
 import type { Earlier, Event, Item } from './store'
 import { NOTES } from './view'
@@ -165,7 +165,7 @@ test('a subagent\'s calls do not count toward the main turn', async () => {
 
 test('a held failure waits for five successes of its own tool, and other tools cost nothing', async () => {
   expect(FIX_ATTEMPTS).toBe(5)
-  const held: Held = { tool: 'Bash', call: './build.sh', error: 'a profile is required', left: FIX_ATTEMPTS, turn: 3, at: 0 }
+  const held: Held = { tool: 'Bash', call: './build.sh', error: 'a profile is required', left: FIX_ATTEMPTS, turn: 3, at: 0, between: [], skipped: 0 }
   expect(heldStep(undefined, 'Bash', 3)).toBe('none')
   // Two, three, four intervening successes: the fifth same-tool success is still judged.
   for (let used = 0; used < FIX_ATTEMPTS; used += 1) {
@@ -176,7 +176,7 @@ test('a held failure waits for five successes of its own tool, and other tools c
 })
 
 test('a held failure lasts through the turn after its own, and no longer', async () => {
-  const held: Held = { tool: 'Bash', call: './build.sh', error: 'e', left: 5, turn: 3, at: 0 }
+  const held: Held = { tool: 'Bash', call: './build.sh', error: 'e', left: 5, turn: 3, at: 0, between: [], skipped: 0 }
   expect(heldStep(held, 'Bash', 3)).toBe('judge')
   expect(heldStep(held, 'Bash', 4)).toBe('judge')
   expect(heldStep(held, 'Bash', 5)).toBe('expired')
@@ -639,4 +639,38 @@ test('the four procedures the package ships are never offered as existing work',
   const skill = (name: string, level = 'general') => ({ kind: 'skill', level, name })
   const kept = reusable([skill('learn'), skill('reuse'), skill('finish-task'), skill('verify-assumptions-first'), skill('finish-task', 'user'), skill('other')])
   expect(kept.map(i => `${i.level}/${i.name}`)).toEqual(['user/finish-task', 'general/other'])
+})
+
+// ---- the calls between a held failure and a later success ----
+
+test('a call that ran while a failure was held is one line: its tool, whether it failed, and the call, masked and cut', async () => {
+  expect(betweenLine('Bash', 'brew install jq', false)).toBe('Bash: brew install jq')
+  expect(betweenLine('Bash', 'ls *.nope', true)).toBe('Bash (failed): ls *.nope')
+  // Another tool's call is its arguments: `callText` already put the tool's name first.
+  expect(betweenLine('Edit', callText('Edit', { file_path: 'a.py', old_string: 'x', new_string: 'y' }), false)).toBe('Edit: {"file_path":"a.py","old_string":"x","new_string":"y"}')
+  expect(betweenLine('Bash', 'export API_TOKEN=abc123def456\nmake', false)).toBe('Bash: export API_TOKEN=<redacted> make')
+  const long = betweenLine('Write', callText('Write', { file_path: 'a.txt', content: 'x'.repeat(5000) }), false)
+  expect(long.length <= 'Write: '.length + 200).toBe(true)
+  expect(long.endsWith('…')).toBe(true)
+})
+
+test('the newest calls between are kept, and the ones before them are counted', async () => {
+  expect(BETWEEN_MAX).toBe(8)
+  const held: Held = { tool: 'Bash', call: 'jq . a.json', error: 'command not found: jq', left: FIX_ATTEMPTS, turn: 1, at: 0, between: [], skipped: 0 }
+  for (let i = 1; i <= 11; i += 1) ranBetween(held, `Bash: step ${i}`)
+  expect(held.between.length).toBe(BETWEEN_MAX)
+  expect(held.between[0]).toBe('Bash: step 4')
+  expect(held.between[BETWEEN_MAX - 1]).toBe('Bash: step 11')
+  expect(held.skipped).toBe(3)
+})
+
+test('a bare retry is the held call itself, the same tool, with nothing run between', async () => {
+  const held: Held = { tool: 'Bash', call: 'curl -fsS https://x.example', error: 'timed out', left: FIX_ATTEMPTS, turn: 1, at: 0, between: [], skipped: 0 }
+  expect(bareRetry(held, 'Bash', 'curl -fsS https://x.example')).toBe(true)
+  expect(bareRetry(held, 'Bash', ' curl -fsS https://x.example\n')).toBe(true)
+  expect(bareRetry(held, 'Bash', 'curl -fsS --retry 3 https://x.example')).toBe(false)
+  expect(bareRetry(held, 'WebFetch', 'curl -fsS https://x.example')).toBe(false)
+  // Something ran between: whether it explains the success is the judge's to say.
+  expect(bareRetry({ ...held, between: ['Bash: brew install curl'] }, 'Bash', 'curl -fsS https://x.example')).toBe(false)
+  expect(bareRetry({ ...held, skipped: 2 }, 'Bash', 'curl -fsS https://x.example')).toBe(false)
 })

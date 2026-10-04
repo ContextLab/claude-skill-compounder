@@ -3,7 +3,7 @@ import type { CompoundBand } from '../types'
 import {
   ago, bandRow, bar, began, boardFrom, boardLines, BUSY, BUSY_MAX_MS, captured, dateText, emptyBand, ended, erred, ERROR, eventLook, eventTail, eventText, eventWord, FLASH_MS, forSession,
   frameAt, FRAME_MS, FRAMES, FRESH_MS, GONE_MS, greeted, HINT, inventoried, listed, motion, newTurn, noted, NOTES, OWED, phaseAt, phaseKey, reuseFound, reuseIdle, reuseText, settledBy, stepped, synced, trackSegs,
-  unfixed, WATCHING, WEAK, weakened, width, WORDS,
+  unfixed, watched, WATCHING, WEAK, weakened, width, WORDS,
   allLines, detailFrom, detailLines, emptyPane, failedDetail, forPane, itemsFrom, keyLines, loadingDetail, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, wrapped,
   type Seg,
 } from './view'
@@ -996,4 +996,67 @@ test('the pane\'s view: a lesson opens over the view it was pressed in and goes 
   const failed = paneItems(listed, undefined, 'compound list exit 2')
   expect([failed.items?.length, failed.itemsProblem]).toEqual([4, 'compound list exit 2'])
   expect(paneItems(failed, [], '').itemsProblem).toBe('')
+})
+
+// ---- a failure the mod holds ----
+
+test('a held failure is shown for as long as it is held: bright, plain, then dim, and never gone', async () => {
+  const failed = `◌ compound ${WATCHING}   ● failed → ○ fixed → ○ owed → ○ recorded`
+  let band = watched(stepped(fresh(), 'failed', T0), true, T0)
+  expect(band.held).toBe(T0)
+  expect(text(bandRow(band, T0 + 1, 100))).toBe(failed)
+  expect(motion(band, T0 + 1)).toBe('fade')
+  expect(bandRow(band, T0 + FRESH_MS - 1, 100).every(s => s.dim === true)).toBe(false)
+  // Past the time a result is gone in, it is still there, dim, and nothing moves: no timer.
+  for (const ms of [FRESH_MS, GONE_MS - 1, GONE_MS, GONE_MS + 3000, 3_600_000]) {
+    expect(text(bandRow(band, T0 + ms, 100))).toBe(failed)
+    expect(bandRow(band, T0 + ms, 100).every(s => s.dim === true)).toBe(true)
+    expect(motion(band, T0 + ms)).toBe('still')
+  }
+  // One redraw as it dims, and none after: the phase does not turn again.
+  expect(phaseKey(band, T0 + FRESH_MS)).toBe(phaseKey(band, T0 + 3_600_000))
+  expect(phaseKey(band, T0 + FRESH_MS - 1)).not.toBe(phaseKey(band, T0 + FRESH_MS))
+  // Saying again that it is held changes nothing, and keeps since when.
+  expect(watched(band, true, T0 + 5000)).toBe(band)
+
+  // A later success is judged: the track is at `fixed` while the judge is asked.
+  band = began(stepped(band, 'fixed', T0 + 20_000), 'f', 'fix', T0 + 20_000)
+  expect(text(bandRow(band, T0 + 20_100, 100))).toContain('is this the fix?   ✓ failed → ● fixed → ○ owed → ○ recorded')
+  // No fix: the row is back at the failure at once, dim, and stays.
+  band = unfixed(ended(band, 'f'))
+  expect(text(bandRow(band, T0 + 20_400, 100))).toBe(failed)
+  expect(text(bandRow(band, T0 + 20_400 + GONE_MS, 100))).toBe(failed)
+  expect(motion(band, T0 + 20_400)).toBe('still')
+
+  // A newer result rides in front of it and fades; the failure is behind it and stays.
+  const recalled = noted(band, 'recall', 'zsh-no-matches-found', T0 + 30_000)
+  expect(text(bandRow(recalled, T0 + 30_001, 100))).toBe('↺ compound lesson recalled · zsh-no-matches-found   ● failed → ○ fixed → ○ owed → ○ recorded')
+  expect(motion(recalled, T0 + 30_001)).toBe('fade')
+  expect(text(bandRow(recalled, T0 + 30_000 + GONE_MS, 100))).toBe(failed)
+  expect(motion(recalled, T0 + 30_000 + GONE_MS)).toBe('still')
+
+  // A typed prompt keeps it: whether it is still held is the mod's to say.
+  expect(newTurn(band).held).toBe(T0)
+})
+
+test('the row lets go of a failure that is no longer held, and leaves a lesson owed where it is', async () => {
+  const band = watched(stepped(fresh(), 'failed', T0), true, T0)
+  // Dropped while the track is at the failure, or at a fix that was being judged.
+  const gone = watched(band, false, T0 + 100)
+  expect(gone.held).toBe(undefined)
+  expect(gone.track).toBe(null)
+  expect(bandRow(gone, T0 + 101, 100)).toEqual([])
+  expect(watched(stepped(band, 'fixed', T0 + 50), false, T0 + 100).track).toBe(null)
+  // The fix was captured: the track is the owed lesson's, and it stays.
+  const owed = watched(captured(band, T0 + 60, './deploy.sh --target staging'), false, T0 + 61)
+  expect(owed.held).toBe(undefined)
+  expect(owed.track).toEqual({ step: 'owed', at: T0 + 60 })
+  expect(text(bandRow(owed, T0 + 3_600_000, 100))).toContain('✓ failed → ✓ fixed → ● owed → ○ recorded')
+  // A lesson recorded while another failure is held: its track fades, and the failure shows again.
+  const both = settledBy(watched(captured(fresh(), T0, 'x'), true, T0), { type: 'learn', lesson: 'a-lesson', update: false }, T0 + 10)
+  expect(text(bandRow(both, T0 + 11, 100))).toContain('✔ recorded')
+  expect(text(bandRow(both, T0 + 10 + GONE_MS, 100))).toBe(`◌ compound ${WATCHING}   ● failed → ○ fixed → ○ owed → ○ recorded`)
+  // A band that holds nothing is answered as it is.
+  const idle = fresh()
+  expect(watched(idle, false, T0)).toBe(idle)
 })

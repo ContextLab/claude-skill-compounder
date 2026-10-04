@@ -314,8 +314,36 @@ export function turnAfterCall(prev: Turn, agentId: string | undefined): Turn {
 // failure is dropped.
 export const FIX_ATTEMPTS = 5
 
-// `at` is when the call failed, in seconds.
-export type Held = { tool: string; call: string; error: string; left: number; turn: number; at: number }
+// How many of the calls made between a held failure and a later success the judge is shown,
+// and how much of each.
+export const BETWEEN_MAX = 8
+const BETWEEN_CALL = 200
+
+// `at` is when the call failed, in seconds. `between` is what the same agent loop ran since,
+// oldest first, one line a call and at most BETWEEN_MAX of them; `skipped` counts the ones
+// before those.
+export type Held = { tool: string; call: string; error: string; left: number; turn: number; at: number; between: string[]; skipped: number }
+
+// One call, as the judge is shown it among the calls between a failure and its fix.
+export function betweenLine(tool: string, call: string, failed: boolean): string {
+  const text = tool === 'Bash' ? call : call.startsWith(`${tool} `) ? call.slice(tool.length + 1) : call
+  return `${tool}${failed ? ' (failed)' : ''}: ${oneLine(text.slice(0, 4 * BETWEEN_CALL), BETWEEN_CALL)}`
+}
+
+// A call ran while a failure was held: it is remembered as one that ran between.
+export function ranBetween(held: Held, line: string): void {
+  held.between.push(line)
+  while (held.between.length > BETWEEN_MAX) {
+    held.between.shift()
+    held.skipped += 1
+  }
+}
+
+// The failed call sent again unchanged, with no call between the two, and it passed: a bare
+// retry. Nothing was done that could have fixed anything, so no model is asked.
+export function bareRetry(held: Held, tool: string, call: string): boolean {
+  return held.tool === tool && sameCall(held.call, call) && held.between.length === 0 && held.skipped === 0
+}
 
 // What a success means for a held failure. Another tool's success is not an attempt at
 // the same thing: it costs no judge call and uses none of the window. A failure is held

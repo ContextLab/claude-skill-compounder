@@ -358,7 +358,7 @@ is empty when there is nothing to show.
 | `◇` | `nothing to reuse` | a reuse check found nothing to add |
 | `■` | `guard stopped a call` | a guard refused a call; the row names the lesson and the call |
 | `↺` | `lesson recalled` | a failed call was given its lesson |
-| `◌` | `watching for the fix` | a call failed and no lesson describes it |
+| `◌` | `watching for the fix` | a call failed and no lesson describes it. It stays, dim, for as long as compound is still looking for the fix |
 | `●` | `lesson owed` | a fix was found; the lesson is not yet recorded. The row shows the call that worked |
 | `✔` | `lesson recorded` | the lesson is written |
 | `○` | `lesson declined` | Claude declined to record it, with a reason |
@@ -512,7 +512,7 @@ the same account as your session.
 | a call of a tool some guard applies to (Bash, unless a lesson names another) | none | about 70 ms |
 | a call of any other tool, or any call when no lesson has a pattern | none | the first call of a turn pays about 70 ms; the rest pay nothing |
 | a failed tool call (not one refused before it ran) | one | none before the call; the model's answer, a median of 0.69 seconds, comes after it |
-| each later success of the same tool, until one is the fix | one each, five at most | none before the call |
+| each later success of the same tool, until one is the fix | one each, five at most; none for the failed call sent again unchanged with nothing run in between | none before the call |
 
 How these were measured, on Claude Code 2.1.289 and macOS 26.6 (Apple M2 Max), with a
 store of 48 lessons and skills (12 of them guards) and a prompt log of about 16,000
