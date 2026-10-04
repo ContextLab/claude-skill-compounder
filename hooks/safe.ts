@@ -44,6 +44,18 @@ const RULES: readonly (readonly [RegExp, string])[] = [
   [/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,}|hf_[A-Za-z0-9]{30,}|npm_[A-Za-z0-9]{30,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g, MASK],
 ]
 
+// Characters that draw nothing, or that a terminal or a reader takes for something other
+// than text: control characters (an escape sequence starts with one), zero-width characters
+// and the bidirectional overrides. A newline and a tab are text.
+const HIDDEN = /[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g
+
+// Text as it may be shown: without what is hidden, and with a space where a control
+// character stood.
+export function plain(text: string): string {
+  return text.replace(HIDDEN, '').replace(CONTROL, ' ')
+}
+
 export function redact(text: string): string {
   let out = text
   for (const [pattern, to] of RULES) out = out.replace(pattern, to)
@@ -52,8 +64,16 @@ export function redact(text: string): string {
 
 // One masked line: for a status entry, a toast, or a field of an event.
 export function oneLine(text: string, cap: number): string {
-  const flat = redact(text).replace(/\s+/g, ' ').trim()
+  const flat = plain(redact(text)).replace(/\s+/g, ' ').trim()
   return flat.length <= cap ? flat : `${flat.slice(0, cap - 1)}…`
+}
+
+// One word of a shell command line, for a command the mod writes out for Claude or the
+// user to run: a value that is not plainly a word is single-quoted, so nothing in a name
+// or a path is ever read by the shell as a command of its own.
+export function shq(text: string): string {
+  const flat = plain(text).replace(/[\n\t]+/g, ' ')
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(flat) ? flat : `'${flat.replace(/'/g, `'\\''`)}'`
 }
 
 // Head and tail with the cut marked, so a reader never takes a shortened call for a broken

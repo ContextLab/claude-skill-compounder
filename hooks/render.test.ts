@@ -303,7 +303,7 @@ test('the error report lists each failure on one masked line and caps the list',
   expect(text.includes('failed 1 time since it last reported')).toBe(true)
   expect(text.includes('Each failure is reported once. This is failure report number 1 of this session.')).toBe(true)
   expect(errorReport([{ where: 'w', message: 'm' }], CLI, 3).includes('failure report number 3 of this session')).toBe(true)
-  expect(text.includes('- reuse.parse: unreadable answer with API_KEY=<redacted>')).toBe(true)
+  expect(text.includes('- reuse.parse: "unreadable answer with API_KEY=<redacted>"')).toBe(true)
   expect(text.includes(`${CLI} status`)).toBe(true)
   const many = errorReport(Array.from({ length: 11 }, (_, i) => ({ where: `w${i}`, message: 'm' })), CLI)
   expect(many.includes('failed 11 times')).toBe(true)

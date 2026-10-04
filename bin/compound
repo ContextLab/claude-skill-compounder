@@ -233,10 +233,29 @@ EVENT LOG
     do, `compound disable NAME` and a report to the package's repository. `unsettled`
     leaves out a `recall` of a general lesson whatever the event says.
 
-    Two guards on one call. When a call is matched by a guard of the project or user
-    level and by a guard of the general pool, `check` returns the nearer one and names
-    the general ones under "yielded": a user who has a lesson of their own for a mistake
-    the pool also covers is refused once, with their own text.
+    Two guards on one call. When a call is matched by a guard of the user level and by a
+    guard of the general pool, `check` returns the user's and names the general ones
+    under "yielded": a user who has a lesson of their own for a mistake the pool also
+    covers is refused once, with their own text. A project guard makes nothing yield.
+
+WHAT A REPOSITORY CAN WRITE
+    A project lesson is a file in a repository, and whoever can commit to it can write
+    one by hand. A lesson file is therefore held to the format where it is READ:
+      - its directory name is a slug (SLUG_RE), its SKILL.md is at most LESSON_BYTES, it
+        holds at most MATCH_MAX patterns of at most MATCH_CHARS characters, and at the
+        project level it is not a link that leaves the project's lessons directory.
+        Otherwise it is reported under `lessons parse` and is not used. A skill
+        directory or a script whose name is not one printable line is not listed.
+      - a pattern is compiled in this process and RUN only in a forked child that is
+        abandoned at a limit: on the probes when lessons are loaded (VET_BUDGET_MS, see
+        vet_patterns), on the call in `check` (COMPOUND_CHECK_BUDGET_MS). In both, the
+        user's and the package's patterns go before the project's.
+      - a project lesson with the name of a user or general lesson is `shadowed`:
+        listed, flagged, and not in force.
+    What is printed for a person passes through `one_line`, which drops control
+    characters, and a name or a path in a command the CLI prints is quoted (sh_quote).
+    `promote --to general` reads what it would publish for the shape of a credential
+    (SECRET_SHAPES) and refuses with `--yes` when it finds one.
 
     One lesson in two places. Two lesson directories of one name whose trees are byte
     for byte the same are one lesson. A project copy identical to the user-level
@@ -317,6 +336,20 @@ SCRIPT_CAP = 200
 WEEK = 7 * 86400
 CHECK_BUDGET_MS = 500
 CHECK_TEXT_CAP = 20000
+# A lesson file is read by every command, and anyone who can commit to a repository can
+# write one there: what is read from it is bounded. A SKILL.md larger than this, more
+# patterns than this, or a longer pattern, is reported under `lessons parse` and not used.
+LESSON_BYTES = 262144
+MATCH_MAX = 32
+MATCH_CHARS = 2000
+# How long `scan` waits for the patterns of every lesson to be tried on the probes below.
+# They are tried in a child process that is abandoned at this limit, because a pattern
+# can be written to backtrack without end on a ten-character probe.
+VET_BUDGET_MS = 200
+# A name of a skill directory or a path of a script that is listed: one line of
+# printable characters. Anything else is left out of every listing.
+LISTED_RE = re.compile(r"^[^\x00-\x1f\x7f-\x9f\u2028\u2029]{1,200}$")
+CONTROL_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
 # A match that hits every one of these would refuse nearly every tool call.
 MATCH_PROBES = ("a", "ls", "git status")
 # The package's own procedures: listed, never offered by `find` as reusable work.
@@ -669,7 +702,18 @@ def read_text(path):
 
 
 def one_line(value):
-    return " ".join(str(value).split())
+    """`value` on one line, without control characters: what is printed to a terminal
+    must not be able to move its cursor or rewrite what is already on it."""
+    return " ".join(CONTROL_CHARS.sub(" ", str(value)).split())
+
+
+def sh_quote(text):
+    """`text` as one word of a shell command line, on one line: for a command that is
+    printed for someone to run, where a name or a path is not the CLI's own."""
+    text = re.sub(r"[\n\t]", " ", CONTROL_CHARS.sub("", str(text)))
+    if re.match(r"^[A-Za-z0-9_@%+=:,./-]+$", text):
+        return text
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$")
@@ -939,13 +983,15 @@ def condition_gaps(item):
 def active(item):
     """Whether `item` is in force here: its condition holds and it is not switched off.
     Only an active lesson is a guard, is found, and is recalled or offered by the mod."""
-    return item.get("applies", True) and not item.get("disabled", False)
+    return item.get("applies", True) and not item.get("disabled", False) and not item.get("shadowed", False)
 
 
 def inactive_flag(item):
     """`disabled`, `not here` or "" for a list row."""
     if item.get("disabled"):
         return "disabled"
+    if item.get("shadowed"):
+        return "shadowed"
     if not item.get("applies", True):
         return "not here"
     return ""
@@ -996,12 +1042,29 @@ def compile_match(pattern):
     return re.compile(pattern, re.MULTILINE)
 
 
-def match_problem(pattern):
-    """Why `pattern` cannot be a guard, or None."""
+def compile_problem(pattern):
+    """Why `pattern` does not compile, or None. Compiling can fail in more ways than
+    re.error (a nesting too deep for the parser, a repeat count too large), and a
+    pattern read from a lesson file must never end the command that reads it."""
+    if len(pattern) > MATCH_CHARS:
+        return "is %d characters long, and a pattern may be %d" % (len(pattern), MATCH_CHARS)
     try:
-        compiled = compile_match(pattern)
+        compile_match(pattern)
     except re.error as exc:
         return "does not compile: %s" % exc
+    except (RecursionError, OverflowError, MemoryError, ValueError) as exc:
+        return "does not compile: %s" % (one_line(exc)[:120] or type(exc).__name__)
+    return None
+
+
+def match_problem(pattern):
+    """Why `pattern` cannot be a guard, or None. It RUNS the pattern, on the empty
+    string and the probes: on a pattern read from a lesson file that is done in a child
+    process with a time limit (see vet_patterns), never in the process that must answer."""
+    issue = compile_problem(pattern)
+    if issue:
+        return issue
+    compiled = compile_match(pattern)
     if compiled.search("") is not None:
         return "matches the empty string, so it would refuse every tool call"
     if all(compiled.search(probe) is not None for probe in MATCH_PROBES):
@@ -1031,6 +1094,9 @@ def _load_item(level, kind, directory, with_body):
         "_tools": list(MATCH_TOOLS), "_file": skill_md, "_problem": None, "_match_issue": None, "_fields": {}, "_body": "",
     }
     try:
+        if os.path.getsize(skill_md) > LESSON_BYTES:
+            item["_problem"] = "SKILL.md is larger than %d bytes" % LESSON_BYTES
+            return item
         text = read_text(skill_md)
     except OSError as exc:
         item["_problem"] = "SKILL.md cannot be read: %s" % (exc.strerror or exc)
@@ -1042,11 +1108,16 @@ def _load_item(level, kind, directory, with_body):
         item["_body"] = body.strip("\r\n")
     item["description"] = one_line(_unquote(fields.get("description", "")))
     patterns, match_issue = parse_match(fields.get("match"))
+    if len(patterns) > MATCH_MAX:
+        match_issue = "match holds %d patterns, and a lesson may hold %d" % (len(patterns), MATCH_MAX)
+        patterns = []
+    # Compiled here, RUN nowhere in this process: `scan` has every pattern tried on the
+    # probes in a child it can abandon (vet_patterns), and drops the ones that fail.
     usable = []
     for pattern in patterns:
-        issue = match_problem(pattern)
+        issue = compile_problem(pattern)
         if issue:
-            match_issue = match_issue or "match %r %s" % (pattern, issue)
+            match_issue = match_issue or "match %s %s" % (shown_pattern(pattern), issue)
         else:
             usable.append(pattern)
     item["match"] = usable
@@ -1063,6 +1134,12 @@ def _load_item(level, kind, directory, with_body):
                 match_issue = match_issue or issue
         item["applies"] = not unread and not condition_gaps(item)
     if kind == "lesson":
+        # The name goes into commands and messages, so it is a slug wherever it is read,
+        # not only where `add` writes it: a lesson file can be written by hand.
+        if problem is None and not SLUG_RE.match(name):
+            problem = "the directory name is not a slug (lowercase letters, digits and hyphens, 2 to 63 characters)"
+        if problem is None and level == "project" and not _under(skill_md, os.path.dirname(directory)):
+            problem = "it is a symbolic link that leaves the project's lessons directory"
         if problem is None and not fields.get("name"):
             problem = "frontmatter has no name"
         if problem is None and _unquote(fields.get("name", "")) != name:
@@ -1076,15 +1153,136 @@ def _load_item(level, kind, directory, with_body):
     return item
 
 
+def shown_pattern(pattern):
+    """A pattern as a problem names it: quoted, and cut when it is long."""
+    return repr(pattern if len(pattern) <= 80 else pattern[:79] + "\u2026")
+
+
+def vet_patterns(items):
+    """Tries every pattern of `items` on the empty string and the probes, and keeps in
+    each item's `match` the ones that may be a guard; the first problem of an item
+    becomes its `_match_issue`.
+
+    A pattern is text from a lesson file, and one can be written to backtrack without
+    end on a probe of ten characters. So the trying is done in a forked child that is
+    abandoned at VET_BUDGET_MS, and the patterns of the user's own levels are tried
+    before the project's: nothing a repository holds can keep a user or general
+    pattern from being tried. A pattern that did not finish is no guard. One that was
+    never reached is no guard at the project level, and stays one at the other two."""
+    jobs = []
+    for number, item in enumerate(items):
+        for pattern in item["match"]:
+            jobs.append((item["level"] == "project", number, pattern))
+    if not jobs:
+        return
+    jobs.sort(key=lambda job: job[0])
+    verdicts = {}
+
+    def work(report):
+        for index, (_untrusted, _number, pattern) in enumerate(jobs):
+            report("S%d" % index)
+            try:
+                issue = match_problem(pattern)
+            except (re.error, RecursionError, MemoryError, OverflowError, ValueError) as exc:
+                issue = "cannot be tried: %s" % type(exc).__name__
+            report("E%d %s" % (index, issue or ""))
+
+    lines = in_child(work, time.monotonic() + VET_BUDGET_MS / 1000.0)
+    started = set()
+    for line in lines:
+        head, _, rest = line.partition(" ")
+        if head[:1] in ("S", "E") and head[1:].isdigit() and int(head[1:]) < len(jobs):
+            if head[0] == "S":
+                started.add(int(head[1:]))
+            else:
+                verdicts[int(head[1:])] = rest
+    keep = {}
+    for index, (untrusted, number, pattern) in enumerate(jobs):
+        item = items[number]
+        issue = verdicts.get(index)
+        if issue is None and index in started:
+            issue = "did not finish on a probe of at most %d characters within %d ms, so it cannot be a guard" % (
+                max(len(probe) for probe in MATCH_PROBES), VET_BUDGET_MS)
+        elif issue is None and untrusted:
+            issue = "was not tried: the patterns before it used up the %d ms there are for trying them" % VET_BUDGET_MS
+        if issue:
+            item["_match_issue"] = item["_match_issue"] or "match %s %s" % (shown_pattern(pattern), issue)
+        else:
+            keep.setdefault(number, []).append(pattern)
+    for number, item in enumerate(items):
+        if item["match"]:
+            item["match"] = [pattern for pattern in item["match"] if pattern in keep.get(number, [])]
+
+
+def in_child(work, deadline):
+    """The lines `work(report)` reported before `deadline` (time.monotonic), in order.
+    `work` runs in a forked child that is killed at the deadline: a regular expression
+    that backtracks without end cannot be interrupted from inside the process that
+    runs it. Where there is no fork, it runs here and is not limited."""
+    lines = []
+    if not hasattr(os, "fork"):
+        work(lines.append)
+        return lines
+    reader, writer = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    child = os.fork()
+    if child == 0:
+        code = 0
+        try:
+            os.close(reader)
+            work(lambda line: os.write(writer, (line.replace("\n", " ") + "\n").encode("utf-8", "replace")))
+        except BaseException:
+            code = 1
+        finally:
+            os._exit(code)
+    os.close(writer)
+    os.set_blocking(reader, False)
+    pending = b""
+    try:
+        while True:
+            try:
+                chunk = os.read(reader, 65536)
+            except BlockingIOError:
+                chunk = None
+            except InterruptedError:
+                continue
+            if chunk == b"":
+                break
+            if chunk:
+                pending += chunk
+                continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.001)
+    finally:
+        try:
+            os.kill(child, 9)  # SIGKILL
+        except OSError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except OSError:
+            pass
+        os.close(reader)
+    # A last line with no newline was cut off by the kill: it is not a report.
+    return pending.decode("utf-8", "replace").split("\n")[:-1]
+
+
 def scan(project, with_body=False):
     """(items, broken). Every lesson and skill at all three levels, one entry per real
     SKILL.md: a directory reachable from two levels (a skills symlink into the package,
-    a project that is the home directory) is listed once, at the widest level."""
+    a project that is the home directory) is listed once, at the widest level.
+
+    A project lesson that carries the name of a user or general lesson and is not that
+    lesson is listed, flagged `shadowed`, and is not in force: a file in a repository
+    cannot stand in for a lesson of the user's own."""
     found = {}
     broken = []
     reported = set()
     rank = {"project": 0, "user": 1, "general": 2}
     switched_off = set(read_disabled())
+    loaded = []
     for level, lessons, skills in level_dirs(project):
         for kind, base in (("lesson", lessons), ("skill", skills)):
             try:
@@ -1103,19 +1301,28 @@ def scan(project, with_body=False):
                         broken.append({"level": level, "kind": kind, "name": name, "path": directory,
                                        "problem": "no SKILL.md", "unparseable": True})
                     continue
+                if kind == "skill" and not LISTED_RE.match(name):
+                    continue  # a name that is not one printable line is never listed
                 item = _load_item(level, kind, directory, with_body)
                 item["disabled"] = level == "general" and kind == "lesson" and name in switched_off
-                real = os.path.realpath(skill_md)
-                issue = item["_problem"] or (item["_match_issue"] if kind == "lesson" else None)
-                if issue and real not in reported:
-                    reported.add(real)
-                    broken.append({"level": level, "kind": kind, "name": name, "path": directory,
-                                   "problem": issue, "unparseable": bool(item["_problem"])})
-                if item["_problem"]:
-                    continue  # a lesson that does not read is reported, never listed
-                previous = found.get(real)
-                if previous is None or rank[level] > rank[previous["level"]]:
-                    found[real] = item
+                loaded.append(item)
+    vet_patterns([item for item in loaded if not item["_problem"]])
+    for item in loaded:
+        level, kind, name, directory = item["level"], item["kind"], item["name"], item["path"]
+        real = os.path.realpath(item["_file"])
+        issue = item["_problem"] or (item["_match_issue"] if kind == "lesson" else None)
+        # One report for one file. A lesson that does not read is reported by its own
+        # directory, so each can be removed by name even when two are links to one file.
+        seen = os.path.realpath(directory) if item["_problem"] else real
+        if issue and seen not in reported:
+            reported.add(seen)
+            broken.append({"level": level, "kind": kind, "name": name, "path": directory,
+                           "problem": issue, "unparseable": bool(item["_problem"])})
+        if item["_problem"]:
+            continue  # a lesson that does not read is reported, never listed
+        previous = found.get(real)
+        if previous is None or rank[level] > rank[previous["level"]]:
+            found[real] = item
     # A project lesson whose tree is the user-level lesson of its name, byte for byte, is
     # that lesson (a committed copy a move left in place), not a second one.
     lessons_by_name = {}
@@ -1125,13 +1332,24 @@ def scan(project, with_body=False):
     for levels in lessons_by_name.values():
         if len(levels) == 2 and same_tree(found[levels["project"]]["path"], found[levels["user"]]["path"]):
             del found[levels["project"]]
+    # See the docstring: the user's and the package's names are theirs.
+    held = set(item["name"] for item in found.values() if item["kind"] == "lesson" and item["level"] != "project")
+    for item in found.values():
+        if item["kind"] == "lesson" and item["level"] == "project" and item["name"] in held:
+            item["shadowed"] = True
     items = sorted(found.values(), key=lambda it: (rank[it["level"]], it["kind"], it["name"]))
     return items, broken
 
 
-def find_item(project, name, with_body=True):
+def find_item(project, name, with_body=True, in_force=False):
+    """The lesson or skill called `name`. When the name exists at two levels it is the
+    nearest one, which is what `rm`, `skill` and `promote` act on; with `in_force` it
+    is the one a session is held to, so a project lesson that is shadowed by a user or
+    general lesson of its name is never what `show` prints for that name."""
     items, _ = scan(project, with_body=with_body)
     hits = [item for item in items if item["name"] == name]
+    if in_force:
+        hits.sort(key=lambda item: bool(item.get("shadowed")))
     if not hits:
         raise usage("no lesson or skill named %r (see `compound list`)" % one_line(name)[:80])
     if len(hits) > 1:
@@ -1197,6 +1415,8 @@ def scan_scripts(project):
                 if not os.path.isfile(path):
                     continue
                 if not (filename.endswith((".py", ".sh")) or os.access(path, os.X_OK)):
+                    continue
+                if not LISTED_RE.match(os.path.relpath(path, project)):
                     continue
                 out.append({
                     "level": "project", "kind": "script",
@@ -1516,7 +1736,8 @@ def holders_elsewhere(name, events, project, skip=()):
 
 def promote_command(project, name, rename=False):
     """The command that moves `name` of `project` to the user level, as it is typed."""
-    return "COMPOUND_PROJECT=%s compound promote %s --to user%s" % (project, name, " --as NEWNAME" if rename else "")
+    return "COMPOUND_PROJECT=%s compound promote %s --to user%s" % (
+        sh_quote(project), sh_quote(name), " --as NEWNAME" if rename else "")
 
 
 def holders(name, events, project, skip=()):
@@ -1637,9 +1858,10 @@ def event_lines(events, clock, words=False, indent=""):
         kind = one_line(event.get("type", "?"))[:32]
         cells = [when_text(parse_ts(event.get("ts")), clock), EVENT_WORDS.get(kind, kind) if words else kind]
         if not words:
-            cells.append(str(event.get("session") or "")[:8] or "-")
-        cells.append(os.path.basename(str(event.get("project") or "")) or "-")
-        rows.append((cells, kind, event_summary(event)[:240 if kind == "skill" else 100]))
+            cells.append(one_line(event.get("session") or "")[:8] or "-")
+        cells.append(one_line(os.path.basename(str(event.get("project") or ""))) or "-")
+        # Every field of an event is text from somewhere else: one line, no control character.
+        rows.append((cells, kind, one_line(event_summary(event))[:240 if kind == "skill" else 100]))
     if not rows:
         return []
     widths = [max(len(cells[index]) for cells, _, _ in rows) for index in range(len(rows[0][0]))]
@@ -2005,7 +2227,7 @@ def cmd_list(args):
         # The list stays a list of what reads; what does not is said on stderr.
         for row in unreadable:
             sys.stderr.write("compound: unparseable %s %s: %s (remove it with `compound rm %s`)\n" % (
-                row["level"], row["path"], row["problem"], row["name"]))
+                row["level"], one_line(row["path"]), one_line(row["problem"]), sh_quote(one_line(row["name"]))))
         emit(rows)
         return 0
     if not rows and not unreadable:
@@ -2019,8 +2241,8 @@ def cmd_list(args):
         lines.append([row["level"], kind, row["name"], counts["reuse"], counts["guard"], counts["recall"],
                       flag, row["description"]])
     for row in unreadable:
-        lines.append([row["level"], "unparseable", row["name"], "-", "-", "-", "",
-                      "%s: %s" % (row["path"], one_line(row["problem"])[:120])])
+        lines.append([row["level"], "unparseable", one_line(row["name"]), "-", "-", "-", "",
+                      "%s: %s" % (one_line(row["path"]), one_line(row["problem"])[:120])])
     header = ["LEVEL", "KIND", "NAME", "REUSED", "GUARDED", "RECALLED", "FLAG", "WHEN"]
     # The description takes the room the terminal has left beside the columns; with too
     # little, it gets a line of its own under its row. Piped, it is cut at 70 characters.
@@ -2058,7 +2280,7 @@ def cmd_list(args):
 
 def cmd_show(args):
     project = project_root()
-    item = find_item(project, args.name)
+    item = find_item(project, args.name, in_force=True)
     text = item.get("_text", "")
     files = sorted(name for name in os.listdir(item["path"]) if name != "SKILL.md" and not name.startswith("."))
     if args.json:
@@ -2075,6 +2297,12 @@ def cmd_show(args):
     sys.stdout.write("%s (%s %s)\n%s\n" % (item["name"], item["level"], item["kind"], item["path"]))
     if item.get("disabled"):
         sys.stdout.write("  disabled for this user; switch it back on: compound enable %s\n" % item["name"])
+    if item.get("shadowed"):
+        sys.stdout.write("  shadowed: a user or general lesson has this name, so this one is not in force\n")
+    if sys.stdout.isatty():
+        # A lesson's text is anyone's who can write the file: on a terminal it is shown
+        # without the control characters that could redraw what is already there.
+        text = CONTROL_CHARS.sub("?", text)
     gaps = condition_gaps(item)
     if gaps:
         sys.stdout.write("  does not apply here: %s\n" % "; ".join(
@@ -2212,7 +2440,8 @@ def cmd_find(args):
         sys.stdout.write("earlier requests:\n")
         for hit in prompts:
             sys.stdout.write("  %s %s %s: \"%s\"\n" % (
-                hit["id"], hit["ts"][:10], os.path.basename(hit["project"]) or "-", hit["prompt"][:160]))
+                one_line(hit["id"]), one_line(hit["ts"])[:10], one_line(os.path.basename(hit["project"])) or "-",
+                hit["prompt"][:160]))
     elif state == "ok":
         sys.stdout.write("prompt log: no earlier request matches\n")
     return 0
@@ -2346,9 +2575,14 @@ def cmd_check(args=None, count=False):
         # unless its `match-tools` says otherwise.
         guarded = [item for item in guarded if tool in item["_tools"]]
     if text:
-        hits, unfinished, never = run_guards([item["match"] for item in guarded], text, began + budget)
-        # See "Two guards on one call": a guard of the general pool yields to a nearer one.
-        nearer = any(guarded[index]["level"] != "general" for index in hits)
+        # The user's and the package's guards are matched before the project's, so a
+        # pattern in a repository that is slow on this call cannot use up the time theirs
+        # need. What is printed keeps the listing's order.
+        order = sorted(range(len(guarded)), key=lambda index: guarded[index]["level"] == "project")
+        hits, unfinished, never = run_guards([guarded[index]["match"] for index in order], text, began + budget)
+        hits, unfinished, never = ([order[index] for index in found] for found in (hits, unfinished, never))
+        # See "Two guards on one call": a guard of the general pool yields to the user's own.
+        nearer = any(guarded[index]["level"] == "user" for index in hits)
         for index in sorted(hits):
             item = guarded[index]
             if nearer and item["level"] == "general":
@@ -2437,6 +2671,40 @@ def _lesson_files(directory):
                 continue
             out.append(os.path.relpath(path, directory))
     return out, sorted(excluded)
+
+
+# What must never go to a public repository: `promote --to general` reads every file it
+# would publish for these and refuses when one is there. The kinds are the ones a text
+# can be recognised as with no context; it is a lower bound, like the mod's own masking
+# of what it logs (hooks/safe.ts), which serves another purpose and is not this list.
+SECRET_SHAPES = (
+    ("a private key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY")),
+    ("an API token", re.compile(
+        r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}"
+        r"|xox[abprs]-[A-Za-z0-9-]{10,}|glpat-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{30,}|hf_[A-Za-z0-9]{30,}"
+        r"|npm_[A-Za-z0-9]{30,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})")),
+    ("a password in a URL", re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]{3,}@", re.I)),
+    ("a bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}")),
+)
+
+
+def secret_findings(item, files, skill_md):
+    """["<file>: <what it looks like>"] for every published file that holds something
+    shaped like a credential. The secret itself is never repeated."""
+    out = []
+    for rel in files:
+        if rel == "SKILL.md":
+            text = skill_md
+        else:
+            try:
+                with open(os.path.join(item["path"], rel), "rb") as handle:
+                    text = handle.read(4 * LESSON_BYTES).decode("utf-8", "replace")
+            except OSError:
+                continue
+        for label, shape in SECRET_SHAPES:
+            if shape.search(text):
+                out.append("%s: %s" % (rel, label))
+    return out
 
 
 def published_text(item):
@@ -2597,6 +2865,7 @@ def cmd_promote(args):
     branch = "compound/%s-%s" % (item["kind"], name)
     files, excluded = _lesson_files(item["path"])
     skill_md = published_text(item)
+    secrets = secret_findings(item, files, skill_md)
     title = "Add %s: %s" % (item["kind"], name)
     body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
         item["kind"], name, item["description"])
@@ -2608,12 +2877,18 @@ def cmd_promote(args):
         "name": name, "from": item["level"], "to": "general", "upstream": upstream,
         "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
         "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
-        "skill_md": skill_md, "excluded": excluded,
+        "skill_md": skill_md, "excluded": excluded, "secrets": secrets,
     }
+    if secrets and args.yes:
+        raise usage("%r was not proposed: what would be published looks like it holds a credential (%s). "
+                    "The general pool is public. Take it out of the lesson and run again" % (name, "; ".join(secrets)))
     if not args.yes:
         if args.json:
             emit(plan)
         else:
+            if secrets:
+                sys.stdout.write("NOT PUBLISHABLE as it is: it looks like it holds a credential (%s), and --yes "
+                                 "will refuse it.\n" % "; ".join(secrets))
             sys.stdout.write(
                 "Plan (nothing has been written; run again with --yes to do it):\n"
                 "  upstream : %s\n  branch   : %s\n  from     : %s (%s level)\n  files    :\n%s"
@@ -3679,7 +3954,9 @@ def build_status():
         check("duplicates", "FAIL" if any(dup["lesson"] for dup in duplicates) else "WARN", text)
 
     if broken:
-        check("lessons parse", "FAIL", "; ".join("%s: %s" % (row["path"], row["problem"]) for row in broken))
+        # A path here is a directory's name as it is on disk, which a repository chooses.
+        check("lessons parse", "FAIL", "; ".join("%s: %s" % (one_line(row["path"]), one_line(row["problem"]))
+                                                 for row in broken))
     else:
         check("lessons parse", "PASS", "every lesson reads")
 
@@ -3894,7 +4171,8 @@ def cmd_status(args):
             row["lesson"], row["from"], ", ".join(row["seen_in"]), why, row["command"]))
     for row in data["unparseable"]:
         out("  unparseable  %s (%s): %s. Fix %s or remove it: compound rm %s\n" % (
-            row["name"], row["level"], one_line(row["problem"])[:120], row["path"], row["name"]))
+            one_line(row["name"]), row["level"], one_line(row["problem"])[:120], one_line(row["path"]),
+            sh_quote(one_line(row["name"]))))
     for row in opened["ineffective"]:
         out("  ineffective  %s (%s): recalled %d times and the failure came back. Add a match "
             "(compound add --update --name %s --match RE), attach a script or rewrite the description\n"

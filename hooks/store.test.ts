@@ -3,7 +3,7 @@ import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
-    { level: 'project', kind: 'lesson', name: 'a', description: 'Use when A.', path: '/p/a', match: ['^x'], counts: { recall: 1 }, ineffective: false },
+    { level: 'project', kind: 'lesson', name: 'alpha', description: 'Use when A.', path: '/p/a', match: ['^x'], counts: { recall: 1 }, ineffective: false },
     { level: 'user', kind: 'skill', name: 'b', description: 'Use when B.', path: '/u/b', match: [] },
     { level: 'project', kind: 'script', name: 'scripts/c.sh', description: '', path: '/p/scripts/c.sh', match: [] },
     { level: 'project', kind: 'widget', name: 'd' },
@@ -11,7 +11,7 @@ test('the inventory is the list the CLI prints, with unknown rows dropped', asyn
     'not a row',
   ])
   const items = parseInventory(out)
-  expect(items?.map(i => `${i.kind}:${i.name}`)).toEqual(['lesson:a', 'skill:b', 'script:scripts/c.sh'])
+  expect(items?.map(i => `${i.kind}:${i.name}`)).toEqual(['lesson:alpha', 'skill:b', 'script:scripts/c.sh'])
   expect(items?.[0]?.match).toEqual(['^x'])
   expect(parseInventory('[]')).toEqual([])
 })
