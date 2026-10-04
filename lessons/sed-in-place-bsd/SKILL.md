@@ -1,3 +1,10 @@
+---
+name: sed-in-place-bsd
+description: Use when sed -i fails on macOS or BSD with an error that quotes the file name ("invalid command code", "undefined label", "unterminated substitute pattern", "expects \ followed by text", "extra characters at the end of"), or leaves a stray file ending in -e.
+match: ["(?:(^\\s*|[;&|(]\\s*|\\b(?:do|then|else)\\s+)|\\b(?:xargs|exec|sudo)\\s(?:[^;&|\\n]*?\\s)?)sed\\s+(-[A-Za-hj-z]+\\s+)*-[A-Za-hj-z]*i\\s+(-[A-Za-z]+\\s+)*['\\\"]?(s[/|#,@:]|\\d|/|\\$)"]
+platform: darwin
+created: 2026-10-04
+---
 BSD sed (macOS) takes the argument after `-i` as a backup suffix. In
 `sed -i 's/a/b/' file` the script is read as the suffix and the file name as the script,
 so the error quotes the FILE NAME and depends on its first letter: "invalid command code

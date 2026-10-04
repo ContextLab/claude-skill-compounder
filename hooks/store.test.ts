@@ -20,6 +20,17 @@ test('inventory output that is not a list is unreadable', async () => {
   for (const bad of ['', 'nothing recorded yet', '{"error":"x"}', '42', '[1,']) expect(parseInventory(bad)).toBe(undefined)
 })
 
+test('a lesson that does not apply on this machine, or that the user switched off, is not in the inventory', async () => {
+  const row = (name: string, more: Record<string, unknown>) => ({ level: 'general', kind: 'lesson', name, description: 'Use when.', path: `/g/${name}`, match: ['^x'], ...more })
+  const out = JSON.stringify([
+    row('here', { applies: true, disabled: false }),
+    row('elsewhere', { applies: false, disabled: false }),
+    row('switched-off', { applies: true, disabled: true }),
+    row('says-nothing', {}),
+  ])
+  expect(parseInventory(out)?.map(i => i.name)).toEqual(['here', 'says-nothing'])
+})
+
 test('guard hits are read from {"hits":[...]}, and anything else is unreadable', async () => {
   expect(parseHits('{"hits":[{"name":"z","level":"user","path":"/u/z","text":"Quote it."},{"level":"user"}]}')).toEqual([{ name: 'z', level: 'user', path: '/u/z', text: 'Quote it.' }])
   expect(parseHits('{"hits":[]}')).toEqual([])

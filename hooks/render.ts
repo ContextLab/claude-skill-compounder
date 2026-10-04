@@ -218,7 +218,7 @@ export function mentionsCli(command: string): boolean {
 }
 
 export function changesStore(verb: string | undefined): boolean {
-  return verb === 'add' || verb === 'promote' || verb === 'skill' || verb === 'rm' || verb === 'update'
+  return verb === 'add' || verb === 'promote' || verb === 'skill' || verb === 'rm' || verb === 'update' || verb === 'disable' || verb === 'enable'
 }
 
 // The CLI calls that write an event when they do something. After one, the mod reads the

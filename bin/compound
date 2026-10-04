@@ -16,7 +16,8 @@ LEVELS
 
 LESSON FORMAT
     <dir>/SKILL.md: a `---` line, `key: value` lines, a `---` line, the body.
-    Keys written here: name, description, match, match-tools, created, updated, origin. A string
+    Keys written here: name, description, match, match-tools, platform, shell, created,
+    updated, origin. A string
     value that is not a plain YAML scalar is written as a JSON string, which is a
     valid YAML double-quoted one; both forms, YAML single quotes and a folded or
     literal block (`description: >`) are read. `--update` edits only the keys it
@@ -29,7 +30,25 @@ LESSON FORMAT
     calls the patterns are tested against. Without it the patterns are tested against
     Bash calls only, so text that is not a command (a file's content, an agent's
     prompt) is never guarded by accident.
+    `platform` and `shell` are the lesson's condition: each is one name, or several
+    separated by commas (`platform: darwin`, `shell: zsh, bash`). A lesson applies on a
+    machine whose platform is one of the names AND whose shell is one of the names; a
+    key that is absent holds everywhere. The platform is COMPOUND_PLATFORM, else
+    sys.platform as darwin, linux, windows, or its own name. The shell is the file name
+    of COMPOUND_SHELL, else of CLAUDE_CODE_SHELL (Claude Code's own override of the shell
+    its Bash tool runs), else of SHELL (the login shell, which is what the Bash tool
+    runs); with none of them set the shell is unknown and a lesson that names one does
+    not apply. A lesson that does not apply here is listed, and marked so, by `list`,
+    `show` and `status`; it is no guard, `find` does not return it and the mod neither
+    recalls nor offers it.
     `created` and `updated` are local dates.
+
+THE SWITCH
+    <COMPOUND_HOME>/disabled.json: a JSON array of the names of the general lessons this
+    user switched off (`compound disable NAME`, `compound enable NAME`). A disabled
+    lesson is treated as one that does not apply here. Nothing in the package is
+    written. Only a lesson of the general pool has a switch: a lesson of the user's own
+    is removed with `rm`.
 
 EVENT LOG
     <COMPOUND_HOME>/events.jsonl, append-only, one JSON object per line, one write()
@@ -207,6 +226,18 @@ EVENT LOG
     runs, so a failure after the refusal is not the lesson failing to prevent it.
     `show --json` says so for the caller's session as `guarded_in_session`.
 
+    Recurring. A lesson of the general pool is never ineffective and is never a
+    strengthening owed: `add --update` does not rewrite it, so a session could not pay
+    that debt. With COMPOUND_RECUR_LIMIT such recalls it is `recurring`: `list`, `show`
+    and `status` say so, and `status` lists it under Open with the two things a user can
+    do, `compound disable NAME` and a report to the package's repository. `unsettled`
+    leaves out a `recall` of a general lesson whatever the event says.
+
+    Two guards on one call. When a call is matched by a guard of the project or user
+    level and by a guard of the general pool, `check` returns the nearer one and names
+    the general ones under "yielded": a user who has a lesson of their own for a mistake
+    the pool also covers is refused once, with their own text.
+
     One lesson in two places. Two lesson directories of one name whose trees are byte
     for byte the same are one lesson. A project copy identical to the user-level
     lesson of its name is not listed; `status` names it as "also committed in".
@@ -218,6 +249,8 @@ ENVIRONMENT
     COMPOUND_NOW         pins the clock: epoch seconds or an ISO 8601 time
     COMPOUND_CHECK_BUDGET_MS  wall-clock budget of one `check`, default 500
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
+    COMPOUND_PLATFORM    the platform a lesson's `platform` is held against (default: this one)
+    COMPOUND_SHELL       the shell a lesson's `shell` is held against (default: CLAUDE_CODE_SHELL, else SHELL)
     COMPOUND_OFF         1 switches the mod off; `status` reports it
     COMPOUND_UPSTREAM    owner/repo `promote --to general` proposes to
     COMPOUND_SURFER      the history-surfer executable (default: `surfer` on PATH)
@@ -233,7 +266,8 @@ ENVIRONMENT
     a session where Claude Code has applied the `env` block of its settings. Run from
     a terminal the CLI has no such environment, so it resolves each of the two from
     the process environment first, then from `env` in <claude dir>/settings.json,
-    then the default (see `setting`).
+    then the default (see `setting`). COMPOUND_PLATFORM and COMPOUND_SHELL are resolved
+    the same way, so a terminal and a session agree on which lessons apply.
 
 EXIT STATUS
     0 success; 2 usage or validation error (an unknown lesson name included);
@@ -288,7 +322,11 @@ MATCH_PROBES = ("a", "ls", "git status")
 # The package's own procedures: listed, never offered by `find` as reusable work.
 OWN_SKILLS = ("learn", "reuse")
 # What COMPOUND_HOME holds when it is ours; `uninstall --purge` removes nothing else.
-HOME_NAMES = ("lessons", "events.jsonl", "install.json", "app", "history-surfer", "claims")
+HOME_NAMES = ("lessons", "events.jsonl", "install.json", "app", "history-surfer", "claims", "disabled.json")
+# The frontmatter keys that say where a lesson applies, and the shape of one name in them.
+CONDITION_KEYS = ("platform", "shell")
+CONDITION_RE = re.compile(r"^[a-z0-9][a-z0-9_.+-]{0,31}$")
+CONDITION_EXAMPLES = {"platform": "darwin, linux or windows", "shell": "zsh or bash"}
 MAX_EPOCH = 253402300799  # 9999-12-31T23:59:59Z
 # Prompt-log rows that begin like this were not typed by the user.
 NOT_TYPED = ("<agent-message", "<task-notification", "<system-reminder",
@@ -831,6 +869,128 @@ def parse_tools(value):
     return data
 
 
+def parse_condition(key, value):
+    """(names, problem) from a frontmatter `platform` or `shell` value: one name, names
+    separated by commas, or a flow list of them."""
+    if value is None or not value.strip():
+        return [], None
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    elif len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = _unquote(text)
+    names = []
+    for part in text.split(","):
+        part = _unquote(part.strip()).strip().lower()
+        if not part:
+            continue
+        if not CONDITION_RE.match(part):
+            return [], "%s %r is not a name, or names separated by commas, such as %s" % (
+                key, one_line(value)[:60], CONDITION_EXAMPLES[key])
+        if part not in names:
+            names.append(part)
+    return names, None
+
+
+_here = {}
+
+
+def this_platform():
+    """The platform a lesson's `platform` is held against."""
+    if "platform" not in _here:
+        value = setting("COMPOUND_PLATFORM")[0].strip().lower()
+        if not value:
+            value = sys.platform
+            if value.startswith("linux"):
+                value = "linux"
+            elif value in ("win32", "cygwin", "msys"):
+                value = "windows"
+        _here["platform"] = value
+    return _here["platform"]
+
+
+def this_shell():
+    """The shell a lesson's `shell` is held against: the file name of the first of
+    COMPOUND_SHELL, CLAUDE_CODE_SHELL and SHELL that is set, or "" when none is."""
+    if "shell" not in _here:
+        found = ""
+        for value in (setting("COMPOUND_SHELL")[0], os.environ.get("CLAUDE_CODE_SHELL", ""),
+                      os.environ.get("SHELL", "")):
+            name = value.strip().replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+            if name.endswith(".exe"):
+                name = name[:-4]
+            if name:
+                found = name
+                break
+        _here["shell"] = found
+    return _here["shell"]
+
+
+def condition_gaps(item):
+    """Why `item` does not apply on this machine: [(key, wanted names, what is here)]."""
+    gaps = []
+    for key, here in (("platform", this_platform), ("shell", this_shell)):
+        wanted = item.get(key) or []
+        if wanted and here() not in wanted:
+            gaps.append((key, wanted, here()))
+    return gaps
+
+
+def active(item):
+    """Whether `item` is in force here: its condition holds and it is not switched off.
+    Only an active lesson is a guard, is found, and is recalled or offered by the mod."""
+    return item.get("applies", True) and not item.get("disabled", False)
+
+
+def inactive_flag(item):
+    """`disabled`, `not here` or "" for a list row."""
+    if item.get("disabled"):
+        return "disabled"
+    if not item.get("applies", True):
+        return "not here"
+    return ""
+
+
+def disabled_path():
+    return os.path.join(home_dir(), "disabled.json")
+
+
+def read_disabled(strict=False):
+    """The names in the switch file. A file that does not read disables nothing; with
+    `strict` it is a failure, so a command that rewrites it never drops what it held."""
+    path = disabled_path()
+    try:
+        data = json.loads(read_text(path))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        if strict:
+            raise failure("%s does not read (%s); fix it or remove it" % (path, one_line(exc)[:120]))
+        return []
+    if not isinstance(data, list) or not all(isinstance(name, str) for name in data):
+        if strict:
+            raise failure("%s is not a JSON array of lesson names; fix it or remove it" % path)
+        return []
+    return data
+
+
+def general_lessons():
+    """The names of the lessons the package ships."""
+    base = os.path.join(pkg_root(), "lessons")
+    try:
+        return set(name for name in os.listdir(base) if os.path.isfile(os.path.join(base, name, "SKILL.md")))
+    except OSError:
+        return set()
+
+
+def issues_url():
+    """Where a problem with a shipped lesson is reported."""
+    upstream = os.environ.get("COMPOUND_UPSTREAM") or UPSTREAM_DEFAULT
+    if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", upstream):
+        upstream = UPSTREAM_DEFAULT
+    return "https://github.com/%s/issues" % upstream
+
+
 def compile_match(pattern):
     """A guard pattern as every reader compiles it: `^` and `$` at every line."""
     return re.compile(pattern, re.MULTILINE)
@@ -867,8 +1027,8 @@ def _load_item(level, kind, directory, with_body):
     skill_md = os.path.join(directory, "SKILL.md")
     item = {
         "level": level, "kind": kind, "name": name, "description": "",
-        "path": directory, "match": [], "_tools": list(MATCH_TOOLS),
-        "_file": skill_md, "_problem": None, "_match_issue": None, "_fields": {}, "_body": "",
+        "path": directory, "match": [], "platform": [], "shell": [], "applies": True, "disabled": False,
+        "_tools": list(MATCH_TOOLS), "_file": skill_md, "_problem": None, "_match_issue": None, "_fields": {}, "_body": "",
     }
     try:
         text = read_text(skill_md)
@@ -892,6 +1052,17 @@ def _load_item(level, kind, directory, with_body):
     item["match"] = usable
     item["_tools"] = parse_tools(fields.get("match-tools"))
     if kind == "lesson":
+        # A condition that does not read is reported, and the lesson applies nowhere: a
+        # guard meant for one shell must not start refusing calls in every other.
+        unread = False
+        for key in CONDITION_KEYS:
+            names, issue = parse_condition(key, fields.get(key))
+            item[key] = names
+            if issue:
+                unread = True
+                match_issue = match_issue or issue
+        item["applies"] = not unread and not condition_gaps(item)
+    if kind == "lesson":
         if problem is None and not fields.get("name"):
             problem = "frontmatter has no name"
         if problem is None and _unquote(fields.get("name", "")) != name:
@@ -913,6 +1084,7 @@ def scan(project, with_body=False):
     broken = []
     reported = set()
     rank = {"project": 0, "user": 1, "general": 2}
+    switched_off = set(read_disabled())
     for level, lessons, skills in level_dirs(project):
         for kind, base in (("lesson", lessons), ("skill", skills)):
             try:
@@ -932,6 +1104,7 @@ def scan(project, with_body=False):
                                        "problem": "no SKILL.md", "unparseable": True})
                     continue
                 item = _load_item(level, kind, directory, with_body)
+                item["disabled"] = level == "general" and kind == "lesson" and name in switched_off
                 real = os.path.realpath(skill_md)
                 issue = item["_problem"] or (item["_match_issue"] if kind == "lesson" else None)
                 if issue and real not in reported:
@@ -1289,15 +1462,17 @@ def settled_by(debt, event):
 def unsettled(events, clock=None):
     """What is owed and nothing has settled, in log order: the `capture` events, and for
     each session and lesson the newest `recall` marked ineffective. With `clock`, only
-    those of the last UNSETTLED_DAYS days."""
+    those of the last UNSETTLED_DAYS days. A recall of a lesson the package ships is
+    never owed (see Recurring)."""
     owed = []
+    shipped = general_lessons()
     for event in events:
         kind = event.get("type")
         if kind == "capture":
             owed.append(event)
         elif kind == "recall":
             name, session = _text(event.get("lesson")), _text(event.get("session"))
-            if event.get("ineffective") is True and name and session:
+            if event.get("ineffective") is True and name and session and name not in shipped:
                 owed = [one for one in owed if not (one.get("type") == "recall" and one.get("lesson") == name
                                                     and one.get("session") == session)]
                 owed.append(event)
@@ -1402,10 +1577,10 @@ def annotate(items, events):
     out = []
     for item in items:
         extra = {"counts": dict(counts.get(item["name"], dict.fromkeys(COUNT_TYPES, 0)))}
-        if item["kind"] == "script":
-            extra["ineffective"] = False
-        else:
-            extra["ineffective"] = is_ineffective(item, recalls, limit)
+        # See Recurring: a lesson the package ships is counted, and is never ineffective.
+        recurs = item["kind"] != "script" and is_ineffective(item, recalls, limit)
+        extra["ineffective"] = recurs and item["level"] != "general"
+        extra["recurring"] = recurs and item["level"] == "general"
         out.append(public(item, extra))
     return out
 
@@ -1618,6 +1793,18 @@ def cmd_add(args):
             tools.append(tool)
     if tools and args.no_match:
         raise usage("--tool and --no-match cannot both be given")
+    condition = {}
+    for key, given in (("platform", args.platform), ("shell", args.shell)):
+        for value in given or []:
+            one = value.strip().lower()
+            if not CONDITION_RE.match(one):
+                raise usage("--%s %r is not a name such as %s" % (key, value, CONDITION_EXAMPLES[key]))
+            if one not in condition.setdefault(key, []):
+                condition[key].append(one)
+    if condition and args.no_condition:
+        raise usage("--no-condition drops the platform and the shell: it cannot be given with --%s" % sorted(condition)[0])
+    if args.no_condition and not args.update:
+        raise usage("--no-condition goes with --update: a new lesson has no condition to drop")
     for pattern in args.match or []:
         issue = match_problem(pattern)
         if issue:
@@ -1649,7 +1836,8 @@ def cmd_add(args):
         item = existing[0]
         if item["level"] == "general":
             raise usage("%r is in the general pool, which changes through a pull request "
-                        "(`compound promote`), not in place" % name)
+                        "(`compound promote`), not in place. Switch it off for yourself with "
+                        "`compound disable %s`, or report it at %s" % (name, name, issues_url()))
         changes = {}
         if description is not None:
             if not description:
@@ -1672,6 +1860,10 @@ def cmd_add(args):
                 raise usage("--tool names the tools a --match pattern is tested against, and %r has no pattern: "
                             "pass --match too" % name)
             changes["match-tools"] = json.dumps(tools, ensure_ascii=False)
+        for key, names in condition.items():
+            changes[key] = yaml_string(", ".join(names))
+        if args.no_condition:
+            removals.extend(CONDITION_KEYS)
         if args.origin and one_line(args.origin):
             changes["origin"] = yaml_string(one_line(args.origin))
         if not body.strip() and not item["_body"].strip():
@@ -1719,6 +1911,9 @@ def cmd_add(args):
             fields["match"] = json.dumps(args.match, ensure_ascii=False)
         if tools:
             fields["match-tools"] = json.dumps(tools, ensure_ascii=False)
+        for key in CONDITION_KEYS:
+            if key in condition:
+                fields[key] = yaml_string(", ".join(condition[key]))
         fields["created"] = local_date(stamp)
         session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         origin = one_line(args.origin or "") or "project %s%s" % (
@@ -1820,7 +2015,7 @@ def cmd_list(args):
     for row in rows:
         counts = row["counts"]
         kind = "guard" if (row["kind"] == "lesson" and row["match"]) else row["kind"]
-        flag = "ineffective" if row["ineffective"] else ""
+        flag = inactive_flag(row) or ("ineffective" if row["ineffective"] else "recurring" if row["recurring"] else "")
         lines.append([row["level"], kind, row["name"], counts["reuse"], counts["guard"], counts["recall"],
                       flag, row["description"]])
     for row in unreadable:
@@ -1872,11 +2067,21 @@ def cmd_show(args):
         row["recalls_since"] = recalls_since(item, tally(events)[1])
         row["guarded_in_session"] = guarded_in(events, item["name"], os.environ.get("CLAUDE_CODE_SESSION_ID", ""))
         row["recur_limit"] = recur_limit()
+        row["here"] = {"platform": this_platform(), "shell": this_shell()}
         row["text"] = text
         row["files"] = files
         emit(row)
         return 0
     sys.stdout.write("%s (%s %s)\n%s\n" % (item["name"], item["level"], item["kind"], item["path"]))
+    if item.get("disabled"):
+        sys.stdout.write("  disabled for this user; switch it back on: compound enable %s\n" % item["name"])
+    gaps = condition_gaps(item)
+    if gaps:
+        sys.stdout.write("  does not apply here: %s\n" % "; ".join(
+            "it is for the %s %s, and this is %s" % (key, " or ".join(wanted), here or "an unknown %s" % key)
+            for key, wanted, here in gaps))
+    elif not item.get("applies", True):
+        sys.stdout.write("  does not apply here: its platform or shell condition does not read\n")
     for name in files:
         sys.stdout.write("  attached: %s\n" % name)
     sys.stdout.write("\n" + text)
@@ -1969,6 +2174,8 @@ def cmd_find(args):
     # The package's own procedures are how lessons are made and reused, not reusable work.
     items = [item for item in items
              if not (item["kind"] == "skill" and item["level"] == "general" and item["name"] in OWN_SKILLS)]
+    # A lesson that does not apply on this machine, or that the user switched off, is not offered.
+    items = [item for item in items if active(item)]
     candidates = items + scan_scripts(project)
     events, _ = read_events()
     scored = []
@@ -2130,7 +2337,8 @@ def cmd_check(args=None, count=False):
         budget = check_budget()
         project = project_root(fast=True)
         items, _ = scan(project, with_body=True)
-        guarded = [item for item in items if item["match"]]
+        # A lesson whose condition does not hold here, or that is switched off, is no guard.
+        guarded = [item for item in items if item["match"] and active(item)]
         if count:
             result["guards"] = len(guarded)
             result["tools"] = sorted(set(one for item in guarded for one in item["_tools"]))
@@ -2139,8 +2347,13 @@ def cmd_check(args=None, count=False):
         guarded = [item for item in guarded if tool in item["_tools"]]
     if text:
         hits, unfinished, never = run_guards([item["match"] for item in guarded], text, began + budget)
+        # See "Two guards on one call": a guard of the general pool yields to a nearer one.
+        nearer = any(guarded[index]["level"] != "general" for index in hits)
         for index in sorted(hits):
             item = guarded[index]
+            if nearer and item["level"] == "general":
+                result.setdefault("yielded", []).append(item["name"])
+                continue
             result["hits"].append({"name": item["name"], "level": item["level"],
                                    "path": item["path"], "text": item["_body"].strip()})
         if unfinished or never:
@@ -2486,7 +2699,8 @@ def cmd_rm(args):
             raise
         item = wrecks[0]
     if item["level"] == "general":
-        raise usage("%r is in the general pool and ships with the package; it is not removed here" % args.name)
+        raise usage("%r is in the general pool and ships with the package; it is not removed here. "
+                    "Switch it off for yourself with `compound disable %s`" % (args.name, args.name))
     if item["kind"] != "lesson" and not args.force:
         raise usage("%r is a skill (%s); `compound rm` removes lessons. "
                     "Pass --force to remove a skill" % (args.name, item["path"]))
@@ -2502,6 +2716,51 @@ def cmd_rm(args):
     else:
         sys.stdout.write("removed %s (%s)\n  %s\n" % (item["name"], item["level"], path))
     return 0
+
+
+def _switch(args, off):
+    name = args.name
+    names = read_disabled(strict=True)
+    path = disabled_path()
+    if off:
+        items, _ = scan(project_root(), with_body=False)
+        mine = [item for item in items if item["name"] == name]
+        if not mine:
+            raise usage("no lesson or skill named %r (see `compound list`)" % one_line(name)[:80])
+        if not any(item["level"] == "general" and item["kind"] == "lesson" for item in mine):
+            item = mine[0]
+            raise usage("%r is a %s-level %s, and only a lesson of the general pool has a switch. One of your own "
+                        "is removed with `compound rm %s%s`" % (
+                            name, item["level"], item["kind"], name, "" if item["kind"] == "lesson" else " --force"))
+    changed = (name not in names) if off else (name in names)
+    if changed:
+        names = sorted(set(names) | {name}) if off else [one for one in names if one != name]
+        if names:
+            atomic_write(path, json.dumps(names, ensure_ascii=False) + "\n")
+        else:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+    if args.json:
+        emit({"name": name, "disabled": off, "changed": changed, "path": path})
+    elif off:
+        sys.stdout.write("%s %s (general): for this user it is no guard and is not recalled or offered\n"
+                         "  switch it back on: compound enable %s\n" % (
+                             "disabled" if changed else "already disabled:", name, name))
+    elif changed:
+        sys.stdout.write("enabled %s (general)\n" % name)
+    else:
+        sys.stdout.write("%s is not disabled\n" % name)
+    return 0
+
+
+def cmd_disable(args):
+    return _switch(args, True)
+
+
+def cmd_enable(args):
+    return _switch(args, False)
 
 
 # ----------------------------------------------------------------------------- skip, log, events
@@ -3451,7 +3710,8 @@ def build_status():
         used = counts["reuse"] + counts["guard"] + counts["recall"]
         if row["kind"] == "skill" and used == 0 and not row["match"]:
             continue
-        flag = "ineffective" if row["ineffective"] else ("never used" if used == 0 else "")
+        flag = inactive_flag(row) or ("ineffective" if row["ineffective"] else "recurring" if row["recurring"]
+                                      else "never used" if used == 0 else "")
         lessons.append({"name": row["name"], "level": row["level"], "kind": row["kind"],
                         "guard": bool(row["match"]), "reuse": counts["reuse"], "guard_hits": counts["guard"],
                         "recall": counts["recall"], "flag": flag, "path": row["path"],
@@ -3517,6 +3777,8 @@ def build_status():
         "open": {
             "ineffective": [{"name": row["name"], "level": row["level"], "path": row["path"],
                              "recall": row["counts"]["recall"]} for row in rows if row["ineffective"]],
+            "recurring": [{"name": row["name"], "level": row["level"], "path": row["path"],
+                           "recall": row["counts"]["recall"]} for row in rows if row["recurring"] and active(row)],
             "unsettled": unsettled,
             "candidates": candidates,
             "skips": skips,
@@ -3525,6 +3787,8 @@ def build_status():
         "unparseable": unparseable,
         "project": project,
         "package": package,
+        "here": {"platform": this_platform(), "shell": this_shell()},
+        "issues": issues_url(),
     }
 
 
@@ -3593,6 +3857,9 @@ def cmd_status(args):
             plural(idle, "lesson"), "it" if idle == 1 else "them"), DIM))
     if not data["lessons"]:
         out("  none recorded yet\n")
+    if any(row["flag"] == "not here" for row in data["lessons"]):
+        out("  not here: the lesson's platform or shell is not this machine's (%s, %s)\n" % (
+            data["here"]["platform"], data["here"]["shell"] or "shell unknown"))
     for row in data["lessons"]:
         for root in row["also_in"]:
             out("  %s (%s) is also committed in %s\n" % (row["name"], row["level"], root))
@@ -3608,7 +3875,7 @@ def cmd_status(args):
     head("Open")
     opened = data["open"]
     if not (opened["ineffective"] or opened["skips"] or opened["errors"] or data["unparseable"]
-            or opened["unsettled"] or opened["candidates"]):
+            or opened["unsettled"] or opened["candidates"] or opened["recurring"]):
         out("  nothing open\n")
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
@@ -3632,6 +3899,10 @@ def cmd_status(args):
         out("  ineffective  %s (%s): recalled %d times and the failure came back. Add a match "
             "(compound add --update --name %s --match RE), attach a script or rewrite the description\n"
             % (row["name"], row["level"], row["recall"], row["name"]))
+    for row in opened["recurring"]:
+        out("  recurring    %s (general): recalled %d times and the failure came back. It ships with the package "
+            "and is not rewritten here. Switch it off for yourself (compound disable %s) or report it at %s\n"
+            % (row["name"], row["recall"], row["name"], data["issues"]))
     for row in opened["skips"]:
         out("  declined     %s %s: %s\n" % (when_text(parse_ts(row["ts"]), clock), str(row["session"])[:8] or "-",
                                              row["why"]))
@@ -3666,6 +3937,11 @@ def build_parser():
     one.add_argument("--no-match", action="store_true", help="with --update: drop the guard patterns")
     one.add_argument("--tool", action="append", metavar="TOOL",
                      help="a tool whose calls the patterns are tested against (default Bash); repeatable")
+    one.add_argument("--platform", action="append", metavar="NAME",
+                     help="the lesson applies on this platform only (darwin, linux, windows); repeatable")
+    one.add_argument("--shell", action="append", metavar="NAME",
+                     help="the lesson applies only where the Bash tool runs this shell (zsh, bash); repeatable")
+    one.add_argument("--no-condition", action="store_true", help="with --update: drop the platform and the shell")
     one.add_argument("--attach", action="append", metavar="FILE", help="a file to keep beside the lesson; repeatable")
     one.add_argument("--origin")
     one.add_argument("--update", action="store_true",
@@ -3704,6 +3980,12 @@ def build_parser():
     one = command("rm", cmd_rm, "Remove a lesson.")
     one.add_argument("name")
     one.add_argument("--force", action="store_true", help="remove a skill too")
+
+    one = command("disable", cmd_disable, "Switch one lesson of the general pool off for this user.")
+    one.add_argument("name")
+
+    one = command("enable", cmd_enable, "Switch a disabled lesson of the general pool back on.")
+    one.add_argument("name")
 
     one = command("skip", cmd_skip, "Decline an owed lesson.")
     one.add_argument("--why", required=True)

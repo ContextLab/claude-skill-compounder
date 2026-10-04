@@ -1,3 +1,10 @@
+---
+name: macos-gnu-only-commands
+description: "Use when a command fails on macOS with \"command not found: timeout\", \"date: illegal option -- d\", \"grep: invalid option -- P\", \"stat: illegal option -- c\", or another GNU-only command or flag."
+match: ["(^\\s*|[;&|(]\\s*|\\b(?:do|then|else)\\s+)timeout\\s+(-\\S+\\s+)*\\d"]
+platform: darwin
+created: 2026-10-04
+---
 macOS ships the BSD versions of the standard tools and no GNU coreutils, so a GNU-only
 command or flag fails there. What works on a stock Mac:
 

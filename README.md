@@ -274,6 +274,29 @@ inside this package.
 Project lessons are plain files. Commit them and everyone who works on the repository
 with compound installed gets them.
 
+### The lessons that ship with compound
+
+The general pool holds six lessons. Each one applies only on the platform or in the shell
+it is about, so on Linux with bash the first five do nothing:
+
+| Lesson | Applies | What it does |
+|-|-|-|
+| `zsh-equals-not-found` | zsh | stops `echo =====` before it runs: zsh takes a bare word of `=` signs as a command to look up, and the rest of the line is lost |
+| `zsh-status-path-variables` | zsh | stops an assignment to `status` (read-only in zsh) or `path` (tied to `PATH`), and `for` or `read` with either name |
+| `zsh-no-matches-found` | zsh | recalled when a command fails with "no matches found" (an unquoted glob that matched nothing) |
+| `sed-in-place-bsd` | macOS | stops `sed -i 's/a/b/' file`, which BSD sed reads as a backup suffix and a file name |
+| `macos-gnu-only-commands` | macOS | stops `timeout N cmd`, which a stock Mac does not have; recalled when `date -d`, `grep -P` or `stat -c` fails |
+| `pip-externally-managed` | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
+
+`compound list` shows them with the rest. One that does not apply on your machine is
+flagged `not here`.
+
+A stop happens once per session, and the same call sent again runs. If one of these
+lessons is wrong for your machine (you installed `timeout`, or your `sed` is GNU sed),
+switch it off for yourself with `compound disable <name>`; `compound enable <name>` brings
+it back. If you already have a lesson of your own for the same mistake, yours is the one
+that stops the call.
+
 ## How you see it working
 
 compound shows what it does in six places.
@@ -376,12 +399,17 @@ each one with its output.
 | decline a lesson that is owed | tell Claude it is not worth keeping, or run `compound skip --why "<reason>"` in a terminal in that project (with several owed, add `--settles <id>`) |
 | strengthen an ineffective lesson | add a pattern: `compound add --update --name <name> --match '<regex>'` |
 | remove a lesson | `compound rm <name>` (`--force` for a skill) |
+| switch off a lesson that ships with compound | `compound disable <name>`; `compound enable <name>` switches it back on |
+| record a lesson that holds only on one platform or shell | `compound add ... --platform darwin` or `--shell zsh` |
 | hide the band | set `COMPOUND_QUIET` to `1` (see [Settings](#settings)) |
 | switch compound off | set `COMPOUND_OFF` to `1` (see [Settings](#settings)) |
 
 A lesson is **ineffective** when it has been recalled twice since it was last written:
 the failure it describes keeps coming back. Claude is asked to strengthen it before it
-finishes, and `compound status` lists it until it is rewritten.
+finishes, and `compound status` lists it until it is rewritten. A lesson that ships with
+compound cannot be rewritten on your machine, so it is never ineffective and Claude is
+asked for nothing: `compound status` lists it as `recurring`, with the command that
+switches it off and the address to report it at.
 
 `compound <command> --help` lists every option of a command.
 
@@ -466,6 +494,7 @@ Other things you may see:
   record it, or tell it to decline. The stop is refused only once.
 - **A call was refused that you wanted.** A guard matched it. Sending the same call again
   runs it. If the pattern is too broad, see [the guide](docs/guide.md#fix-a-guard-that-stops-the-wrong-calls).
+  A guard that ships with compound is switched off with `compound disable <name>`.
 
 ## More
 

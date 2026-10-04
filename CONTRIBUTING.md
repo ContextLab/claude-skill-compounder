@@ -47,6 +47,7 @@ fails. They spend model calls, so they are run by hand and never by `run_tests.s
 | `journey_unsettled.py` | A capture an earlier session left unsettled is raised at the next session's first prompt and settled by its id. |
 | `journey_claims.py` | With a claims directory that cannot be made, the mod refuses nothing and logs one `error`. |
 | `journey_error.py` | A failure of the mod itself is logged, reported at the next prompt, each failure once; `COMPOUND_OFF=1` writes nothing. |
+| `journey_general.py` | The lessons the package ships, on macOS with zsh: each shipped guard refuses its wrong form once, the recall lessons are given to their failures, a general lesson recalled past the limit raises no debt, and a disabled or not-applying lesson does nothing. |
 | `journey_skills.py` | The plugin's surface in a headless session: the two skills and the `/compound` command are listed, and `compound:learn`, invoked through the Skill tool, writes a lesson. |
 
 Two more scripts there measure and assert nothing:
