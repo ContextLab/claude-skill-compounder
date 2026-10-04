@@ -136,6 +136,13 @@ export function cliCall(command: string): string | undefined {
   return undefined
 }
 
+// A command that names the CLI anywhere, including through a variable (`C=/path/compound;
+// $C add ...`), which `cliCall` does not read as a call. It may have written events, so
+// the log is read after it; it is still guarded and judged like any other command.
+export function mentionsCli(command: string): boolean {
+  return /(^|[\/\s="'])compound(?=$|[\s"';&|)])/.test(command)
+}
+
 export function changesStore(verb: string | undefined): boolean {
   return verb === 'add' || verb === 'promote' || verb === 'skill' || verb === 'rm' || verb === 'update'
 }
@@ -184,9 +191,9 @@ export function storeNews(events: readonly Event[], told: ReadonlySet<string>): 
     if (e.type === 'learn') out.push({ key, toast: `compound: lesson ${e.update === true ? 'rewritten' : 'recorded'}: ${name}`, status: undefined })
     else if (e.type === 'promote' && e.auto !== true) {
       const where = e.to === 'general' ? 'proposed to the general pool' : 'moved to the user level'
-      out.push({ key, toast: `compound: lesson ${name} ${where}`, status: `compound: ${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
-    } else if (e.type === 'skill') out.push({ key, toast: `compound: lesson ${name} is now a skill`, status: `compound: skill ${name}` })
-    else if (e.type === 'rm') out.push({ key, toast: `compound: ${name} removed`, status: `compound: removed ${name}` })
+      out.push({ key, toast: `compound: lesson ${name} ${where}`, status: `${e.to === 'general' ? 'proposed' : 'moved'} ${name}` })
+    } else if (e.type === 'skill') out.push({ key, toast: `compound: lesson ${name} is now a skill`, status: `skill ${name}` })
+    else if (e.type === 'rm') out.push({ key, toast: `compound: ${name} removed`, status: `removed ${name}` })
   }
   return out
 }
@@ -294,8 +301,8 @@ export function reuseContext(items: readonly Item[], earlier: readonly Earlier[]
 }
 
 export function reuseStatus(items: number, earlier: number): string {
-  if (items > 0) return `compound: ${items} reusable`
-  return `compound: ${earlier} earlier request${earlier === 1 ? '' : 's'}`
+  if (items > 0) return `${items} reusable`
+  return `${earlier} earlier request${earlier === 1 ? '' : 's'}`
 }
 
 // Moment 2. The reason a call is refused: what it matched, the note quoted, how to proceed.
@@ -546,5 +553,5 @@ export function errorReport(errors: readonly Failure[], cli: string, nth = 1): s
 }
 
 export function errorStatus(count: number): string {
-  return `compound: ${count} error${count === 1 ? '' : 's'}`
+  return `${count} error${count === 1 ? '' : 's'}`
 }

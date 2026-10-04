@@ -5,6 +5,9 @@ already built and learned. It does two things without being asked: before a subs
 task it looks for existing work to reuse, and after a problem is solved it has the lesson
 written down where the next session will meet it.
 
+This document is the technical contract. The [README](../README.md) is the place to
+start, and the [user guide](guide.md) shows each command with its output.
+
 Two rules shape everything below.
 
 - **One source of truth.** Every lesson, skill and script exists once, at one level. It is
@@ -404,13 +407,13 @@ or recorded. Every new failure is reported, each one once.
 - **Drawing failures**: a band or a pane that cannot be drawn leaves the engine's own
   drawing in its place and never stops a turn. One `error` event per session is logged for
   the band (`ui.band`) and one for the pane (`ui.pane`).
-- **Status entry**: every firing sets a short entry (`compound: 2 reusable`,
-  `compound: guard zsh-equals-word`, `compound: lesson owed`, `compound: 1 error`). A
-  hook that the engine stopped (it threw, or ran out of its time) sets `compound: N
-  errors` from its `.catch` handler. A `compound` command the session runs sets one for
-  what it did (`compound: skill <name>`, `compound: removed <name>`, `compound: moved
-  <name>`). The entry is cleared when a debt is settled by `compound add` or `compound
-  skip`, and at the start of each new typed prompt.
+- **Status entry**: every firing sets a short entry (`2 reusable`, `guard
+  zsh-equals-word`, `lesson owed`, `1 error`). Claude Code shows the plugin's name before
+  it, so the status area reads `compound: 2 reusable`. A hook that the engine stopped (it
+  threw, or ran out of its time) sets `N errors` from its `.catch` handler. A `compound`
+  command the session runs sets one for what it did (`skill <name>`, `removed <name>`,
+  `moved <name>`). The entry is cleared when a debt is settled by `compound add` or
+  `compound skip`, and at the start of each new typed prompt.
 - **Toast**: a lesson recorded, rewritten, moved, proposed to the general pool, made a
   skill, removed or marked ineffective. A toast for a `compound` command the session ran
   follows the event that command wrote to the log (`learn`, `promote`, `skill`, `rm`),

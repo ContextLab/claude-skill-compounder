@@ -4,7 +4,7 @@ import type { CompoundBand, CompoundBoard, CompoundBusyKind } from '../types'
 import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { candidateFloor, fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt, significantWords } from './judge'
 import {
-  BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason,
+  BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli,
   heldStep, inputOf, isCommand, judged, knownContext, newsKey, promotedText, ranOut, recallContext, reportsEvents, reusable, reuseContext, reuseStatus,
   stopDebt, stopNudge, stopStrengthen, storeNews, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, unsettledContext, userOrigin,
   type Failure, type Held, type Turn,
@@ -641,7 +641,7 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   // The newest few: a long backlog is in `compound status`, not in every session's first prompt.
   const shown = open.slice(-UNSETTLED_SHOWN).map(c => ({ ...c, failed: redact(c.failed), error: redact(c.error), fixed: redact(c.fixed) }))
   await log($, { type: 'remind', captures: shown.map(c => c.id) })
-  $.ui.status(`compound: ${open.length} unsettled`)
+  $.ui.status(`${open.length} unsettled`)
   await paint($, (band, now) => noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'} owed`, now))
   return unsettledContext(shown, await cliPath($))
 }
@@ -793,7 +793,7 @@ async function guard($: EngineInterface, sid: string, tool: string, input: Recor
   const text = callText(tool, input).slice(0, LOGGED_CALL)
   const ms = Date.now() - began
   for (const h of fresh) await log($, { type: 'guard', lesson: h.name, tool, text, ms })
-  $.ui.status(`compound: guard ${first.name}`)
+  $.ui.status(`guard ${first.name}`)
   await paint($, (band, now) => noted(band, 'guard', first.name, now))
   return guardReason(fresh, await cliPath($))
 }
@@ -849,7 +849,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
     ineffective,
   })
   if (ineffective) $.ui.toast(`compound: lesson ${lesson.name} is ineffective (recalled ${count} times)`)
-  $.ui.status(ineffective ? `compound: ${lesson.name} ineffective` : `compound: recalled ${lesson.name}`)
+  $.ui.status(ineffective ? `${lesson.name} ineffective` : `recalled ${lesson.name}`)
   await paint($, (band, now) => (ineffective ? weakened(band, lesson.name, now) : noted(unfixed(band), moved ? 'moved' : 'recall', lesson.name, now)))
   out.push(known ? knownContext(lesson, text, count, ineffective, cliAt, call) : recallContext(lesson, text, count, ineffective, cliAt, call))
   return out
@@ -928,7 +928,7 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     agent: agent ?? null,
     ms: reply.ms,
   })
-  $.ui.status('compound: lesson owed')
+  $.ui.status('lesson owed')
   await paint($, (band, now) => captured(band, now))
   return [captureContext({ failed: was.call, error: was.error, fixed: call }, await cliPath($))]
 }
@@ -995,7 +995,7 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
     refusals.push(stopStrengthen(weakFresh, cliAt))
   }
   if (refusals.length > 0) {
-    $.ui.status(fresh.length > 0 ? 'compound: lesson owed' : `compound: strengthen ${weakFresh[0]?.name ?? ''}`)
+    $.ui.status(fresh.length > 0 ? 'lesson owed' : `strengthen ${weakFresh[0]?.name ?? ''}`)
     return refusals.join('\n\n')
   }
   const turn = turns.get(sid)
@@ -1009,7 +1009,7 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   turns.set(sid, { ...turn, calls: 0 })
   await log($, { type: 'nudge', calls })
   await log($, { type: 'refuse', why: 'nudge', calls })
-  $.ui.status('compound: asked about lessons')
+  $.ui.status('asked about lessons')
   await paint($, (band, now) => noted(band, 'nudge', `${calls} tool calls`, now))
   return stopNudge(calls, cliAt)
 }
@@ -1116,6 +1116,8 @@ export const register: Register = on => {
         await onCliCall($, sid, verb, began)
         return ran
       }
+      // The CLI reached through a variable or a wrapper: what it wrote is in the log.
+      if (tool === 'Bash' && typeof input.command === 'string' && mentionsCli(input.command)) await onCliCall($, sid, 'add', began)
       if (!judged(tool)) return ran
       const key = `${sid}:${e.agentId ?? 'main'}`
       const call = callText(tool, input)

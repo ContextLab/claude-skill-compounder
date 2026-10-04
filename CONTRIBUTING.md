@@ -1,10 +1,13 @@
 # Contributing
 
+There are two ways to contribute: propose a lesson you recorded, or work on the package.
+
 ## Proposing a lesson or skill to the general pool
 
 The general pool is `lessons/` and `skills/` in this repository. Everything in it is
-installed for every user. From a machine where the lesson already exists at the user
-level:
+installed for every user. You propose a lesson from a machine where it already exists at
+the user level. If it is still a project lesson, move it first with `compound promote
+<name> --to user`. Then:
 
 ```bash
 compound promote <name> --to general        # prints the plan, writes nothing
@@ -12,9 +15,13 @@ compound promote <name> --to general --yes  # forks, pushes a branch, opens the 
 ```
 
 Read the plan before adding `--yes`: it prints the files and the pull request text that
-will be published.
+will be published. The [user guide](docs/guide.md#propose-a-lesson-to-the-general-pool)
+shows a plan.
 
 ## Working on the package
+
+You need Claude Code, `python3` (3.9 or later) and `git`. Clone the repository and run
+these from its root:
 
 ```bash
 ./run_tests.sh                 # CLI suite: stdlib unittest, real files, no mocks
@@ -76,13 +83,38 @@ T=$(mktemp -d)
 bin/compound install --claude-dir "$T/claude" --bin-dir "$T/bin"
 ```
 
-Rules the code is written under:
+## The documentation
+
+| Page | For | Holds |
+|-|-|-|
+| `README.md` | a new user | what compound does, install, how to see it working, the common commands |
+| `docs/guide.md` | a user who wants to step in | each manual command with its real output |
+| `docs/design.md` | a contributor | the technical contract: every command, option, event and environment variable |
+
+Every command shown in the documentation runs as written, and every output shown is real
+output, shortened only with `...`. To get real output without touching your own
+configuration, run the CLI in a throwaway home directory:
+
+```bash
+export HOME=$(mktemp -d) COMPOUND_NO_SURFER=1
+```
+
+The two diagrams in `README.md` are Mermaid. After changing one, render it and look at
+it in a light and a dark theme:
+
+```bash
+npx -y @mermaid-js/mermaid-cli -i diagram.mmd -o diagram.png
+npx -y @mermaid-js/mermaid-cli -i diagram.mmd -o diagram-dark.png -t dark -b '#0d1117'
+```
+
+## Rules the code is written under
 
 - `bin/compound` is the only code that reads or writes lessons, the event log and the
   install. The mod calls it for every store operation.
 - Tests use no mocks. The CLI tests run the real CLI against temporary directories. The
   journeys run real Claude Code sessions with `COMPOUND_HOME` and `COMPOUND_PROJECT`
   pointed at temporary directories.
-- Documentation describes what the package does now. `tests/test_docs.py` fails when
-  `docs/design.md` lacks a `COMPOUND_*` name, a subcommand, an option or a claim kind
-  that the code has, and when this file lacks a journey script.
+- Documentation describes what the package does now, for a reader who is new to it.
+  `tests/test_docs.py` fails when `docs/design.md` lacks a `COMPOUND_*` name, a
+  subcommand, an option or a claim kind that the code has, when this file lacks a journey
+  script, and when `README.md` uses one of its terms before defining it.

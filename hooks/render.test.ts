@@ -4,7 +4,7 @@ import {
   inputOf, isCommand, judged, knownContext, NOTE_RULE, quotedNote, recallContext, reusable, reuseContext, reuseStatus, simpleCommands,
   promotedText, stopDebt, stopNudge, stopStrengthen, unsettledContext, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser, userOrigin, worthChecking,
   BUDGET, ranOut, reportsEvents, storeNews,
-  type Held,
+  type Held, mentionsCli
 } from './render'
 import type { Earlier, Event, Item } from './store'
 
@@ -212,9 +212,9 @@ test('the reuse message lists items and earlier requests as quoted records, and 
 test('with nothing to reuse and no earlier request the reuse message is empty', async () => {
   expect(reuseContext([], [], CLI)).toBe('')
   expect(reuseContext([], [{ id: 'p1', date: '', project: '', session: '', text: 'x', score: 0 }], CLI).includes('- p1: "x"')).toBe(true)
-  expect(reuseStatus(2, 1)).toBe('compound: 2 reusable')
-  expect(reuseStatus(0, 1)).toBe('compound: 1 earlier request')
-  expect(reuseStatus(0, 3)).toBe('compound: 3 earlier requests')
+  expect(reuseStatus(2, 1)).toBe('2 reusable')
+  expect(reuseStatus(0, 1)).toBe('1 earlier request')
+  expect(reuseStatus(0, 3)).toBe('3 earlier requests')
 })
 
 test('a recorded note is quoted between markers that its own text cannot close, with its level and path', async () => {
@@ -302,8 +302,8 @@ test('the error report lists each failure on one masked line and caps the list',
   const many = errorReport(Array.from({ length: 11 }, (_, i) => ({ where: `w${i}`, message: 'm' })), CLI)
   expect(many.includes('failed 11 times')).toBe(true)
   expect(many.includes('- ... and 3 more')).toBe(true)
-  expect(errorStatus(1)).toBe('compound: 1 error')
-  expect(errorStatus(2)).toBe('compound: 2 errors')
+  expect(errorStatus(1)).toBe('1 error')
+  expect(errorStatus(2)).toBe('2 errors')
 })
 
 // ---- another project's lesson ----
@@ -419,7 +419,7 @@ test('a toast follows an event in the log, never the text of a command', async (
   expect(storeNews([at('guard', { lesson: 'x' }), at('recall', { lesson: 'x' }), at('capture', {})], new Set())).toEqual([])
   const moved = storeNews([at('promote', { lesson: 'zsh-equals-word', to: 'user', from: 'project' })], new Set())
   expect(moved.map(n => n.toast)).toEqual(['compound: lesson zsh-equals-word moved to the user level'])
-  expect(moved[0]!.status).toBe('compound: moved zsh-equals-word')
+  expect(moved[0]!.status).toBe('moved zsh-equals-word')
   const proposed = storeNews([at('promote', { lesson: 'zsh-equals-word', to: 'general', url: 'https://github.com/o/r/pull/7' })], new Set())
   expect(proposed.map(n => n.toast)).toEqual(['compound: lesson zsh-equals-word proposed to the general pool'])
   // The mod's own automatic move raises its toast where it is made.
@@ -431,9 +431,9 @@ test('a lesson recorded, made a skill or removed each sets a status entry and ra
   expect(learned).toEqual([{ key: '2026-10-03T12:00:00Z|learn|build-needs-profile', toast: 'compound: lesson recorded: build-needs-profile', status: undefined }])
   expect(storeNews([at('learn', { lesson: 'a', update: true })], new Set())[0]!.toast).toBe('compound: lesson rewritten: a')
   const skill = storeNews([at('skill', { lesson: 'release-checklist', level: 'user' })], new Set())
-  expect(skill.map(n => [n.toast, n.status])).toEqual([['compound: lesson release-checklist is now a skill', 'compound: skill release-checklist']])
+  expect(skill.map(n => [n.toast, n.status])).toEqual([['compound: lesson release-checklist is now a skill', 'skill release-checklist']])
   const gone = storeNews([at('rm', { lesson: 'stale-note', level: 'project' })], new Set())
-  expect(gone.map(n => [n.toast, n.status])).toEqual([['compound: stale-note removed', 'compound: removed stale-note']])
+  expect(gone.map(n => [n.toast, n.status])).toEqual([['compound: stale-note removed', 'removed stale-note']])
   // A declined debt clears the entry and raises nothing.
   expect(storeNews([at('skip', { why: 'a typo' })], new Set())).toEqual([{ key: '2026-10-03T12:00:00Z|skip|', toast: undefined, status: undefined }])
 })
@@ -443,7 +443,7 @@ test('an event is news once: one already told is not told again', async () => {
   const first = storeNews(rows, new Set())
   expect(first.length).toBe(2)
   expect(storeNews(rows, new Set(first.map(n => n.key)))).toEqual([])
-  expect(storeNews(rows, new Set([first[0]!.key])).map(n => n.status)).toEqual(['compound: removed b'])
+  expect(storeNews(rows, new Set([first[0]!.key])).map(n => n.status)).toEqual(['removed b'])
 })
 
 // ---- the README's example ----
@@ -471,4 +471,12 @@ const README_EXAMPLE = [
 
 test('the README example is the text the reuse check adds for its sample items', async () => {
   expect(reuseContext(README_ITEMS, README_EARLIER, '/Users/me/.claude/compound/app/bin/compound')).toBe(README_EXAMPLE)
+})
+
+test('the CLI named through a variable or a path is seen, and an ordinary word is not', () => {
+  expect(mentionsCli('C=/Users/me/.claude/compound/app/bin/compound; $C find toml; $C add --name x')).toBe(true)
+  expect(mentionsCli('"/opt/x/bin/compound" add --name x')).toBe(true)
+  expect(mentionsCli('compound skip --why no')).toBe(true)
+  expect(mentionsCli('echo compounding interest')).toBe(false)
+  expect(mentionsCli('ls compound-demo')).toBe(false)
 })

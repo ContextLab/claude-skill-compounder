@@ -81,3 +81,21 @@ Observed in the journeys: with the stronger wording a session usually strengthen
 lesson at once, so the stop refusal is reached only when it tries to finish first. One
 session wrote a `--match` from the ERROR text, which never matches a call; the messages
 now say what a match is tested against.
+
+## 2026-10-04: third review, band and pane, screencast, docs
+
+- Third cold review: nothing blocking; its findings fixed in `af53c7d`.
+- Band above the prompt and `/compound` pane: `76f556b` (`hooks/view.ts`, `notes/2026-10-04-band-and-pane.md`).
+- Screencast: `docs/media/demo.gif` and three stills, recorded from real sonnet sessions by
+  `dev/demo.sh`. Scene 1-2 produced a recorded lesson in 8 of 40 takes, so re-recording is slow.
+- The recording exposed a bug: Claude ran the CLI through a variable (`C=...; $C add`), the mod
+  did not see it, and the band and status entry stayed on "lesson owed" after the lesson was
+  recorded. Fixed with `mentionsCli` in `hooks/render.ts`. The GIF predates the fix, so its
+  scene 2 does not show the "recorded" flash; `demo-2-pane.png` is cropped above the stale entry.
+- README rewritten, `docs/guide.md` added, Mermaid flowchart and levels diagram, logo.
+- Old note blocks removed from twelve CLAUDE.md files; backups in the local `~/.claude`
+  repository at `c704723`. Eleven zero-byte project `.claude/CLAUDE.md` files remain (their
+  deletion was refused by the permission classifier).
+
+Open: re-record scenes 1-2 to show the recorded flash; look at the band and pane on the
+desktop surface; eight project repositories each hold one unpushed local commit.

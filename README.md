@@ -1,33 +1,24 @@
-# compound
+<p align="center">
+  <img src="docs/media/logo.svg" alt="compound logo" width="120">
+</p>
 
-A Claude Code mod that makes each session start from what earlier sessions already built
-and learned.
+<h1 align="center">compound</h1>
 
-- **Before a substantial task**, it looks for skills, lessons, scripts and earlier
-  requests that already cover it, and tells Claude to reuse or broaden those before
-  building anything new.
-- **After a problem is solved**, it has the lesson written down where the next session
-  will meet it. A mistake made once is stopped before it is made again.
+compound is a Claude Code **mod** that makes each session start from what your earlier
+sessions built and learned. A mod is a plugin made of hooks: code that runs when you
+submit a prompt, when Claude calls a tool, and when Claude is about to stop.
 
-Both happen from hooks. Neither you nor Claude has to remember to do anything.
+- **Less rebuilding.** Before Claude builds something, compound shows it the work you
+  already have that covers the request.
+- **Mistakes happen once.** When a problem is solved, the fix is written down. The next
+  session is stopped before it makes the same mistake.
+- **Nothing to remember.** Both happen on their own. You keep working as you do now.
 
-## Terms
+![Screencast: a request fails and then succeeds, the lesson is recorded, and a new session in another project is stopped before it repeats the mistake](docs/media/demo.gif)
 
-- A **mod** is a Claude Code plugin made of hooks: code that runs when a prompt is
-  submitted, a tool is called or Claude is about to stop.
-- A **lesson** is a short note recorded after a problem was solved.
-- A **guard** is a lesson that carries a **pattern**, a regular expression tested against
-  a tool call before it runs.
-- A lesson is **recalled** when a tool call fails and compound hands Claude the lesson
-  that describes that failure, beside the error.
-- A **level** is how far a lesson reaches: one project, all of your projects, or every
-  user of compound. Each lesson lives at one level.
-- The **general pool** is the widest level: the lessons and skills that ship inside this
-  package to everyone who installs it.
-- The **prompt log** is a searchable record of every prompt you have typed in Claude
-  Code, kept by [history-surfer](https://github.com/ContextLab/claude-history-surfer).
-  compound searches it for earlier requests like the one you are making.
-- The **status entry** is a short line Claude Code shows in its status area.
+1. A request fails, then succeeds on a later attempt: converting a TOML file with a Python that lacks `tomllib`.
+2. compound has the lesson recorded. It shows in the band above the prompt and in the `/compound` pane.
+3. A new session in another project is stopped before it repeats the mistake, and gets it right.
 
 ## Install
 
@@ -35,52 +26,249 @@ Both happen from hooks. Neither you nor Claude has to remember to do anything.
 curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/main/install.sh | bash
 ```
 
-Then start a new Claude Code session. Check that it is working:
+Then start a new Claude Code session. Sessions that are already open do not load the mod.
+
+**Requirements:** Claude Code 2.1.288 or later, `python3` (3.9 or later) and `git`. The
+installer also installs [history-surfer](https://github.com/ContextLab/claude-history-surfer)
+unless you already have it. history-surfer keeps the **prompt log**: a searchable record
+of the prompts you type in Claude Code. compound searches it for earlier requests like
+the one you are making.
+
+The mod is built on Claude Code's function-hook API, which is early access and may change
+between releases.
+
+**Check that it works:**
 
 ```bash
 compound status
 ```
 
-If your shell answers `command not found`, the directory the installer linked `compound`
-into is not on your `PATH` yet. The installer prints the line to add to your shell
-profile, and its last line gives the full path to run. With the default location that is:
+If your shell answers `command not found`, the directory that holds `compound` is not on
+your `PATH` yet. The installer prints the line to add to your shell profile. Until you
+add it, run the full path:
 
 ```bash
 ~/.local/bin/compound status
 ```
 
-Requirements: Claude Code 2.1.288 or later, `python3` (3.9 or later), `git`. The installer
-also installs history-surfer, which keeps the prompt log, unless you already have it.
+Right after install, the report looks like this (paths shown for a user named `me`):
 
-The mod is built on Claude Code's function-hook API, which is early access and may change
-between releases.
+```
+Health
+  PASS  python          3.9.13
+  PASS  mod             enabled in /Users/me/.claude/settings.json
+  WARN  mod last fired  never: the event log holds no event the mod wrote (reuse, guard, ...)
+  PASS  cli             /Users/me/.local/bin/compound
+  PASS  prompt log      0 prompts in this project
+  WARN  last event      no events yet in /Users/me/.claude/compound/events.jsonl
+  PASS  duplicates      every name exists once
+  PASS  lessons parse   every lesson reads
+  PASS  errors          none in the last 7 days
+...
+```
+
+The two `WARN` rows are expected on a new install. They turn to `PASS` once compound has
+acted in a session. [Troubleshooting](#troubleshooting) explains every row.
+
+**Update and uninstall:**
 
 | To | Run |
 |-|-|
-| update | `compound update` |
-| uninstall, keeping everything you recorded | `compound uninstall` |
-| uninstall and delete `~/.claude/compound` | `compound uninstall --purge` |
+| update to the newest version | `compound update` |
+| uninstall and keep everything you recorded | `compound uninstall` |
+| uninstall and also delete `~/.claude/compound` | `compound uninstall --purge` |
 
-Install adds one path to `env.CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`, links
-`compound` into `~/.local/bin` or `~/bin`, and records both in
-`~/.claude/compound/install.json`. Uninstall reverses exactly that.
+Install changes three things: it adds one path to `env.CLAUDE_CODE_PLUGIN_DIRS` in
+`~/.claude/settings.json`, it links `compound` into `~/.local/bin` or `~/bin`, and it
+writes a record of both to `~/.claude/compound/install.json`. Uninstall reverses exactly
+those three.
 
-`compound uninstall` leaves four things where they are: project lessons, which stay in
-their repositories; the skills in `~/.claude/skills`, the ones you made with `compound
-skill` included; your user-level lessons and the event log in `~/.claude/compound`; and
-the copy of this package the installer cloned to `~/.claude/compound/app`. Its output
-gives the paths of the last two. `--purge` adds the removal of `~/.claude/compound`: the
-user-level lessons, the event log and that clone. It still leaves the project lessons
-and `~/.claude/skills`.
+What each uninstall leaves behind:
 
-## What you will see
+| | `compound uninstall` | `compound uninstall --purge` |
+|-|-|-|
+| project lessons, inside their repositories | kept | kept |
+| skills in `~/.claude/skills`, including ones you made with `compound skill` | kept | kept |
+| lessons you keep for all your projects, and the event log, in `~/.claude/compound` | kept | deleted |
+| the copy of this package at `~/.claude/compound/app` | kept | deleted |
 
-compound sets a status entry each time it acts, so a firing is never silent.
+## What it does
 
-**You type a request to build something substantial.** compound gathers the lessons,
-skills and scripts already recorded, and earlier requests of yours that share its words,
-and asks a small model which of them cover part of the request. What it names is added to
-the prompt:
+compound gives Claude two habits.
+
+### 1. Reuse before building
+
+When you ask for something substantial, compound first looks through what you already
+have: recorded lessons, skills, the project's scripts, and your earlier requests. If any
+of it covers part of the request, compound tells Claude to use it or extend it.
+
+> You ask: "Write a script that finds duplicate entries in our bibliography."
+> compound adds: you already have `scripts/bibdupcheck.py` in this project, and you asked
+> for something similar on 2026-09-14.
+> Claude extends the existing script.
+
+A short prompt, a request to run a command, or a request that nothing covers gets nothing
+added.
+
+### 2. Learn after solving
+
+A **lesson** is a short note that says how a problem was solved. When a command fails and
+a later one fixes it, compound tells Claude to record the lesson. From then on the lesson
+works in two ways:
+
+- A **guard** is a lesson that carries a **pattern**: a regular expression that describes
+  the wrong command. compound tests every tool call against the patterns before the call
+  runs. On a match it refuses the call once and quotes the lesson, so Claude corrects the
+  call first.
+- A lesson without a pattern is **recalled**: when a call fails, compound hands Claude
+  the lesson that describes that failure, beside the error.
+
+> Session one: `import tomllib` fails on Python 3.9. Claude finds the fix and records the
+> lesson `toml-needs-tomllib`. The lesson is about your machine, so it is kept for all
+> your projects.
+> Session two, another project: Claude is about to make the same call. compound stops it
+> and quotes the lesson. Claude uses the fix on its first try.
+
+Recorded text is always shown to Claude as a quoted note to weigh. It is never passed on
+as an instruction.
+
+## How it works
+
+```mermaid
+flowchart TD
+    P(["You type a request"]):::you --> R{{"Reuse check:<br/>does existing work cover it?"}}:::check
+    R -- "yes" --> RA["Matching work is added<br/>to the prompt"]:::act
+    R -- "no" --> T
+    RA --> T["Claude calls a tool"]:::claude
+    T --> G{{"Guard: does the call match<br/>a lesson's pattern?"}}:::check
+    G -- "yes" --> GS["Call refused once,<br/>lesson quoted"]:::act
+    GS -- "Claude corrects it" --> T
+    G -- "no" --> RUN["The call runs"]:::claude
+    RUN -- "it fails" --> RC{{"Recall: is there a lesson<br/>for this failure?"}}:::check
+    RC -- "yes" --> RL["Lesson shown<br/>beside the error"]:::act
+    RC -- "no" --> H["Failure held,<br/>fix watched for"]:::act
+    H -- "a later call works" --> C["Capture:<br/>a lesson is owed"]:::act
+    RUN -- "it works" --> S{{"Stop check:<br/>is a lesson still owed?"}}:::check
+    RL --> S
+    C --> S
+    S -- "yes" --> L["Claude records the lesson,<br/>or declines with a reason"]:::claude
+    S -- "no" --> D(["Claude finishes"]):::you
+    L --> ST[("Lesson store")]:::store
+    ST -. "read by the next session" .-> P
+
+    classDef you fill:#475569,stroke:#94a3b8,color:#ffffff
+    classDef claude fill:#1d4ed8,stroke:#93c5fd,color:#ffffff
+    classDef check fill:#b45309,stroke:#fcd34d,color:#ffffff
+    classDef act fill:#15803d,stroke:#86efac,color:#ffffff
+    classDef store fill:#7e22ce,stroke:#d8b4fe,color:#ffffff
+```
+
+| Colour | Kind of step |
+|-|-|
+| grey | you, and the end of the turn |
+| blue | Claude |
+| orange | a question compound asks |
+| green | what compound does with the answer |
+| purple | where lessons are kept |
+
+The five questions and actions in the chart:
+
+| Step | When | What compound does |
+|-|-|-|
+| Reuse check | you submit a prompt | finds existing work that covers the request and adds it to the prompt |
+| Guard | a tool call is about to run | refuses a call that matches a lesson's pattern, once, with the lesson quoted |
+| Recall | a tool call failed | shows Claude the lesson that describes the failure |
+| Capture | a call works after one failed | decides whether it is the fix, and if so tells Claude to record the lesson |
+| Stop check | Claude is about to finish | refuses the stop once if a lesson is owed and not yet recorded or declined |
+
+### Where lessons live
+
+A **level** is how far a lesson reaches. Each lesson lives at exactly one of three levels.
+It is moved when its reach grows. It is never copied.
+
+```mermaid
+flowchart LR
+    A["project<br/>one repository"]:::lvl -- "it matches a failure<br/>in a second project" --> B["user<br/>all your projects"]:::lvl
+    B -- "you propose it and<br/>the pull request is merged" --> C["general<br/>everyone"]:::lvl
+    classDef lvl fill:#7e22ce,stroke:#d8b4fe,color:#ffffff
+```
+
+| Level | Applies to | Location |
+|-|-|-|
+| project | this repository | `<repo>/.claude/compound/lessons/` |
+| user | all of your projects, or your machine and tools | `~/.claude/compound/lessons/` |
+| general | everyone who installs compound | `lessons/` and `skills/` in this package |
+
+The general level is also called the **general pool**: the lessons and skills that ship
+inside this package.
+
+- **Project to user** happens on its own, when a project lesson matches a failure in a
+  second project. A lesson that git tracks is left in its repository; `compound status`
+  then prints the command that moves it.
+- **User to general** happens only when you ask for it. It opens a pull request against
+  this repository.
+
+Project lessons are plain files. Commit them and everyone who works on the repository
+with compound installed gets them.
+
+## How you see it working
+
+compound shows what it does in six places.
+
+**1. The band.** One row directly above the prompt shows what compound is doing now. It
+is empty when there is nothing to show.
+
+![The band after a fix: the learn-loop track shows a lesson owed](docs/media/demo-1-capture.png)
+
+| Glyph | Label | Meaning |
+|-|-|-|
+| spinner | `checking for reusable work`, `is this the fix?`, ... | a check is running |
+| `◆` | `reuse found` | existing work was added to your prompt |
+| `■` | `guard stopped a call` | a guard refused a call |
+| `↺` | `lesson recalled` | a failed call was given its lesson |
+| `◌` | `watching for the fix` | a call failed and no lesson describes it |
+| `●` | `lesson owed` | a fix was found; the lesson is not yet recorded |
+| `✔` | `lesson recorded` | the lesson is written |
+| `○` | `lesson declined` | Claude declined to record it, with a reason |
+| `⇡` | `lesson moved to the user level` | a lesson moved up |
+| `▲` | `lesson ineffective` | a lesson did not prevent its failure and needs strengthening |
+| `✖` | `N compound errors` | compound itself failed; your work is not blocked |
+
+Results fade after 8 seconds. `lesson owed`, `lesson ineffective` and errors stay until
+they are dealt with. [The design](docs/design.md#seeing-it-work) lists every row.
+
+**2. The learn-loop track.** From a failed call until its lesson is settled, the band
+also shows four steps. The current step is bold:
+
+```
+✓ failed → ✓ fixed → ● owed → ○ recorded
+```
+
+**3. The `/compound` pane.** Type `/compound` in a session to open a dashboard: health,
+what is open, lessons per level, the most used lessons, and recent events. `r` refreshes
+it. `/compound close` closes it. `/compound status` prints the same report as text.
+
+![The /compound pane: health, open items, levels, most used lessons, recent events](docs/media/demo-2-pane.png)
+
+**4. Toasts.** A short pop-up appears when a lesson is recorded, rewritten, moved,
+proposed, made a skill, removed, or marked ineffective.
+
+**5. The status entry.** The **status entry** is a short line in Claude Code's status
+area. compound sets it each time it acts, for example `compound: 2 reusable`,
+`compound: guard zsh-equals-word` or `compound: lesson owed`.
+
+**6. `compound status` and the event log.** `compound status` in a terminal prints
+health checks, counts per level, how often each lesson was used, recent events, and
+everything that waits for you, each with the command that deals with it. Every event is
+also one line of JSON in `~/.claude/compound/events.jsonl`; `compound events` prints
+them.
+
+When a guard stops a call, Claude sees the lesson and you see the band:
+
+![A guard stops a call in a new session and quotes the lesson](docs/media/demo-3-guard.png)
+
+<details>
+<summary>The full message the reuse check adds to a prompt</summary>
 
 ```
 [compound] Reuse before building.
@@ -94,152 +282,123 @@ Where an entry does cover part of this request, use it, or broaden it so it also
 The compound:reuse skill has the procedure. `/Users/me/.claude/compound/app/bin/compound show <name>` prints a lesson. compound CLI: /Users/me/.claude/compound/app/bin/compound (use this path if `compound` is not on PATH).
 ```
 
-A short prompt, a request to run a command, or a request nothing covers adds nothing.
+</details>
 
-**A command fails, and a later one fixes it.** compound quotes both back to Claude and
-tells it to record the lesson. If Claude tries to finish without recording or declining
-it, the stop is refused once. A lesson still unrecorded when the session ends is listed
-by `compound status` and raised again at the start of the next session in that project.
+## Everyday use
 
-**The same mistake is about to happen again.** If the lesson is a guard, the call is
-refused once with the lesson quoted as the reason; sending the same call again runs it.
-If a call fails anyway, the matching lesson is recalled: Claude reads it beside the error.
+There is nothing you have to do. Work as usual, and watch the band.
 
-**A lesson keeps recurring.** A lesson that is recalled twice after the same failure has
-not prevented anything. compound marks it ineffective, and Claude must strengthen it (add
-a pattern, attach a script, or rewrite it) or say why not before it can finish.
+When you want to step in, these are the manual controls. [The guide](docs/guide.md) shows
+each one with its output.
 
-**Something in compound itself breaks.** The error is logged, shown in the status entry
-and reported to Claude at the next prompt. A broken check never blocks your work.
-
-Recorded text is always shown to Claude as a quoted note to weigh, never as an
-instruction.
-
-To record a lesson yourself at any time, type `/compound:learn`. If it is unclear what
-you want recorded, Claude asks.
-
-## Where lessons live
-
-A lesson lives at exactly one of three levels. It is moved when its reach grows and is
-never copied by compound.
-
-| Level | Applies to | Location |
-|-|-|-|
-| project | this repository | `<repo>/.claude/compound/lessons/` |
-| user | two or more of your projects, or your machine and tools | `~/.claude/compound/lessons/` |
-| general | anyone | `lessons/` and `skills/` in this package |
-
-A lesson starts at the project level. One that matches a failure in a second project is
-moved to the user level automatically, unless git tracks it in its own repository: a
-committed lesson stays where it is, is still recalled, and is listed by `compound status`
-with the command that moves it. When two projects hold the same lesson, byte for byte,
-under one name, it is one lesson: the copy git does not track is the one that moves, and
-`compound status` notes the project that keeps the committed copy. One that would help
-anyone can be proposed to the
-general pool, which opens a pull request against this repository:
-
-```bash
-compound promote <name> --to general        # prints the plan, writes nothing
-compound promote <name> --to general --yes  # forks, pushes, opens the pull request
-```
-
-Project lessons are plain files in the repository. Commit them and everyone who works on
-it with compound installed gets them.
-
-A lesson is a directory with a `SKILL.md`, the same format as a Claude Code skill, plus
-any scripts it needs. `compound skill <name>` moves one into the skills directory of its
-level, which makes it a skill Claude can route to by description.
-
-## What is working and what is not
-
-```
-$ compound status
-
-Health
-  PASS  python          3.9.13
-  PASS  mod             enabled in ~/.claude/settings.json
-  PASS  mod last fired  9s ago (guard)
-  PASS  cli             ~/.local/bin/compound
-  PASS  prompt log      113 prompts in this project
-  PASS  last event      9s ago (78 events)
-  PASS  duplicates      every name exists once
-  PASS  lessons parse   every lesson reads
-  PASS  errors          none in the last 7 days
-
-Store
-  level    lessons  skills  guards
-  project  6        1       2
-  user     32       4       7
-  general  0        2       0
-
-Lessons
-  name             level  kind    reuse  guard  recall  flag
-  zsh-equals-word  user   guard   0      4      0
-  ci-checks        user   lesson  3      0      2       ineffective
-  ...
-```
-
-`Recent` lists the last ten events and `Open` lists what needs attention, each with the
-command that deals with it: ineffective lessons, lessons owed and not yet recorded,
-lessons Claude declined to record and why, lessons that could move up a level, and
-errors. The command exits 1 when a health check
-fails. Inside a session,
-`/compound` prints the same report. Every event is one line of JSON in
-`~/.claude/compound/events.jsonl`.
-
-## Commands
-
-| Command | Does |
+| You want to | Do this |
 |-|-|
-| `compound status` | health, counts, per-lesson use, recent events, what is open |
-| `compound list` | every lesson and skill at every level |
-| `compound find <words>` | lessons, skills, scripts and earlier prompts matching the words |
-| `compound show <name>` | one lesson |
-| `compound add --name <n> --when <trigger>` | record a lesson; the text is read on stdin |
-| `compound skill <name>` | turn a lesson into a skill |
-| `compound promote <name> --to user\|general` | move a lesson up a level |
-| `compound rm <name>` | remove a lesson (`--force` for a skill) |
+| record a lesson yourself | type `/compound:learn` in a session. If it is unclear what you want recorded, Claude asks. |
+| search what is recorded | `compound find <words>` |
+| see every lesson and skill | `compound list` |
+| read one lesson | `compound show <name>` |
+| turn a lesson into a skill | `compound skill <name>` |
+| move a lesson to the user level | `compound promote <name> --to user` |
+| propose a lesson to the general pool | `compound promote <name> --to general` prints the plan and writes nothing. Add `--yes` to open the pull request. |
+| decline a lesson that is owed | tell Claude it is not worth keeping, or run `compound skip --why "<reason>"` |
+| strengthen an ineffective lesson | add a pattern: `compound add --update --name <name> --match '<regex>'` |
+| remove a lesson | `compound rm <name>` (`--force` for a skill) |
+| hide the band | set `COMPOUND_QUIET` to `1` (see [Settings](#settings)) |
+| switch compound off | set `COMPOUND_OFF` to `1` (see [Settings](#settings)) |
 
-`compound <command> --help` lists every option. [docs/design.md](docs/design.md) has the
-full contract.
+A lesson is **ineffective** when it has been recalled twice since it was last written:
+the failure it describes keeps coming back. Claude is asked to strengthen it before it
+finishes, and `compound status` lists it until it is rewritten.
+
+`compound <command> --help` lists every option of a command.
 
 ## Settings
 
-Environment variables, read by the mod. Set them in the `env` block of
-`~/.claude/settings.json`. These are the ones you are likely to tune;
-[the design](docs/design.md#environment-variables) lists every variable the package
-reads. `compound status` run in a terminal reads `COMPOUND_OFF` and
-`COMPOUND_RECUR_LIMIT` from that same block, so it reports what the mod does.
+Settings are environment variables. Put them in the `env` block of
+`~/.claude/settings.json`, then start a new session:
+
+```json
+{
+  "env": {
+    "COMPOUND_QUIET": "1"
+  }
+}
+```
+
+These are the ones you are likely to change.
+[The design](docs/design.md#environment-variables) lists every variable.
 
 | Variable | Default | Meaning |
 |-|-|-|
 | `COMPOUND_OFF` | unset | `1` switches the mod off |
-| `COMPOUND_QUIET` | unset | `1` turns the band above the prompt off; the status entry, the toasts and the `/compound` pane stay |
+| `COMPOUND_QUIET` | unset | `1` turns the band off; the status entry, the toasts and the `/compound` pane stay |
 | `COMPOUND_PROMPT_MIN_CHARS` | 80 | shortest prompt the reuse check looks at |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | tool calls in a turn before Claude is asked whether it learned anything |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
-| `COMPOUND_RECUR_LIMIT` | 2 | recurrences before a lesson is ineffective |
-| `COMPOUND_MODEL` | `haiku` | model that answers the mod's questions |
-| `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for it |
+| `COMPOUND_RECUR_LIMIT` | 2 | times a lesson is recalled before it is ineffective |
+| `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |
+| `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for that model |
+
+`compound status` in a terminal reads `COMPOUND_OFF` and `COMPOUND_RECUR_LIMIT` from the
+same `env` block, so its report matches what the mod does.
 
 ## Cost
 
-The mod asks a small model one question per substantial prompt, one per failed tool
-call, and one for each of the next successes of the same tool, five at most, until one
-is the fix. Measured on Claude Code 2.1.289, the prompt check (a search of the prompt log
-and the model call) adds about one second to a prompt. The guard adds about 30 ms to a
-tool call when any lesson carries a pattern. When none does, the first tool call of a
-turn pays that once and the rest pay nothing. A check that has not answered within 1.5
-seconds is abandoned and the call runs. Every other call the mod makes to its
-command-line tool while a tool call or a stop waits has 2 seconds, and one that runs out
-is not tried again in that turn, so a slow disk costs a turn a few seconds at most. The
-model calls use the same account as the session.
+compound asks a small model (`haiku` by default) a few short questions. The calls use
+the same account as your session.
 
-## How it works
+| When | Model calls | Added time |
+|-|-|-|
+| a substantial prompt | one | about 1 second |
+| a tool call, when any lesson has a pattern | none | about 30 ms |
+| a tool call, when no lesson has a pattern | none | the first call of a turn pays about 30 ms; the rest pay nothing |
+| a failed tool call | one | none before the call |
+| each later success of the same tool, until one is the fix | one each, five at most | none before the call |
 
-[docs/design.md](docs/design.md) describes the parts, the five moments the mod acts at,
-the lesson format, the CLI contract and the tests. [CONTRIBUTING.md](CONTRIBUTING.md)
-covers working on the package and proposing a lesson to the general pool.
+The times were measured on Claude Code 2.1.289. compound never holds your work for long:
+a guard check that has not answered in 1.5 seconds is abandoned and the call runs. Any
+other check that makes a tool call or a stop wait has 2 seconds, and one that runs out is
+not tried again in that turn.
+
+## Troubleshooting
+
+Run `compound status`. Each row under `Health` is `PASS`, `WARN` or `FAIL`. The command
+exits 1 when a row fails.
+
+| Row | It says | What to do |
+|-|-|-|
+| `python` | FAIL: older than 3.9 | install Python 3.9 or later |
+| `mod` | WARN: not in `env.CLAUDE_CODE_PLUGIN_DIRS`, or `settings.json` does not exist | run `compound install` |
+| `mod` | FAIL: `settings.json` cannot be read | the row prints the problem; fix the JSON in `~/.claude/settings.json` |
+| `mod` | WARN: switched off | remove `COMPOUND_OFF` from your settings or environment |
+| `mod` | FAIL: cannot load as a plugin | a file of the package is missing; run `compound update`, or install again |
+| `mod last fired` | WARN: never, or nothing in the last 7 days | start a new Claude Code session and work in it; a new install shows this until compound first acts |
+| `cli` | WARN: not on `PATH` | add the line the row prints to your shell profile and open a new shell |
+| `cli` | WARN: `compound` on `PATH` is another program | remove or rename the other one, or put this package's directory first on `PATH` |
+| `prompt log` | WARN: `surfer` is not on `PATH`, or it exited with an error | install [history-surfer](https://github.com/ContextLab/claude-history-surfer); without it the reuse check sees no earlier requests, and everything else works |
+| `last event` | WARN: no events yet | nothing; it passes after the first event |
+| `last event` | WARN: lines do not parse | the bad lines of `~/.claude/compound/events.jsonl` are skipped; delete them to clear the warning |
+| `last event` | FAIL: the event log cannot be written | fix the permissions of `~/.claude/compound` |
+| `duplicates` | FAIL or WARN: one name at two places | the row prints both paths; remove or rename one |
+| `lessons parse` | FAIL: a lesson does not read | the row prints the file and the problem; fix the file or run `compound rm <name>` |
+| `errors` | WARN: errors in the last 7 days | the `Open` section of the report lists each one |
+
+Other things you may see:
+
+- **Nothing appears in a session.** The session was open before you installed. Start a
+  new one.
+- **Claude does not finish and talks about a lesson.** A lesson is owed. Let Claude
+  record it, or tell it to decline. The stop is refused only once.
+- **A call was refused that you wanted.** A guard matched it. Sending the same call again
+  runs it. If the pattern is too broad, see [the guide](docs/guide.md#fix-a-guard-that-stops-the-wrong-calls).
+
+## More
+
+- [docs/guide.md](docs/guide.md): the user guide. Every manual command with its output.
+- [docs/design.md](docs/design.md): the technical contract. The parts, the lesson format,
+  every command, option and environment variable.
+- [CONTRIBUTING.md](CONTRIBUTING.md): working on the package, and proposing a lesson to
+  the general pool.
 
 ## License
 
