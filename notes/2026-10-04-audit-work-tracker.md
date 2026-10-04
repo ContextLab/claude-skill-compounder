@@ -37,7 +37,7 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
 | G1 | #19 point 4 | a `use` event when a skill made from a lesson (or any recorded skill) is invoked, with its notice on the band and its count in `status` and the pane | dispatched (track G) |
 | G2 | #19 point 1 | notice a repeated request (the same procedure asked for several times, from the prompt log) and propose making it a skill | dispatched (track G) |
 | G3 | #19 point 3 | a skill in the shipped pool that composes other skills. The owner chose (2026-10-04): BOTH `finish-task` (review the change, run every check, update docs and notes, commit; calls compound:learn when something failed and was fixed) and `verify-assumptions-first` (check base assumptions with real calls before a large effort, then an MVP, then the full build; calls compound:reuse first) | dispatched (track G) |
-| H | #30 | after some weeks of ordinary use, a sweep of the log: capture to lesson / skip / unsettled rates, guard refusals corrected vs re-sent, recall precision, reuse relevance. A `compound` report that prints them | dispatched (track H): the report; the sweep itself needs weeks of data |
+| H | #30 | after some weeks of ordinary use, a sweep of the log: capture to lesson / skip / unsettled rates, guard refusals corrected vs re-sent, recall precision, reuse relevance. A `compound` report that prints them | MERGED (bb49a91, merge 21552d4): `compound report`; a `retry` event after a guard refusal. Notes in `2026-10-04-track-h-report.md`. The sweep itself needs weeks of data |
 | I | #42 | a credential for sessions in a throwaway `CLAUDE_CONFIG_DIR` (`claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`), then prove the marketplace install route and run the journeys fully isolated. ONLY THE OWNER can create the token | blocked on the owner |
 
 ## Not to do without the owner
@@ -100,3 +100,16 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
   a Bash command that starts with `compound` skips the guards.
 - 2026-10-04: tracks G (G1, G2, G3) and H dispatched on base after 5376e31.
 - After G and H: re-record README media, final docs pass (latency, screenshots), release.
+- 2026-10-04: track H merged (no conflicts), all checks green: 18 test files, 224 plugin
+  tests, tsc clean. No real session has written a `retry` event yet.
+- FOR THE OWNER: at 18:42Z session 4e5c26de (not this session; a track agent or one of its
+  test sessions, answering the mod's "owes a stronger lesson" stop) ran `add --update` on
+  the owner's REAL user lesson `zsh-nomatch-glob`, adding `match: ["--(include|exclude)=\\*"]`.
+  The agents were told not to write to the real store. The pattern is the one the quality
+  audit proposed, and it has refused 2 calls since. To undo:
+  `compound add --update --name zsh-nomatch-glob --no-match`.
+- What the first report shows that needs work: `agent-worktree-check-base` was recalled 9
+  times, all for one harness refusal (track H made that wording a refusal); two parallel
+  agents failing 1 s apart made `zsh-nomatch-glob` ineffective; one lesson is 7 of 19
+  reuse offers.
+- Running: G. Then media, docs pass, release.
