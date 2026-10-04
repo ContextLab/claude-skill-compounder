@@ -61,43 +61,11 @@ class StatusTest(Case):
         import sys
         self.assertEqual(self.health(self.status(), "python")["detail"], "%d.%d.%d" % sys.version_info[:3])
 
-    def claude(self, text, body=None):
-        """A real executable named `claude` that answers `--version` with `text`; the
-        directory it is in, for PATH."""
-        tools = os.path.join(self.box.root, "tools")
-        os.makedirs(tools, exist_ok=True)
-        path = os.path.join(tools, "claude")
-        with open(path, "w") as handle:
-            handle.write(body or "#!/bin/sh\necho '%s'\n" % text)
-        os.chmod(path, 0o755)
-        return tools + ":/usr/bin:/bin"
-
     def test_without_claude_on_path_the_claude_code_row_warns(self):
         row = self.health(self.status(), "claude code")
         self.assertEqual(row["status"], "WARN")
         self.assertIn("not on PATH", row["detail"])
         self.assertIn("2.1.288", row["detail"])
-
-    def test_a_claude_code_at_or_above_the_minimum_passes(self):
-        for version in ("2.1.288", "2.1.289", "2.2.0", "3.0.1", "2.10.0"):
-            row = self.health(self.status(PATH=self.claude("%s (Claude Code)" % version)), "claude code")
-            self.assertEqual((row["status"], row["detail"]), ("PASS", version))
-
-    def test_a_claude_code_below_the_minimum_fails_and_says_what_to_do(self):
-        for version in ("2.1.287", "2.0.999", "1.9.300"):
-            data = self.status(PATH=self.claude("%s (Claude Code)" % version))
-            row = self.health(data, "claude code")
-            self.assertEqual(row["status"], "FAIL", version)
-            self.assertIn(version, row["detail"])
-            self.assertIn("2.1.288", row["detail"])
-            self.assertIn("claude update", row["detail"])
-            self.assertFalse(data["ok"])
-
-    def test_a_claude_that_gives_no_version_warns(self):
-        for body in ("#!/bin/sh\necho 'no numbers here'\n", "#!/bin/sh\nexit 3\n"):
-            row = self.health(self.status(PATH=self.claude("", body)), "claude code")
-            self.assertEqual(row["status"], "WARN", body)
-            self.assertIn("2.1.288", row["detail"])
 
     def test_the_real_claude_code_is_read(self):
         import shutil

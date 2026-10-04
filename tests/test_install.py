@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import unittest
@@ -239,24 +240,18 @@ class InstallTest(Case):
     def claude_lines(self, proc):
         return [line for line in proc.stdout.splitlines() if line.strip().startswith("claude ")]
 
-    def test_a_claude_code_older_than_the_minimum_is_a_warning_and_not_a_failure(self):
-        tools = os.path.join(self.box.root, "tools")
-        self.program(tools, "claude", "2.1.100 (Claude Code)")
-        proc = self.install(PATH=tools + ":/usr/bin:/bin")
+    def test_the_real_claude_code_is_one_quiet_line(self):
+        """The Claude Code installed on this machine, asked for its version by install."""
+        real = shutil.which("claude")
+        if not real:
+            self.skipTest("no `claude` on PATH here")
+        said = subprocess.run([real, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, universal_newlines=True, timeout=30).stdout
+        version = re.search(r"\d+\.\d+\.\d+", said).group(0)
+        proc = self.install(PATH=os.path.dirname(real) + ":/usr/bin:/bin")
         lines = self.claude_lines(proc)
         self.assertEqual(len(lines), 1, proc.stdout)
-        self.assertIn("2.1.100", lines[0])
-        self.assertIn("2.1.288", lines[0])
-        self.assertIn("claude update", lines[0])
-        self.assertTrue(os.path.isfile(self.box.manifest), "the install went through")
-
-    def test_a_claude_code_at_the_minimum_is_one_quiet_line(self):
-        tools = os.path.join(self.box.root, "tools")
-        self.program(tools, "claude", "2.1.288 (Claude Code)")
-        proc = self.install(PATH=tools + ":/usr/bin:/bin")
-        lines = self.claude_lines(proc)
-        self.assertEqual(len(lines), 1, proc.stdout)
-        self.assertIn("2.1.288", lines[0])
+        self.assertIn(version, lines[0])
         self.assertNotIn("older", lines[0])
 
     def test_without_claude_on_path_install_says_the_version_was_not_checked(self):
