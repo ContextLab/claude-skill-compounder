@@ -33,13 +33,22 @@ the blocks and `~/.claude/lessons`.
 
 ## Task list
 
-1. [running] CLI agent: `bin/compound`, `tests/test_*.py`, `install.sh`, `run_tests.sh`, CI.
-2. [running] Mod agent: `.claude-plugin/`, `hooks/`, `skills/learn`, `skills/reuse`, `tests/journeys/`.
-3. Integrate: full suite, `claude plugin validate/test`, journeys.
-4. Red team with cold agents (not forks): CLI, mod, docs-as-a-new-user.
-5. Docs: `README.md`, `docs/`, `.claude/CLAUDE.md`, `CONTRIBUTING.md`, all present tense.
-6. Install on this machine, migrate the notes, verify live in a real session.
-7. Push; update project memory.
+1. [done] CLI: `bin/compound`, `tests/test_*.py`, `install.sh`, `run_tests.sh`, CI.
+2. [done] Mod: `.claude-plugin/`, `hooks/`, `skills/learn`, `skills/reuse`, `tests/journeys/`.
+3. [done] Two cold red-team rounds (CLI, mod, then a new-user pass) and their fixes.
+4. [done] Installed on this machine with `./install.sh`; a live `claude -p` session wrote a
+   `guard` event for `zsh-equals-word` through the installed path.
+5. [done] 99 old notes converted to 77 lessons (32 user, 45 project) with
+   `compound add`; plan and scripts were in the session scratchpad.
+6. [blocked, needs Jeremy] Deleting the old `<!-- skillnote:begin -->` blocks from
+   `~/.claude/CLAUDE.md` and eleven project `.claude/CLAUDE.md` files, and
+   `~/.claude/lessons/`. The permission classifier refused it. Until it is done each
+   lesson exists twice (the old note and the new lesson).
+7. [open] The status entry and toasts have been seen by no one: `claude -p` cannot show
+   them. Check in an interactive session.
+8. [open] The 45 project lessons are untracked files in eleven other repositories;
+   nothing there is committed.
+9. [open] Ubuntu: the suite has only run on macOS; CI runs on the first push.
 
 ## Open question for Jeremy
 
