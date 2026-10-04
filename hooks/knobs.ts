@@ -8,6 +8,7 @@ export type Knobs = {
   recurLimit: number
   model: string
   judgeTimeoutMs: number
+  repeatMin: number
 }
 
 export type RawKnobs = {
@@ -17,6 +18,7 @@ export type RawKnobs = {
   recurLimit?: string
   model?: string
   judgeTimeout?: string
+  repeatMin?: string
 }
 
 // haiku: the cheapest alias, and the fastest. The reuse check holds every substantial
@@ -32,6 +34,9 @@ export const DEFAULTS: Knobs = {
   recurLimit: 2,
   model: DEFAULT_MODEL,
   judgeTimeoutMs: 10000,
+  // How many sessions must have made one kind of request, this one included, before the
+  // reuse check offers to make it a skill. Two would offer at the first repetition.
+  repeatMin: 3,
 }
 
 // A whole number of at most nine digits and at least `min`, or the default.
@@ -56,6 +61,7 @@ export function knobsFrom(raw: RawKnobs): Knobs {
     // Seconds in the environment, milliseconds to the engine. Zero is no timeout at all,
     // which the prompt path cannot afford, so it takes the default.
     judgeTimeoutMs: whole(raw.judgeTimeout, DEFAULTS.judgeTimeoutMs / 1000, 1) * 1000,
+    repeatMin: whole(raw.repeatMin, DEFAULTS.repeatMin, 2),
   }
 }
 

@@ -17,7 +17,8 @@ export type Item = {
 }
 
 export type Hit = { name: string; level: string; path: string; text: string }
-export type Earlier = { id: string; date: string; project: string; session: string; text: string; score: number }
+// `sessions` are the sessions the CLI says asked this very text, the current one left out.
+export type Earlier = { id: string; date: string; project: string; session: string; text: string; score: number; sessions?: string[] }
 export type Event = Record<string, unknown> & { type: string }
 
 function parsed(text: string): unknown {
@@ -128,6 +129,8 @@ export function squeezed(text: string): string {
   return text.split(/\s+/).filter(w => w !== '').join(' ').slice(0, 300)
 }
 
+const SESSIONS_MAX = 20
+
 // `least` is how many of the searched words a prompt must share to be a candidate at all:
 // a row the CLI scored below it is dropped, and a row with no score is kept.
 export function parseEarlier(stdout: string, session: string, mine: readonly string[], most: number, least = 0): Earlier[] | undefined {
@@ -139,13 +142,23 @@ export function parseEarlier(stdout: string, session: string, mine: readonly str
   const out: Earlier[] = []
   for (const r of list) {
     const text = str(r.prompt) || str(r.text)
-    const from = str(r.session) || str(r.session_id)
-    if (text.trim() === '' || (session !== '' && from === session) || own.has(squeezed(text))) continue
+    let from = str(r.session) || str(r.session_id)
+    if (text.trim() === '') continue
+    // The sessions that asked this very text, when the CLI names them: the current one is not an earlier one.
+    const others = Array.isArray(r.sessions) ? r.sessions.filter((s): s is string => typeof s === 'string' && ONE_LINE.test(s) && s !== session).slice(0, SESSIONS_MAX) : undefined
+    if ((session !== '' && from === session) || own.has(squeezed(text))) {
+      // This session's own prompt, unless the CLI says another session asked the same words.
+      if (session === '' || others === undefined || others.length === 0) continue
+      from = others[0] ?? ''
+    }
     if (out.some(e => e.text === text)) continue
     const score = typeof r.score === 'number' ? r.score : -1
     if (score >= 0 && score < least) continue
     const project = str(r.project)
-    out.push({ id: str(r.id), date: (str(r.ts) || str(r.date)).slice(0, 10), project: project.split('/').filter(p => p !== '').pop() ?? '', session: from, text, score: Math.max(0, score) })
+    out.push({
+      id: str(r.id), date: (str(r.ts) || str(r.date)).slice(0, 10), project: project.split('/').filter(p => p !== '').pop() ?? '', session: from, text, score: Math.max(0, score),
+      ...(others === undefined ? {} : { sessions: others }),
+    })
     if (out.length >= most) break
   }
   return out
@@ -153,7 +166,9 @@ export function parseEarlier(stdout: string, session: string, mine: readonly str
 
 // A request the CLI holds a verdict for: what the judge answered the last time this text was
 // asked in this project against this store.
-export type Memo = { verdict: 'named' | 'nothing' | 'not-substantial'; items: string[]; earlier: Earlier[] }
+// `repeats` are the earlier requests of the same kind it named, and `asked` the sessions that
+// have asked this request since the verdict was kept.
+export type Memo = { verdict: 'named' | 'nothing' | 'not-substantial'; items: string[]; earlier: Earlier[]; repeats: Earlier[]; asked: string[] }
 // `compound find --request --json`: the words the prompt log was searched for, the
 // candidates that reached the floor, the candidate earlier requests, the key the verdict is
 // remembered under, and the verdict already remembered, if there is one.
@@ -172,20 +187,47 @@ export function parseFound(stdout: string, session: string, mine: readonly strin
   if (m !== undefined && (verdict === 'named' || verdict === 'nothing' || verdict === 'not-substantial')) {
     const names = Array.isArray(m.items) ? m.items.filter((n): n is string => typeof n === 'string') : []
     // What was remembered is offered again as it was: nothing of it is this session's own prompt.
-    memo = { verdict, items: names, earlier: parseEarlier(JSON.stringify({ prompts: m.prompts ?? [] }), '', [], most) ?? [] }
+    const asked = Array.isArray(m.asked) ? m.asked.filter((s): s is string => typeof s === 'string' && ONE_LINE.test(s)).slice(-SESSIONS_MAX) : []
+    memo = {
+      verdict,
+      items: names,
+      earlier: parseEarlier(JSON.stringify({ prompts: m.prompts ?? [] }), '', [], most) ?? [],
+      repeats: parseEarlier(JSON.stringify({ prompts: m.repeats ?? [] }), '', [], most) ?? [],
+      asked,
+    }
   }
   return { words, items, earlier, key: str(o.memo_key), memo }
 }
 
 // What `compound memo` reads on stdin: the verdict on a request, with the names and the
 // earlier requests it named, as the CLI's own `find` rows.
-export function memoOf(key: string, verdict: Memo['verdict'], items: readonly Item[], earlier: readonly Earlier[]): string {
-  return JSON.stringify({
-    key,
-    verdict,
-    items: items.map(i => i.name),
-    prompts: earlier.map(e => ({ id: e.id, ts: e.date, project: e.project, session: e.session, prompt: e.text })),
-  })
+export function memoOf(key: string, verdict: Memo['verdict'], items: readonly Item[], earlier: readonly Earlier[], repeats: readonly Earlier[] = []): string {
+  const row = (e: Earlier) => ({ id: e.id, ts: e.date, project: e.project, session: e.session, prompt: e.text, ...(e.sessions === undefined ? {} : { sessions: e.sessions }) })
+  return JSON.stringify({ key, verdict, items: items.map(i => i.name), prompts: earlier.map(row), ...(repeats.length === 0 ? {} : { repeats: repeats.map(row) }) })
+}
+
+// `compound use <name> --json`: the skill a `use` event was written for, as the CLI names
+// it, or `used: false` when the name is no skill it counts. undefined when it is neither.
+export type Used = { used: boolean; name: string; level: string }
+
+export function parseUsed(stdout: string): Used | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined || typeof o.used !== 'boolean') return undefined
+  const name = str(o.name)
+  if (!o.used) return { used: false, name: '', level: '' }
+  return ONE_LINE.test(name) ? { used: true, name, level: str(o.level) } : undefined
+}
+
+// HOW OFTEN A KIND OF REQUEST WAS MADE. The sessions that made it: the ones behind each
+// earlier request the judge named as the same kind (`sessions` when the CLI gave them, else
+// the row's own), and the ones the memo saw ask this very request, the current session left
+// out of both; then this one. A row with no session counts for nothing: "across sessions"
+// cannot be said of it.
+export function askedTimes(rows: readonly Earlier[], asked: readonly string[], session: string): number {
+  const seen = new Set<string>()
+  for (const e of rows) for (const s of e.sessions ?? [e.session]) if (s !== '' && s !== session) seen.add(s)
+  for (const s of asked) if (s !== '' && s !== session) seen.add(s)
+  return seen.size === 0 ? 0 : seen.size + 1
 }
 
 // `since` is how many recalls are later than the lesson's last rewrite, and `limit` how many

@@ -20,6 +20,8 @@ export type CompoundNoteKind =
   | 'removed'
   | 'ineffective'
   | 'nudge'
+  | 'used'
+  | 'repeat'
   | 'ready'
   | 'idle'
 // `text` names the thing (the lesson, the items found); `detail` is what else there is room
@@ -52,7 +54,7 @@ export type CompoundBand = {
 }
 
 export type CompoundLevel = { level: string; lessons: number; skills: number; guards: number }
-export type CompoundLesson = { name: string; level: string; guard: boolean; reuse: number; guards: number; recall: number; flag: string }
+export type CompoundLesson = { name: string; level: string; guard: boolean; reuse: number; guards: number; recall: number; use: number; flag: string }
 // One row of what is open: what it is, the command that settles it (and a second one, where
 // there is a second way), and the lesson a press of the row opens.
 export type CompoundOpen = { text: string; command?: string; more?: string; lesson?: string }
@@ -61,7 +63,7 @@ export type CompoundRecent = { at: number; type: string; text: string; tail?: st
 export type CompoundCheck = { check: string; status: string; detail: string }
 // What the log holds of the mod helping, one per event, and the time of its oldest event
 // in seconds (0 when it holds none).
-export type CompoundTotals = { reused: number; guarded: number; recalled: number; recorded: number; since: number }
+export type CompoundTotals = { reused: number; guarded: number; recalled: number; used: number; recorded: number; since: number }
 
 // What the pane shows, as `compound status --json` and `compound events --json` gave it.
 export type CompoundBoard = {
@@ -81,10 +83,10 @@ export type CompoundBoard = {
 
 // One lesson or skill of the all-lessons view, as `compound list --json` gave it. `kind` is
 // `lesson`, `guard` (a lesson that carries a pattern) or `skill`.
-export type CompoundItem = { name: string; level: string; kind: string; reuse: number; guards: number; recall: number; flag: string; description: string }
+export type CompoundItem = { name: string; level: string; kind: string; reuse: number; guards: number; recall: number; use: number; flag: string; description: string }
 // One lesson, as `compound show <name> --json` gave it. `loading` while the CLI is asked,
 // `failed` with `problem` when it could not say. `at` is when it was read, in milliseconds;
-// `last` is the newest reuse, guard or recall that names the lesson, its time in seconds.
+// `last` is the newest reuse, guard, recall or use that names the lesson, its time in seconds.
 export type CompoundDetail = {
   name: string
   state: 'loading' | 'ready' | 'failed'
@@ -98,6 +100,7 @@ export type CompoundDetail = {
   reuse: number
   guards: number
   recall: number
+  use: number
   flag: string
   last: { at: number; type: string } | null
   path: string

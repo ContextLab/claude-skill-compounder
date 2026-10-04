@@ -3,12 +3,12 @@ import { DEFAULTS, DEFAULT_MODEL, isOff, isQuiet, knobsFrom, modelName, whole } 
 
 test('with nothing set every knob is its default', async () => {
   expect(knobsFrom({})).toEqual(DEFAULTS)
-  expect(DEFAULTS).toEqual({ promptMinChars: 80, turnMinCalls: 25, nudgeCooldown: 1800, recurLimit: 2, model: DEFAULT_MODEL, judgeTimeoutMs: 10000 })
+  expect(DEFAULTS).toEqual({ promptMinChars: 80, turnMinCalls: 25, nudgeCooldown: 1800, recurLimit: 2, model: DEFAULT_MODEL, judgeTimeoutMs: 10000, repeatMin: 3 })
 })
 
 test('a well-formed value is taken', async () => {
   const k = knobsFrom({ promptMinChars: '0', turnMinCalls: '3', nudgeCooldown: '0', recurLimit: '5', model: 'sonnet', judgeTimeout: '4' })
-  expect(k).toEqual({ promptMinChars: 0, turnMinCalls: 3, nudgeCooldown: 0, recurLimit: 5, model: 'sonnet', judgeTimeoutMs: 4000 })
+  expect(k).toEqual({ promptMinChars: 0, turnMinCalls: 3, nudgeCooldown: 0, recurLimit: 5, model: 'sonnet', judgeTimeoutMs: 4000, repeatMin: 3 })
 })
 
 test('a value of the wrong shape takes the default, never a guess', async () => {
@@ -43,4 +43,11 @@ test('only the literal 1 turns the band off', async () => {
 test('only the literal 1 switches the mod off', async () => {
   expect(isOff('1')).toBe(true)
   for (const v of [undefined, '', '0', 'true', 'yes', ' 1']) expect(isOff(v)).toBe(false)
+})
+
+test('how many sessions make a request one that keeps coming back: three, never fewer than two', async () => {
+  expect(knobsFrom({}).repeatMin).toBe(3)
+  expect(knobsFrom({ repeatMin: '5' }).repeatMin).toBe(5)
+  expect(knobsFrom({ repeatMin: '2' }).repeatMin).toBe(2)
+  for (const bad of ['1', '0', 'many', '-3', '2.5']) expect(knobsFrom({ repeatMin: bad }).repeatMin).toBe(3)
 })
