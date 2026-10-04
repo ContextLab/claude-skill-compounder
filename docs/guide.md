@@ -49,6 +49,7 @@ Outputs below are real. Paths are shown for a user named `me` working in a proje
 | ineffective | a lesson that was recalled twice since it was last written: the failure keeps coming back |
 | recurring | the same, for a lesson of the general pool: it is counted, and nothing is asked of Claude |
 | not here | a lesson whose platform or shell is not this machine's; it is listed and does nothing |
+| shadowed | a project lesson that carries the name of one of your own lessons or of a general one; it is listed and does nothing |
 | prompt log | a searchable record of the prompts you type, kept by [history-surfer](https://github.com/ContextLab/claude-history-surfer) |
 
 ## Where to type things
@@ -157,7 +158,8 @@ general  skill   reuse               0/0/0              Use when starting a subs
 
 `compound list --scripts` adds the project's scripts. `compound list --level user` shows
 one level. The `FLAG` column says `ineffective`, `recurring`, `not here` (the lesson is
-for another platform or shell) or `disabled` (you switched it off).
+for another platform or shell), `disabled` (you switched it off) or `shadowed` (a project
+lesson with the name of a user or general lesson, which is the one in force).
 
 Read one lesson:
 

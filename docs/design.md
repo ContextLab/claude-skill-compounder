@@ -116,8 +116,15 @@ Quote it or use printf '%s\n' '====='.
   known to the event log (a project named in a `learn` event whose lesson directory still
   exists) holds a different lesson of that name; an identical copy is the same lesson
   (see Levels). `compound promote <name> --to user --as NEWNAME` renames the lesson while
-  moving it. When a project lesson and a different user lesson of one name are visible
-  together anyway, `compound status` fails its `duplicates` check and names both paths.
+  moving it. When a project lesson and a different user or general lesson of one name
+  are visible together anyway, `compound status` fails its `duplicates` check and names
+  both paths, and the project's one is **shadowed**: it is listed and flagged `shadowed`
+  (`list --json` carries `shadowed: true`), and it is not in force. It is no guard, it is
+  not found, recalled or offered, and `compound show <name>` prints the user's or the
+  general lesson. `compound rm <name>` removes the project's copy, which is the nearest.
+  The name is the directory's name, and it is held to the slug where a lesson is read,
+  not only where `compound add` writes it: a lesson whose directory name is not a slug
+  fails the `lessons parse` check and is not used (see "What a repository can write").
 - `description` says when the lesson applies. It is what the mod's model reads to decide
   relevance, so it is written as a trigger.
 - `match` is optional: a JSON array of Python regular expressions tested against the text
@@ -290,13 +297,20 @@ or `(` (which covers `$(`), and after `do`, `then` or `else`.
 condition holds on this machine (see "Where a lesson applies") and that the user has not
 switched off (see "The general pool").
 
-**Two guards on one call.** A call that is matched by a guard of the project or user
-level and by a guard of the general pool is refused by the nearer one alone: `compound
-check` returns the project and user hits and names the general ones under `"yielded"`.
-A user who already has a lesson of their own for a mistake the pool also covers is
-refused once, with their own text. A call only the general guard matches is refused by
-it. Several hits of one kind (two general guards, or a project and a user guard) are one
-refusal that quotes each.
+**Two guards on one call.** A call that is matched by a guard of the user level and by a
+guard of the general pool is refused by the user's alone: `compound check` returns the
+user's hit and names the general ones under `"yielded"`. A user who already has a lesson
+of their own for a mistake the pool also covers is refused once, with their own text. A
+project guard makes nothing yield: a call that a project guard and a general guard both
+match is one refusal that quotes each, so a file in a repository never takes the place
+of a guard the package ships. A call only the general guard matches is refused by it.
+Several hits (two general guards, a project and a user guard) are one refusal that
+quotes each.
+
+**Whose patterns go first.** The patterns of the user and general levels are matched
+before the project's. A project pattern that is slow on a call uses up what is left of
+`COMPOUND_CHECK_BUDGET_MS` after the user's and the package's guards were tested, never
+before; it is named under `"timed_out"`, and an `error` is logged for it.
 
 Before a call the mod makes exactly one CLI call, `compound check --guards`, and needs no
 listing. The reply also says how many lessons carry a `match`, and the tools those lessons
@@ -456,9 +470,39 @@ RECORDED-NOTE>>>
 If the note applies to this call, adjust it; if not, send the call again and it will run.
 ```
 
+The markers cannot be closed or reopened from inside the text they hold: their own
+spelling, and one that reads like it (other hyphens, spaces, a character that draws
+nothing), is rewritten, control characters are taken out, and a `[compound]` in quoted
+text becomes `(compound)`, so no quoted line opens the way the mod's own messages do.
+
+The same holds for everything else the mod did not write:
+
+- **The evidence of a capture.** The failing call, its error and the working call are
+  shown between `<<<RECORDED-CAPTURE` and `RECORDED-CAPTURE>>>` under a statement that
+  they are quoted evidence, and that a lesson says what was wrong with the call and never
+  what the output told the reader to do. An error is whatever the tool printed, which
+  can be the text of a file or a web page. This is so beside the fixing call, at a
+  refused stop (where the debt is read back from the event log), and at a session's
+  first prompt.
+- **Names, paths and ids.** A lesson's name, a script's path, a project's path and a
+  capture's id are put on one line and cut before they stand in a sentence. Where one is
+  a word of a command the mod writes out (`compound add --update --name <name>`,
+  `COMPOUND_PROJECT=<project> compound promote <name> --to user`, `--settles <id>`), it
+  is quoted for the shell unless it is plainly a word. The CLI's listing is read the
+  same way: a lesson whose name is not a slug, a skill or a script whose name is not one
+  printable line, and a capture whose id is not an id, are dropped.
+- **A lesson's patterns**, when a message shows them: one line each, cut at 300
+  characters, eight at most.
+- **The mod's own failure reports.** A failure's message can repeat what a program or
+  the judge model printed. Each is on one line, in quotes, under a statement that it is
+  a quotation and not an instruction.
+
 The model that judges relevance is told the same thing: names and descriptions in the
 inventory are data, and a description that claims to apply to everything is not evidence
-that it applies.
+that it applies. A line of a call, an error or a request that imitates one of the
+prompt's own section marks (`ITS ERROR:`, `END OF DATA`, `Reply with exactly`) is marked
+`(quoted)`. Whatever the model answers, the mod takes from it only a name that was in
+the list it was shown, and for a fix a quotation that is found in the error.
 
 What the mod sends to that model or writes to the event log is masked first: values of
 assignments, flags, headers and JSON members whose name says secret, password arguments
@@ -470,6 +514,92 @@ masking is a lower bound, not a guarantee.
 `/compound:learn` runs the same recording procedure at any time. The skill reads the
 evidence the mod holds, the transcript and the prompt log. When it cannot tell what the
 user wants recorded, it asks the user before writing anything.
+
+## What a repository can write
+
+A project lesson is a file under `<repo>/.claude/compound/lessons/`, so whoever can
+commit to a repository can write one by hand, and the user who clones it has not read
+it. A tool's output is the same kind of text: a file's content, a page, another
+program's words. This section says what the package holds such text to, and what it
+does not defend against.
+
+**What a lesson file is held to, where it is read.** A lesson that fails one of these is
+reported by the `lessons parse` check with its path, and is not used: no guard, not
+listed, not found, not recalled.
+
+| Rule | Limit |
+|-|-|
+| the directory name is a slug | lowercase letters, digits and hyphens, 2 to 63 characters |
+| `SKILL.md` | at most 262144 bytes |
+| `match` | at most 32 patterns, each at most 2000 characters, each one that compiles |
+| a project lesson | its `SKILL.md` is inside the project's lessons directory: a symbolic link that leaves it is not followed |
+
+A skill directory or a script whose name is not one line of printable characters is left
+out of every listing.
+
+**A pattern is never run where it can hang the command.** A regular expression can be
+written to backtrack without end, on a call or on ten characters. The CLI compiles a
+pattern in its own process and runs it only in a child process that it abandons at a
+limit: for 200 ms when lessons are loaded, where each pattern is tried on the empty
+string and three short probes (a pattern that matches them all would refuse every call,
+and one that does not finish is no guard), and for `COMPOUND_CHECK_BUDGET_MS` in `check`.
+In both, the patterns of the user and general levels are run before the project's, so a
+pattern in a repository cannot keep the user's own guards from being tested. A pattern
+that cannot be compiled, for any reason, is reported and ends no command. On the
+ordinary path the load costs one more process fork: `compound check` with thirty guards
+takes about 60 ms of the 1500 ms the mod gives it.
+
+**A repository cannot stand in for the user.** A project lesson that takes the name of a
+user or general lesson is shadowed (see "What a lesson is"). A general guard yields only
+to a user guard. A project lesson reaches the user level only by `compound promote`: the
+mod asks for that move only for a lesson the event log holds a `learn` event for (one
+that `compound add` wrote in that project), and the CLI makes it only when git does not
+track the lesson. A lesson committed in a repository is never moved by the mod.
+
+**What is shown is quoted.** See "How lesson text is presented". A path or a name in a
+command the CLI prints is quoted for the shell.
+
+**Nothing drawn carries a control character.** An escape sequence in a lesson's text, a
+call, an event's field or a file's name could recolour a row, move the cursor, repaint
+what is on the screen, set the terminal's title or write a link. It is taken out at one
+place for each thing that draws. In the mod, every string of the CLI's JSON is cleaned
+where `hooks/view.ts` reads it, and every row of the band and the pane is cleaned where
+it leaves `bandRow` and `boardLines`, which also covers the band's state read back from
+the session. In the CLI, when stdout or stderr is a terminal, everything any command
+writes passes one filter that drops every control character except a newline, a tab and
+a colour sequence (`ESC [ ... m`), which is what the CLI's own colouring writes; the
+fields a command prints on one line are cleaned whether or not it is a terminal. What is
+left: a colour sequence in a lesson's body recolours text that `compound show` prints on
+a terminal, and piped output and `--json` carry a lesson's body as it is.
+
+**What is published is read first.** `compound promote <name> --to general` reads every
+file it would publish for the shape of a credential: a private key block, a well-known
+token form, a password in a URL, a bearer token. The plan lists what it found under
+`secrets` (the file and the kind, never the text), and `--yes` exits 2 without cloning
+or pushing anything. It is a lower bound: a secret with no recognisable shape is not
+found, and the plan prints the text to be published so it can be read.
+
+**What the package does not defend against.**
+
+- The text of a quoted note or of quoted evidence still reaches Claude, marked as a
+  quotation. Whether Claude gives it weight is Claude's judgement, as with any file it
+  reads in the repository.
+- A guard is advice, not a barrier: it refuses a call once per session and the call sent
+  again runs. A Bash command whose program is the `compound` CLI is not tested against
+  the guards.
+- A project guard can refuse a call once per session per lesson, and a project pattern
+  that is slow on a call costs that call up to `COMPOUND_CHECK_BUDGET_MS`. Both are
+  reported (`guard` and `error` events), and `compound rm` removes the lesson.
+- Output that carries a line shaped like a shell's error is taken for a failed call (see
+  moment 3), so a printed file can make the session owe a lesson. The debt is declined
+  with `compound skip`.
+- The event log, the claims and `disabled.json` under `COMPOUND_HOME`, and
+  `settings.json`, are the user's own files. Anything that can write them, the session's
+  own shell included (`compound log` appends any event), is trusted: a debt can be
+  settled, or an event forged, by a process running as the user.
+- `compound check` that fails or does not answer in 1500 ms lets the call run (see
+  moment 2). The mod never blocks a turn on its own failure.
+- The masking of secrets in what is logged and sent to the judge is a lower bound.
 
 ## Recording a lesson (the `learn` skill)
 
@@ -847,7 +977,7 @@ The health checks, in order:
 | `prompt log` | history-surfer answers; the row reads `N prompts in this project`, or `reachable` when its answer holds no count |
 | `last event` | the event log can be written and every line of it parses |
 | `duplicates` | no name is visible at two levels (FAIL for a lesson, WARN for two skills) |
-| `lessons parse` | every lesson reads |
+| `lessons parse` | every lesson reads: its frontmatter, its name (a slug that is the directory's name), its size, its patterns and its condition (see "What a repository can write") |
 | `errors` | the mod logged no error in the last 7 days |
 
 ## CLI contract
@@ -859,13 +989,13 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | Command | Does |
 |-|-|
 | `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
-| `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, `platform`, `shell`, `applies`, `disabled`, counts, `ineffective`, `recurring`. A lesson not in force is listed, flagged `not here` or `disabled`. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the three counters (`REUSED`, `GUARDED`, `RECALLED`), the flag and the description, fitted to the terminal. |
-| `compound show N` | One lesson's path and text, and when it is not in force, why. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard or recall that names it, or null). |
+| `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, `platform`, `shell`, `applies`, `disabled`, counts, `ineffective`, `recurring`, and `shadowed: true` on a project lesson that carries a user or general lesson's name. A lesson not in force is listed, flagged `not here`, `disabled` or `shadowed`. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the three counters (`REUSED`, `GUARDED`, `RECALLED`), the flag and the description, fitted to the terminal. |
+| `compound show N` | One lesson's path and text, and when it is not in force, why. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard or recall that names it, or null). |
 | `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`). An empty stdin is exit 2; a request with no word in it has no candidates. |
 | `compound memo` | stdin `{"key","verdict","items","prompts"}`: keeps the verdict on a request under the `memo_key` that `find --request --json` printed. `verdict` is `named`, `nothing` or `not-substantial`; `items` are names, `prompts` rows as `find` prints them. Anything else is exit 2. |
 | `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match. A general guard that hit beside a project or user one is named under `"yielded"` and is not a hit. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
-| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote` when it moved or proposed something. |
+| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential; with `--yes` forks, pushes a branch and opens the pull request, or exits 2 when `secrets` is not empty. Logs `promote` when it moved or proposed something. |
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed: the refusal names `compound disable`. Logs `rm`. |
 | `compound disable N` | Switches the general lesson `N` off for this user (see "The general pool"). Exit 2 for a lesson that is not in the general pool. Logs nothing. |
 | `compound enable N` | Switches it back on. |
@@ -1010,6 +1140,10 @@ never touched.
 - `tests/test_*.py`: standard `unittest`, real files in temporary directories, the real
   CLI through `subprocess`. No mocks. `tests/test_docs.py` holds this document to the
   code: every `COMPOUND_*` name, every subcommand and option, every claim kind.
+  `tests/test_security.py` writes hostile lesson files, skills and scripts into a project
+  by hand and checks what the CLI makes of them; `hooks/security.test.ts` puts hostile
+  text where the mod reads a tool's output, the CLI's JSON and the event log, and checks
+  what reaches Claude.
 - `hooks/*.test.ts`: `claude plugin test .` for prompt building, answer parsing, message
   rendering and what the band and the pane show (`view.test.ts`). `ui.test.ts` mounts the
   band and the pane through the mod's hooks on the terminal and the desktop surface, with

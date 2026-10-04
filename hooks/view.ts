@@ -2,7 +2,7 @@ import type {
   CompoundBand, CompoundBoard, CompoundBusyKind, CompoundCheck, CompoundDetail, CompoundItem, CompoundLesson, CompoundLevel, CompoundNoteKind, CompoundOpen, CompoundPane,
   CompoundPaneView, CompoundRecent, CompoundStep, CompoundTotals,
 } from '../types'
-import { oneLine } from './safe'
+import { drawn, oneLine, plain } from './safe'
 
 // What the band above the prompt and the `/compound` pane show. Pure: values in, values
 // out, no `$`. ./register keeps the band's state and the pane's data in `$.state`, changes
@@ -297,6 +297,16 @@ export function phaseKey(band: CompoundBand | null | undefined, now: number): st
 // (`a: all lessons`), which is three cells more.
 export type Seg = { text: string; color?: string; dim?: boolean; bold?: boolean; inverse?: boolean; key?: string; hotkey?: string }
 
+// NOTHING THAT IS DRAWN CARRIES A CONTROL CHARACTER. A name, a call, a path or a lesson's
+// text comes from a lesson file, a tool's output or the event log, and an escape sequence
+// in it would recolour the row, move the cursor, set the terminal's title or write a link.
+// It is taken out in two places, and every string passes both: where the CLI's JSON is
+// read (`str`), and where a row leaves this file (`bandRow`, `boardLines`), which also
+// covers the band's own state, kept in `$.state` and read back.
+function clean(segs: readonly Seg[]): Seg[] {
+  return segs.map(seg => ({ ...seg, text: drawn(seg.text) }))
+}
+
 export function width(segs: readonly Seg[]): number {
   return segs.reduce((n, s) => n + [...s.text].length + (s.hotkey === undefined ? 0 : 3), 0)
 }
@@ -363,6 +373,10 @@ function badges(band: CompoundBand, main: Main, tracked: boolean): Seg[] {
 // The band's one row, as segments that together are at most `columns` cells wide. Empty
 // when there is nothing to show: the hook then draws nothing.
 export function bandRow(band: CompoundBand | null | undefined, now: number, columns: number): Seg[] {
+  return clean(bandSegs(band, now, columns))
+}
+
+function bandSegs(band: CompoundBand | null | undefined, now: number, columns: number): Seg[] {
   if (band === null || band === undefined || columns < 12) return []
   const main = mainOf(band, now)
   const phase = trackPhase(band, now)
@@ -438,8 +452,10 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
 }
 
+// A string of the CLI's JSON, as it may be shown: see `clean`. A newline stays, for text
+// that is laid out over several lines.
 function str(value: unknown): string {
-  return typeof value === 'string' ? value : typeof value === 'number' ? String(value) : ''
+  return typeof value === 'string' ? plain(value) : typeof value === 'number' ? String(value) : ''
 }
 
 function num(value: unknown): number {
@@ -745,6 +761,10 @@ function totalLines(totals: CompoundTotals, now: number, columns: number): Line[
 // levels, the lessons most used and the recent events. `events` is how many timeline rows
 // there is room for. Only a name or free text (a call, a path, a reason) is ever cut.
 export function boardLines(board: CompoundBoard | null | undefined, columns: number, events = 8): Line[] {
+  return boardRows(board, columns, events).map(clean)
+}
+
+function boardRows(board: CompoundBoard | null | undefined, columns: number, events: number): Line[] {
   if (board === null || board === undefined) return [[{ text: 'Reading the store…', dim: true }]]
   if (board.problem !== '') return [[{ text: `${ERROR.glyph} `, color: ERROR.color }, { text: board.problem }]].map(l => fit(l, columns))
   const out: Line[] = []
@@ -1044,8 +1064,8 @@ export function detailFrom(shown: string, now: number): CompoundDetail | undefin
 
 // A line of a lesson as the pane may draw it: a tab is two cells, and no control character
 // reaches the terminal.
-function clean(line: string): string {
-  return line.replace(/\t/g, '  ').replace(/[\u0000-\u001f\u007f]/g, '')
+function cleanLine(line: string): string {
+  return drawn(line.replace(/\t/g, '  ').replace(/[\u0000-\u001f\u007f-\u009f]/g, ''))
 }
 
 // One lesson: its name, level and kind, its counters and when it last fired, its guard
@@ -1075,9 +1095,9 @@ export function detailLines(detail: CompoundDetail | null | undefined, columns: 
   ]
   if (detail.match.length > 0) {
     out.push([{ text: detail.match.length === 1 ? 'guard pattern' : 'guard patterns', dim: true }])
-    for (const pattern of detail.match) out.push(...wrapped(clean(pattern), columns, '  ', { color: NOTES.guard.color }))
+    for (const pattern of detail.match) out.push(...wrapped(cleanLine(pattern), columns, '  ', { color: NOTES.guard.color }))
   }
-  if (detail.files.length > 0) out.push(...wrapped(`attached: ${detail.files.map(clean).join(', ')}`, columns, '', { dim: true }))
+  if (detail.files.length > 0) out.push(...wrapped(`attached: ${detail.files.map(cleanLine).join(', ')}`, columns, '', { dim: true }))
   if (detail.path !== '') out.push(...wrapped(detail.path, columns, '', { dim: true }))
   if (detail.description !== '') out.push([], ...wrapped(detail.description, columns))
   out.push([])
@@ -1085,7 +1105,7 @@ export function detailLines(detail: CompoundDetail | null | undefined, columns: 
   while (lines.length > 0 && (lines[lines.length - 1] ?? '').trim() === '') lines.pop()
   if (lines.length === 0) out.push([{ text: '(no text)', dim: true }])
   for (const raw of lines.slice(0, BODY_LINES)) {
-    const line = clean(raw).trimEnd()
+    const line = cleanLine(raw).trimEnd()
     if (line === '') out.push([])
     else if ([...line].length <= columns) out.push([{ text: line }])
     else {

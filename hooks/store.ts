@@ -48,6 +48,19 @@ function rows(value: unknown, keys: readonly string[]): Record<string, unknown>[
   return list.map(record).filter((r): r is Record<string, unknown> => r !== undefined)
 }
 
+// WHAT THE CLI PRINTS IS READ AS DATA, AND HELD TO A SHAPE HERE. A lesson's name goes into
+// commands the mod tells Claude to run, so it is a slug or the row is dropped; the name of a
+// skill or a script, and the id of a capture, are one line of printable characters. The CLI
+// holds lesson files to the same rule when it loads them; this is the second lock, for a
+// CLI that is older than the mod or is not this package's.
+const SLUG = /^[a-z0-9][a-z0-9-]{1,62}$/
+const ONE_LINE = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]{1,200}$/
+const CAPTURE_ID = /^[A-Za-z0-9._-]{1,64}$/
+
+export function slug(name: string): boolean {
+  return SLUG.test(name)
+}
+
 function kindOf(value: unknown): Kind | undefined {
   return value === 'lesson' || value === 'skill' || value === 'script' ? value : undefined
 }
@@ -56,10 +69,12 @@ function itemOf(r: Record<string, unknown>): Item | undefined {
   const kind = kindOf(r.kind)
   const name = str(r.name)
   if (kind === undefined || name === '') return undefined
+  if (kind === 'lesson' ? !SLUG.test(name) : !ONE_LINE.test(name)) return undefined
   // The CLI lists every lesson and says which are in force. One whose platform or shell is
   // not this machine's (`applies: false`), or that the user switched off (`disabled: true`),
   // is neither offered for reuse nor recalled.
-  if (r.applies === false || r.disabled === true) return undefined
+  // So is a project lesson that carries the name of a user or general one (`shadowed`).
+  if (r.applies === false || r.disabled === true || r.shadowed === true) return undefined
   const match = Array.isArray(r.match) ? r.match.filter((m): m is string => typeof m === 'string') : []
   const project = str(r.project)
   return { kind, name, level: str(r.level), description: str(r.description), path: str(r.path), match, ...(project === '' ? {} : { project }) }
@@ -101,7 +116,7 @@ export function parseHits(stdout: string): Hit[] | undefined {
   if (o === undefined || !Array.isArray(o.hits)) return undefined
   return o.hits
     .map(record)
-    .filter((r): r is Record<string, unknown> => r !== undefined && str(r.name) !== '')
+    .filter((r): r is Record<string, unknown> => r !== undefined && ONE_LINE.test(str(r.name)))
     .map(r => ({ name: str(r.name), level: str(r.level), path: str(r.path), text: str(r.text) }))
 }
 
@@ -261,7 +276,7 @@ export function parseOwed(stdout: string): Owed | undefined {
     const name = str(e.lesson)
     if (e.type === 'capture') {
       out.debts.push({ id: str(e.id), key: str(e.call) || str(e.ts), tool: str(e.tool), failed: str(e.failed), error: str(e.error), fixed: str(e.fixed) })
-    } else if (e.type === 'recall' && name !== '') {
+    } else if (e.type === 'recall' && ONE_LINE.test(name)) {
       out.weak = [...out.weak.filter(s => s.name !== name), { name, guard: e.guard === true, call: str(e.call) }]
     } else continue
     const at = seconds(e)
@@ -322,7 +337,8 @@ export function parseUnsettled(stdout: string, session: string, now: number): Un
   const out: Unsettled[] = []
   for (const e of events) {
     const id = str(e.id)
-    if (e.type !== 'capture' || id === '' || (session !== '' && str(e.session) === session)) continue
+    // The id is written into the commands that settle the capture: one that is not an id is not shown.
+    if (e.type !== 'capture' || !CAPTURE_ID.test(id) || (session !== '' && str(e.session) === session)) continue
     out.push({ id, age: ageText(now - seconds(e)), failed: str(e.failed), error: str(e.error), fixed: str(e.fixed) })
   }
   return out

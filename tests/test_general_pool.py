@@ -359,11 +359,13 @@ class SameSubjectTest(PoolCase):
         self.assertEqual(reply["yielded"], ["zsh-equals-not-found"])
         self.assertEqual(reply["guards"], 2)
 
-    def test_a_project_guard_wins_too(self):
+    def test_a_project_guard_does_not_silence_the_general_one(self):
+        """A project lesson is a file in a repository, which anyone who can commit to it can
+        write: it never takes the place of a guard the package ships. Both are quoted."""
         self.box.add("local-equals", "Use when here.", "Project text.\n", "--match", ECHO)
         reply = self.check("echo =====")
-        self.assertEqual([hit["level"] for hit in reply["hits"]], ["project"])
-        self.assertEqual(reply["yielded"], ["zsh-equals-not-found"])
+        self.assertEqual([hit["level"] for hit in reply["hits"]], ["project", "general"])
+        self.assertNotIn("yielded", reply)
 
     def test_the_general_guard_still_refuses_a_call_the_users_pattern_misses(self):
         self.box.add("zsh-equals-word", "Use when mine.", "My text.\n", "--level", "user", "--match", ANCHOR + r"echo\s+={4,}")

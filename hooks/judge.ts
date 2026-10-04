@@ -26,6 +26,16 @@ export type FixAnswer =
   | { verdict: 'KNOWN'; lesson: Item }
   | { verdict: 'NONE'; reason: string }
 
+// The prompts below mark their sections with a few fixed lines. A call, an error or a
+// request is text from anywhere (a file a command printed, a web page), and a line of it
+// that imitates one of those marks could end the data early and start "instructions". Such
+// a line is marked as quoted, so the only section marks in a prompt are the prompt's own.
+const SECTION = /^([ \t]*)(END OF DATA|REQUEST:|FAILED CALL:|ITS ERROR:|LATER SUCCESSFUL CALL:|Recorded lessons,|Inventory,|Earlier requests,|Reply with exactly)/gim
+
+export function asData(text: string): string {
+  return text.replace(SECTION, '$1(quoted) $2')
+}
+
 function line(item: Item): string {
   const what = redact(item.description).replace(/\s+/g, ' ').trim()
   return `${item.name} [${item.kind}, ${item.level}]: ${what.length > DESCRIPTION ? `${what.slice(0, DESCRIPTION)}…` : what}`
@@ -107,7 +117,7 @@ export function reusePrompt(request: string, items: readonly Item[], earlier: re
     listedEarlier(earlier),
     '',
     'REQUEST:',
-    excerpt(request, PROMPT_HEAD, PROMPT_TAIL),
+    asData(excerpt(request, PROMPT_HEAD, PROMPT_TAIL)),
     '',
     'END OF DATA',
     '',
@@ -130,10 +140,10 @@ export function recallPrompt(failed: string, error: string, lessons: readonly It
     listed(lessons),
     '',
     'FAILED CALL:',
-    excerpt(failed, CALL_HEAD, CALL_TAIL),
+    asData(excerpt(failed, CALL_HEAD, CALL_TAIL)),
     '',
     'ITS ERROR:',
-    excerpt(error, ERROR_HEAD, ERROR_TAIL),
+    asData(excerpt(error, ERROR_HEAD, ERROR_TAIL)),
     '',
     'Reply with exactly one line of JSON and nothing else: {"name":"<exact lesson name>"} or {"name":null}',
     '',
@@ -166,13 +176,13 @@ export function fixPrompt(pair: Pair, lessons: readonly Item[]): string {
     listed(lessons),
     '',
     'FAILED CALL:',
-    excerpt(pair.failed, CALL_HEAD, CALL_TAIL),
+    asData(excerpt(pair.failed, CALL_HEAD, CALL_TAIL)),
     '',
     'ITS ERROR:',
-    excerpt(pair.error, ERROR_HEAD, ERROR_TAIL),
+    asData(excerpt(pair.error, ERROR_HEAD, ERROR_TAIL)),
     '',
     'LATER SUCCESSFUL CALL:',
-    excerpt(pair.worked, CALL_HEAD, CALL_TAIL),
+    asData(excerpt(pair.worked, CALL_HEAD, CALL_TAIL)),
     '',
     'Reply with exactly one line of JSON and nothing else:',
     '{"same_goal":true|false,"call_mistake":true|false,"evidence":"<exact quote from ITS ERROR, or empty>","recurs":true|false,"verdict":"FIX"|"KNOWN"|"NONE","name":"<recorded lesson name, for KNOWN>","reason":"<for NONE, a few words>"}',
