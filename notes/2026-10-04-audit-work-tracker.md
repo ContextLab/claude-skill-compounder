@@ -134,3 +134,9 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
   `verify-assumptions-first`; `find --request` at 500-690 ms; parallel agents can make a
   lesson ineffective; `measure_reuse.py` offers `brew-doctor-exit` for the LaTeX prompt;
   the effectiveness sweep once there are weeks of data (`compound report`).
+- 2026-10-04: the owner approved the guard on `zsh-nomatch-glob`; `--shell zsh` added to it.
+- 2026-10-04: a bug-fix agent is running on base 753b8e0: the dropped held failure, the fix
+  judge rejecting the README's example, the blank band. Notes will be `2026-10-05-learn-loop-fixes.md`.
+- 2026-10-04: the open decisions were settled with codex: `2026-10-04-decisions.md`. To
+  implement after the bug-fix agent merges (track J): D1, D5, D6, D7, D8, the promote scan,
+  the settlement scope, recurrence by level and path. Then release v0.5.1.
