@@ -234,12 +234,14 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('classic.Stop', () => ({}) as never)
   on('prompt.submit', (_$, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
   // What the engine would draw where the mod draws nothing.
-  for (const component of ['AbovePrompt', 'Pane'] as const) {
-    on('ui.render', { component }, ($, e) => {
-      const { Text } = $.ui.resolve(e)
-      return h(Text, null, 'beneath') as never
-    })
-  }
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, null, 'beneath') as never
+  })
+  on('ui.render', { component: 'Pane' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return h(Text, null, 'beneath') as never
+  })
   return w
 }
 
