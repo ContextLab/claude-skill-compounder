@@ -56,6 +56,10 @@ function itemOf(r: Record<string, unknown>): Item | undefined {
   const kind = kindOf(r.kind)
   const name = str(r.name)
   if (kind === undefined || name === '') return undefined
+  // The CLI lists every lesson and says which are in force. One whose platform or shell is
+  // not this machine's (`applies: false`), or that the user switched off (`disabled: true`),
+  // is neither offered for reuse nor recalled.
+  if (r.applies === false || r.disabled === true) return undefined
   const match = Array.isArray(r.match) ? r.match.filter((m): m is string => typeof m === 'string') : []
   const project = str(r.project)
   return { kind, name, level: str(r.level), description: str(r.description), path: str(r.path), match, ...(project === '' ? {} : { project }) }

@@ -40,7 +40,7 @@ class StatusTest(Case):
         data = self.status()
         for key in ("ok", "health", "store", "lessons", "recent", "open"):
             self.assertIn(key, data)
-        self.assertEqual(sorted(data["open"]), ["candidates", "errors", "ineffective", "skips", "unsettled"])
+        self.assertEqual(sorted(data["open"]), ["candidates", "errors", "ineffective", "recurring", "skips", "unsettled"])
 
     def test_a_fresh_sandbox_warns_and_does_not_fail(self):
         data = self.status()

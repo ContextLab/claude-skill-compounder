@@ -883,7 +883,11 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   const afterGuard = read?.guarded === true
   // A lesson left in another project is that project's to rewrite: this session is not
   // asked to strengthen it, and owes nothing for it.
-  const ineffective = asProject === undefined && !afterGuard && (read?.since === undefined ? count >= k.recurLimit : read.since + 1 >= (read.limit ?? k.recurLimit))
+  // A lesson of the general pool ships with the package and is not rewritten in place, so a
+  // session could not pay that debt: its recurrences are counted, `compound status` says
+  // what a user can do about them, and nothing is owed.
+  const shipped = (read?.level || lesson.level) === 'general'
+  const ineffective = asProject === undefined && !afterGuard && !shipped && (read?.since === undefined ? count >= k.recurLimit : read.since + 1 >= (read.limit ?? k.recurLimit))
   await log($, {
     type: 'recall',
     lesson: lesson.name,

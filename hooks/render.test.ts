@@ -111,7 +111,7 @@ test('the CLI\'s own calls are recognised by verb, and only some change the stor
   for (const other of ['docker compound up', 'echo compound interest add', 'ls bin/compound', 'compounding add', './build.sh --profile dev']) {
     expect(cliCall(other)).toBe(undefined)
   }
-  for (const v of ['add', 'promote', 'skill', 'rm', 'update']) expect(changesStore(v)).toBe(true)
+  for (const v of ['add', 'promote', 'skill', 'rm', 'update', 'disable', 'enable']) expect(changesStore(v)).toBe(true)
   for (const v of ['skip', 'find', 'list', 'status', undefined]) expect(changesStore(v)).toBe(false)
 })
 

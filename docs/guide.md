@@ -15,6 +15,7 @@ Contents:
 - [Record a lesson yourself](#record-a-lesson-yourself)
 - [Find and read what is recorded](#find-and-read-what-is-recorded)
 - [The four forms of a lesson](#the-four-forms-of-a-lesson)
+- [A lesson for one platform or shell](#a-lesson-for-one-platform-or-shell)
 - [Change a lesson](#change-a-lesson)
 - [Turn a lesson into a skill](#turn-a-lesson-into-a-skill)
 - [Move a lesson up a level](#move-a-lesson-up-a-level)
@@ -24,6 +25,7 @@ Contents:
 - [Strengthen an ineffective lesson](#strengthen-an-ineffective-lesson)
 - [Fix a guard that stops the wrong calls](#fix-a-guard-that-stops-the-wrong-calls)
 - [Remove a lesson](#remove-a-lesson)
+- [Switch off a lesson that ships with compound](#switch-off-a-lesson-that-ships-with-compound)
 - [Share lessons with your team](#share-lessons-with-your-team)
 - [Switch compound off, or make it quiet](#switch-compound-off-or-make-it-quiet)
 - [Read `compound status`](#read-compound-status)
@@ -45,6 +47,8 @@ Outputs below are real. Paths are shown for a user named `me` working in a proje
 | general pool | the lessons and skills that ship inside the compound package |
 | owed | a session owes a lesson when a fix was found and the lesson is not yet recorded or declined |
 | ineffective | a lesson that was recalled twice since it was last written: the failure keeps coming back |
+| recurring | the same, for a lesson of the general pool: it is counted, and nothing is asked of Claude |
+| not here | a lesson whose platform or shell is not this machine's; it is listed and does nothing |
 | prompt log | a searchable record of the prompts you type, kept by [history-surfer](https://github.com/ContextLab/claude-history-surfer) |
 
 ## Where to type things
@@ -136,12 +140,19 @@ compound list
 LEVEL    KIND    NAME                USE/GRD/RCL  FLAG  WHEN
 project  lesson  python3-no-tomllib-use-tomli  0/0/0              Use when reading a TOML file with Python older than 3.11.
 user     guard   zsh-equals-word     0/0/0              Use when a zsh command line has a bare word starting with "=".
+general  guard   macos-gnu-only-commands    0/0/0              Use when a command fails on macOS with "command not found: timeout", "
+general  lesson  pip-externally-managed     0/0/0              Use when pip install fails with "error: externally-managed-environment
+general  guard   sed-in-place-bsd           0/0/0              Use when sed -i fails on macOS or BSD with an error that quotes the fi
+general  guard   zsh-equals-not-found       0/0/0              Use when a command fails in zsh with "==== not found" or "=word not fo
+general  lesson  zsh-no-matches-found       0/0/0              Use when a command fails in zsh with "no matches found:" (an unquoted
+general  guard   zsh-status-path-variables  0/0/0              Use when a command fails in zsh with "read-only variable: status", or
 general  skill   learn               0/0/0              Use when a "[compound]" message says the session owes a lesson, says a
 general  skill   reuse               0/0/0              Use when starting a substantial task (building a script, tool, skill,
 ```
 
 `compound list --scripts` adds the project's scripts. `compound list --level user` shows
-one level.
+one level. The `FLAG` column says `ineffective`, `recurring`, `not here` (the lesson is
+for another platform or shell) or `disabled` (you switched it off).
 
 Read one lesson:
 
@@ -207,6 +218,46 @@ that tool's input and not against Bash commands unless `--tool Bash` is given to
 compound add --name no-env-edit --when "Use when editing a .env file." \
   --match '"file_path": "[^"]*\.env"' --tool Edit --tool Write --body "Never edit .env; change .env.example."
 ```
+
+## A lesson for one platform or shell
+
+A lesson about a shell or an operating system is wrong advice everywhere else. Say where
+it holds with `--platform` (`darwin`, `linux`, `windows`) and `--shell` (`zsh`, `bash`).
+Each can be given more than once, and a lesson with both needs both to hold:
+
+```bash
+compound add --name zsh-function-name-is-alias --level user --shell zsh \
+  --when 'Use when defining a function in zsh fails with "defining function based on alias".' \
+  --body 'Name the function something that is not an alias, or write `function name {`.'
+```
+
+```
+recorded lesson zsh-function-name-is-alias (user)
+  /Users/me/.claude/compound/lessons/zsh-function-name-is-alias
+```
+
+On a machine where the condition does not hold, the lesson is not a guard, is not
+recalled and is not offered for reuse. It is still listed, flagged `not here`, and
+`compound show` says why. With bash as the shell:
+
+```bash
+compound show zsh-equals-not-found
+```
+
+```
+zsh-equals-not-found (general lesson)
+/Users/me/.claude/compound/app/lessons/zsh-equals-not-found
+  does not apply here: it is for the shell zsh, and this is bash
+...
+```
+
+The platform is the one the `compound` command runs on. The shell is the one Claude
+Code's Bash tool uses, which compound infers: `CLAUDE_CODE_SHELL` when you set it, else
+your login shell (`SHELL`). If that is not the shell your commands run in, set
+`COMPOUND_SHELL` (for example to `bash`) in the `env` block of `~/.claude/settings.json`.
+
+`compound add --update --name <name> --shell bash` replaces a condition, and `compound add
+--update --name <name> --no-condition` drops both.
 
 ## Change a lesson
 
@@ -381,6 +432,15 @@ removed, turned into a skill or moved under a new name is no longer owed a stren
 
 `COMPOUND_RECUR_LIMIT` sets how many recalls make a lesson ineffective. The default is 2.
 
+A lesson of the general pool is not rewritten on your machine (`compound add --update`
+refuses it), so it is never ineffective and Claude is never asked to strengthen it.
+`compound status` lists it under `Open` as `recurring`, with what you can do:
+
+```
+Open
+  recurring    pip-externally-managed (general): recalled 2 times and the failure came back. It ships with the package and is not rewritten here. Switch it off for yourself (compound disable pip-externally-managed) or report it at https://github.com/ContextLab/claude-skill-compounder/issues
+```
+
 ## Fix a guard that stops the wrong calls
 
 A guard refuses a matching call once per session. Sending the same call again runs it,
@@ -409,7 +469,42 @@ removed build-needs-profile (project)
 ```
 
 A skill is removed only with `--force`. Nothing in the general pool can be removed this
-way.
+way: it is switched off.
+
+## Switch off a lesson that ships with compound
+
+The general pool's lessons are listed by `compound list --level general`. To switch one
+off for yourself:
+
+```bash
+compound disable sed-in-place-bsd
+```
+
+```
+disabled sed-in-place-bsd (general): for this user it is no guard and is not recalled or offered
+  switch it back on: compound enable sed-in-place-bsd
+```
+
+`compound list` then flags it:
+
+```
+general  guard   sed-in-place-bsd           0/0/0        disabled  Use when sed -i fails on macOS or BSD with an error that quotes the fi
+```
+
+```bash
+compound enable sed-in-place-bsd
+```
+
+```
+enabled sed-in-place-bsd (general)
+```
+
+The choice is kept in `~/.claude/compound/disabled.json`, outside the package, so
+`compound update` does not undo it. Only a lesson of the general pool has a switch; one
+of your own is removed with `compound rm`.
+
+When you have a guard of your own for a mistake a shipped guard also covers, a call both
+match is stopped once, by yours. The shipped one stays in force for calls yours misses.
 
 ## Share lessons with your team
 
@@ -447,6 +542,7 @@ a session, and `/compound` shows it as a pane.
 ```
 Health
   PASS  python          3.9.13
+  PASS  claude code     2.1.289
   PASS  mod             enabled in /Users/me/.claude/settings.json
   WARN  mod last fired  never: the event log holds no event the mod wrote (reuse, guard, ...)
   PASS  cli             /Users/me/.local/bin/compound
@@ -460,12 +556,15 @@ Store
   level    lessons  skills  guards
   project  0        0       0
   user     1        1       1
-  general  0        2       0
+  general  6        2       4
 
 Lessons
   name                level  kind    reuse  guard  recall  flag
   python3-no-tomllib-use-tomli  user   lesson  0      0      0       never used
   zsh-equals-word     user   skill   0      0      0       never used
+  macos-gnu-only-commands     general  guard   0      0      0       never used
+  pip-externally-managed      general  lesson  0      0      0       never used
+  ...
 
 Recent
   2026-10-04T05:02:13Z learn    -        proj                 python3-no-tomllib-use-tomli (project)
@@ -479,7 +578,7 @@ Open
 
 | Section | Shows |
 |-|-|
-| Health | nine checks; the [README](../README.md#troubleshooting) says what to do for each `WARN` and `FAIL` |
+| Health | ten checks; the [README](../README.md#troubleshooting) says what to do for each `WARN` and `FAIL` |
 | Store | how many lessons, skills and guards each level holds |
 | Lessons | per lesson: times reused, times it stopped a call, times recalled, and a flag |
 | Recent | the newest events: time, type, session, project, detail |
@@ -493,6 +592,7 @@ The rows under `Open`:
 | `candidate` | a project lesson applied in a second project and was not moved | run the command the row prints, if you want it at the user level |
 | `unparseable` | a lesson file does not read | fix the file the row names, or `compound rm <name>` |
 | `ineffective` | a lesson keeps being recalled | [strengthen it](#strengthen-an-ineffective-lesson) |
+| `recurring` | a lesson of the general pool keeps being recalled | [switch it off](#switch-off-a-lesson-that-ships-with-compound), or report it at the address the row prints |
 | `skipped` | a lesson was declined, and why | nothing; it is a record |
 | `error` | compound itself failed in the last 7 days | read the message; if it repeats, report it |
 

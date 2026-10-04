@@ -633,6 +633,30 @@ test('a failure after the lesson\'s guard refused in this session is recalled an
   expect(w.logged.filter(e => e.type === 'recall').map(e => [e.ineffective, e.after_guard])).toEqual([[false, true], [true, false]])
 })
 
+// ---- a lesson of the general pool ----
+
+test('a general lesson that recurs past the limit is recalled, and the session owes nothing for it', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_RECUR_LIMIT: '1' })
+  mock.clock(on, { now: T0 })
+  w.judge = async () => '{"name":"release-notes-format"}'
+  // The CLI's account: the lesson ships with the package and was recalled far past the limit.
+  w.show = JSON.stringify({ name: 'release-notes-format', level: 'general', path: '/pkg/lessons/release-notes-format', text: 'Print it with printf.', counts: { recall: 5 }, recalls_since: 5, recur_limit: 1, guarded_in_session: false, ineffective: false, recurring: true })
+  const failed = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  const recall = w.logged.find(e => e.type === 'recall')
+  expect([recall?.lesson, recall?.ineffective]).toEqual(['release-notes-format', false])
+  expect(w.owed).toEqual([])
+  expect(JSON.stringify(failed.context)).toContain('A recorded lesson may describe this failure')
+  expect(JSON.stringify(failed.context)).not.toContain('is not preventing that failure')
+  expect(JSON.stringify(failed.context)).not.toContain('--update')
+  const stop = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(stop.block).toBe(undefined)
+  expect(w.logged.filter(e => e.type === 'refuse')).toEqual([])
+  // The same answer for a lesson of the user's own is a strengthening owed.
+  w.show = JSON.stringify({ name: 'release-notes-format', level: 'user', path: '/u/l/release-notes-format', text: 'Print it with printf.', counts: { recall: 5 }, recalls_since: 5, recur_limit: 1, guarded_in_session: false })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(w.logged.filter(e => e.type === 'recall').map(e => e.ineffective)).toEqual([false, true])
+})
+
 // ---- every verdict is logged ----
 
 test('every question put to the judge writes a judge event with its ms, whatever the answer', async ($, on) => {

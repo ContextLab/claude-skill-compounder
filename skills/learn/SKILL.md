@@ -59,6 +59,10 @@ compound find "<keywords from the command and the error>"
 If a lesson or skill already covers this, improve that one with `--update` (step 6). Do
 not add a second lesson for the same mistake. `compound show <name>` prints one in full.
 
+A lesson at the `general` level ships with the package and `--update` refuses it. When
+one already covers the mistake there is nothing to record: decline (step 2) and say that
+the general lesson covers it.
+
 ## 4. Choose the form.
 
 | Form | Choose it when | How |
@@ -84,6 +88,12 @@ prints the lessons whose pattern hits.
   (repeatable): the pattern is then tested against the JSON of that tool's input, and not
   against Bash commands unless `--tool Bash` is given too.
   `--match '"file_path": "[^"]*\.env"' --tool Edit --tool Write`
+- **Say where the lesson holds, when it holds only somewhere.** A mistake that is the
+  shell's (zsh refuses what bash accepts) gets `--shell zsh`; one that is the operating
+  system's tools (BSD `sed` on macOS) gets `--platform darwin`. The names are `zsh`,
+  `bash`; `darwin`, `linux`, `windows`. The lesson is then a guard, and is recalled, only
+  on a machine where both hold, and is listed as `not here` on every other. Leave them
+  out for a lesson that holds everywhere.
 
 ## 5. Choose the level.
 

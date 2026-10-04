@@ -125,12 +125,58 @@ Quote it or use printf '%s\n' '====='.
 - `match-tools` is optional: a JSON array of the tool names whose calls the patterns are
   tested against (`compound add --tool`). Without it they are tested against Bash calls
   only.
+- `platform` and `shell` are optional: the lesson's condition (`compound add --platform`,
+  `--shell`). See "Where a lesson applies".
 - The body is the lesson. Attached files sit beside it and are named by relative path.
 
 Because the format is a skill's format, turning a lesson into a routable skill is a move:
 `compound skill <name>` moves the directory from the lessons directory to the skills
 directory of the same level. A lesson is the default. It becomes a skill when it has
 steps Claude must follow and a trigger a description can route.
+
+### Where a lesson applies
+
+A lesson about a shell or an operating system is wrong advice everywhere else: `echo
+=====` fails in zsh and is fine in bash, `sed -i 's/a/b/' f` fails on macOS and is the
+right form on Linux. Such a lesson carries a condition in its frontmatter:
+
+```
+platform: darwin
+shell: zsh
+```
+
+Each key holds one name, or several separated by commas (`platform: darwin, freebsd`). A
+lesson applies on a machine whose platform is one of the names and whose shell is one of
+the names; a key that is absent holds everywhere. `compound add --platform NAME` and
+`--shell NAME` write them (each repeatable), `--update` replaces the one it names, and
+`--update --no-condition` drops both.
+
+- **The platform** is `COMPOUND_PLATFORM` when set, else what Python reports for the
+  machine the CLI runs on: `darwin`, `linux`, `windows`, or `sys.platform` as it is for
+  anything else.
+- **The shell** is the one Claude Code's Bash tool runs commands in, which the package
+  cannot ask for: it is inferred. It is the file name of the first of these that is set:
+  `COMPOUND_SHELL`; `CLAUDE_CODE_SHELL`, Claude Code's own override of its shell; `SHELL`,
+  the login shell, which Claude Code uses when nothing overrides it. With none of them set
+  the shell is unknown, and a lesson that names a shell does not apply. The limits: a
+  login shell Claude Code does not run commands in (fish, for one) is still what `SHELL`
+  says, so a zsh lesson stays off on such a machine, which errs toward no refusal; and a
+  command the session runs through another shell (`bash -c '...'`, a script with a
+  `#!/bin/bash` line) is judged by the Bash tool's shell, not by the one that will run
+  it. `COMPOUND_SHELL` in the `env` block of `settings.json` corrects a wrong inference.
+- The CLI, which holds the one definition, resolves `COMPOUND_PLATFORM` and
+  `COMPOUND_SHELL` the way it resolves `COMPOUND_RECUR_LIMIT` (see Environment
+  variables), so a terminal and a session agree.
+
+A lesson whose condition does not hold here is **not in force**: it is no guard (`compound
+check` neither tests nor counts it), `compound find` does not return it, and the mod
+leaves it out of what it offers for reuse and of what a failed call is matched against.
+It is still listed: `compound list` and `compound status` flag it `not here`, `compound
+show` says which condition failed and what this machine is, and `list --json` carries
+`platform`, `shell` and `applies`. A condition that does not read (a hand-edited
+`platform: Mac OS`) fails the `lessons parse` check, and the lesson applies nowhere until
+it is fixed. The condition is evaluated inside the one `compound check` the mod makes
+before a tool call; it costs no further call.
 
 ## Moments
 
@@ -192,6 +238,18 @@ match at the start and end of every line of a command and not only of the whole 
 anchor the `learn` skill teaches for "a command starts here" is
 `(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)`: the start of a line, after `;`, `&&`, `||`, `|`
 or `(` (which covers `$(`), and after `do`, `then` or `else`.
+
+**Which lessons are guards here.** Only a lesson in force: one whose platform and shell
+condition holds on this machine (see "Where a lesson applies") and that the user has not
+switched off (see "The general pool").
+
+**Two guards on one call.** A call that is matched by a guard of the project or user
+level and by a guard of the general pool is refused by the nearer one alone: `compound
+check` returns the project and user hits and names the general ones under `"yielded"`.
+A user who already has a lesson of their own for a mistake the pool also covers is
+refused once, with their own text. A call only the general guard matches is refused by
+it. Several hits of one kind (two general guards, or a project and a user guard) are one
+refusal that quotes each.
 
 Before a call the mod makes exactly one CLI call, `compound check --guards`, and needs no
 listing. The reply also says how many lessons carry a `match`, and the tools those lessons
@@ -412,10 +470,63 @@ beside the pattern. `compound status` lists ineffective lessons until they are r
 A lesson left in another project (see Levels) is that project's to rewrite: the session
 that met it owes nothing for it.
 
+**A general lesson is never a debt.** A lesson of the general pool changes through a pull
+request, and `compound add --update` refuses it, so a session could not pay a
+strengthening owed for one. Its recalls are counted like any other lesson's, and that is
+all: no recall of it is marked ineffective, the message beside the error asks for nothing,
+no stop is refused, and `compound events --unsettled` never lists one, whatever a `recall`
+event says. With `COMPOUND_RECUR_LIMIT` recalls since the file last changed the lesson is
+**recurring**: `compound list` and `compound status` flag it so, `list --json` and `show
+--json` carry `recurring: true` (and `ineffective: false`), and `compound status` lists
+it under Open with the two things a user can do: switch it off for themselves (`compound
+disable <name>`), or report it to the package's repository
+(`https://github.com/<COMPOUND_UPSTREAM>/issues`). A recurring lesson that was switched
+off is no longer listed under Open.
+
 The mod's own failures are handled the same way. A hook that throws, a model answer that
 does not parse, a CLI call that fails: each is written to the event log as an `error`,
 shown in the status entry, and reported to Claude at the next typed prompt so it is fixed
 or recorded. Every new failure is reported, each one once.
+
+## The general pool
+
+`lessons/` in this package holds the lessons every user gets. Each is a file `compound
+add` wrote, without its `origin` (what `compound promote --to general` publishes):
+
+| Lesson | Form | Applies where | Stops or answers |
+|-|-|-|-|
+| `zsh-equals-not-found` | guard | `shell: zsh` | `echo =====`: a bare word of two or more `=` after `echo`, which zsh looks up as a command |
+| `zsh-status-path-variables` | guard | `shell: zsh` | an assignment to `status` or `path`, `for status in`/`for path in`, `read status`/`read path` |
+| `zsh-no-matches-found` | lesson | `shell: zsh` | recalled when a command fails with "no matches found" |
+| `sed-in-place-bsd` | guard | `platform: darwin` | `sed -i` followed by a script and no backup suffix |
+| `macos-gnu-only-commands` | guard | `platform: darwin` | `timeout N ...` as a command; `date -d`, `grep -P` and `stat -c` are recalled when they fail |
+| `pip-externally-managed` | lesson | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
+
+Two of the guards assume the stock tool. On a Mac where `timeout` is installed
+(Homebrew's coreutils) or where `sed` is GNU sed, the guarded call is right; a pattern is
+tested against the command's text and cannot look at `PATH`. The guard refuses once per
+session, its text says to send the call again when the tool is there, and the call sent
+again runs. A user for whom that is every session switches the lesson off.
+
+`tests/test_general_pool.py` runs each shipped pattern through `compound check --guards`
+against a table of calls it must stop and a table of calls it must let through, and every
+shipped pattern against a list of ordinary commands.
+
+**The switch.** `compound disable <name>` switches one general lesson off for this user,
+and `compound enable <name>` switches it back on. The names are kept in
+`<COMPOUND_HOME>/disabled.json`, a JSON array; nothing in the package is written, so an
+update of the package keeps the choice. A disabled lesson is not in force, exactly like
+one whose condition does not hold: no guard, not found, not recalled, not offered. `compound
+list` and `compound status` flag it `disabled`, `compound show` says so with the command
+that enables it, and `list --json` carries `disabled: true`. Only a lesson of the general
+pool has a switch: `disable` exits 2 for a project or user lesson and names `compound rm`,
+and `compound rm` of a general lesson exits 2 and names `compound disable`. `enable` of a
+name that is not disabled changes nothing and says so. A switch file that does not read
+disables nothing, and `disable` and `enable` exit 1 without rewriting it. The CLI reads
+the switch file on every call, so `compound check` follows it at once. What the mod keeps
+between calls (that there is no guard at all, and its listing of lessons, kept for a
+minute) is dropped after a `compound disable` or `enable` the session ran; after one run
+in a terminal it is dropped at the session's next typed prompt or when the minute is up.
 
 ## Seeing it work
 
@@ -519,7 +630,10 @@ or recorded. Every new failure is reported, each one once.
   each lesson how often it was reused, guarded, recalled, and the projects that keep a
   committed copy of a user-level lesson; recent events; and under Open everything that
   waits for someone: unsettled captures, promotion candidates with the command that moves
-  each, ineffective lessons, debts declined and why, and errors in the last seven days.
+  each, ineffective lessons, recurring general lessons with what a user can do about each,
+  debts declined and why, and errors in the last seven days. A lesson not in force is
+  flagged `not here` or `disabled` in the per-lesson table, and `status --json` says under
+  `here` the platform and the shell lessons are held against.
   An unsettled capture is listed with the two things that settle it, each as it is typed:
   `/compound:learn settle <id>` in a Claude Code session in that project, or `compound
   skip --settles <id> --why "<reason>"`.
@@ -547,14 +661,16 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Logs `learn`. |
-| `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, counts. `--scripts` adds the project's scripts. |
-| `compound show N` | One lesson's path and text. With `--json` also its counts, `recalls_since` (the recalls that count toward ineffective), `recur_limit`, and `guarded_in_session` (its guard refused a call in the caller's session). |
-| `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. |
-| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards that apply to that tool and match. `--guards` adds `"guards"`, the number of lessons that carry a `match`, and `"tools"`, the tools they apply to. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--origin T] [--update] [--settles ID]` | Writes the lesson. `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture. Logs `learn`. |
+| `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, `platform`, `shell`, `applies`, `disabled`, counts, `ineffective`, `recurring`. A lesson not in force is listed, flagged `not here` or `disabled`. `--scripts` adds the project's scripts. |
+| `compound show N` | One lesson's path and text, and when it is not in force, why. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective), `recur_limit`, and `guarded_in_session` (its guard refused a call in the caller's session). |
+| `compound find WORDS [--limit N]` | Lessons, skills and scripts ranked by word overlap, the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. |
+| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match. A general guard that hit beside a project or user one is named under `"yielded"` and is not a hit. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan; with `--yes` forks, pushes a branch and opens the pull request. Logs `promote` when it moved or proposed something. |
-| `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed. Logs `rm`. |
+| `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed: the refusal names `compound disable`. Logs `rm`. |
+| `compound disable N` | Switches the general lesson `N` off for this user (see "The general pool"). Exit 2 for a lesson that is not in the general pool. Logs nothing. |
+| `compound enable N` | Switches it back on. |
 | `compound skip --why T [--settles ID]` | Declines what the session owes, or with `--settles` the capture of that id. Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound log` | stdin: one event object of a known type. Appends it with `ts`, `session` and `project` filled in, and an `id` for a `capture`. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
@@ -574,6 +690,8 @@ runs it. A name both read is passed by the mod to every CLI call it makes.
 report, and a terminal has no `env` block applied. The CLI therefore resolves each of the
 two from the process environment first, then from `env` in `<claude dir>/settings.json`,
 then the default, so `compound status` in a terminal and the mod in a session agree.
+`COMPOUND_PLATFORM` and `COMPOUND_SHELL` are resolved the same way. The mod does not read
+them: the CLI it runs inherits the session's environment.
 
 A value of the wrong shape (not a whole number where one is expected) is the default.
 
@@ -585,10 +703,12 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_TURN_MIN_CALLS` | 25 | mod | Tool calls the main loop makes in a turn before the stop asks whether anything was learned. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
 | `COMPOUND_RECUR_LIMIT` | 2 | mod, CLI | Recurrences of a lesson, since it was last written, that make it ineffective. |
+| `COMPOUND_PLATFORM` | this machine's | CLI | The platform a lesson's `platform` is held against: `darwin`, `linux`, `windows`. Resolved like `COMPOUND_RECUR_LIMIT`. For tests, and for a machine the CLI names wrongly. |
+| `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | CLI | The shell a lesson's `shell` is held against (`zsh`, `bash`), when the Bash tool's shell is not the one inferred. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_MODEL` | `haiku` | mod | The model that answers the mod's three questions: an alias or a model id. |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | mod | Seconds to wait for that model's answer. |
 | `COMPOUND_BIN` | `compound` on `PATH` | mod | The CLI the mod runs when the package holds no `bin/compound` of its own. |
-| `COMPOUND_HOME` | `<claude dir>/compound` | mod, CLI, installer | The user level's root: user lessons, the event log, the claims, the install record, and the clone `install.sh` makes. |
+| `COMPOUND_HOME` | `<claude dir>/compound` | mod, CLI, installer | The user level's root: user lessons, the event log, the claims, the install record, the switch file `disabled.json`, and the clone `install.sh` makes. |
 | `COMPOUND_CLAUDE_DIR` | `~/.claude` | mod, CLI, installer | The Claude Code directory: `settings.json` and the user skills. `install.sh` reads it only for the default of `COMPOUND_HOME`. |
 | `COMPOUND_PROJECT` | the git top level of the working directory, else the working directory | mod, CLI | The project root. Setting it runs the CLI as that project from anywhere, which is how a lesson of another project is moved: `COMPOUND_PROJECT=<its project> compound promote <name> --to user`. |
 | `COMPOUND_NOW` | the clock | CLI | Pins the time: epoch seconds or an ISO 8601 time. For tests. |

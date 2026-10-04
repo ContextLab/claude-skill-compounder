@@ -140,9 +140,18 @@ class CheckTest(Case):
                               extra='match: ["danger"]\n')
         self.box.write_lesson(self.box.skill_dir("s-guard", "user"), "s-guard", body="S.\n",
                               extra='match: ["danger"]\n')
+        # A guard of the general pool yields to a nearer one that hits the same call.
+        proc = self.box.run("check", stdin=json.dumps({"tool": "Bash", "input": {"command": "run danger now"}}))
+        self.assertExit(proc, 0)
+        data = json.loads(proc.stdout)
+        self.assertEqual([(hit["level"], hit["name"]) for hit in data["hits"]],
+                         [("project", "p-guard"), ("user", "u-guard"), ("user", "s-guard")])
+        self.assertEqual(data["yielded"], ["g-guard"])
+        self.assertExit(self.box.run("rm", "p-guard"), 0)
+        self.assertExit(self.box.run("rm", "u-guard"), 0)
+        self.assertExit(self.box.run("rm", "s-guard", "--force"), 0)
         hits = self.hits("Bash", {"command": "run danger now"})
-        self.assertEqual([(hit["level"], hit["name"]) for hit in hits],
-                         [("project", "p-guard"), ("user", "u-guard"), ("user", "s-guard"), ("general", "g-guard")])
+        self.assertEqual([(hit["level"], hit["name"]) for hit in hits], [("general", "g-guard")])
 
     def test_a_lesson_with_two_matching_patterns_is_one_hit(self):
         self.box.add("twice", "Use when.", "Body.\n", "--match", "dan", "--match", "ger")
