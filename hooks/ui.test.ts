@@ -990,6 +990,10 @@ test('a failure after the lesson\'s guard refused in this session is recalled an
   w.check = hit('release-notes-format')
   const refused = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(refused.deny).toContain('lesson=release-notes-format')
+  // The claim behind the refusal runs the shell by its path: a PATH with no `sh` on it does
+  // not leave the session without its refusals.
+  const shells = w.calls.filter(c => c[1] === '-c').map(c => c[0])
+  expect(shells.length > 0 && shells.every(program => program === '/bin/sh')).toBe(true)
   expect(w.asked).toBe(0)
   w.judge = async () => '{"name":"release-notes-format"}'
   // The CLI's account: the guard refused in this session, so no recall of it counts.

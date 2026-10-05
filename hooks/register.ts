@@ -99,6 +99,8 @@ const TIMED_OUT = -2
 const SKIPPED = -3
 // How many prompt-log candidates the judge is shown.
 const CANDIDATES_MAX = 5
+// By its path: a session whose PATH holds no `sh` still has its claims, and so its refusals.
+const SH = '/bin/sh'
 const CLAIMS_KEPT_DAYS = 14
 const SETTINGS_TTL_MS = 30000
 const INVENTORY_TTL_MS = 60000
@@ -757,9 +759,9 @@ async function claim($: EngineInterface, sid: string, key: string): Promise<Clai
     }
     if (!sweptClaims) {
       sweptClaims = true
-      await $.process.run(['sh', '-c', SWEEP_SH, 'sh', root, String(CLAIMS_KEPT_DAYS)], { timeoutMs: BUDGET.claim })
+      await $.process.run([SH, '-c', SWEEP_SH, 'sh', root, String(CLAIMS_KEPT_DAYS)], { timeoutMs: BUDGET.claim })
     }
-    const ran = await $.process.run(['sh', '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key)], { timeoutMs: BUDGET.claim })
+    const ran = await $.process.run([SH, '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key)], { timeoutMs: BUDGET.claim })
     if (ran.exitCode === 0) return 'mine'
     if (ran.exitCode === 1) return 'taken'
     await failOnce($, sid, 'claim', `${ran.stderr.trim() || `exit ${ran.exitCode}`}; the claims directory is unusable, so nothing is refused in this session`)

@@ -246,7 +246,7 @@ function world(on: On): World {
     w.calls.push(argv)
     const verb = argv[0]?.endsWith('/compound') ? argv[1] : argv[0]
     const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-    if (verb === 'sh' && argv.includes('p=$(command -v compound) && [ "$p" -ef "$1" ]')) {
+    if ((verb === 'sh' || verb === '/bin/sh') && argv.includes('p=$(command -v compound) && [ "$p" -ef "$1" ]')) {
       return { value: { exitCode: w.bare ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (verb === 'log') {
@@ -335,7 +335,7 @@ test('S2: the bare name is checked like any other call, whatever a shell would s
     expect(checks(w), command).toBe(before + 1)
   }
   // The question is not put at all.
-  expect(w.calls.filter(c => c[0] === 'sh' && c.some(a => a.includes('command -v'))).length).toBe(0)
+  expect(w.calls.filter(c => (c[0] === 'sh' || c[0] === '/bin/sh') && c.some(a => a.includes('command -v'))).length).toBe(0)
 })
 
 test('S2: another path to the CLI, and another file called compound, are checked', async ($, on) => {

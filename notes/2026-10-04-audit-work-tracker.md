@@ -162,3 +162,22 @@ removed in `88a6c3e`). #19 and #42 stay open, each restated against the rewrite.
   ineffective from today's agent sessions (agent-worktree-check-base, chain-commit-with-and,
   heredoc-ends-and-chain, zsh-nomatch-glob), and `echo =====` is now refused by both
   `zsh-equals-word` and the shipped `zsh-equals-not-found`.
+- 2026-10-04: the owner ran (through this session) `compound disable` for
+  zsh-equals-not-found, zsh-no-matches-found and macos-gnu-only-commands: their own three
+  guards now refuse alone.
+- 2026-10-04: track S2 merged (1c9f0ad, merge 5f471a1; notes in
+  `2026-10-05-track-s2-security.md`). The bare name `compound` is never exempt: only the
+  exact absolute path the mod runs. A project skill can no longer take a user lesson's
+  name; links out of a project are refused; `promote --yes` to a non-default destination
+  needs `--upstream DEST`. The two findings the review did not name were not identified.
+- 2026-10-04: the live log held one error: a session whose PATH had no `sh` lost its claims
+  ("nothing is refused in this session"). The mod now runs `/bin/sh` by its path.
+- Released v0.5.1. All checks green: 23 test files, 282 plugin tests, tsc clean.
+- OPEN after v0.5.1: `compound log` keeps a caller-supplied `ineffective`; the CLI's own
+  printed commands use the bare name `compound`; whether a project `settings.json` `env`
+  block can set `COMPOUND_HOME`/`COMPOUND_NOW` for the mod is unverified; `compound report`
+  counts recalls by name; a bare retry writes no event; bug 1 of the learn-loop fixes was
+  verified with mounted hooks only; #42 (the token, then the marketplace route); haiku and
+  `verify-assumptions-first`; `find --request` at 500-690 ms; Linux, bash, WSL and Windows
+  are simulated only; the three rules an agent added to `.claude/CLAUDE.md` await the
+  owner's reading; four of the owner's lessons show as ineffective from today's sessions.
