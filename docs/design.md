@@ -985,8 +985,9 @@ add` wrote, without its `origin` (what `compound promote --to general` publishes
 | `sed-in-place-bsd` | guard | `platform: darwin` | `sed -i` followed by a script and no backup suffix |
 | `macos-gnu-only-commands` | lesson | `platform: darwin` | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails |
 | `pip-externally-managed` | lesson | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
+| `proposal-ships-the-working-fix` | lesson | everywhere | recalled when a locally working fix is proposed upstream or to a shared pool |
 
-Three of the six are guards. `macos-gnu-only-commands` is recalled and stops nothing:
+Three of the seven are guards. `macos-gnu-only-commands` is recalled and stops nothing:
 on a Mac with Homebrew's coreutils `timeout` is installed and the call is right, and a
 pattern is tested against the command's text and cannot look at `PATH`. For the same
 reason `sed-in-place-bsd` assumes the stock tool: where `sed` is GNU sed the guarded call

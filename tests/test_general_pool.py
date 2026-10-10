@@ -451,6 +451,7 @@ GNU_ONLY = ["timeout 60 npm test", "cd x && timeout 10s make", "out=$(timeout 5 
 SHIPPED = {
     "macos-gnu-only-commands": ("lesson", ["darwin"], []),
     "pip-externally-managed": ("lesson", [], []),
+    "proposal-ships-the-working-fix": ("lesson", [], []),
     "sed-in-place-bsd": ("guard", ["darwin"], []),
     "zsh-equals-not-found": ("guard", [], ["zsh"]),
     "zsh-no-matches-found": ("lesson", [], ["zsh"]),
@@ -491,7 +492,7 @@ class ShippedPoolTest(PoolCase):
         self.assertEqual((parse["status"], parse["detail"]), ("PASS", "every lesson reads"))
         duplicates = [row for row in status["health"] if row["check"] == "duplicates"][0]
         self.assertEqual(duplicates["status"], "PASS")
-        self.assertEqual(status["store"]["general"]["lessons"], 6)
+        self.assertEqual(status["store"]["general"]["lessons"], 7)
         self.assertEqual(status["store"]["general"]["guards"], 3)
 
     def test_a_shipped_lesson_carries_no_origin_and_is_as_the_cli_writes_it(self):
@@ -554,7 +555,7 @@ class ShippedPoolTest(PoolCase):
             for command in yes:
                 self.assertEqual(self.shipped_hits(command, **BASH_LINUX), [], command)
         pool = self.pool(**BASH_LINUX)
-        self.assertEqual(sorted(name for name, row in pool.items() if row["applies"]), ["pip-externally-managed"])
+        self.assertEqual(sorted(name for name, row in pool.items() if row["applies"]), ["pip-externally-managed", "proposal-ships-the-working-fix"])
         # zsh on Linux: the zsh guards apply, the macOS ones do not.
         self.assertEqual(self.shipped_hits("echo ====", COMPOUND_PLATFORM="linux"), ["zsh-equals-not-found"])
         self.assertEqual(self.shipped_hits("timeout 5 make", COMPOUND_PLATFORM="linux"), [])
