@@ -108,7 +108,7 @@ The two `WARN` rows are expected on a new install. They turn to `PASS` once comp
 acted in a session. Three more can show: `cli`, until the directory that holds `compound` is
 on your `PATH`, `prompt log`, when history-surfer is not installed, and `claude code`, when
 no `claude` command is on your `PATH` to ask for its version.
-[Troubleshooting](#troubleshooting) explains every row. The six lessons and four skills in
+[Troubleshooting](#troubleshooting) explains every row. The seven lessons and four skills in
 the row `general` are [the ones that ship with compound](#the-lessons-that-ship-with-compound).
 
 **Update and uninstall:**
@@ -305,7 +305,7 @@ with compound installed gets them.
 
 ### The lessons that ship with compound
 
-The general pool holds six lessons. Each one applies only on the platform or in the shell
+The general pool holds seven lessons. Each one applies only on the platform or in the shell
 it is about, so on Linux with bash the first five do nothing:
 
 | Lesson | Applies | What it does |
@@ -316,6 +316,7 @@ it is about, so on Linux with bash the first five do nothing:
 | `sed-in-place-bsd` | macOS | stops `sed -i 's/a/b/' file`, which BSD sed reads as a backup suffix and a file name |
 | `macos-gnu-only-commands` | macOS | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails: a stock Mac has the BSD tools. It stops no call |
 | `pip-externally-managed` | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
+| `proposal-ships-the-working-fix` | everywhere | recalled when a fix that works locally is proposed upstream or to a shared pool: the proposal ships the working form (a hook stays a hook), not a softer reminder |
 
 `compound list` shows them with the rest. One that does not apply on your machine is
 flagged `not here`.
