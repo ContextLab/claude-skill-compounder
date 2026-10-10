@@ -268,6 +268,7 @@ The five questions and actions in the chart:
 | Recall | a tool call failed | shows Claude the lesson that describes the failure |
 | Capture | a call works after one failed | decides whether it is the fix, and if so tells Claude to record the lesson |
 | Stop check | Claude is about to finish | refuses the stop once if a lesson is owed and not yet recorded or declined |
+| In-flight check | Claude is about to finish | refuses the stop once if work is still in flight with nothing watching it: a detached process, a workflow run dispatched by hand, or the user's own pull request with pending checks, and no polling loop alive. Runs `hooks/inflight-stop-check.sh`, which can also be registered directly as a Stop hook |
 
 Two things happen beside the chart. A request that keeps coming back is offered a skill,
 as described above. And each time a session invokes a skill that compound lists, the use

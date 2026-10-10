@@ -220,6 +220,9 @@ type World = {
   // What `check` prints whatever the call, and what `log --json` prints, when the test says.
   check: string | undefined
   logReply: string | undefined
+  // What the in-flight check prints at a stop ('' = nothing in flight), and the stdin it got.
+  inflight: string
+  inflightStdin: string[]
 }
 
 let worlds = 0
@@ -230,7 +233,7 @@ let worlds = 0
 function world(on: On): World {
   worlds += 1
   const n = worlds
-  const w: World = { bare: true, calls: [], logged: [], asked: 0, judge: '{"name":null}', show: '', verdict: { counted: true, ineffective: false }, fails: () => false, owed: [], check: undefined, logReply: undefined }
+  const w: World = { bare: true, calls: [], logged: [], asked: 0, judge: '{"name":null}', show: '', verdict: { counted: true, ineffective: false }, fails: () => false, owed: [], check: undefined, logReply: undefined, inflight: '', inflightStdin: [] }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000' })
   on('session.id', () => ({ value: `decisions-${n}` }))
   on('session.root', () => ({ value: `/work/decisions-${n}` }))
@@ -254,6 +257,10 @@ function world(on: On): World {
       const event = sent.type === 'recall' ? { ...sent, ...w.verdict } : sent
       w.logged.push(sent)
       return done(argv.includes('--json') ? (w.logReply ?? JSON.stringify({ ts: '2026-10-05T12:00:00Z', session: `decisions-${n}`, ...event })) : '')
+    }
+    if (String(argv[1] ?? '').endsWith('/hooks/inflight-stop-check.sh')) {
+      w.inflightStdin.push(e.init?.stdin ?? '')
+      return done(w.inflight)
     }
     if (verb === 'list') return done(LESSONS)
     if (verb === 'show') return done(w.show)
@@ -542,4 +549,46 @@ test('the stop refused for two owed lessons carries both ids, as the CLI listed 
   expect(stop.block).toContain('This session owes 2 lessons')
   expect(stop.block).toContain('- 1: --settles ab12cd34')
   expect(stop.block).toContain('- 2: --settles ef56ab78')
+})
+
+// ---- the in-flight check at the stop ------------------------------------------------------
+
+const UNWATCHED = JSON.stringify({ decision: 'block', reason: 'Work is still in flight and NO waiter is running:\nDETACHED PROCESSES:\npid 6263 (up 17:12) python canary-runner.py' })
+
+test('a stop with work in flight and no waiter is refused with what is in flight', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: 1_800_000_000_000 })
+  w.inflight = UNWATCHED
+  const stop = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(stop.block).toContain('[compound] Work is still in flight and NO waiter is running')
+  expect(stop.block).toContain('pid 6263')
+  expect(w.inflightStdin).toEqual([JSON.stringify({ stop_hook_active: false })])
+})
+
+test('the check is told when the stop follows a block, so the script can stay silent', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: 1_800_000_000_000 })
+  await $.classic.Stop({ stop_hook_active: true } as never)
+  expect(w.inflightStdin).toEqual([JSON.stringify({ stop_hook_active: true })])
+})
+
+test('nothing in flight, or a check that prints something unreadable, lets the stop through', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: 1_800_000_000_000 })
+  expect((await $.classic.Stop({ stop_hook_active: false } as never)).block).toBeUndefined()
+  w.inflight = 'not json at all'
+  expect((await $.classic.Stop({ stop_hook_active: false } as never)).block).toBeUndefined()
+  w.inflight = JSON.stringify({ decision: 'approve', reason: 'fine' })
+  expect((await $.classic.Stop({ stop_hook_active: false } as never)).block).toBeUndefined()
+})
+
+test('an owed lesson and unwatched work are both in the one refusal', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: 1_800_000_000_000 })
+  w.owed = [{ ts: '2026-10-05T12:00:00Z', type: 'capture', id: 'ab12cd34', call: 'c1', tool: 'Bash', failed: './deploy.sh', error: 'no target', fixed: './deploy.sh --target x' }]
+  w.inflight = UNWATCHED
+  const stop = await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(stop.block).toContain('This session owes a lesson')
+  expect(stop.block).toContain('./deploy.sh --target x')
+  expect(stop.block).toContain('NO waiter is running')
 })
