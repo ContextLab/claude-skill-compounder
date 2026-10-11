@@ -13,3 +13,10 @@ __pycache__/
 
 # Agent worktrees
 .claude/worktrees/
+
+# Raw rows of the usage audit: excerpts of real sessions (commands, paths, session ids).
+# The reports and the scripts that made them are kept; the rows stay on the machine.
+notes/2026-10-11-usage-audit/*.jsonl
+notes/2026-10-11-usage-audit/ts_output.txt
+notes/2026-10-11-usage-audit/surfacing/*.jsonl
+notes/2026-10-11-usage-audit/**/__pycache__/
