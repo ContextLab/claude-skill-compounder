@@ -43,6 +43,23 @@ LESSON FORMAT
     recalls nor offers it.
     `created` and `updated` are local dates.
 
+EVIDENCE
+    <COMPOUND_HOME>/evidence/<id>/: a snapshot, the bytes of one script file as they were
+    when a session ran it, under the file's own name, and `meta.json`: `id`, `sha256` (of
+    the bytes), `name`, `path` (where it ran), `size`, `project`, `tracked` (git tracks
+    the file: true, false, or null when git cannot say), `first`, `last`, `ok` and
+    `failed` (how many runs passed and failed), `runs` (the newest EVIDENCE_RUNS of them:
+    `ts`, `session`, `ok`, `command`, and `call`, `agent`, `turn` when the mod gave them),
+    `lesson` (the lesson that holds it) and `declined` (`why`, `ts`, `session`). `<id>` is
+    sixteen hex digits of the SHA-256 of the path, a zero byte and the bytes: the same
+    file run again is the same snapshot, and an edit is a new one, a new version of the
+    script at that path. `evidence note` writes a snapshot, `add` marks the ones a lesson
+    attaches, `skip --evidence` the one it declines. A lesson that attaches a script
+    keeps `.evidence.json` beside its SKILL.md: `attachments` (for each script with a
+    recorded passing run: `name`, `id`, `sha256`, `path`, `command`, `session`, `ts`,
+    `ok`, `failed`) and `unrun` (the names of the programs kept without one).
+    Which scripts are owed a decision is defined once, in `evidence_due`.
+
 THE SWITCH
     <COMPOUND_HOME>/disabled.json: a JSON array of the names of the general lessons this
     user switched off (`compound disable NAME`, `compound enable NAME`). A disabled
@@ -160,6 +177,9 @@ EVENT LOG
                                     guard    bool      it has a match
                                     update   bool      --update rewrote it
                                     settles* string    --settles: the capture it settles
+                                    evidence [string]  the ids of the snapshots its
+                                                       attached scripts are (see
+                                                       EVIDENCE)
         skill     CLI `skill`       lesson*  string
                                     level    string    project | user
                                     path     string    the skill's directory
@@ -167,8 +187,13 @@ EVENT LOG
                                     level    string    project | user
         skip      CLI `skip`        why*     string
                                     settles* string    --settles: the capture it settles
-        refuse    mod               why*     string    debt | strengthen | nudge: why a
-                                                       stop was refused
+                                    evidence* string   --evidence: the snapshot whose
+                                                       script it declines; such an
+                                                       event settles nothing
+        refuse    mod               why*     string    debt | strengthen | evidence |
+                                                       nudge: why a stop was refused
+                                    evidence [string]  evidence: the ids of the scripts
+                                                       it was refused for
                                     debts    [string]  debt: the failed calls' ids
                                     lessons  [string]  strengthen: the lessons owed a
                                                        rewrite
@@ -2389,7 +2414,10 @@ def git_tracked(directory):
     taken as tracked: the caller then leaves the directory where it is."""
     if _walk_up_git(os.path.realpath(directory)) is None:
         return False
-    code, out, _err = _run(["git", "-C", directory, "ls-files", "--", "."], timeout=30)
+    # Another project's store is a repository nobody vouched for here: the monitor its
+    # config may name is a program git would start, and it is switched off for the question.
+    code, out, _err = _run(["git", "-C", directory, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                            "ls-files", "--", "."], timeout=30)
     if code != 0:
         return True
     return bool(out.strip())
@@ -2715,6 +2743,14 @@ HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A
 ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 VAR_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 EVIDENCE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+# A snapshot's file is kept, and attached to a lesson, under its own name: one path
+# component that is not hidden and is not a file a lesson has of its own.
+EVIDENCE_NAME_RE = re.compile(r"^[A-Za-z0-9_+@%=,~-][A-Za-z0-9_+@%=,~. -]{0,199}$")
+
+
+def evidence_name_ok(name):
+    return bool(isinstance(name, str) and EVIDENCE_NAME_RE.match(name) and name not in ("SKILL.md", "meta.json")
+                and not name.endswith(".tmp"))
 
 
 def without_heredocs(command):
@@ -2890,13 +2926,19 @@ def _own_script(path):
 
 
 def _git_tracked_file(path):
-    """True when git tracks the file, False when it does not, None when git cannot say."""
+    """True when git tracks the file, False when it does not, None when git cannot say.
+    The directory is wherever a script ran, which may be a repository nobody vouched for:
+    git is asked one question that reads the index, with the settings through which a
+    repository's own config can start a program switched off."""
     import subprocess
 
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat")
     try:
-        proc = subprocess.run(["git", "ls-files", "--error-unmatch", "--", os.path.basename(path)],
-                              cwd=os.path.dirname(path), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                              stdin=subprocess.DEVNULL, timeout=2)
+        proc = subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                               "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat", "--no-pager",
+                               "ls-files", "--error-unmatch", "--", os.path.basename(path)],
+                              cwd=os.path.dirname(path), env=env, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=2)
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode == 0:
@@ -2913,7 +2955,13 @@ def _read_meta(ident):
         return None
     if not isinstance(meta, dict) or meta.get("id") != ident or not isinstance(meta.get("runs"), list):
         return None
-    meta["_file"] = os.path.join(evidence_dir(), ident, _text(meta.get("name")) or "script")
+    # meta.json is a file anything running as the user can write: the name in it is held
+    # to the rule it was written under, so it can name no file outside the snapshot.
+    if not evidence_name_ok(meta.get("name")):
+        return None
+    meta["_file"] = os.path.join(evidence_dir(), ident, meta["name"])
+    if os.path.islink(meta["_file"]):
+        return None
     return meta
 
 
@@ -2981,7 +3029,7 @@ def note_run(path, run, project):
     None for a file that is not kept: too large, not text, or not the session's."""
     import hashlib
 
-    if _own_script(path):
+    if _own_script(path) or not evidence_name_ok(os.path.basename(path)):
         return None
     try:
         with open(path, "rb") as handle:
@@ -2992,8 +3040,12 @@ def note_run(path, run, project):
     if not data or len(data) > EVIDENCE_BYTES or b"\0" in data:
         return None
     try:
-        data.decode("utf-8")
+        text = data.decode("utf-8")
     except UnicodeDecodeError:
+        return None
+    # A script that holds something shaped like a credential is not copied anywhere: a
+    # snapshot may be attached to a lesson, and a project's lessons are committed.
+    if any(shape.search(text) for _label, shape in SECRET_SHAPES):
         return None
     digest = hashlib.sha256(data).hexdigest()
     # One snapshot is one file's bytes at one path: the same bytes at another path are

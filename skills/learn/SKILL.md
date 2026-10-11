@@ -1,6 +1,6 @@
 ---
 name: learn
-description: Use when a "[compound]" message says the session owes a lesson, says an earlier session left one unsettled, says a lesson is ineffective, or asks whether it learned anything, when a failed command was just fixed, or when the user says to remember, record or write down how something was solved. Records one lesson with the compound CLI.
+description: Use when a "[compound]" message says the session owes a lesson, says an earlier session left one unsettled, says a lesson is ineffective, says the session ran a script that nothing keeps, or asks whether it learned anything, when a failed command was just fixed, or when the user says to remember, record or write down how something was solved. Records one lesson with the compound CLI.
 ---
 
 # Record a lesson
@@ -32,6 +32,13 @@ whichever applies.
 - When this skill was invoked as `/compound:learn settle <id>` (the line `compound status`
   prints for an unsettled lesson), the lesson to record is that one: find the id in
   `compound events --unsettled --json` and pass `--settles <id>` in step 6.
+- When the message says the session ran a script that nothing keeps, or the solution this
+  session reached is a script it wrote and ran, the evidence is the script itself, kept
+  as it ran: `compound evidence list --session "$CLAUDE_CODE_SESSION_ID"` lists each with
+  its id and how often it passed and failed, and `compound evidence show <id>` prints the
+  kept copy and the last call that passed. Write the lesson from that copy and that call.
+  Do not rewrite the script from memory, tidy it, or describe what it "should" do: what
+  goes into the lesson is the file that passed (step 4, `--from-evidence`).
 - If the lesson is about something else in this session, re-read the tool calls and results
   in the transcript above. Quote the command and the error text exactly.
 - For what the user asked for, in their words: `surfer search "<keywords>"` (history-surfer's
@@ -85,7 +92,7 @@ id or "this session" (say it so that a later session can follow it, or pass
 |-|-|-|
 | lesson | The default. One or two sentences prevent the mistake. | `compound add` |
 | guard | The mistake is a recognizable command or tool call. The call is then stopped before it runs. | add `--match '<regex>'` |
-| script | The fix is a procedure worth running, not retyping. | add `--attach <file>` and say in the body to run it |
+| script | The fix is a procedure worth running, not retyping, and the session ran it. | add `--from-evidence <id>` (the copy kept when it ran) and say in the body what it is for, the call that runs it and what it needs |
 | skill | There are steps to follow in order AND a trigger that can route to them. | record the lesson, then `compound skill <name>` |
 
 A `--match` value is a Python regular expression, searched for in the command of a Bash
@@ -163,16 +170,28 @@ Quote it or use printf '%s\n' '====='.
 EOF
 ```
 
-A lesson with a script attached (the file is copied beside the lesson):
+A lesson with the script that worked (the copy kept when it ran is put beside the lesson;
+the id is the one `compound evidence list` and the `[compound]` message give):
 
 ```bash
 compound add --name release-checklist \
   --when "Use when cutting a release of this repository." \
-  --attach scripts/release-check.sh <<'EOF'
-Run release-check.sh (beside this lesson) before tagging. It checks the version
-string, the changelog entry and a clean tree, which were each forgotten once.
+  --from-evidence 3f2a91c0b6e41d07 <<'EOF'
+Run release-check.sh (beside this lesson) from the repository root before tagging:
+`sh release-check.sh v1.2.0`. It checks the version string, the changelog entry and a
+clean tree, which were each forgotten once.
 EOF
 ```
+
+`--attach <file>` takes a file by its path, and is the same thing when that file is one
+the session ran and has not changed since. A program that never ran is refused: run it,
+see it pass, then attach it. Only when the file is meant to be kept without a run (a
+template another script fills in) pass `--unrun`, and the lesson says so.
+
+A script that is not worth a lesson (a probe, a one-off, something that only makes sense
+inside this task) is declined by its id: `compound skip --evidence <id> --why "<reason>"`.
+A script that belongs to this repository's own tooling is better committed to the
+repository, and then declined here with that as the reason.
 
 One lesson settles one owed lesson. When this session owes exactly one, a plain `compound
 add` settles it. When it owes more than one, pass `--settles <id>` with the id of the one

@@ -217,6 +217,13 @@ works in two ways:
 > Session two, another project: Claude is about to make the same call. compound stops it
 > and quotes the lesson. Claude uses the fix on its first try.
 
+A solution is often a script. When Claude writes a script during a task and runs it,
+compound keeps a copy of the script exactly as it ran. Once a script has passed three
+times and nothing else keeps it, Claude is stopped once before it finishes and asked to
+record it or decline it. A lesson recorded that way carries the copy that ran, not a
+script rewritten from memory, and a program that was never run is refused as an
+attachment. [The guide](docs/guide.md#keep-a-script-that-worked) shows it.
+
 Recorded text is always shown to Claude as a quoted note to weigh. It is never passed on
 as an instruction.
 
@@ -269,9 +276,10 @@ The five questions and actions in the chart:
 | Capture | a call works after one failed | decides whether it is the fix, and if so tells Claude to record the lesson |
 | Stop check | Claude is about to finish | refuses the stop once if a lesson is owed and not yet recorded or declined |
 
-Two things happen beside the chart. A request that keeps coming back is offered a skill,
-as described above. And each time a session invokes a skill that compound lists, the use
-is counted and shown.
+Three things happen beside the chart. A request that keeps coming back is offered a skill,
+as described above. Each time a session invokes a skill that compound lists, the use
+is counted and shown. And a script a session ran is kept as it ran, and the stop check
+asks once for a script that worked and that nothing keeps.
 
 ### Where lessons live
 
@@ -495,6 +503,7 @@ These are the ones you are likely to change.
 | `COMPOUND_REPEAT_MIN` | 3 | sessions that made one kind of request before compound offers to make it a skill |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | tool calls in a turn before Claude is asked whether it learned anything |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
+| `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | passing runs of a script before Claude is asked to record or decline it |
 | `COMPOUND_RECUR_LIMIT` | 2 | sessions a lesson is recalled in before it is ineffective |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | the shell a lesson for one shell is held against (`zsh`, `bash`); set it when Claude Code runs your commands in another shell than your login shell |
 | `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |

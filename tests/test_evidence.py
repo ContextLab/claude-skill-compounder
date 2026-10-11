@@ -131,6 +131,55 @@ class NoteTest(EvidenceCase):
         self.assertNotIn("abcdef0123456789", shown)
         self.assertNotIn("hunter2secret", shown)
 
+    def test_a_script_that_holds_a_credential_is_not_copied(self):
+        token = "ghp_" + "a1B2c3D4e5" * 4
+        path = self.script("deploy.sh", "#!/bin/sh\ncurl -H 'Authorization: token %s' https://example.invalid\n" % token)
+        self.assertEqual(self.note(path), [])
+        self.assertFalse(os.path.isdir(os.path.join(self.box.chome, "evidence")) and any(
+            token in open(os.path.join(base, name), errors="replace").read()
+            for base, _dirs, names in os.walk(os.path.join(self.box.chome, "evidence")) for name in names))
+
+    def test_a_snapshot_whose_record_names_another_file_is_not_read(self):
+        """meta.json is a file on disk: a name written into it by hand can name no file
+        outside the snapshot and can never stand in for a lesson's SKILL.md."""
+        ident = self.passed(self.script("validate.sh", "#!/bin/sh\ntrue\n"), 1)
+        meta_path = os.path.join(self.box.chome, "evidence", ident, "meta.json")
+        with open(meta_path) as handle:
+            meta = json.load(handle)
+        victim = os.path.join(self.box.root, "victim.txt")
+        with open(victim, "w") as handle:
+            handle.write("not a script\n")
+        for name in ("SKILL.md", "../../../victim.txt", victim, ".evidence.json", "a/b.sh", ""):
+            with open(meta_path, "w") as handle:
+                json.dump(dict(meta, name=name), handle)
+            proc = self.box.run("add", "--name", "taken-over", "--when", "Use when.", "--from-evidence", ident,
+                                stdin="Body.\n")
+            self.assertExit(proc, 2)
+            self.assertFalse(os.path.exists(self.box.lesson_dir("taken-over")), name)
+            self.assertEqual(self.rows(), [], name)
+
+    def test_a_file_whose_name_is_a_lessons_own_is_not_kept(self):
+        self.assertEqual(self.note("sh %s" % self.script("SKILL.md", "#!/bin/sh\ntrue\n")), [])
+        self.assertEqual(self.note("sh %s" % self.script(".hidden.sh", "#!/bin/sh\ntrue\n")), [])
+
+    def test_git_is_asked_without_running_what_the_repository_configures(self):
+        """The directory a script ran in may be a repository with a config of its own: the
+        fsmonitor it names is a program git would start, and it is not started."""
+        repo = os.path.join(self.box.root, "cloned")
+        os.makedirs(repo)
+        git_ok("init", "-q", repo)
+        marker = os.path.join(self.box.root, "ran-by-git")
+        hook = self.script("fsmonitor.sh", "#!/bin/sh\ntouch %s\n" % marker)
+        git_ok("config", "core.fsmonitor", hook, cwd=repo)
+        path = self.script("tool.sh", "#!/bin/sh\ntrue\n", repo)
+        git_ok("add", "tool.sh", cwd=repo)
+        # `git add` itself asked the monitor: that is this test's own git, not the CLI's.
+        if os.path.exists(marker):
+            os.remove(marker)
+        self.assertEqual(len(self.note(path)), 1)
+        self.assertEqual([row["tracked"] for row in self.rows() if row["name"] == "tool.sh"], [True])
+        self.assertFalse(os.path.exists(marker))
+
     def test_input_that_is_not_a_run_is_refused(self):
         for stdin in ("", "[]", '{"command": "x"}', '{"command": 3, "ok": true}'):
             self.assertExit(self.box.run("evidence", "note", stdin=stdin), 2)

@@ -436,6 +436,59 @@ That publishes to the package's own pool. If `COMPOUND_UPSTREAM` or
 the refusal both print the destination, and it is published there only when the command
 says so too, with `--yes --upstream <that destination>`.
 
+## Keep a script that worked
+
+When Claude writes a script during a task and runs it, compound keeps a copy of the script
+exactly as it ran, each time it runs. You do nothing for that. Once a script has passed
+three times and nothing else keeps it (git does not track it, no lesson holds it), Claude
+is stopped once before it finishes and asked to record the script or decline it.
+
+See what was kept:
+
+```bash
+compound evidence list
+```
+
+```
+3f2a91c0b6e41d07  validate.sh                  passed 9, failed 2, 3 versions  owed a decision
+    /private/tmp/scratch/validate.sh
+```
+
+`compound evidence show 3f2a91c0b6e41d07` prints the script and the last call that passed.
+`compound evidence list --due` lists only the scripts owed a decision.
+
+Record it as a lesson that carries the script. The file attached is the copy that ran,
+not whatever is at that path now:
+
+```bash
+compound add --name validate-bib \
+  --when "Use when checking the bibliography before a commit." \
+  --from-evidence 3f2a91c0b6e41d07 <<'EOF'
+Run validate.sh (beside this lesson) from the repository root. It checks every entry for
+a DOI and a page range and exits 1 on the first one that lacks either.
+EOF
+```
+
+`compound show validate-bib` then says where the script came from:
+
+```
+  attached: validate.sh (the script as it ran: passed 9; last as `S=/private/tmp/scratch; $S/validate.sh --all`)
+```
+
+`--attach FILE` works too when the file is one that ran. Attaching a program that was never
+run is refused: a lesson's script should be one that was seen to work. Run it first, or
+pass `--unrun` to keep it anyway; the lesson then says it was kept without a recorded run.
+
+If the script is not worth keeping (a probe, a one-off), decline it, and it is not asked
+about again:
+
+```bash
+compound skip --evidence 3f2a91c0b6e41d07 --why "a probe of one API response"
+```
+
+A script that belongs to the repository is better committed there. Once git tracks it,
+compound does not ask about it.
+
 ## Decline a lesson
 
 Not every fix is worth a lesson. A typo or a missing file is a one-off. When a lesson is
@@ -916,7 +969,8 @@ Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`
 | `compound promote` | move a lesson up a level, or propose it | [Move a lesson up a level](#move-a-lesson-up-a-level), [Propose a lesson to the general pool](#propose-a-lesson-to-the-general-pool) |
 | `compound rm` | remove a lesson | [Remove a lesson](#remove-a-lesson) |
 | `compound disable`, `compound enable` | switch a shipped lesson off and on | [Switch off a lesson that ships with compound](#switch-off-a-lesson-that-ships-with-compound) |
-| `compound skip` | decline a lesson that is owed | [Decline a lesson](#decline-a-lesson) |
+| `compound skip` | decline a lesson that is owed, or a script | [Decline a lesson](#decline-a-lesson), [Keep a script that worked](#keep-a-script-that-worked) |
+| `compound evidence` | the scripts sessions ran, kept as they ran | [Keep a script that worked](#keep-a-script-that-worked) |
 | `compound events` | read the event log | [Read the event log](#read-the-event-log) |
 | `compound status` | health, totals and what is open | [Read `compound status`](#read-compound-status) |
 | `compound report` | what the event log says compound did | [Read `compound report`](#read-compound-report) |

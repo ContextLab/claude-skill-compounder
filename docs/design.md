@@ -94,6 +94,7 @@ A lesson is a directory holding a `SKILL.md` and any scripts it needs:
 ```
 <lessons dir>/<name>/SKILL.md
 <lessons dir>/<name>/<attached files>
+<lessons dir>/<name>/.evidence.json    when an attached script has a recorded run, or was kept without one
 ```
 
 ```markdown
@@ -508,9 +509,90 @@ calls are not counted, a prompt typed while the turn is running does not restart
 count, and the question is asked at most every `COMPOUND_NUDGE_COOLDOWN` seconds across
 all sessions.
 
-Each refusal writes a `refuse` event that says why: `debt`, `strengthen` or `nudge`. A
+A script the session ran until it worked, which nothing keeps, refuses one stop too (see
+"A script that ran"). It is asked before the question after a long turn, and a stop
+refused for it is not asked that question.
+
+Each refusal writes a `refuse` event that says why: `debt`, `strengthen`, `evidence` or `nudge`. A
 refused stop takes the place of the answer Claude was giving, so every such message ends
 by asking for the final answer of the turn again.
+
+### A script that ran
+
+A session that solves a problem often writes a script on the way, runs it until it works,
+and leaves it in a scratch directory that is gone the next day. That script is the
+solution, in the one form that is known to work. The mod has the CLI keep it as it ran,
+and a lesson that carries a script carries that copy.
+
+**Keeping it.** After a Bash call whose command may have run a script file (it names a
+file with a program's ending, or its program is a path), the mod hands the command, the
+directory the session is in and whether the call passed to the CLI (`compound evidence
+note`). Nothing waits for that: it is started once the call's result is in hand. The CLI
+reads the command and finds the files it RAN: the program of a simple command when it is a
+file named with a directory (`./build.sh`, `$S/validate.sh`), and the file a runner is
+given (`python3 x.py`, `bash x.sh`, `uv run x.py`, after `nohup`, `timeout 30` and the
+like). `NAME=value` and `cd DIR` earlier in the command are followed. A file that is only
+named was not run (`cat x.py`, `git add x.py`, `pytest tests/test_x.py`, `python3 -c ...
+x.py`), and the body of a here-document is text, not a command. A word whose variables have
+no value the CLI can see names nothing. A call refused before it ran ran nothing.
+
+For each such file the CLI keeps a **snapshot**: the file's bytes as they are at that
+moment, under `<COMPOUND_HOME>/evidence/<id>/`, with a record of the run (the time, the
+session, the call's id, the command with credentials masked, passed or failed). The id is
+sixteen hex digits made from the path and the bytes, so the same file run again adds a run
+to its snapshot and an edited file is a new snapshot: a new version of the same script,
+which is known by its path. Not kept: a file over 256 KiB, one that is not UTF-8 text, one
+that holds something shaped like a credential (the shapes `promote --to general` refuses to
+publish: a private key, an API token, a password in a URL, a bearer token), one whose name
+is not a plain file name, the package's own files, and a file under a system directory or
+a directory of installed packages (`node_modules`, `site-packages`, a virtual
+environment). Whether git tracks the file is asked of git in the file's own directory,
+which may be a repository nobody vouched for: the one command reads the index, with the
+settings through which a repository's config can start a program switched off. A
+snapshot's `meta.json` is read back as data: a name in it that is not a plain file name,
+or that is a lesson's own `SKILL.md`, makes the snapshot unreadable, so it can put no
+file anywhere but beside the lesson under its own name. A snapshot that no
+lesson holds is removed 30 days after its last run.
+
+**Owing a decision.** A script is owed a decision when its newest version passed, it
+passed `COMPOUND_EVIDENCE_MIN_RUNS` times in all (3), git does not track it, no lesson
+holds any version of it and nobody declined it (`evidence_due` in the CLI, the one
+definition; `compound evidence list --due`). At a stop the mod asks the CLI for the
+scripts of the session that are owed one, and the stop is refused once for each script,
+with its name, how often it passed and failed, the last call that passed, and the two
+commands that settle it:
+
+```
+[compound] This session ran a script until it worked, and nothing keeps it.
+A copy of each was kept as it ran. A later session with the same job would write it again, unless it is recorded now, from that copy and not from memory.
+
+- validate.sh (evidence 3f2a91c0b6e41d07): passed 9 times, failed 2, in 3 versions; ran as /private/tmp/scratch/validate.sh
+  the last call that passed: S=/private/tmp/scratch; $S/validate.sh --all
+  record it: <cli> add --name <slug> --when "Use when <the job it does>" --from-evidence 3f2a91c0b6e41d07 --body "<what it does, how to call it, what it needs>"
+  or decline it: <cli> skip --evidence 3f2a91c0b6e41d07 --why "<reason>"
+```
+
+A script git tracks is already kept, by the repository, and is never owed. The refusal
+writes a `refuse` event with `why: evidence` and the ids.
+
+**A lesson keeps the copy that ran.** `compound add --from-evidence ID` attaches the
+snapshot's file to the lesson under its own name: the bytes that passed, whatever the file
+at that path holds now. `compound add --attach FILE` does the same when the file's bytes
+are a snapshot's. Either way the lesson's directory gets `.evidence.json`, which says for
+each attached script which snapshot it is, the path it ran at, the last call that passed,
+the session, and how often it passed and failed; `compound show` prints that beside the
+attachment, and the `learn` event carries `evidence`, the ids. Three things are refused
+(exit 2, nothing written): a snapshot whose every run failed, an id that names no
+snapshot, and `--attach` of a program (a file with a program's ending or a `#!` line) that
+has no recorded passing run. That last one is a script nobody has seen work; `--unrun`
+keeps it anyway, and `.evidence.json` and `compound show` then say it was kept without a
+recorded run. A file that is not a program (a table, a template) needs no run.
+`.evidence.json` names a path and a session of one machine: like every dotfile it is left
+out of what `promote --to general` publishes.
+
+**Declining.** `compound skip --evidence ID --why T` says the script is not worth a
+lesson. It is not asked about again, in any version. The `skip` event carries `evidence`
+and settles no capture and no strengthening.
 
 ### A skill that is used
 
@@ -1237,7 +1319,8 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
 - **Claims**: `~/.claude/compound/claims/<session id>/`, one empty directory per thing
   the mod did once in that session: `guard-<lesson>` (a guard's refusal),
   `stop-<call id>` (a stop refused for an owed lesson), `strengthen-<lesson>` (a stop
-  refused for an ineffective lesson), `nudge-<turn>` (the question after a long turn),
+  refused for an ineffective lesson), `nudge-<turn>` (the question after a long turn), `evidence-<id>` (a stop refused for a
+  script that ran),
   `unsettled` (the reminder at the first prompt), `fail-<call id>` (a failed call, held
   and judged by one copy of the mod), `reuse-<digest>-<n>` (the reuse check of one
   prompt, where the digest is of the prompt's text and the number counts 20-second windows),
@@ -1350,7 +1433,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture, and is required when the session has more than one unsettled (exit 2 otherwise, listing their ids). Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--from-evidence ID]... [--unrun] [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--from-evidence ID` attaches the script the CLI kept under that id, as it ran; `--attach` of a program with no recorded passing run is exit 2 unless `--unrun` (see "A script that ran"). `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture, and is required when the session has more than one unsettled (exit 2 otherwise, listing their ids). Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, `platform`, `shell`, `applies`, `disabled`, `counts` (`reuse`, `guard`, `recall`, `learn`, `use`), `ineffective`, `recurring`, and `shadowed: true` on a project lesson that carries a user or general lesson's name. A lesson not in force is listed, flagged `not here`, `disabled` or `shadowed`. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the four counters (`REUSED`, `GUARDED`, `RECALLED`, `USED`), the flag and the description, fitted to the terminal; where the columns themselves do not fit, the flag goes before the description on the line under the row. |
 | `compound show N` | One lesson's path and text, and when it is not in force, why. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective: at most one for a session, since the lesson was last written), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard, recall or use that names it, or null). |
 | `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`) and the asking session is added to the memo's `asked`. Each row under `prompts` carries `sessions`, the sessions that asked that text (its own first, at most 20). An empty stdin is exit 2; a request with no word in it has no candidates. |
@@ -1362,7 +1445,8 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed: the refusal names `compound disable`. Logs `rm`. |
 | `compound disable N` | Switches the general lesson `N` off for this user (see "The general pool"). Exit 2 for a lesson that is not in the general pool. Logs nothing. |
 | `compound enable N` | Switches it back on. |
-| `compound skip --why T [--settles ID]` | Declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
+| `compound evidence note`, `compound evidence list [--session S] [--due]`, `compound evidence show ID` | `note`: stdin `{"command", "ok", "cwd", "call", "agent", "turn"}` (the first two required); keeps a snapshot of every script file the command ran, with the run, and prints `{"noted":[{id,name,path}]}`. The mod runs it. `list`: one row for each script, by its path: `id` (its newest version), `name`, `path`, `ok`, `failed`, `ok_this` (passing runs of the newest version), `versions`, `turns`, `sessions`, `failed_first`, `first`, `last`, `tracked`, `scratch`, `command` (the newest call that passed), `lesson`, `changed` (it ran in a newer version than the lesson holds), `declined`, `due`. `--session S` counts what that session ran; `--due` leaves only the scripts owed a decision. `show ID`: one snapshot, its runs and its text. See "A script that ran". |
+| `compound skip --why T [--settles ID] [--evidence ID]` | With `--evidence ID`: declines the script of that snapshot, which is then not asked about again and settles nothing else; `--settles` with it is exit 2. Otherwise: declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |
@@ -1396,6 +1480,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_REUSE_FLOOR` | 1.5 | mod, CLI | The weight a lesson, skill or script must reach to be a candidate for a request (`compound find --request`): about one rare word in its name or description and one more in its body. `0` makes every entry that shares a word a candidate. The mod passes it to the CLI as `--floor`. |
 | `COMPOUND_REPEAT_MIN` | 3 | mod | Sessions that must have made one kind of request, this one included, before the reuse check offers to make it a skill (see "A request that keeps coming back"). At least 2; a smaller value is the default. |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | mod | Tool calls the main loop makes in a turn before the stop asks whether anything was learned. |
+| `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | CLI | Passing runs of a script, all its versions together, before a stop asks for it to be recorded or declined (see "A script that ran"). At least 1; anything else is the default. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
 | `COMPOUND_RECUR_LIMIT` | 2 | CLI | Recurrences of a lesson that count, since it was last written, that make it ineffective. One recall counts for a session. |
 | `COMPOUND_PLATFORM` | this machine's | CLI | The platform a lesson's `platform` is held against: `darwin`, `linux`, `windows`. Resolved like `COMPOUND_RECUR_LIMIT`. For tests, and for a machine the CLI names wrongly. |
