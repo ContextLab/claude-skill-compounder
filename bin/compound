@@ -257,6 +257,12 @@ EVENT LOG
                                                        lesson of its name
                                     from*    string    the project root that holds it
                                     seen_in* string    the project root it applied in
+        index     mod               lessons  int       the lessons the session was
+                                                       shown, by name and when each
+                                                       applies, at its first prompt
+                                    scripts  int       how many of them carry a script
+                                    elsewhere int      how many are another project's
+                                    chars    int       the length of what was shown
         met       CLI `met`         sig*     string    the signature of a failed call's
                                                        error (see `signature`): the
                                                        failure, whatever its paths,
@@ -526,7 +532,7 @@ LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn", "use")
 # Every type the table in the docstring names.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met")
+               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met", "index")
 # The types a command of this CLI writes, and the command: `compound log` refuses them, so
 # an event that settles a debt or says a lesson was written, moved or removed is in the log
 # only because that command ran. `log` takes the other types, which are the mod's.
@@ -536,7 +542,7 @@ LOG_TYPES = tuple(kind for kind in EVENT_TYPES if kind not in CLI_WRITES)
 # The types the mod writes, or has the CLI write (`use`): the newest of them is when the
 # mod last fired.
 MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "use", "repeat", "error",
-             "retry")
+             "retry", "index")
 # Written to be measured (`compound report`), one for every question put to the model and
 # one for the call after a refusal: left out of `status`'s Recent.
 VERDICT_TYPES = ("judge", "retry", "met")
@@ -804,7 +810,7 @@ EVENT_WORDS = {
     "reuse": "reused", "guard": "guarded", "recall": "recalled", "capture": "owed", "remind": "reminded",
     "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
     "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "use": "used",
-    "repeat": "repeated", "error": "error", "retry": "retried", "met": "met",
+    "repeat": "repeated", "error": "error", "retry": "retried", "met": "met", "index": "indexed",
 }
 
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
@@ -813,7 +819,7 @@ EVENT_COLOURS = {
     "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
     "judge": DIM, "use": BLUE, "repeat": CYAN,
     "error": RED,
-    "retry": DIM, "met": DIM,
+    "retry": DIM, "met": DIM, "index": DIM,
 }
 STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
 
@@ -4210,9 +4216,93 @@ def cmd_list(args):
     return 0
 
 
+# The most other projects, and lessons of theirs, the index reaches for.
+INDEX_PROJECTS = 12
+INDEX_ELSEWHERE = 60
+
+
+def _has_script(directory):
+    """Whether a lesson's directory holds a file beside its SKILL.md that is a program."""
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return False
+    return any(not name.startswith(".") and name != "SKILL.md" and os.path.isfile(os.path.join(directory, name))
+               and is_script(os.path.join(directory, name)) for name in names)
+
+
+def cmd_index(args):
+    """Every lesson a session of this project could use, as rows for the index the mod puts
+    in front of a session once: the lessons in force here, and the lessons of the user's
+    OTHER projects that carry a script. A lesson with a script comes before one without,
+    the project's own before the user's, the package's and another project's, so that an
+    index cut to its length loses the least useful first. Skills are not listed: Claude
+    Code lists those itself."""
+    project = project_root()
+    items, _broken = scan(project)
+    events, _bad = read_events()
+    rows = []
+    seen = set()
+    for item in items:
+        if item["kind"] != "lesson" or item.get("_problem") or not active(item) or item.get("shadowed"):
+            continue
+        seen.add(item["name"])
+        rows.append({"name": item["name"], "level": item["level"], "description": item["description"],
+                     "script": _has_script(item["path"]), "path": item["path"]})
+    here = os.path.realpath(project)
+    roots = []
+    for event in reversed(events):
+        root = event.get("project")
+        if event.get("type") != "learn" or event.get("level") != "project" or not isinstance(root, str) or not root:
+            continue
+        if root in roots or os.path.realpath(root) == here or not os.path.isdir(root):
+            continue
+        roots.append(root)
+        if len(roots) >= INDEX_PROJECTS:
+            break
+    elsewhere = []
+    for root in roots:
+        for item in scan(root)[0]:
+            if item["level"] != "project" or item["kind"] != "lesson" or item.get("_problem") or not active(item):
+                continue
+            if item.get("shadowed") or item["name"] in seen or not _has_script(item["path"]):
+                continue
+            seen.add(item["name"])
+            elsewhere.append({"name": item["name"], "level": "project", "description": item["description"],
+                              "script": True, "path": item["path"], "project": root})
+    rows.extend(elsewhere[:INDEX_ELSEWHERE])
+    order = {"project": 0, "user": 1, "general": 2}
+    rows.sort(key=lambda row: (not row["script"], 3 if row.get("project") else order.get(row["level"], 4), row["name"]))
+    emit(rows)
+    return 0
+
+
+def elsewhere_item(project, name):
+    """(item, project root) for the lesson called `name` in another project the event log
+    knows, or (None, None). `show` reads it when no lesson of that name is in force here:
+    the index offers a session the lessons of the user's other projects, and a name it
+    offers is one `show` prints."""
+    events, _bad = read_events()
+    for root, directory in holders(name, events, project):
+        if os.path.realpath(root) == os.path.realpath(project):
+            continue
+        for item in scan(root, with_body=True)[0]:
+            if (item["level"] == "project" and item["kind"] == "lesson" and item["name"] == name
+                    and os.path.realpath(item["path"]) == os.path.realpath(directory)
+                    and not item.get("_problem") and not item.get("shadowed")):
+                return item, root
+    return None, None
+
+
 def cmd_show(args):
     project = project_root()
-    item = find_item(project, args.name, in_force=True)
+    other = None
+    try:
+        item = find_item(project, args.name, in_force=True)
+    except Fail:
+        item, other = elsewhere_item(project, args.name) if SLUG_RE.match(args.name) else (None, None)
+        if item is None:
+            raise
     text = item.get("_text", "")
     files = sorted(name for name in os.listdir(item["path"]) if name != "SKILL.md" and not name.startswith("."))
     if args.json:
@@ -4230,12 +4320,17 @@ def cmd_show(args):
                  if event.get("type") in ("reuse", "guard", "recall", "use") and item["name"] in event_names(event)]
         row["last"] = {"ts": fired[-1].get("ts"), "type": fired[-1].get("type")} if fired else None
         row["files"] = files
+        if other:
+            row["project"] = other
         proof, unrun = read_proof(item["path"])
         row["evidence"] = [proof[name] for name in files if name in proof]
         row["unrun"] = [name for name in files if name in unrun]
         emit(row)
         return 0
     sys.stdout.write("%s (%s %s)\n%s\n" % (item["name"], item["level"], item["kind"], item["path"]))
+    if other:
+        sys.stdout.write("  a lesson of another project, %s: it is not in force here, and its files are read and run "
+                         "where they are\n" % other)
     if item.get("disabled"):
         sys.stdout.write("  disabled for this user; switch it back on: compound enable %s\n" % item["name"])
     if item.get("shadowed"):
@@ -7399,6 +7494,9 @@ def build_parser():
     one.add_argument("--evidence", metavar="ID", help="the id of the recorded script being declined")
 
     command("log", cmd_log, "Append one event (a JSON object on stdin).")
+
+    command("index", cmd_index, "The lessons a session here could use, as rows, the ones with a script first (JSON).",
+            json_flag=False)
 
     command("met", cmd_met, "A call failed: say whether its failure was met in an earlier session (JSON on stdin).",
             json_flag=False)

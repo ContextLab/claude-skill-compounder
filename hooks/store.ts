@@ -323,6 +323,23 @@ export function seconds(event: Event): number {
   return 0
 }
 
+// A row of `compound index`: a lesson a session here could use. `script` says a program sits
+// beside it; `project` is set on a lesson of another project, with the root it is in.
+export type Indexed = { name: string; level: string; description: string; script: boolean; path: string; project?: string }
+
+// The rows of `compound index`, in the CLI's order (the most useful first), or undefined
+// when the reply is not a list. A name that is not a slug is dropped: it goes into a command.
+export function parseIndex(stdout: string): Indexed[] | undefined {
+  const list = rows(parsed(stdout), [])
+  if (list === undefined) return undefined
+  return list
+    .filter(r => SLUG.test(str(r.name)) && str(r.description) !== '')
+    .map(r => {
+      const project = str(r.project)
+      return { name: str(r.name), level: str(r.level), description: str(r.description), script: r.script === true, path: str(r.path), ...(project === '' ? {} : { project }) }
+    })
+}
+
 // `compound met`: whether a failed call's failure was met before. `sig` is its signature (the
 // error with what differs from one meeting to the next folded away), `sessions` the other
 // sessions that met it, `captured` that a lesson was owed for it once already. undefined

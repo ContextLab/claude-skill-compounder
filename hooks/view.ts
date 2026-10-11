@@ -105,6 +105,7 @@ export const WORDS: Record<string, string> = {
   error: 'error',
   retry: 'retried',
   met: 'met',
+  index: 'indexed',
 }
 
 export function eventWord(type: string): string {

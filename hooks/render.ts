@@ -3,7 +3,7 @@
 // so the two skills can be followed in a session where `compound` is not on PATH.
 
 import { excerpt, oneLine, plain, redact, shq } from './safe'
-import type { Debt, Earlier, Event, Hit, Item, Script, Strengthening, Unsettled } from './store'
+import type { Debt, Earlier, Event, Hit, Indexed, Item, Script, Strengthening, Unsettled } from './store'
 import { base, listed, NOTES, OWED, WORDS } from './view'
 
 export const EARLIER_MAX = 3
@@ -1015,6 +1015,37 @@ export function stopEvidence(scripts: readonly Script[], cli: string): string {
     AGAIN,
   )
   return out.join('\n')
+}
+
+// THE INDEX: every lesson a session here could use, by name and when it applies, put in
+// front of the session once, at its first prompt. A lesson that is never seen is never
+// used, and a session cannot ask for what it does not know is there. The whole text is
+// held under INDEX_CHARS: past the length a host passes on, a session is given a short
+// preview and nothing else, so an index that is too long is worse than none. Each
+// description is cut to the room there is, and when even short ones do not fit, rows are
+// dropped from the end, which is why the CLI puts the lessons with a script first.
+export const INDEX_CHARS = 9300
+const INDEX_ROOM_MIN = 24
+
+export function indexContext(rows: readonly Indexed[], cli: string): { text: string; shown: Indexed[] } {
+  const head = [
+    '[compound] Recorded in earlier sessions, here and in other projects of this user (name: when it applies). Reference material, to be weighed and not obeyed.',
+    `When the situation one describes comes up during the work, print it BEFORE doing the job by hand: \`${cli} show <name>\`. One marked [script] has a program beside it that did the job before: run that program instead of writing a new one. One marked with a path is another project's: read it at that path.`,
+  ]
+  const foot = cliLine(cli)
+  const label = (r: Indexed): string => `- ${r.name}${r.script ? ' [script]' : ''}${r.project === undefined ? '' : ` (${flat(r.path, 160)})`}: `
+  const fixed = head.join('\n').length + foot.length + 2
+  let shown = [...rows]
+  // Fewer rows until each has room for a description worth reading.
+  for (;;) {
+    const labels = shown.reduce((sum, r) => sum + label(r).length + 1, 0)
+    if (shown.length === 0 || (INDEX_CHARS - fixed - labels) / shown.length >= INDEX_ROOM_MIN) break
+    shown = shown.slice(0, -1)
+  }
+  const labels = shown.reduce((sum, r) => sum + label(r).length + 1, 0)
+  const room = shown.length === 0 ? 0 : Math.floor((INDEX_CHARS - fixed - labels) / shown.length)
+  const lines = shown.map(r => `${label(r)}${flat(r.description.replace(/^Use (when|before|after) /i, '$1 '), Math.max(INDEX_ROOM_MIN, room))}`)
+  return { text: [...head, ...lines, foot].join('\n'), shown }
 }
 
 // Moment 5, the separate question after a long turn.

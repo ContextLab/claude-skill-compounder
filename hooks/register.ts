@@ -6,14 +6,14 @@ import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt
 import {
   bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
   sameCall, soleCli, soleCliShape,
-  heldStep, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
+  heldStep, indexContext, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
   resembles, reuseContext, reuseStatus, ruleRefusal, shellError, shellFailure, stopDebt, stopEvidence, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
   unsettledContext, usedStatus, userOrigin,
   type Failure, type Held, type Repeat, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseLogged, parseMet, parseMoved, parseOwed, parseScripts, parseShow,
+  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseIndex, parseInventory, parseLogged, parseMet, parseMoved, parseOwed, parseScripts, parseShow,
   parseTimedOut, parseUnsettled, parseUsed, settlers,
   type Earlier, type Event, type Found, type Item, type Met,
 } from './store'
@@ -831,6 +831,26 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   return unsettledContext(shown, await cliPath($))
 }
 
+// Once per session, at its first typed prompt: the index of what is recorded. A session
+// cannot use a lesson it has never seen, and most recorded lessons were never seen again.
+async function lessonIndex($: EngineInterface, sid: string): Promise<string> {
+  if (!(await firstTime($, sid, 'index'))) return ''
+  const ran = await cli($, ['index'], undefined, [0], undefined, BUDGET.prompt)
+  if (ran === undefined) return ''
+  // A CLI that says nothing has nothing to show (one older than this command prints a usage error, caught above).
+  if (ran.stdout.trim() === '') return ''
+  const rows = parseIndex(ran.stdout)
+  if (rows === undefined) {
+    await fail($, 'index.parse', `compound index printed something unreadable: ${ran.stdout.slice(0, 200)}`)
+    return ''
+  }
+  if (rows.length === 0) return ''
+  const made = indexContext(rows, await cliPath($))
+  if (made.shown.length === 0) return ''
+  await log($, { type: 'index', lessons: made.shown.length, scripts: made.shown.filter(r => r.script).length, elsewhere: made.shown.filter(r => r.project !== undefined).length, chars: made.text.length })
+  return made.text
+}
+
 // Candidates first, then ONE question: the candidates and the candidate earlier requests go
 // to the judge together, and only what it names is added to the prompt. A prompt the CLI
 // holds a verdict for is not put to the judge again.
@@ -1007,6 +1027,12 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
     if (owed !== '') out.push(owed)
   } catch (err) {
     await fail($, 'unsettled', err)
+  }
+  try {
+    const index = await lessonIndex($, sid)
+    if (index !== '') out.push(index)
+  } catch (err) {
+    await fail($, 'index', err)
   }
   const k = await knobs($)
   if (text.length < k.promptMinChars) {

@@ -699,7 +699,7 @@ class SmallThingsTest(Case):
             doc = handle.read().split('"""')[1]
         table = doc.split("Fields per type.")[1].split("A line that does not parse")[0]
         rows = re.findall(r"^        ([a-z]+) +(mod|CLI `[a-z]+`)", table, re.M)
-        self.assertEqual(len(rows), 19, rows)
+        self.assertEqual(len(rows), 20, rows)
         for kind, writer in rows:
             proc = self.box.run("log", stdin=json.dumps({"type": kind}))
             if writer == "mod":

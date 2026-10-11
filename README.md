@@ -279,6 +279,10 @@ The five questions and actions in the chart:
 | Capture | a call works after one failed | tells Claude to record the lesson when an earlier session met the same failure and nothing was recorded; for a failure met for the first time, a model decides whether the fix is one to keep |
 | Stop check | Claude is about to finish | refuses the stop once if a lesson is owed and not yet recorded or declined |
 
+At a session's first prompt compound also shows Claude an index of what is recorded: one
+line for each lesson, the ones that carry a script first, including scripts recorded in
+your other projects. A tool written once is offered everywhere.
+
 Three things happen beside the chart. A request that keeps coming back is offered a skill,
 as described above. Each time a session invokes a skill that compound lists, the use
 is counted and shown. And a script a session ran is kept as it ran, and the stop check
