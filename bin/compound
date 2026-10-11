@@ -4072,6 +4072,7 @@ def cmd_add(args):
 
     if proof or unrun:
         write_proof(directory, proof, unrun, name)
+        _pin_mtime(os.path.join(directory, "SKILL.md"), stamp)
     extra = {"settles": settles} if settles else {}
     if proof:
         extra["evidence"] = [meta["id"] for meta in proof]
@@ -4117,9 +4118,15 @@ def project_level_problem(project):
 
 def _pin_mtime(path, stamp):
     """With the clock pinned, a file written 'now' carries the pinned time too, so
-    'recalled since it was last modified' compares one clock with itself."""
+    'recalled since it was last modified' compares one clock with itself. So do the
+    files beside it, which 'unchanged since it was recorded' compares with the same clock."""
     if os.environ.get("COMPOUND_NOW"):
         os.utime(path, (stamp, stamp))
+        directory = os.path.dirname(path)
+        for name in os.listdir(directory):
+            other = os.path.join(directory, name)
+            if os.path.isfile(other) and not os.path.islink(other):
+                os.utime(other, (stamp, stamp))
 
 
 def _create_dir(parent, name, text, attachments):
@@ -4221,6 +4228,46 @@ INDEX_PROJECTS = 12
 INDEX_ELSEWHERE = 60
 
 
+def recorded_by_user(events):
+    """{real path of a lesson's directory: the time of the newest `learn` event that names
+    it}: the lessons this user's own sessions and commands wrote, as the log has them."""
+    out = {}
+    for event in events:
+        path = event.get("path")
+        stamp = parse_ts(event.get("ts"))
+        if event.get("type") == "learn" and isinstance(path, str) and path and stamp is not None:
+            real = os.path.realpath(path)
+            out[real] = max(stamp, out.get(real, 0))
+    return out
+
+
+# How long after its `learn` event a lesson's files may have been written and still be
+# the ones that event wrote.
+RECORDED_SLACK = 5
+
+
+def unchanged_since_recorded(directory, recorded):
+    """Whether a lesson of ANOTHER project may be offered here: this user's log says the
+    lesson was recorded with the CLI, and no file of it was written since. A repository
+    is a place other people write to: a lesson that arrived with a clone or a pull, or
+    one edited after it was recorded, is that repository's word and not this user's, and
+    it is neither listed in another project's index nor printed there by name."""
+    import stat
+
+    stamp = recorded.get(os.path.realpath(directory))
+    if stamp is None:
+        return False
+    try:
+        names = os.listdir(directory)
+        for name in names:
+            info = os.lstat(os.path.join(directory, name))
+            if not stat.S_ISREG(info.st_mode) or info.st_mtime > stamp + RECORDED_SLACK:
+                return False
+    except OSError:
+        return False
+    return bool(names)
+
+
 def _has_script(directory):
     """Whether a lesson's directory holds a file beside its SKILL.md that is a program."""
     try:
@@ -4261,11 +4308,15 @@ def cmd_index(args):
         if len(roots) >= INDEX_PROJECTS:
             break
     elsewhere = []
+    recorded = recorded_by_user(events)
     for root in roots:
         for item in scan(root)[0]:
             if item["level"] != "project" or item["kind"] != "lesson" or item.get("_problem") or not active(item):
                 continue
             if item.get("shadowed") or item["name"] in seen or not _has_script(item["path"]):
+                continue
+            # Another project's files reach this one only as this user recorded them.
+            if not unchanged_since_recorded(item["path"], recorded):
                 continue
             seen.add(item["name"])
             elsewhere.append({"name": item["name"], "level": "project", "description": item["description"],
@@ -4283,8 +4334,11 @@ def elsewhere_item(project, name):
     the index offers a session the lessons of the user's other projects, and a name it
     offers is one `show` prints."""
     events, _bad = read_events()
+    recorded = recorded_by_user(events)
     for root, directory in holders(name, events, project):
         if os.path.realpath(root) == os.path.realpath(project):
+            continue
+        if not unchanged_since_recorded(directory, recorded):
             continue
         for item in scan(root, with_body=True)[0]:
             if (item["level"] == "project" and item["kind"] == "lesson" and item["name"] == name
