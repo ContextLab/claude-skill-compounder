@@ -2319,7 +2319,12 @@ def signature(result):
     """The signature of a failed call's result, or None when it has no line that reads
     like an error or the line says nothing about the call."""
     lines = [line.strip() for line in _text(result)[:EVENT_TEXT_CAP * 4].split("\n") if line.strip()]
-    found = [line for line in lines if SIGNATURE_KEY.search(line) and not line.startswith(('File "', "at ", "^"))]
+    # The mod's own sentence in front of a shell error it found in a call that exited 0.
+    lines = [re.sub(r"^The call exited with status \d+, and its output carries a shell error: ", "", line)
+             for line in lines]
+    # A line of markup is a report's or a page's (a JUnit <testsuite failures="0">), not the call's error.
+    found = [line for line in lines if SIGNATURE_KEY.search(line)
+             and not line.startswith(('File "', "at ", "^")) and not re.match(r"^<(?!tool_use_error>)[A-Za-z!?/]", line)]
     if not found:
         return None
     # A Python exception's own line when there is one, else the first line that reads like
@@ -3556,13 +3561,24 @@ def evidence_dir():
     return os.path.join(home_dir(), "evidence")
 
 
-def _own_script(path):
-    """Whether the file is this package's, or another tool's, and not work of the session."""
+def _own_script(path, project=None):
+    """Whether the file is this package's, or another tool's, and not work of the session.
+    A session's own scripts are in its project or in a temporary directory (a scratchpad,
+    /tmp): a program anywhere else on the machine (an SDK's, a plugin's, a tool of the
+    user's own) was not written by the session, however often the session runs it."""
+    import tempfile
+
     if path == os.path.realpath(__file__) or _under(path, pkg_root()):
         return True
     if any(part in path for part in NOT_OURS):
         return True
-    return any(path.startswith(root) for root in SYSTEM_ROOTS)
+    if any(path.startswith(root) for root in SYSTEM_ROOTS):
+        return True
+    places = [root for root in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/tmp", "/var/folders",
+                                "/private/var/folders") if os.path.isdir(root)]
+    if project:
+        places.append(project)
+    return not any(_under(path, place) for place in places)
 
 
 # What a script that takes its input from the call reads, and what a script that only
@@ -3657,7 +3673,7 @@ def note_run(path, run, project):
     None for a file that is not kept: too large, not text, or not the session's."""
     import hashlib
 
-    if _own_script(path) or not evidence_name_ok(os.path.basename(path)):
+    if _own_script(path, project) or not evidence_name_ok(os.path.basename(path)):
         return None
     try:
         with open(path, "rb") as handle:
@@ -3771,6 +3787,9 @@ def evidence_due(row):
     the main loop ran it EVIDENCE_MIN_RUNS times. The number of runs alone does not tell
     a tool from a probe (notes/2026-10-11-usage-audit/threshold-study.md)."""
     if row["ok_this"] < 1 or row["in_repo"] or row["test"] or row["bound"] or row["lesson"] or row["declined"]:
+        return False
+    # A snapshot kept before the rule about whose scripts are kept: held to it when read.
+    if _own_script(_text(row.get("path")), _text(row.get("project")) or None):
         return False
     return bool((row["ok"] >= EVIDENCE_TOOL_RUNS and (row["varied"] or row["reads_args"]))
                 or row["ok_main"] >= evidence_min_runs())

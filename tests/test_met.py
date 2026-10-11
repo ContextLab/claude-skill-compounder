@@ -38,6 +38,10 @@ class SignatureTest(MetCase):
         for one, other in pairs:
             self.assertEqual(self.met(one)["sig"], self.met(other)["sig"], one)
             self.assertTrue(self.met(one)["sig"], one)
+        # A shell error the mod found in a call that exited 0 is that error, without the mod's own sentence.
+        self.assertEqual(self.met("The call exited with status 0, and its output carries a shell error: "
+                                  "(eval):1: command not found: timeout\nrest of the output")["sig"],
+                         "command not found: timeout")
         self.assertNotEqual(self.met("zsh: command not found: timeout")["sig"],
                             self.met("zsh: command not found: gsed")["sig"])
 
@@ -49,6 +53,9 @@ class SignatureTest(MetCase):
             "TimeoutError: browserBackend.callTool: Timeout 5000ms exceeded.",
             "ImportError: cannot import name 'x' from 'y' (/a/b/c/y.py)",
             "KeyError: 'info'",
+            '<testsuite name="pytest" tests="12" failures="0" errors="0" skipped="1" time="0.3" timestamp="2026-10-11">',
+            '<div class="error">not found</div>',
+            "<!-- failed to load -->",
             "Exit code 1",
             "",
             "everything was fine",

@@ -10,7 +10,7 @@ import json
 import os
 import unittest
 
-from test_support import NOW, Case, git_ok
+from test_support import NOW, REPO, Case, git_ok
 
 DAY = 86400
 
@@ -118,6 +118,14 @@ class NoteTest(EvidenceCase):
         self.assertEqual(self.note("node %s" % self.script("cli.js", "console.log(1)\n", vendored)), [])
         self.assertEqual(self.note("%s list" % self.box.script), [])
         self.assertEqual(self.note("/bin/sh -n /bin/sh"), [])
+        # A program elsewhere on the machine (an SDK's, a plugin's, the user's own) is not the
+        # session's: only a file in the project or in a temporary directory is kept. This
+        # checkout's own test runner stands for such a program, wherever the checkout is
+        # (unless it was itself checked out into a temporary directory).
+        elsewhere = os.path.join(REPO, "run_tests.sh")
+        if not any(REPO.startswith(root) for root in ("/tmp", "/private/tmp", "/var/", "/private/var/")):
+            self.assertEqual(self.note("sh %s --help" % elsewhere), [])
+        self.assertEqual(len(self.note(self.script("in-project.sh", "#!/bin/sh\ntrue\n", self.box.project))), 1)
         big = self.script("big.py", "x = 1\n" * 60000)
         self.assertEqual(self.note("python3 %s" % big), [])
         binary = self.script("blob.sh", "")
