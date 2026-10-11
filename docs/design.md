@@ -637,7 +637,9 @@ there is one, else the first line that reads like an error), with what differs f
 meeting to the next folded away. A path of two or more parts becomes `<PATH>`, a quoted
 name `<Q>`, a hash `<HEX>`, every number `N`, and the word after `no matches found:` is
 dropped. `(eval):14: command not found: timeout` and `(eval):1: command not found:
-timeout` are one signature, `command not found: timeout`. An error that says nothing
+timeout` are one signature, `command not found: timeout`. A line of markup (a JUnit
+`<testsuite failures="0">`, a page's `<div class="error">`) is a report's and not the
+call's error, and is passed over. An error that says nothing
 about the call has no signature and is never counted: the work's own failures (an
 assertion, a `KeyError`, a traceback, a count of failed tests), a file that is simply not
 there, a wait that ran out, a name that cannot be imported. The CLI writes each meeting
@@ -729,9 +731,11 @@ to its snapshot and an edited file is a new snapshot: a new version of the same 
 which is known by its path. Not kept: a file over 256 KiB, one that is not UTF-8 text, one
 that holds something shaped like a credential (the shapes `promote --to general` refuses to
 publish: a private key, an API token, a password in a URL, a bearer token), one whose name
-is not a plain file name, the package's own files, and a file under a system directory or
+is not a plain file name, the package's own files, a file under a system directory or
 a directory of installed packages (`node_modules`, `site-packages`, a virtual
-environment). A snapshot's `meta.json` is read back as data: a name in it that is not a
+environment), and any file that is neither in the session's project nor in a temporary
+directory: a program elsewhere on the machine (an SDK's, a plugin's, a tool of the user's
+own) was not written by the session, however often the session runs it. A snapshot's `meta.json` is read back as data: a name in it that is not a
 plain file name, or that is a lesson's own `SKILL.md` in any letter case, makes the
 snapshot unreadable, so it can put no file anywhere but beside the lesson under its own
 name. A snapshot that no
