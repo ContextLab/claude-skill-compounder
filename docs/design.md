@@ -546,18 +546,35 @@ that holds something shaped like a credential (the shapes `promote --to general`
 publish: a private key, an API token, a password in a URL, a bearer token), one whose name
 is not a plain file name, the package's own files, and a file under a system directory or
 a directory of installed packages (`node_modules`, `site-packages`, a virtual
-environment). Whether git tracks the file is asked of git in the file's own directory,
-which may be a repository nobody vouched for: the one command reads the index, with the
-settings through which a repository's config can start a program switched off. A
-snapshot's `meta.json` is read back as data: a name in it that is not a plain file name,
-or that is a lesson's own `SKILL.md`, makes the snapshot unreadable, so it can put no
-file anywhere but beside the lesson under its own name. A snapshot that no
+environment). A snapshot's `meta.json` is read back as data: a name in it that is not a
+plain file name, or that is a lesson's own `SKILL.md` in any letter case, makes the
+snapshot unreadable, so it can put no file anywhere but beside the lesson under its own
+name. A snapshot that no
 lesson holds is removed 30 days after its last run.
 
-**Owing a decision.** A script is owed a decision when its newest version passed, it
-passed `COMPOUND_EVIDENCE_MIN_RUNS` times in all (3), git does not track it, no lesson
-holds any version of it and nobody declined it (`evidence_due` in the CLI, the one
-definition; `compound evidence list --due`). At a stop the mod asks the CLI for the
+**Owing a decision.** Most scripts a session writes are probes: written, run a few times
+and done with. How often a script ran does not tell a tool from a probe; how it was used
+does. A script is owed a decision when all of this holds (`evidence_due` in the CLI, the
+one definition; `compound evidence list --due`):
+
+- its newest version passed;
+- it is not inside a repository (a directory with `.git` above it): a repository keeps
+  its own files, and committing the script is the repository's way to keep it;
+- it is not a test file (`test_*.py`, `*_test.py`, `conftest.py`, `*.test.ts`,
+  `*.spec.js`, `test-*.sh`);
+- its text names no scratch directory and no worktree (`/scratchpad/`,
+  `/private/tmp/claude-`, `/.claude/worktrees/`, `/var/folders/`): such a script works
+  only where it was written;
+- no lesson holds any version of it and nobody declined it;
+- and it was used as a tool: it passed twice AND takes its input from the call (two
+  passing runs were given different arguments, or its text reads its arguments:
+  `sys.argv`, `argparse`, `$1`, `"$@"`, `process.argv` and the like), OR the main loop
+  ran it `COMPOUND_EVIDENCE_MIN_RUNS` times (3) with success, which is how a check that
+  takes no arguments is used.
+
+Whether a file is in a repository is read from the directories above it. Git is not run
+there: the directory is wherever a script happened to run, and a repository's own config
+can name a program for git to start. At a stop the mod asks the CLI for the
 scripts of the session that are owed one, and the stop is refused once for each script,
 with its name, how often it passed and failed, the last call that passed, and the two
 commands that settle it:
@@ -572,8 +589,11 @@ A copy of each was kept as it ran. A later session with the same job would write
   or decline it: <cli> skip --evidence 3f2a91c0b6e41d07 --why "<reason>"
 ```
 
-A script git tracks is already kept, by the repository, and is never owed. The refusal
-writes a `refuse` event with `why: evidence` and the ids.
+The refusal writes a `refuse` event with `why: evidence` and the ids. The rule and its
+numbers come from reading six weeks of real sessions: of the scripts the rule picks, 58%
+were reusable tools and 8% probes (the rest worked only in one worktree or scratch
+directory, which is what the check of the script's text is for); of those it passes over,
+9% were tools.
 
 **A lesson keeps the copy that ran.** `compound add --from-evidence ID` attaches the
 snapshot's file to the lesson under its own name: the bytes that passed, whatever the file
@@ -1445,7 +1465,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed: the refusal names `compound disable`. Logs `rm`. |
 | `compound disable N` | Switches the general lesson `N` off for this user (see "The general pool"). Exit 2 for a lesson that is not in the general pool. Logs nothing. |
 | `compound enable N` | Switches it back on. |
-| `compound evidence note`, `compound evidence list [--session S] [--due]`, `compound evidence show ID` | `note`: stdin `{"command", "ok", "cwd", "call", "agent", "turn"}` (the first two required); keeps a snapshot of every script file the command ran, with the run, and prints `{"noted":[{id,name,path}]}`. The mod runs it. `list`: one row for each script, by its path: `id` (its newest version), `name`, `path`, `ok`, `failed`, `ok_this` (passing runs of the newest version), `versions`, `turns`, `sessions`, `failed_first`, `first`, `last`, `tracked`, `scratch`, `command` (the newest call that passed), `lesson`, `changed` (it ran in a newer version than the lesson holds), `declined`, `due`. `--session S` counts what that session ran; `--due` leaves only the scripts owed a decision. `show ID`: one snapshot, its runs and its text. See "A script that ran". |
+| `compound evidence note`, `compound evidence list [--session S] [--due]`, `compound evidence show ID` | `note`: stdin `{"command", "ok", "cwd", "call", "agent", "turn"}` (the first two required); keeps a snapshot of every script file the command ran, with the run, and prints `{"noted":[{id,name,path}]}`. The mod runs it. `list`: one row for each script, by its path: `id` (its newest version), `name`, `path`, `ok`, `failed`, `ok_this` (passing runs of the newest version), `versions`, `turns`, `sessions`, `failed_first`, `first`, `last`, `in_repo`, `scratch`, `test`, `reads_args`, `bound`, `varied` (two passing runs were given different arguments), `ok_main` (passing runs by the main loop), `command` (the newest call that passed), `lesson`, `changed` (it ran in a newer version than the lesson holds), `declined`, `due`. `--session S` counts what that session ran; `--due` leaves only the scripts owed a decision. `show ID`: one snapshot, its runs and its text. See "A script that ran". |
 | `compound skip --why T [--settles ID] [--evidence ID]` | With `--evidence ID`: declines the script of that snapshot, which is then not asked about again and settles nothing else; `--settles` with it is exit 2. Otherwise: declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
@@ -1480,7 +1500,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_REUSE_FLOOR` | 1.5 | mod, CLI | The weight a lesson, skill or script must reach to be a candidate for a request (`compound find --request`): about one rare word in its name or description and one more in its body. `0` makes every entry that shares a word a candidate. The mod passes it to the CLI as `--floor`. |
 | `COMPOUND_REPEAT_MIN` | 3 | mod | Sessions that must have made one kind of request, this one included, before the reuse check offers to make it a skill (see "A request that keeps coming back"). At least 2; a smaller value is the default. |
 | `COMPOUND_TURN_MIN_CALLS` | 25 | mod | Tool calls the main loop makes in a turn before the stop asks whether anything was learned. |
-| `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | CLI | Passing runs of a script, all its versions together, before a stop asks for it to be recorded or declined (see "A script that ran"). At least 1; anything else is the default. |
+| `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | CLI | Passing runs of a script by the main loop, all its versions together, before a stop asks for it to be recorded or declined, when nothing else says the script is a tool (see "A script that ran"). At least 1; anything else is the default. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
 | `COMPOUND_RECUR_LIMIT` | 2 | CLI | Recurrences of a lesson that count, since it was last written, that make it ineffective. One recall counts for a session. |
 | `COMPOUND_PLATFORM` | this machine's | CLI | The platform a lesson's `platform` is held against: `darwin`, `linux`, `windows`. Resolved like `COMPOUND_RECUR_LIMIT`. For tests, and for a machine the CLI names wrongly. |

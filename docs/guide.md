@@ -439,9 +439,11 @@ says so too, with `--yes --upstream <that destination>`.
 ## Keep a script that worked
 
 When Claude writes a script during a task and runs it, compound keeps a copy of the script
-exactly as it ran, each time it runs. You do nothing for that. Once a script has passed
-three times and nothing else keeps it (git does not track it, no lesson holds it), Claude
-is stopped once before it finishes and asked to record the script or decline it.
+exactly as it ran, each time it runs. You do nothing for that. Most such scripts are
+probes and are left alone. When one was used as a tool (it passed twice and takes
+arguments, or Claude itself ran it three times), it is outside any repository, and no
+lesson holds it, Claude is stopped once before it finishes and asked to record the script
+or decline it.
 
 See what was kept:
 
@@ -486,8 +488,8 @@ about again:
 compound skip --evidence 3f2a91c0b6e41d07 --why "a probe of one API response"
 ```
 
-A script that belongs to the repository is better committed there. Once git tracks it,
-compound does not ask about it.
+A script that belongs to the repository is better kept there. compound does not ask
+about a script that is inside a repository.
 
 ## Decline a lesson
 

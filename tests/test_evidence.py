@@ -30,8 +30,9 @@ class EvidenceCase(Case):
 
     def note(self, command, ok=True, **kw):
         run = {"command": command, "ok": ok, "call": kw.pop("call", "toolu_01"), "turn": kw.pop("turn", 1)}
-        if "cwd" in kw:
-            run["cwd"] = kw.pop("cwd")
+        for key in ("cwd", "agent"):
+            if key in kw:
+                run[key] = kw.pop(key)
         return self.box.json("evidence", "note", "--json", stdin=json.dumps(run), **kw)["noted"]
 
     def rows(self, *flags, **kw):
@@ -149,7 +150,7 @@ class NoteTest(EvidenceCase):
         victim = os.path.join(self.box.root, "victim.txt")
         with open(victim, "w") as handle:
             handle.write("not a script\n")
-        for name in ("SKILL.md", "../../../victim.txt", victim, ".evidence.json", "a/b.sh", ""):
+        for name in ("SKILL.md", "skill.md", "Skill.MD", "../../../victim.txt", victim, ".evidence.json", "a/b.sh", ""):
             with open(meta_path, "w") as handle:
                 json.dump(dict(meta, name=name), handle)
             proc = self.box.run("add", "--name", "taken-over", "--when", "Use when.", "--from-evidence", ident,
@@ -161,10 +162,20 @@ class NoteTest(EvidenceCase):
     def test_a_file_whose_name_is_a_lessons_own_is_not_kept(self):
         self.assertEqual(self.note("sh %s" % self.script("SKILL.md", "#!/bin/sh\ntrue\n")), [])
         self.assertEqual(self.note("sh %s" % self.script(".hidden.sh", "#!/bin/sh\ntrue\n")), [])
+        # On a file system that ignores case, `skill.md` beside a lesson IS its SKILL.md.
+        other = os.path.join(self.scratch, "lower")
+        os.makedirs(other)
+        lower = self.script("skill.md", "#!/bin/sh\ntrue\n", other)
+        self.assertEqual(self.note("sh %s" % lower), [])
+        proc = self.box.run("add", "--name", "lower-case", "--when", "Use when.", "--attach", lower, "--unrun",
+                            stdin="Body.\n")
+        self.assertExit(proc, 2)
+        self.assertIn("SKILL.md", proc.stderr)
 
-    def test_git_is_asked_without_running_what_the_repository_configures(self):
-        """The directory a script ran in may be a repository with a config of its own: the
-        fsmonitor it names is a program git would start, and it is not started."""
+    def test_git_is_not_run_in_the_directory_a_script_ran_in(self):
+        """The directory a script ran in may be a repository with a config of its own, and a
+        config can name a program for git to start (here, its fsmonitor). Whether the file
+        is in a repository is read from the directories above it, and git is not run."""
         repo = os.path.join(self.box.root, "cloned")
         os.makedirs(repo)
         git_ok("init", "-q", repo)
@@ -177,7 +188,7 @@ class NoteTest(EvidenceCase):
         if os.path.exists(marker):
             os.remove(marker)
         self.assertEqual(len(self.note(path)), 1)
-        self.assertEqual([row["tracked"] for row in self.rows() if row["name"] == "tool.sh"], [True])
+        self.assertEqual([row["in_repo"] for row in self.rows() if row["name"] == "tool.sh"], [True])
         self.assertFalse(os.path.exists(marker))
 
     def test_input_that_is_not_a_run_is_refused(self):
@@ -211,16 +222,49 @@ class DueTest(EvidenceCase):
         self.note(path, ok=False, COMPOUND_NOW=NOW + 9)
         self.assertEqual(self.rows("--due"), [])
 
-    def test_a_script_git_already_keeps_is_not_owed(self):
+    def test_a_script_in_a_repository_is_the_repositorys_to_keep(self):
         git_ok("init", "-q", self.box.project)
-        tracked = self.script("release.sh", "#!/bin/sh\ntrue\n", self.box.project)
-        loose = self.script("probe.sh", "#!/bin/sh\ntrue\n", self.box.project)
-        git_ok("add", "release.sh", cwd=self.box.project)
-        self.passed(tracked, 3)
-        self.passed(loose, 3)
+        inside = self.script("release.sh", "#!/bin/sh\ntrue\n", self.box.project)
+        outside = self.script("probe.sh", "#!/bin/sh\ntrue\n")
+        self.passed(inside, 3)
+        self.passed(outside, 3)
         rows = dict((row["name"], row) for row in self.rows())
-        self.assertEqual((rows["release.sh"]["tracked"], rows["release.sh"]["due"]), (True, False))
-        self.assertEqual((rows["probe.sh"]["tracked"], rows["probe.sh"]["due"]), (False, True))
+        self.assertEqual((rows["release.sh"]["in_repo"], rows["release.sh"]["due"]), (True, False))
+        self.assertEqual((rows["probe.sh"]["in_repo"], rows["probe.sh"]["due"]), (False, True))
+
+    def test_a_script_that_takes_its_input_from_the_call_is_owed_after_two_passing_runs(self):
+        """A tool is told from a probe by how it is used, not by how often: given different
+        arguments, or written to read them."""
+        fixed = self.script("probe.py", "print(open('/etc/hosts').read()[:10])\n")
+        self.passed("python3 %s" % fixed, 2, agent="worker-1")
+        varied = self.script("render.py", "import os\nprint(os.environ.get('PAGE'))\n")
+        self.note("python3 %s chapter1.md" % varied, agent="worker-1")
+        self.note("python3 %s chapter2.md" % varied, agent="worker-1", COMPOUND_NOW=NOW + 1)
+        reads = self.script("fill.sh", "#!/bin/sh\nsed \"s/NAME/$1/\" template.txt\n")
+        self.passed("sh %s" % reads, 2, agent="worker-1")
+        once = self.script("once.py", "import sys\nprint(sys.argv[1:])\n")
+        self.passed("python3 %s a" % once, 1, agent="worker-1")
+        rows = dict((row["name"], row) for row in self.rows())
+        self.assertEqual([(name, rows[name]["varied"], rows[name]["reads_args"], rows[name]["due"])
+                          for name in ("probe.py", "render.py", "fill.sh", "once.py")],
+                         [("probe.py", False, False, False), ("render.py", True, False, True),
+                          ("fill.sh", False, True, True), ("once.py", False, True, False)])
+
+    def test_runs_alone_count_only_when_the_main_loop_made_them(self):
+        path = self.script("progress.sh", "#!/bin/sh\ndate\n")
+        self.passed(path, 5, agent="worker-1")
+        self.assertEqual((self.rows()[0]["ok"], self.rows()[0]["ok_main"], self.rows()[0]["due"]), (5, 0, False))
+        self.passed(path, 3, COMPOUND_NOW=NOW + 20)
+        self.assertEqual((self.rows()[0]["ok_main"], self.rows()[0]["due"]), (3, True))
+
+    def test_a_test_file_and_a_script_tied_to_a_scratch_directory_are_not_owed(self):
+        test = self.script("test_parser.py", "import sys\nprint(sys.argv)\n")
+        bound = self.script("collect.py", "import sys\nOUT = '/private/tmp/claude-501/x/scratchpad/out.json'\nprint(sys.argv, OUT)\n")
+        for path in (test, bound):
+            self.passed("python3 %s" % path, 4)
+        rows = dict((row["name"], row) for row in self.rows())
+        self.assertEqual((rows["test_parser.py"]["test"], rows["test_parser.py"]["due"]), (True, False))
+        self.assertEqual((rows["collect.py"]["bound"], rows["collect.py"]["due"]), (True, False))
 
     def test_a_snapshot_nothing_holds_goes_after_thirty_days_and_a_lessons_stays(self):
         kept = self.passed(self.script("kept.sh", "#!/bin/sh\necho kept\n"), 3)
