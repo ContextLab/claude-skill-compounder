@@ -200,6 +200,74 @@ test('a recall reply is a recorded lesson, a readable no, or unreadable', async 
   }
 })
 
+// The two replies haiku gave that the mod logged as `recall.parse` errors (8 and 11 October
+// 2026), as far as the log kept them (200 characters), with the lessons they were asked about.
+const FENCED_THEN_PROSE = '```json\n{"name": "inline-python-in-zsh-quotes"}\n```\n\nThe error "bad substitution" occurs because the command uses `${c:0:7}` (bash parameter expansion syntax for substring) inside a zsh double-quoted'
+const BOLD_THEN_PROSE = '**zsh-equals-word**\n\nThe failing command has unquoted `===` words after `;`, in `echo ==== lg` and `echo === guard`. zsh treats a bare word starting with `=` as a command-path lookup, which produces `'
+const ZSH: Item[] = [item('lesson', 'zsh-equals-word', 'user'), item('lesson', 'inline-python-in-zsh-quotes', 'user'), item('lesson', 'zsh-equals', 'user')]
+
+test('the object is found when the words after it hold a brace of their own', async () => {
+  expect(firstObject(FENCED_THEN_PROSE)).toEqual({ name: 'inline-python-in-zsh-quotes' })
+  expect(firstObject('Use `${x}` here: {"a":{"b":"}"}} and then `${y}`.')).toEqual({ a: { b: '}' } })
+  expect(firstObject('{"a":1}\n{"a":1}')).toEqual({ a: 1 })
+  // Two objects that differ are two answers, and neither is taken.
+  expect(firstObject('{"a":1} or {"a":2}')).toBe(undefined)
+  expect(firstObject('{"name":"zsh-equals-word"} {"name":null}')).toBe(undefined)
+})
+
+test('a recall reply that is fenced JSON followed by an explanation is read', async () => {
+  expect(parseRecall(FENCED_THEN_PROSE, ZSH)?.lesson?.name).toBe('inline-python-in-zsh-quotes')
+  expect(parseRecall(FENCED_THEN_PROSE.replace(/\n/g, ' '), ZSH)?.lesson?.name).toBe('inline-python-in-zsh-quotes')
+  expect(parseRecall('```json\n{"name": null}\n```\nNone applies: `${c:0:7}` is not covered.', ZSH)).toEqual({ lesson: undefined })
+})
+
+test('a recall reply that begins with a recorded name and no JSON is read as that name', async () => {
+  expect(parseRecall(BOLD_THEN_PROSE, ZSH)?.lesson?.name).toBe('zsh-equals-word')
+  // As the log kept it: on one line.
+  expect(parseRecall(BOLD_THEN_PROSE.replace(/\n+/g, ' '), ZSH)?.lesson?.name).toBe('zsh-equals-word')
+  for (const said of ['zsh-equals-word', '`zsh-equals-word`', '"zsh-equals-word"', '**`zsh-equals-word`**', '__zsh-equals-word__', '**zsh-equals-word [lesson, user]**: it applies.', 'zsh-equals-word: the call has a bare `===`.', '  *zsh-equals-word*.']) {
+    expect(parseRecall(said, ZSH)?.lesson?.name).toBe('zsh-equals-word')
+  }
+  // Braces in the explanation are not an answer and do not spoil the one given.
+  expect(parseRecall('**zsh-equals-word**\n\nThe call also uses `${c:0:7}`, which is fine.', ZSH)?.lesson?.name).toBe('zsh-equals-word')
+  // The shorter name is not found inside the longer one, nor the longer taken for the shorter.
+  expect(parseRecall('**zsh-equals**', ZSH)?.lesson?.name).toBe('zsh-equals')
+})
+
+test('a recall reply without JSON that names no recorded lesson, or more than one, is unreadable', async () => {
+  for (const bad of [
+    '**not-recorded**\n\nThe failing command has unquoted words.',
+    '**zsh-equals-word** or perhaps **inline-python-in-zsh-quotes**: both describe it.',
+    '**zsh-equals-word**\n\nThis is not inline-python-in-zsh-quotes, which is about quoting.',
+    'zsh-equals-word, zsh-equals',
+    // A name that is not what the reply begins with is a mention, not an answer.
+    'None of them applies. zsh-equals-word is about a different mistake.',
+    'The lesson zsh-equals-word applies.',
+    'I think **zsh-equals-word** applies.',
+    '**zsh-equals-wordy**',
+    '**zsh-equals-word/extra**',
+    'null',
+    'none',
+    '**None**',
+    '**zsh-equals-word** {"name":',
+    '{"name": zsh-equals-word}',
+  ]) {
+    expect(parseRecall(bad, ZSH)).toBe(undefined)
+  }
+  // JSON, when there is any, is the answer: a name not recorded is a readable no, as before.
+  expect(parseRecall('{"name":"not-recorded"}\nzsh-equals-word', ZSH)).toEqual({ lesson: undefined })
+})
+
+test('the recall prompt asks for the bare line: no fence, no markdown, no explanation', async () => {
+  const recall = recallPrompt('./build.sh', ERROR, LESSONS)
+  const ask = recall.split('\n').filter(l => l.startsWith('Reply with exactly'))
+  expect(ask.length).toBe(1)
+  expect(recall.includes('{"name":"<exact lesson name>"} or {"name":null}')).toBe(true)
+  expect(recall.includes('no code fence')).toBe(true)
+  expect(recall.includes('no explanation')).toBe(true)
+  expect(recall.includes('The first character of your reply is { and the last is }.')).toBe(true)
+})
+
 function fix(fields: Record<string, unknown>): string {
   return JSON.stringify({ same_goal: true, call_mistake: true, recurs: true, evidence: 'a profile is required', verdict: 'FIX', ...fields })
 }

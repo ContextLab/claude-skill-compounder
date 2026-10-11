@@ -409,6 +409,17 @@ event log knows. A match is returned beside the error, quoted, and counted as a
 left in place as described under Levels. With no match the failure is held, per agent, as
 the possible start of a new lesson.
 
+The model is asked for one line of JSON, `{"name":"<exact lesson name>"}` or
+`{"name":null}`, with no code fence, markdown or explanation. What it sends is read as
+follows (`parseRecall` and `firstObject` in `hooks/judge.ts`). The JSON object is the
+answer wherever it stands in the reply, in a fence or before an explanation, even one
+with braces of its own; two objects that differ are no answer. A reply with no JSON is
+read only when it begins with the name of a lesson it was shown, bare or inside markdown
+emphasis, backticks or quotes, and mentions no other lesson it was shown: a name further
+in may be one the reply rules out, and of two names the mod does not pick one. Anything
+else is unreadable: the failure is held as if no lesson matched, and an `error` with
+`where` `recall.parse` is logged.
+
 **One failure is held per agent loop.** A later failure that no lesson describes takes
 the place of the one held. A later failure that a lesson *is* recalled for is not held
 and takes nothing's place: the failure held before it stays held, and its fix is still
