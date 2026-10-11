@@ -105,9 +105,11 @@ prints the lessons whose pattern hits.
   of any line (`^` matches at every line of the command), after `;`, `&&`, `||`, `|` or
   `(` (so inside `$(`), and after `do`, `then` or `else`. A pattern without it also fires
   on the command's name inside an argument (`grep timeout run.log`).
-- **A pattern guards Bash calls only.** It is never tested against a file being written,
-  an agent's prompt or any other tool's input, so prose that mentions the mistake is not
-  stopped. When the mistake is a call of another tool, name the tool with `--tool`
+- **A pattern guards Bash calls only, and of a Bash call only what runs.** It is never
+  tested against a file being written, an agent's prompt or any other tool's input, and
+  inside a Bash command not against the body of a here-document, a comment, or text that
+  begins inside a quoted argument. So prose that mentions the mistake is not stopped, and
+  a pattern cannot be written to catch a mistake inside an inline `python - <<EOF` program. When the mistake is a call of another tool, name the tool with `--tool`
   (repeatable): the pattern is then tested against the JSON of that tool's input, and not
   against Bash commands unless `--tool Bash` is given too.
   `--match '"file_path": "[^"]*\.env"' --tool Edit --tool Write`

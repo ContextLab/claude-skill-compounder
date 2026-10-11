@@ -204,7 +204,9 @@ works in two ways:
 - A **guard** is a lesson that carries a **pattern**: a regular expression that describes
   the wrong command. compound tests every Bash command against the patterns before it
   runs (and the calls of another tool only for a lesson that names that tool). On a match
-  it refuses the call once and quotes the lesson, so Claude corrects the call first.
+  it refuses the call once and quotes the lesson, so Claude corrects the call first. A
+  pattern is matched against what the command runs, not against text it carries: the body
+  of a here-document, a comment and a quoted argument are not commands.
 - A lesson without a pattern is **recalled**: when a call fails, compound hands Claude
   the lesson that describes that failure, beside the error. A call that was refused
   before it ran (a permission denied, a safety check, a hook) is not a failed call, and a
@@ -321,7 +323,7 @@ it is about, so on Linux with bash the first five do nothing:
 |-|-|-|
 | `zsh-equals-not-found` | zsh | stops `echo =====` before it runs: zsh takes a bare word of `=` signs as a command to look up, and the rest of the line is lost |
 | `zsh-status-path-variables` | zsh | stops an assignment to `status` (read-only in zsh) or `path` (tied to `PATH`), and `for` or `read` with either name |
-| `zsh-no-matches-found` | zsh | recalled when a command fails with "no matches found" (an unquoted glob that matched nothing) |
+| `zsh-no-matches-found` | zsh | stops a command with an unquoted `*` or `?` that matches no file where it would run, which zsh refuses whole with "no matches found"; it checks the files, so it stops only a call that cannot run |
 | `sed-in-place-bsd` | macOS | stops `sed -i 's/a/b/' file`, which BSD sed reads as a backup suffix and a file name |
 | `macos-gnu-only-commands` | macOS | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails: a stock Mac has the BSD tools. It stops no call |
 | `pip-externally-managed` | everywhere | recalled when `pip install` fails with "externally-managed-environment" |

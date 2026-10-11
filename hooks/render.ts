@@ -649,13 +649,20 @@ export function guardReason(hits: readonly Hit[], cli: string): string {
     NOTE_RULE,
   ]
   for (const h of quoted) out.push('', quotedNote(h.name, h.level, h.path, h.text))
+  // A probe read the machine, not only the text: what it found is said in the mod's own
+  // words, with the words of the call quoted on one line each.
+  const sure = hits.filter(h => h.sure === true)
+  for (const h of sure) {
+    const words = (h.words ?? []).map(w => `\`${flat(w, 200)}\``).join(', ')
+    out.push('', `Checked against the files that are there, for ${flat(h.name, NAME_CHARS)}: this call cannot run as it is written${words === '' ? '' : `. The words at fault: ${words}`}.`)
+  }
   if (more.length > 0) out.push('', `The first ${quoted.length} are quoted above. The other ${more.length === 1 ? 'one is' : `${more.length} are`} named in the first line, and \`${cli} show <name>\` prints one.`)
   out.push(
     '',
     hits.length <= 1
       ? 'If the note applies to this call, adjust it; if not, send the call again and it will run.'
       : 'If a note applies to this call, adjust it; if none does, send the call again and it will run.',
-    'Each lesson stops a call once per session.',
+    sure.length > 0 ? 'A call that was checked against the files is stopped each time it is written a new way; the same call sent again runs. Any other lesson stops a call once per session.' : 'Each lesson stops a call once per session.',
     cliLine(cli),
   )
   const shipped = hits.filter(h => h.level === 'general')

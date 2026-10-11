@@ -274,7 +274,7 @@ class ListTest(Case):
         self.assertEqual(rows, [{
             "level": "project", "kind": "lesson", "name": "guarded",
             "description": "Use when guarded.", "path": self.box.lesson_dir("guarded"),
-            "match": ["danger"], "platform": [], "shell": [], "applies": True, "disabled": False,
+            "match": ["danger"], "probe": None, "platform": [], "shell": [], "applies": True, "disabled": False,
             "counts": {"reuse": 0, "guard": 0, "recall": 0, "learn": 1, "use": 0},
             "ineffective": False, "recurring": False}])
 

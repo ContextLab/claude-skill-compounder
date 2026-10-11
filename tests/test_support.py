@@ -302,7 +302,7 @@ class SupportTest(Case):
         with open(SCRIPT) as handle:
             text = handle.read()
         allowed = {"json", "os", "re", "sys", "time", "datetime", "subprocess", "shutil", "fcntl",
-                   "tempfile", "argparse", "select", "stat", "math", "hashlib", "shlex"}
+                   "tempfile", "argparse", "select", "stat", "math", "hashlib", "shlex", "glob"}
         import re as _re
         found = set(_re.findall(r"^\s*import (\w+)", text, _re.M))
         found |= set(_re.findall(r"^\s*from (\w+) import", text, _re.M))

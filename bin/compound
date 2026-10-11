@@ -1404,7 +1404,7 @@ def _load_item(level, kind, directory, with_body):
     skill_md = os.path.join(directory, "SKILL.md")
     item = {
         "level": level, "kind": kind, "name": name, "description": "",
-        "path": directory, "match": [], "platform": [], "shell": [], "applies": True, "disabled": False,
+        "path": directory, "match": [], "probe": None, "platform": [], "shell": [], "applies": True, "disabled": False,
         "_tools": list(MATCH_TOOLS), "_file": skill_md, "_problem": None, "_match_issue": None, "_fields": {}, "_body": "",
     }
     try:
@@ -1436,6 +1436,13 @@ def _load_item(level, kind, directory, with_body):
             usable.append(pattern)
     item["match"] = usable
     item["_tools"] = parse_tools(fields.get("match-tools"))
+    named = _unquote(fields.get("probe", "")).strip()
+    if named:
+        if kind == "lesson" and named in PROBES:
+            item["probe"] = named
+        else:
+            match_issue = match_issue or "probe %r is not a probe this version has (%s)" % (
+                one_line(named)[:40], ", ".join(sorted(PROBES)))
     if kind == "lesson":
         # A condition that does not read is reported, and the lesson applies nowhere: a
         # guard meant for one shell must not start refusing calls in every other.
@@ -3092,6 +3099,186 @@ def simple_commands(command, kinds=None):
     return [part.strip() for part in out if part.strip()]
 
 
+# ----------------------------------------------------------------------------- probes
+
+# A probe is a check of a call that a pattern cannot make: it reads the command AND the
+# machine. A lesson names one with `probe: NAME`, and is then a guard whose hit is certain:
+# the call cannot run as it is written. PROBES maps each name to its function, which takes
+# (command, directory) and returns the words that are wrong, or [].
+GLOB_OFF_RE = re.compile(r"\b(?:setopt|unsetopt|set\s+[-+]o|emulate)\b|\bnoglob\b|\bset\s+[-+][A-Za-z]*f", re.I)
+GLOB_WORDS = 24
+SPECIAL_PARAM_RE = re.compile(r"\$[?*#@!$0-9-]")
+
+
+def _command_words(command):
+    """[[(character, kind)]] for each simple command's words: the command without its
+    here-document bodies and comments, split where command text has `;`, `&`, `|` or a
+    newline, and into words where it has white space that no backslash escapes. Command
+    text between quote characters is a string handed to another shell (`sh -c '...'`,
+    `eval "..."`): that shell reads it, by its own rules, and its words are left out."""
+    text, kinds = guard_view(command)
+    commands, words, word = [], [], []
+    quote = ""
+    nested = False
+    escaped = False
+
+    def end_word():
+        if word and not nested:
+            words.append(list(word))
+        del word[:]
+
+    for char, kind in zip(text, kinds):
+        if kind != "c":
+            word.append((char, kind))
+            escaped = False
+            continue
+        if escaped:
+            word.append((char, kind))
+            escaped = False
+            continue
+        if char in "\"'":
+            if not quote:
+                quote = char
+            elif char == quote:
+                quote = ""
+                word.append((char, kind))
+                end_word()
+                nested = False
+                continue
+            word.append((char, kind))
+            continue
+        if quote:
+            # Command text inside quotes: the words of a string another shell runs.
+            nested = True
+            continue
+        if char == "\\":
+            escaped = True
+            word.append((char, kind))
+        elif char in ";&|\n":
+            end_word()
+            if words:
+                commands.append(words)
+            words = []
+        elif char in " \t":
+            end_word()
+        else:
+            word.append((char, kind))
+    end_word()
+    if words:
+        commands.append(words)
+    return commands
+
+
+def _glob_pattern(word, names):
+    """(pattern for the file system, the word as written) when the word is one zsh would
+    expand as a file pattern, else None: it has a `*` or `?` in command text, and nothing
+    in it that this reading does not follow (a bracket, a brace, a parenthesis, a
+    redirection, a command substitution, a parameter with no value here)."""
+    import glob
+
+    raw = "".join(char for char, _kind in word)
+    if not any(kind == "c" and char in "*?" for char, kind in word):
+        return None
+    if "**" in raw or SPECIAL_PARAM_RE.search(raw) or ASSIGN_RE.match(raw):
+        return None
+    out = []
+    index = 0
+    wild = False
+    while index < len(word):
+        char, kind = word[index]
+        if kind == "c" and char in "[]{}()<>`^#":
+            return None
+        if kind == "c" and char in "\"'":
+            index += 1
+            continue
+        if kind == "c" and char == "\\" and index + 1 < len(word):
+            out.append(glob.escape(word[index + 1][0]))
+            index += 2
+            continue
+        if char == "$" and kind in "cd":
+            found = VAR_RE.match(raw, index)
+            if not found:
+                return None
+            name = found.group(1) or found.group(2)
+            value = names.get(name, os.environ.get(name))
+            if value is None:
+                return None
+            out.append(glob.escape(value))
+            index = found.end()
+            continue
+        if kind == "d" and char in "`\\":
+            return None
+        if kind == "c" and char in "*?":
+            wild = True
+            out.append(char)
+        else:
+            out.append(glob.escape(char))
+        index += 1
+    pattern = "".join(out)
+    if not wild or not pattern:
+        return None
+    if pattern.startswith("~"):
+        pattern = os.path.expanduser(pattern)
+    return pattern, raw
+
+
+def unmatched_globs(command, cwd):
+    """The words of a command that zsh would refuse with "no matches found": a word with an
+    unquoted `*` or `?` that matches no file, read from the directory the command would
+    run in (`cd DIR` earlier in the command is followed). zsh then runs nothing of the
+    line. Words this reading cannot be sure of are left alone, and so is a command that
+    changes how the shell globs."""
+    import glob
+
+    view = guard_view(command)[0]
+    if GLOB_OFF_RE.search(view):
+        return []
+    names = {}
+    here = cwd
+    found = []
+    tried = 0
+    for words in _command_words(command):
+        plain = ["".join(char for char, _kind in word) for word in words]
+        while plain and ASSIGN_RE.match(plain[0]) and not any(kind == "c" and char in "*?" for char, kind in words[0]):
+            assigned = ASSIGN_RE.match(plain[0])
+            value = _expand_word(assigned.group(2).strip("\"'"), names)
+            if value is not None:
+                names[assigned.group(1)] = value
+            plain, words = plain[1:], words[1:]
+        if not plain:
+            continue
+        head = plain[0]
+        if head in ("[[", "((", "case", "let", "function", "alias", "typeset", "local", "export", "declare"):
+            continue
+        if head == "cd" and len(plain) >= 2:
+            target = _expand_word(plain[1].strip("\"'"), names)
+            if target:
+                target = target if os.path.isabs(target) else os.path.join(here, target)
+                if os.path.isdir(target):
+                    here = target
+            continue
+        for position, word in enumerate(words):
+            if position and plain[position - 1] in ("=~", "==", "!=", "="):
+                continue
+            made = _glob_pattern(word, names)
+            if made is None:
+                continue
+            tried += 1
+            if tried > GLOB_WORDS:
+                return found
+            pattern, raw = made
+            full = pattern if os.path.isabs(pattern) else os.path.join(glob.escape(here), pattern)
+            try:
+                if next(glob.iglob(full), None) is None and raw not in found:
+                    found.append(raw)
+            except (OSError, ValueError, re.error):
+                continue
+    return found
+
+
+PROBES = {"unmatched-glob": unmatched_globs}
+
+
 # ----------------------------------------------------------------------------- evidence
 
 # The largest script a snapshot keeps, the runs one snapshot lists (it counts them all),
@@ -4570,7 +4757,7 @@ def cmd_check(args=None, count=False):
         project = project_root(fast=True)
         items, _ = scan(project, with_body=True)
         # A lesson whose condition does not hold here, or that is switched off, is no guard.
-        guarded = [item for item in items if item["match"] and active(item)]
+        guarded = [item for item in items if (item["match"] or item["probe"]) and active(item)]
         if count:
             result["guards"] = len(guarded)
             result["tools"] = sorted(set(one for item in guarded for one in item["_tools"]))
@@ -4587,10 +4774,27 @@ def cmd_check(args=None, count=False):
         hits, unfinished, never = ([order[index] for index in found] for found in (hits, unfinished, never))
         # See "Several guards on one call": no guard yields to another. Every guard in
         # force that matched is a hit.
-        for index in sorted(hits):
+        # A probe reads the machine as well as the command. Its hit is certain: the words
+        # it names cannot run as written, so the hit says which, and `sure` says that
+        # sending the call again changes nothing.
+        probed = {}
+        if tool == "Bash" and isinstance(payload, dict):
+            where = call.get("cwd") if isinstance(call.get("cwd"), str) and os.path.isdir(call["cwd"]) else None
+            for index, item in enumerate(guarded):
+                if item["probe"] and where is not None and time.monotonic() < began + budget:
+                    try:
+                        words = PROBES[item["probe"]](text, where)
+                    except Exception:  # a probe that cannot read the call says nothing
+                        words = []
+                    if words:
+                        probed[index] = words
+        for index in sorted(set(hits) | set(probed)):
             item = guarded[index]
-            result["hits"].append({"name": item["name"], "level": item["level"],
-                                   "path": item["path"], "text": item["_body"].strip()})
+            hit = {"name": item["name"], "level": item["level"], "path": item["path"], "text": item["_body"].strip()}
+            if index in probed:
+                hit["sure"] = True
+                hit["words"] = [redact(word)[:200] for word in probed[index][:5]]
+            result["hits"].append(hit)
         if unfinished or never:
             result["timed_out"] = [guarded[index]["name"] for index in unfinished]
             result["unchecked"] = [guarded[index]["name"] for index in never]

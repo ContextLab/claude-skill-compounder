@@ -12,11 +12,15 @@ export type Item = {
   description: string
   path: string
   match: string[]
+  // The check of a call against the machine that the lesson names, when it names one.
+  probe?: string
   // Set on a project-level lesson that belongs to a project other than the session's.
   project?: string
 }
 
-export type Hit = { name: string; level: string; path: string; text: string }
+// `sure`: the hit is a probe's, which read the machine: the call cannot run as written, and
+// `words` are the words of it that are wrong.
+export type Hit = { name: string; level: string; path: string; text: string; sure?: boolean; words?: string[] }
 // `sessions` are the sessions the CLI says asked this very text, the current one left out.
 export type Earlier = { id: string; date: string; project: string; session: string; text: string; score: number; sessions?: string[] }
 export type Event = Record<string, unknown> & { type: string }
@@ -78,7 +82,8 @@ function itemOf(r: Record<string, unknown>): Item | undefined {
   if (r.applies === false || r.disabled === true || r.shadowed === true) return undefined
   const match = Array.isArray(r.match) ? r.match.filter((m): m is string => typeof m === 'string') : []
   const project = str(r.project)
-  return { kind, name, level: str(r.level), description: str(r.description), path: str(r.path), match, ...(project === '' ? {} : { project }) }
+  const probe = str(r.probe)
+  return { kind, name, level: str(r.level), description: str(r.description), path: str(r.path), match, ...(probe === '' ? {} : { probe }), ...(project === '' ? {} : { project }) }
 }
 
 // `compound list --scripts --json`. undefined when the output is not the list it should be.
@@ -118,7 +123,13 @@ export function parseHits(stdout: string): Hit[] | undefined {
   return o.hits
     .map(record)
     .filter((r): r is Record<string, unknown> => r !== undefined && ONE_LINE.test(str(r.name)))
-    .map(r => ({ name: str(r.name), level: str(r.level), path: str(r.path), text: str(r.text) }))
+    .map(r => ({
+      name: str(r.name),
+      level: str(r.level),
+      path: str(r.path),
+      text: str(r.text),
+      ...(r.sure === true ? { sure: true, words: Array.isArray(r.words) ? r.words.filter((w): w is string => typeof w === 'string').slice(0, 5) : [] } : {}),
+    }))
 }
 
 // The prompt-log half of `compound find --json`: {"prompts":[{id, ts, project, prompt}]},

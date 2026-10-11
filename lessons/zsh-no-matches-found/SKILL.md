@@ -2,6 +2,7 @@
 name: zsh-no-matches-found
 description: "Use when a command fails in zsh with \"no matches found:\" (an unquoted glob or bracket that matched no file: rm -f build/*.o, grep --include=*.py, pip install pkg[extra], a URL with \"?\")."
 shell: zsh
+probe: unmatched-glob
 created: 2026-10-04
 ---
 zsh stops the whole command line with "no matches found: <pattern>" when an unquoted

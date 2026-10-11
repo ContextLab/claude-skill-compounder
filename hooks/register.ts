@@ -846,8 +846,8 @@ async function reuseCheck($: EngineInterface, sid: string, text: string, k: Knob
 
 async function reuseJudged($: EngineInterface, sid: string, text: string, request: string, began: number, k: Knobs): Promise<string> {
   const listing = await inventory($, BUDGET.prompt)
-  // The listing also says whether any lesson carries a pattern, so the guard need not ask.
-  if (listing !== undefined && !listing.some(i => i.match.length > 0)) noGuards.add(sid)
+  // The listing also says whether any lesson carries a pattern or a probe, so the guard need not ask.
+  if (listing !== undefined && !listing.some(i => i.match.length > 0 || i.probe !== undefined)) noGuards.add(sid)
   // The same listing gives the greeting its counts: no call is made for them.
   if (listing !== undefined) await paint($, band => inventoried(band, listing.filter(i => i.kind === 'lesson').length, listing.filter(i => i.match.length > 0).length))
   const found = await gathered($, sid, text, request)
@@ -1053,7 +1053,14 @@ async function guard($: EngineInterface, sid: string, loop: string, tool: string
   }
   let ran: Ran
   try {
-    ran = await spawn($, ['check', '--guards'], JSON.stringify({ tool, input }), undefined, BUDGET.check)
+    // Where the call would run, for a lesson that checks the call against the files there.
+    let cwd: string | undefined
+    try {
+      cwd = tool === 'Bash' ? await $.session.cwd() : undefined
+    } catch {
+      cwd = undefined
+    }
+    ran = await spawn($, ['check', '--guards'], JSON.stringify({ tool, input, ...(cwd === undefined ? {} : { cwd }) }), undefined, BUDGET.check)
   } finally {
     late?.cancel()
     if (shown !== undefined) {
@@ -1077,14 +1084,17 @@ async function guard($: EngineInterface, sid: string, loop: string, tool: string
     return undefined
   }
   // Once per session per lesson: the claim is the record, so the same call sent again
-  // runs. With no record there is no refusal.
+  // runs. With no record there is no refusal. A hit that is sure (a probe read the files:
+  // the call cannot run as written) is claimed for the call's own text instead, so the
+  // mistake written a new way is stopped again, and the same call sent again still runs.
+  const whole = callText(tool, input)
   const fresh = []
   for (const h of hits) {
-    if (await mayRefuse($, sid, `guard-${h.name}`)) fresh.push(h)
+    const once = h.sure === true ? `-${digest(whole)}` : ''
+    if (await mayRefuse($, sid, `guard-${h.name}${once}`)) fresh.push(h)
   }
   const first = fresh[0]
   if (first === undefined) return undefined
-  const whole = callText(tool, input)
   const text = whole.slice(0, LOGGED_CALL)
   const ms = Date.now() - began
   // `watched`: this loop's next call of the tool is logged as a `retry` event.

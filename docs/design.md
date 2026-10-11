@@ -136,6 +136,9 @@ Quote it or use printf '%s\n' '====='.
 - `match` is optional: a JSON array of Python regular expressions tested against a call
   before it runs: the command of a Bash call, or the input of the tools `match-tools`
   names (see moment 2). A lesson with `match` is a **guard**.
+- `probe` is optional: the name of a check of the call against the machine, built into
+  the CLI (`unmatched-glob`). A lesson with a `probe` is a guard too, and its hit is sure
+  (see moment 2, "A probe").
 - `match-tools` is optional: a JSON array of the tool names whose calls the patterns are
   tested against (`compound add --tool`). Without it they are tested against Bash calls
   only.
@@ -334,15 +337,50 @@ of a Bash call and against nothing else, unless the lesson names other tools in
 `match-tools`: then they are tested against the JSON of the input of exactly the tools
 named. So the content of a file being written, the prompt of an agent and the text of a
 hand-back, which may all mention a mistake without making it, are never refused by a
-lesson written about a command. A Bash command that carries the mistake's text inside a
-quoted argument (`grep '; git commit' notes.md`) is still a command, and a pattern that
-does not anchor itself to where a command starts will match it.
+lesson written about a command.
+
+**And of a command, its command text.** A Bash command carries text that is not a command:
+the body of a here-document (a Python program, a file being written, a commit message),
+a comment, a quoted argument (`grep '; git commit' notes.md`). The CLI reads the command
+the way a shell does and gives every character a kind: command text, inside single
+quotes, inside double quotes, here-document body, comment. A pattern is tested against the
+command with its here-document bodies and comments taken out, and a match counts only
+when it BEGINS in command text. It may run on into a quoted argument, which is how a
+pattern about `sed -i 's/a/b/'` reads the script; it may not start in one. A string or a
+body handed to a shell is a command and is read as one, to any depth: `bash -c '...'`,
+`eval "..."`, `bash <<EOF`, and a `$( )` inside double quotes or inside a here-document
+whose delimiter is not quoted. `tests/test_command_text.py` holds this reading to what
+zsh, bash and sh actually run, on 48 commands. Measured on six weeks of real calls it
+removes every recorded stop that began in a here-document body (15 of 66) and no stop of
+a call that went on to fail before guards existed (0 of 246).
 
 **Where a command starts.** Each pattern is compiled with `re.MULTILINE`, so `^` and `$`
 match at the start and end of every line of a command and not only of the whole call. The
 anchor the `learn` skill teaches for "a command starts here" is
 `(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)`: the start of a line, after `;`, `&&`, `||`, `|`
 or `(` (which covers `$(`), and after `do`, `then` or `else`.
+
+**A probe: a check of the call against the machine.** Some mistakes cannot be told from
+the text. `ls build/*.o` fails in zsh only when no file matches, and a pattern wide enough
+to catch it stops ten calls that would have run for each one it saves. A lesson may name
+a **probe** instead of, or beside, a pattern (`probe: NAME` in its frontmatter): a check
+built into the CLI that reads the command and the machine. There is one,
+`unmatched-glob`: a word of command text with an unquoted `*` or `?` that matches no
+file, read from the directory the call would run in (the mod passes it as `cwd`, and `cd
+DIR` and `NAME=value` earlier in the command are followed), is a word zsh refuses with "no
+matches found" before it runs anything of the line. The probe leaves alone what it cannot
+be sure of: a word with a bracket, a brace, a parenthesis, `**`, a command substitution
+or a parameter that has no value here; the words of `[[ ]]`, `case` and an assignment,
+which the shell does not expand; the words of a string another shell runs (`sh -c
+'...'`); and a whole command that changes how the shell globs (`setopt`, `noglob`, `set
+-f`). `tests/test_probe.py` runs 40 commands in the real zsh and holds the probe to stop
+exactly the ones zsh refused. A probe's hit is **sure** (`"sure": true` and the `words`
+at fault in `compound check`'s reply): the call cannot run as written. So it is refused
+for the call's own text, not once per session for the lesson: the same mistake written a
+new way is stopped again, and the same call sent again runs. That matters because a
+session repeats a mistake: 57 of the 72 recalls of the lesson for this failure came after
+the session's one refusal. A probe named by a lesson that this version of the CLI does
+not have is reported like a pattern that does not read, and stops nothing.
 
 **Which lessons are guards here.** Only a lesson in force: one whose platform and shell
 condition holds on this machine (see "Where a lesson applies") and that the user has not
@@ -1094,7 +1132,7 @@ add` wrote, without its `origin` (what `compound promote --to general` publishes
 |-|-|-|-|
 | `zsh-equals-not-found` | guard | `shell: zsh` | `echo =====`: a bare word of two or more `=` after `echo`, which zsh looks up as a command |
 | `zsh-status-path-variables` | guard | `shell: zsh` | an assignment to `status` or `path`, `for status in`/`for path in`, `read status`/`read path` |
-| `zsh-no-matches-found` | lesson | `shell: zsh` | recalled when a command fails with "no matches found" |
+| `zsh-no-matches-found` | guard (probe) | `shell: zsh` | a word with an unquoted `*` or `?` that matches no file where the call would run (`probe: unmatched-glob`); recalled when a command fails with "no matches found" |
 | `sed-in-place-bsd` | guard | `platform: darwin` | `sed -i` followed by a script and no backup suffix |
 | `macos-gnu-only-commands` | lesson | `platform: darwin` | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails |
 | `pip-externally-managed` | lesson | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
@@ -1337,7 +1375,8 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   call of the tool by that loop while the process lived. Like a `judge` event it is left
   out of Recent and counted for no lesson.
 - **Claims**: `~/.claude/compound/claims/<session id>/`, one empty directory per thing
-  the mod did once in that session: `guard-<lesson>` (a guard's refusal),
+  the mod did once in that session: `guard-<lesson>` (a guard's refusal; `guard-<lesson>-<digest>`, with the digest of the
+  call's text, for a hit that is sure),
   `stop-<call id>` (a stop refused for an owed lesson), `strengthen-<lesson>` (a stop
   refused for an ineffective lesson), `nudge-<turn>` (the question after a long turn), `evidence-<id>` (a stop refused for a
   script that ran),
@@ -1458,7 +1497,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound show N` | One lesson's path and text, and when it is not in force, why. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective: at most one for a session, since the lesson was last written), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard, recall or use that names it, or null). |
 | `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`) and the asking session is added to the memo's `asked`. Each row under `prompts` carries `sessions`, the sessions that asked that text (its own first, at most 20). An empty stdin is exit 2; a request with no word in it has no candidates. |
 | `compound memo` | stdin `{"key","verdict","items","prompts","repeats"}`: keeps the verdict on a request under the `memo_key` that `find --request --json` printed, with the session that asked. `verdict` is `named`, `nothing` or `not-substantial`; `items` are names, `prompts` and `repeats` rows as `find` prints them. Anything else is exit 2. |
-| `compound check [--guards]` | stdin `{"tool","input"}`. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match: every one of them, since no guard yields to another (see "Several guards on one call"). A guard that did not finish matching in `COMPOUND_CHECK_BUDGET_MS` is named under `"timed_out"`, and one the time ran out before under `"unchecked"`. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
+| `compound check [--guards]` | stdin `{"tool","input"}`, and `"cwd"`, the directory a Bash call would run in. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match: every one of them, since no guard yields to another (see "Several guards on one call"). A Bash command is matched on its command text (see "And of a command, its command text"). A hit of a lesson's probe carries `"sure": true` and `"words"`, the words at fault; without `cwd` no probe runs. A guard that did not finish matching in `COMPOUND_CHECK_BUDGET_MS` is named under `"timed_out"`, and one the time ran out before under `"unchecked"`. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound use N` | Counts one use of the skill `N`, which is what Claude Code calls the skill a session invoked: a bare name for a skill of the project or the user level, `compound:NAME` for a skill of this package. Logs `use` for a skill `compound list` shows, except the package's `learn` and `reuse`. Any other name writes nothing; the exit status is 0 either way and `--json` says `used`. The mod runs it (see "A skill that is used"). |
 | `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes] [--upstream DESTINATION]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential and `unpublishable` each file that cannot be read or is too large to scan; with `--yes` forks, pushes a branch and opens the pull request (or, with `COMPOUND_UPSTREAM_GIT`, pushes the branch there with git alone), or exits 2 when either list is not empty. `--upstream DESTINATION` confirms a destination the environment names: when `COMPOUND_UPSTREAM` or `COMPOUND_UPSTREAM_GIT` names one that is not the package's own pool, `--yes` exits 2 unless `--upstream` gives the same value, and a value that is not the destination is exit 2 (see "Where it is published"). The plan carries the words to add under `confirm`. Logs `promote` when it moved or proposed something. |
