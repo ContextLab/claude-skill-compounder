@@ -276,7 +276,7 @@ The five questions and actions in the chart:
 | Reuse check | you submit a prompt | finds existing work that covers the request and adds it to the prompt |
 | Guard | a tool call is about to run | refuses a call that matches a lesson's pattern, once, with the lesson quoted |
 | Recall | a tool call failed | shows Claude the lesson that describes the failure |
-| Capture | a call works after one failed | decides whether it is the fix, and if so tells Claude to record the lesson |
+| Capture | a call works after one failed | tells Claude to record the lesson when an earlier session met the same failure and nothing was recorded; for a failure met for the first time, a model decides whether the fix is one to keep |
 | Stop check | Claude is about to finish | refuses the stop once if a lesson is owed and not yet recorded or declined |
 
 Three things happen beside the chart. A request that keeps coming back is offered a skill,

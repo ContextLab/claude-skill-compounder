@@ -435,7 +435,9 @@ corrections, each one function in `hooks/render.ts` (`refusal`, `shellError`):
   there is no mistake in how the call was written and nothing to fix: no model is asked,
   the failure is not held, and the band does not say it is watching for a fix. A refusal
   is recognised by the opening of its text, and a text that begins with `Exit code` is
-  always a command that ran.
+  always a command that ran. One kind of refusal is a failure all the same: a refusal that
+  is a rule (the harness's own, a safety check's) and that an earlier session met too (see
+  "A failure met before" under moment 4).
 - A Bash call that **exited 0 with a shell error in its output** is a failed call. Under
   Claude Code a pipeline's status is its last command's, so `timeout 5 x | tail` and a
   glob that matches nothing come back as successes. Such a result is recognised by a line
@@ -540,6 +542,65 @@ id, age, project and the failed and working commands.
 That definition exists once, in the CLI. `compound status`, `compound events --unsettled`
 and the mod all take what is owed from it, and the mod decides nothing about settling for
 itself (see "What a session owes").
+
+### A failure met before
+
+Whether a fix is worth a lesson is a guess when a model makes it from one failure. It is
+a fact when the failure comes back: a second session that meets the failure a first one
+met, with no lesson recorded in between, is working it out again. So the mod asks the log
+before it asks a model.
+
+**The signature.** When a call fails and no recorded lesson describes the failure, the
+mod hands the error to the CLI (`compound met`), which reduces it to its **signature**:
+the line of the error that says what went wrong (a Python exception's own line when
+there is one, else the first line that reads like an error), with what differs from one
+meeting to the next folded away. A path of two or more parts becomes `<PATH>`, a quoted
+name `<Q>`, a hash `<HEX>`, every number `N`, and the word after `no matches found:` is
+dropped. `(eval):14: command not found: timeout` and `(eval):1: command not found:
+timeout` are one signature, `command not found: timeout`. An error that says nothing
+about the call has no signature and is never counted: the work's own failures (an
+assertion, a `KeyError`, a traceback, a count of failed tests), a file that is simply not
+there, a wait that ran out, a name that cannot be imported. The CLI writes each meeting
+down (a `met` event: `sig`, `tool`, and the other sessions that had met it) and answers
+`{"sig", "sessions", "captured"}`: how many OTHER sessions met that signature, and
+whether a `capture` event already carries it.
+
+**Owed without a judge.** A failure whose signature an earlier session met, and for which
+no lesson was owed before (`captured` is false), is held like any other, and the lesson
+is owed as soon as there is a passing call to quote: no model is asked whether the fix
+is worth keeping. The `capture` event carries `why: recurred`, `sig` and `met` (the
+earlier sessions), and the message beside the fix says the failure was met before and in
+how many sessions. Which passing call is quoted as the one that worked: for a Bash call,
+the first that shares a word of substance with the failed call (`./build.sh --profile
+dev` after `./build.sh`; `gtimeout 5 make test` after `timeout 5 make test`; not `echo
+alpha`; `resembles` in `hooks/render.ts`); when none does, the last of the five attempts
+the failure is held for; for any other tool, its first call that passes. A failure met
+before that is still held when the session stops (it was dealt with through another
+tool, or not at all) is captured at that stop, with the calls that ran after it in place
+of the working call, and the stop is refused for it like any owed lesson. The failed call
+sent again unchanged and passing is a retry here too, and owes nothing.
+
+**Once for a failure.** A signature that a `capture` event carries is not captured
+again, whether that lesson was recorded or declined: recorded, the lesson is recalled at
+the next meeting; declined, the answer stands. A failure met for the first time, and one
+already captured, go to the judge as described above.
+
+**A refusal that is a rule.** A call the harness refused before it ran is not a failed
+call (moment 3), with this exception: when the refusal is the harness's own or a safety
+check's, the mod asks `compound met` about it, and one that an earlier session met, or
+that a lesson was once owed for, is handled as a failed call from there on: a recorded
+lesson is recalled beside it, and without one its lesson is owed. A subagent that is
+held to its worktree, or a wait written a way the harness blocks, is refused the same
+way in session after session; each session works the rule out again unless a lesson
+says it. A permission the user withheld is the user's decision and is never counted, and
+neither is a refusal by this mod's own guard.
+
+Measured on six weeks of real sessions before it was built: 834 failed calls had a
+signature, 330 different ones, 55 of them met in two or more sessions. The rule would
+have raised 49 lessons (once a signature), and those signatures were met 373 more times
+afterwards. Of 36 read by hand about 26 were a rule of a tool, the shell or the harness
+that a later session met again, and about 8 were noise, which the list of errors that
+say nothing was then widened for.
 
 ### 5. Stop: Claude is about to finish
 
@@ -1474,6 +1535,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | `repeat` | `repeated` | a request made in several sessions was offered a skill |
   | `error` | `error` | the mod itself failed |
   | `retry` | `retried` | the call sent after a guard refused one; left out of Recent |
+  | `met` | `met` | a failed call whose error has a signature, and the other sessions that had met it; left out of Recent |
 
   A lesson that did not prevent its failure is `ineffective`, and what it is owed is `to
   strengthen`. The four counters are `reused`, `guarded`, `recalled` and `used` wherever they
@@ -1517,6 +1579,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound enable N` | Switches it back on. |
 | `compound evidence note`, `compound evidence list [--session S] [--due]`, `compound evidence show ID` | `note`: stdin `{"command", "ok", "cwd", "call", "agent", "turn"}` (the first two required); keeps a snapshot of every script file the command ran, with the run, and prints `{"noted":[{id,name,path}]}`. The mod runs it. `list`: one row for each script, by its path: `id` (its newest version), `name`, `path`, `ok`, `failed`, `ok_this` (passing runs of the newest version), `versions`, `turns`, `sessions`, `failed_first`, `first`, `last`, `in_repo`, `scratch`, `test`, `reads_args`, `bound`, `varied` (two passing runs were given different arguments), `ok_main` (passing runs by the main loop), `command` (the newest call that passed), `lesson`, `changed` (it ran in a newer version than the lesson holds), `declined`, `due`. `--session S` counts what that session ran; `--due` leaves only the scripts owed a decision. `show ID`: one snapshot, its runs and its text. See "A script that ran". |
 | `compound skip --why T [--settles ID] [--evidence ID]` | With `--evidence ID`: declines the script of that snapshot, which is then not asked about again and settles nothing else; `--settles` with it is exit 2. Otherwise: declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
+| `compound met` | stdin `{"tool","call","error"}`: a call failed. Prints `{"sig","sessions","captured"}`: the signature of the error (null when it says nothing about the call), the number of OTHER sessions that met that signature, and whether a `capture` event already carries it. Logs `met` when there is a signature. The mod runs it (see "A failure met before"). |
 | `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |

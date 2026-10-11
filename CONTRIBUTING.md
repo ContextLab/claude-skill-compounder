@@ -42,7 +42,7 @@ fails. They spend model calls, so they are run by hand and never by `run_tests.s
 | `journey_reuse.py` | Moment 1: a substantial prompt is given the existing work and earlier requests that cover it, a prompt nothing covers is given nothing, and the first prompt sent again in a new session is given the same from the memo, with no model asked. |
 | `journey_guard.py` | Moment 2: a call matching a guard is refused once and runs when sent again; a slow `check`, or a slow `list` and `events`, costs the turn one budget each and one `error` each. |
 | `journey_recall.py` | Moment 3: a failed call is given its recorded lesson, and a lesson met in a second project is moved to the user level or left in place when git tracks it. |
-| `journey_capture.py` | Moments 4 and 5: a fix after a failure makes the session owe a lesson, and the stop is refused until it is recorded. |
+| `journey_capture.py` | Moments 4 and 5: an earlier session meets a failure and fixes nothing; a later session that meets it again and fixes it owes the lesson with no model asked, and the stop is refused until it is recorded. A fix that comes after three unrelated calls is the one quoted. |
 | `journey_stop.py` | Moment 5: an owed lesson refuses one stop, declining it settles it, and a long turn is asked once whether it learned anything. |
 | `journey_strengthen.py` | A lesson recalled after its failure came back is marked ineffective, and the session must strengthen it or decline before it stops. |
 | `journey_unsettled.py` | A capture an earlier session left unsettled is raised at the next session's first prompt and settled by its id. |

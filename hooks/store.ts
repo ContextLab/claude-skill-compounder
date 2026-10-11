@@ -323,6 +323,20 @@ export function seconds(event: Event): number {
   return 0
 }
 
+// `compound met`: whether a failed call's failure was met before. `sig` is its signature (the
+// error with what differs from one meeting to the next folded away), `sessions` the other
+// sessions that met it, `captured` that a lesson was owed for it once already. undefined
+// when the failure has no signature (its error says nothing about the call) or the reply
+// does not read.
+export type Met = { sig: string; sessions: number; captured: boolean }
+
+export function parseMet(stdout: string): Met | undefined {
+  const o = record(parsed(stdout))
+  if (o === undefined || typeof o.sig !== 'string' || o.sig === '' || !ONE_LINE.test(o.sig)) return undefined
+  const sessions = typeof o.sessions === 'number' && Number.isFinite(o.sessions) && o.sessions > 0 ? Math.floor(o.sessions) : 0
+  return { sig: o.sig, sessions, captured: o.captured === true }
+}
+
 // A script a session ran, as `compound evidence list --json` gives it: `id` names the bytes
 // the CLI kept, `ok` and `failed` are its runs, `command` the newest call that passed.
 export type Script = { id: string; name: string; path: string; ok: number; failed: number; versions: number; command: string }

@@ -7,15 +7,15 @@ import {
   bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
   sameCall, soleCli, soleCliShape,
   heldStep, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
-  reuseContext, reuseStatus, shellError, shellFailure, stopDebt, stopEvidence, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
+  resembles, reuseContext, reuseStatus, ruleRefusal, shellError, shellFailure, stopDebt, stopEvidence, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
   unsettledContext, usedStatus, userOrigin,
   type Failure, type Held, type Repeat, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseLogged, parseMoved, parseOwed, parseScripts, parseShow,
+  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseLogged, parseMet, parseMoved, parseOwed, parseScripts, parseShow,
   parseTimedOut, parseUnsettled, parseUsed, settlers,
-  type Earlier, type Event, type Found, type Item,
+  type Earlier, type Event, type Found, type Item, type Met,
 } from './store'
 import {
   allLines, bandRow, began as checkBegan, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
@@ -1198,7 +1198,16 @@ async function lessons($: EngineInterface): Promise<Item[]> {
   return [...here, ...(await lessonsElsewhere($, here))]
 }
 
-async function onFailure($: EngineInterface, sid: string, key: string, tool: string, callId: string, call: string, errorText: string): Promise<string[]> {
+// Whether a failed call's failure was met in an earlier session: the CLI reduces the error
+// to its signature, looks the signature up in the log and writes this meeting down. One
+// call, on the path of a call that has already failed. undefined when the failure has no
+// signature or the CLI did not say.
+async function metBefore($: EngineInterface, tool: string, call: string, error: string): Promise<Met | undefined> {
+  const ran = await cli($, ['met'], JSON.stringify({ tool, call: call.slice(0, LOGGED_CALL), error: error.slice(0, 3 * LOGGED_ERROR) }))
+  return ran === undefined ? undefined : parseMet(ran.stdout)
+}
+
+async function onFailure($: EngineInterface, sid: string, key: string, tool: string, callId: string, call: string, errorText: string, known_?: Met): Promise<string[]> {
   // The instance that claims the failure holds it, and so is the only one that judges the fix.
   if (!(await firstTime($, sid, `fail-${callId}`))) return []
   const error = redact(errorText)
@@ -1224,8 +1233,14 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
     }
   }
   if (hit === undefined) {
+    // No lesson describes it. Was it met before? A failure an earlier session met too is
+    // one a lesson was owed for: its fix is captured without asking any model whether it
+    // is worth keeping, once for the failure (a lesson recorded or declined for it since
+    // means it is not owed again).
+    const met = known_ ?? (await metBefore($, tool, call, error))
+    const again = met !== undefined && met.sessions > 0 && !met.captured ? { met: met.sessions, sig: met.sig } : {}
     // One failure is held per agent loop: a newer one that no lesson describes takes its place.
-    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0, at: nowS(), between: [], skipped: 0 })
+    held.set(key, { tool, call, error, left: FIX_ATTEMPTS, turn: turns.get(sid)?.n ?? 0, at: nowS(), between: [], skipped: 0, ...again })
     await paint($, (band, now) => watched(stepped(band, 'failed', now), true, now))
     return []
   }
@@ -1257,6 +1272,38 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     held.delete(key)
     await watch($, sid)
     return []
+  }
+  // A failure an earlier session met too: no model is asked. The lesson is owed because
+  // the failure came back, which is a fact of the log and not an opinion about the fix.
+  // What is left to tell is WHICH passing call to quote as the one that worked: one that
+  // looks like another go at the failed call, or, when none does, the last of the
+  // attempts the failure is held for. Until then the failure stays held.
+  if (was.met !== undefined && was.met > 0 && was.sig !== undefined) {
+    if (tool === 'Bash' && !resembles(was.call, call) && was.left > 1) {
+      was.left -= 1
+      return []
+    }
+    held.delete(key)
+    const id = digest(`${sid}:${callId}`)
+    await log($, {
+      type: 'capture',
+      id,
+      tool,
+      failed: was.call.slice(0, LOGGED_CALL),
+      error: was.error.slice(-LOGGED_ERROR),
+      fixed: call.slice(0, LOGGED_CALL),
+      why: 'recurred',
+      sig: was.sig,
+      met: was.met,
+      call: callId,
+      agent: agent ?? null,
+      ms: 0,
+    })
+    owes(sid, [id], [])
+    $.ui.status(owedStatus(redact(call)))
+    await paint($, (band, now) => captured(stepped(band, 'fixed', now), now, redact(call)))
+    await watch($, sid)
+    return [captureContext({ failed: was.call, error: was.error, fixed: call, id, met: was.met }, await cliPath($))]
   }
   // The attempt is counted before the question is asked, so two successes that arrive
   // together cannot both be the last. The failure stays held while the judge is asked.
@@ -1457,6 +1504,29 @@ function turnEnded(sid: string): undefined {
 async function onStop($: EngineInterface, followsBlock: boolean): Promise<string | undefined> {
   if (await off($)) return undefined
   const sid = await $.session.id()
+  // A failure an earlier session met too, still held when the turn ends: whatever the
+  // session did about it, it did with another tool or in a way no later call showed. The
+  // lesson is owed all the same, and the session has the turn in front of it to write it from.
+  for (const [key, was] of [...held]) {
+    if (!key.startsWith(`${sid}:`) || was.met === undefined || was.met <= 0 || was.sig === undefined) continue
+    held.delete(key)
+    const id = digest(`${sid}:stop:${was.at}:${was.sig}`)
+    await log($, {
+      type: 'capture',
+      id,
+      tool: was.tool,
+      failed: was.call.slice(0, LOGGED_CALL),
+      error: was.error.slice(-LOGGED_ERROR),
+      fixed: was.between.length > 0 ? `(no later call of ${was.tool} repeated it; what ran next: ${was.between.join(' | ')})`.slice(0, LOGGED_CALL) : `(no later call of ${was.tool} repeated it)`,
+      why: 'recurred',
+      sig: was.sig,
+      met: was.met,
+      call: id,
+      agent: null,
+      ms: 0,
+    })
+    owes(sid, [id], [])
+  }
   // What the session owes is asked of the CLI, whose definition of settled is the only one.
   const asked = await cli($, ['events', '--unsettled', '--session', sid, '--json'])
   if (asked === undefined) return turnEnded(sid)
@@ -1698,7 +1768,17 @@ export const register: Register = on => {
       const text = String(ran.text ?? '')
       // A call that was refused before it ran (a permission, a safety check, the harness, a
       // hook) is not a failed call: no judge is asked, nothing is held, nothing is watched.
-      if (ran.isError === true && refusal(text) !== undefined) return ran
+      // Except a refusal that is a RULE (the harness's, a safety check's) and that a
+      // session met before: that one is a failure with a lesson to it, recalled if one
+      // is recorded and owed if none is.
+      const refused = ran.isError === true ? refusal(text) : undefined
+      if (refused !== undefined) {
+        if (!judged(tool) || !ruleRefusal(refused)) return ran
+        const met = await metBefore($, tool, callText(tool, input), redact(text))
+        if (met === undefined || (met.sessions === 0 && !met.captured)) return ran
+        const more = await onFailure($, sid, key, tool, e.tool_use_id, callText(tool, input), text, met)
+        return more.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...more] }
+      }
       const call = callText(tool, input)
       if (!judged(tool)) {
         if (before !== undefined) ranBetween(before, betweenLine(tool, call, ran.isError === true))

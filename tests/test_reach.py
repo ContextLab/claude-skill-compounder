@@ -699,7 +699,7 @@ class SmallThingsTest(Case):
             doc = handle.read().split('"""')[1]
         table = doc.split("Fields per type.")[1].split("A line that does not parse")[0]
         rows = re.findall(r"^        ([a-z]+) +(mod|CLI `[a-z]+`)", table, re.M)
-        self.assertEqual(len(rows), 18, rows)
+        self.assertEqual(len(rows), 19, rows)
         for kind, writer in rows:
             proc = self.box.run("log", stdin=json.dumps({"type": kind}))
             if writer == "mod":
@@ -708,8 +708,8 @@ class SmallThingsTest(Case):
                 self.assertExit(proc, 2)
                 self.assertIn("`compound %s`" % writer.split("`")[1], proc.stderr, kind)
         self.assertEqual(sorted(writer for _kind, writer in rows if writer != "mod"),
-                         ["CLI `add`", "CLI `promote`", "CLI `promote`", "CLI `rm`", "CLI `skill`", "CLI `skip`",
-                          "CLI `use`"])
+                         ["CLI `add`", "CLI `met`", "CLI `promote`", "CLI `promote`", "CLI `rm`", "CLI `skill`",
+                          "CLI `skip`", "CLI `use`"])
 
     def surfer(self, text, code=0):
         path = os.path.join(self.box.root, "surfer")

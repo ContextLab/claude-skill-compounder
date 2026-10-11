@@ -20,7 +20,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 SCRIPT = os.path.join(REPO, "bin", "compound")
 NOW = 1790000000  # 2026-09-21T14:13:20Z
 # The event types `compound log` refuses: each is written by a command of the CLI.
-CLI_TYPES = ("learn", "skip", "rm", "skill", "promote", "candidate", "use")
+CLI_TYPES = ("learn", "skip", "rm", "skill", "promote", "candidate", "use", "met")
 BASE_PATH = "/usr/bin:/bin"
 
 

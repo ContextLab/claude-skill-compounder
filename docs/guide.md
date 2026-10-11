@@ -952,6 +952,7 @@ for a command typed in a terminal), the project, and what the event was about.
 | `error` | compound itself failed |
 | `judge` | a question was put to the judge model: which question, its verdict and the milliseconds it took |
 | `retry` | the first call of a tool after a guard refused one, and whether it is the same call |
+| `met` | a call failed with an error that has a signature, and how many other sessions had met it |
 
 Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`,
 `--unsettled`, `--limit <n>`, and `--json` for the full objects.
@@ -978,11 +979,12 @@ Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`
 | `compound report` | what the event log says compound did | [Read `compound report`](#read-compound-report) |
 | `compound install`, `compound update`, `compound uninstall` | set the package up, move it to a newer version, take it out | the [README](../README.md#install) |
 
-Four commands exist for the mod, which runs them itself. You never need them:
+Five commands exist for the mod, which runs them itself. You never need them:
 
 | Command | The mod runs it |
 |-|-|
 | `compound check` | before a tool call, to test the call against every guard; it reads `{"tool", "input"}` on standard input |
 | `compound memo` | after a reuse check, to keep the verdict on a request so the same request is not judged twice |
 | `compound use` | when a session invokes a skill, to count the use |
+| `compound met` | when a call fails and no lesson describes it, to ask whether an earlier session met the same failure |
 | `compound log` | to append one event to the event log. It takes the events the mod writes; `learn`, `skip`, `rm`, `skill`, `promote` and `use` are written only by their own commands |

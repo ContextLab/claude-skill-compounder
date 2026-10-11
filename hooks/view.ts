@@ -104,6 +104,7 @@ export const WORDS: Record<string, string> = {
   repeat: 'repeated',
   error: 'error',
   retry: 'retried',
+  met: 'met',
 }
 
 export function eventWord(type: string): string {

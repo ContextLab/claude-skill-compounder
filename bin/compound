@@ -169,6 +169,14 @@ EVENT LOG
                                     agent    string    the subagent whose loop it was,
                                                        null for the main loop
                                     ms       int       milliseconds the judge took
+                                    why      string    recurred: no model was asked;
+                                                       the failure was met in an
+                                                       earlier session and no lesson
+                                                       describes it
+                                    sig*     string    recurred: the failure's
+                                                       signature (see `met`)
+                                    met      int       recurred: the earlier sessions
+                                                       that met it
         remind    mod               captures [string]  ids of the unsettled captures a
                                                        session was told about at its
                                                        first prompt
@@ -249,6 +257,13 @@ EVENT LOG
                                                        lesson of its name
                                     from*    string    the project root that holds it
                                     seen_in* string    the project root it applied in
+        met       CLI `met`         sig*     string    the signature of a failed call's
+                                                       error (see `signature`): the
+                                                       failure, whatever its paths,
+                                                       numbers and names
+                                    tool     string
+                                    sessions int       the other sessions that had met
+                                                       it when this was written
         use       CLI `use`         lesson*  string    the skill a session invoked, as
                                                        `list` names it. The mod runs
                                                        `use` when a skill's prompt is
@@ -511,12 +526,12 @@ LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn", "use")
 # Every type the table in the docstring names.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry")
+               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met")
 # The types a command of this CLI writes, and the command: `compound log` refuses them, so
 # an event that settles a debt or says a lesson was written, moved or removed is in the log
 # only because that command ran. `log` takes the other types, which are the mod's.
 CLI_WRITES = {"learn": "add", "skip": "skip", "rm": "rm", "skill": "skill", "promote": "promote",
-              "candidate": "promote", "use": "use"}
+              "candidate": "promote", "use": "use", "met": "met"}
 LOG_TYPES = tuple(kind for kind in EVENT_TYPES if kind not in CLI_WRITES)
 # The types the mod writes, or has the CLI write (`use`): the newest of them is when the
 # mod last fired.
@@ -524,7 +539,7 @@ MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge",
              "retry")
 # Written to be measured (`compound report`), one for every question put to the model and
 # one for the call after a refusal: left out of `status`'s Recent.
-VERDICT_TYPES = ("judge", "retry")
+VERDICT_TYPES = ("judge", "retry", "met")
 # The tools a lesson's patterns are tested against when it names none.
 MATCH_TOOLS = ("Bash",)
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -789,7 +804,7 @@ EVENT_WORDS = {
     "reuse": "reused", "guard": "guarded", "recall": "recalled", "capture": "owed", "remind": "reminded",
     "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
     "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "use": "used",
-    "repeat": "repeated", "error": "error", "retry": "retried",
+    "repeat": "repeated", "error": "error", "retry": "retried", "met": "met",
 }
 
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
@@ -798,7 +813,7 @@ EVENT_COLOURS = {
     "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
     "judge": DIM, "use": BLUE, "repeat": CYAN,
     "error": RED,
-    "retry": DIM,
+    "retry": DIM, "met": DIM,
 }
 STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
 
@@ -2265,6 +2280,78 @@ def capture_id(event):
     if isinstance(given, str) and given:
         return given
     return short_hash("\n".join(str(event.get(key) or "") for key in ("session", "call", "failed", "fixed")))
+
+
+# ----------------------------------------------------------------------------- a failure met before
+
+# The line of a failed call's result that says what went wrong, with what differs from one
+# meeting to the next folded away (paths, numbers, hashes, quoted names): its SIGNATURE. Two
+# failures with one signature are the same failure met twice. A line that reads like an
+# error is one that holds one of these words.
+SIGNATURE_KEY = re.compile(r"(?i)error|not found|no such|denied|refus|failed|cannot|can't|unable|invalid|unrecognized"
+                           r"|no matches|not a |blocked|isolated|outside allowed|exceeds|traceback|unknown|missing"
+                           r"|timed out|not permitted|bad substitution")
+# What says nothing about the call: the work's own failures (an assertion, an exception of
+# the program under test), a file that is simply not there, a wait that ran out. Measured on
+# six weeks of sessions: these are the signatures that recur and teach nothing.
+SIGNATURE_GENERIC = re.compile(
+    r"^(?:E\s+)?(?:AssertionError|KeyError|Traceback|TypeError|ValueError|IndexError|AttributeError|RuntimeError"
+    r"|NameError|json\.decoder|Found N error|### Error|<PATH>$|Exit code|E  |FAILED|N failed|error: N|Error: N)"
+    r"|^(?:<Q>|N|<PATH>|\W)*$|(?i:no such file or directory|timeouterror|timeout \\w+ exceeded|timed out|cannot import name)")
+SIGNATURE_CHARS = 110
+SIGNATURE_MIN = 12
+
+
+def signature(result):
+    """The signature of a failed call's result, or None when it has no line that reads
+    like an error or the line says nothing about the call."""
+    lines = [line.strip() for line in _text(result)[:EVENT_TEXT_CAP * 4].split("\n") if line.strip()]
+    found = [line for line in lines if SIGNATURE_KEY.search(line) and not line.startswith(('File "', "at ", "^"))]
+    if not found:
+        return None
+    # A Python exception's own line when there is one, else the first line that reads like
+    # an error: the shell and the harness lead with it.
+    raised = [line for line in found if re.match(r"^(?:E\s+)?[A-Za-z_.]*(?:Error|Exception)\b", line)]
+    line = raised[-1] if raised else found[0]
+    line = re.sub(r"^Exit code \d+\s*", "", line) or (found[1] if len(found) > 1 else line)
+    line = re.sub(r"^<tool_use_error>", "", line)
+    line = re.sub(r"(?:/[\w.@%+=:,~-]+){2,}/?", "<PATH>", line)
+    line = re.sub(r"'[^']{1,80}'|\"[^\"]{1,80}\"|`[^`]{1,80}`", "<Q>", line)
+    line = re.sub(r"\b[0-9a-f]{7,}\b", "<HEX>", line)
+    line = re.sub(r"\d+", "N", line)
+    line = re.sub(r"\(eval\):N: ", "", line)
+    # What follows these is the one call's own word, not the failure.
+    line = re.sub(r"(no matches found): .*", r"\1", line)
+    line = line[:SIGNATURE_CHARS].strip()
+    if len(line) < SIGNATURE_MIN or SIGNATURE_GENERIC.search(line):
+        return None
+    return line
+
+
+def cmd_met(args):
+    """stdin {"tool", "call", "error"}: a call failed. Says whether its failure was met
+    before, and writes the meeting down."""
+    try:
+        given = json.loads(read_stdin())
+    except ValueError:
+        raise usage("met reads one JSON object {\"tool\", \"call\", \"error\"} on stdin")
+    if not isinstance(given, dict) or not isinstance(given.get("error"), str):
+        raise usage("met reads one JSON object {\"tool\", \"call\", \"error\"} on stdin")
+    sig = signature(redact(given["error"]))
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    out = {"sig": sig, "sessions": 0, "captured": False}
+    if sig:
+        events, _bad = read_events()
+        others = set(_text(event.get("session")) for event in events
+                     if event.get("type") == "met" and event.get("sig") == sig and _text(event.get("session")))
+        others.discard(session)
+        out["sessions"] = len(others)
+        # A lesson was owed for this failure once already: recorded or declined, it is not
+        # owed again.
+        out["captured"] = any(event.get("type") == "capture" and event.get("sig") == sig for event in events)
+        log_event("met", project_root(), sig=sig, tool=_text(given.get("tool"))[:80], sessions=out["sessions"])
+    emit(out)
+    return 0
 
 
 def settled_by(debt, event):
@@ -7312,6 +7399,9 @@ def build_parser():
     one.add_argument("--evidence", metavar="ID", help="the id of the recorded script being declined")
 
     command("log", cmd_log, "Append one event (a JSON object on stdin).")
+
+    command("met", cmd_met, "A call failed: say whether its failure was met in an earlier session (JSON on stdin).",
+            json_flag=False)
 
     one = command("evidence", cmd_evidence, "The scripts sessions ran, kept as they ran: note a run, list, show.")
     one.add_argument("action", choices=("note", "list", "show"))

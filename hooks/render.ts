@@ -450,7 +450,51 @@ const BETWEEN_CALL = 200
 // `at` is when the call failed, in seconds. `between` is what the same agent loop ran since,
 // oldest first, one line a call and at most BETWEEN_MAX of them; `skipped` counts the ones
 // before those.
-export type Held = { tool: string; call: string; error: string; left: number; turn: number; at: number; between: string[]; skipped: number }
+// `met` and `sig` are set when the failure is one an EARLIER session met and no lesson
+// describes: its fix is owed a lesson without any model being asked.
+export type Held = { tool: string; call: string; error: string; left: number; turn: number; at: number; between: string[]; skipped: number; met?: number; sig?: string }
+
+// Whether a Bash call that passed looks like another go at the call that failed: the two
+// share a word of substance. The words of a call are those of its simple commands, without
+// the ones that only move about or set things up (`cd`, `export`, an assignment), without
+// options, and with a path cut to its last part, so that two calls that merely begin with
+// the same `cd` share nothing. `./build.sh` and `./build.sh --profile dev` share
+// `build.sh`; `timeout 5 make test` and `gtimeout 5 make test` share `make`; `echo alpha`
+// shares nothing with either. A hint for WHICH passing call to quote as the one that
+// worked: that a lesson is owed was decided by the failure having come back.
+const SETUP_WORDS = new Set(['cd', 'export', 'set', 'unset', 'source', 'pushd', 'popd', 'true', 'echo', 'printf', 'sleep'])
+
+function wordsOf(command: string): Set<string> {
+  const out = new Set<string>()
+  for (const simple of simpleCommands(command)) {
+    const words = simple.split(/\s+/).filter(w => w !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w))
+    if (words.length === 0 || SETUP_WORDS.has(words[0]!)) continue
+    for (const raw of words) {
+      const word = raw.replace(/^["'(]+|["');]+$/g, '')
+      if (word.startsWith('-') || /^[<>|&0-9]/.test(word)) continue
+      const last = word.split('/').filter(p => p !== '').pop() ?? ''
+      if (last.length >= 3 && !SETUP_WORDS.has(last)) out.add(last)
+    }
+  }
+  return out
+}
+
+export function resembles(failed: string, passed: string): boolean {
+  const a = wordsOf(failed)
+  if (a.size === 0) return false
+  for (const word of wordsOf(passed)) if (a.has(word)) return true
+  return false
+}
+
+// A REFUSAL THAT KEEPS COMING BACK IS A FAILURE WORTH A LESSON. A call the harness refused
+// before it ran taught the session a rule of the harness (a worktree it may not leave, a
+// wait it may not make that way), and the next session meets the same refusal. These are
+// the kinds that are rules: the harness's own and a safety check's. A permission the user
+// withheld is the user's decision, and a refusal by this mod's own guard already has its
+// lesson.
+export function ruleRefusal(kind: string | undefined): boolean {
+  return kind === 'harness' || kind === 'safety'
+}
 
 // One call, as the judge is shown it among the calls between a failure and its fix.
 export function betweenLine(tool: string, call: string, failed: boolean): string {
@@ -777,10 +821,13 @@ const CAPTURE_CLOSE = 'RECORDED-CAPTURE>>>'
 // Moment 4. Returned beside the result of the call that fixed a held failure. `id` is the
 // capture's: one lesson or one decline settles one capture, and names it with --settles
 // when the session owes more than one.
-export function captureContext(pair: { failed: string; error: string; fixed: string; id?: string }, cli: string): string {
+export function captureContext(pair: { failed: string; error: string; fixed: string; id?: string; met?: number }, cli: string): string {
   const id = pair.id === undefined || pair.id === '' ? undefined : pair.id
+  const met = pair.met !== undefined && pair.met > 0 ? pair.met : 0
   return [
-    '[compound] A failed call was just fixed. This session now owes a lesson, so the next session does not repeat the failure.',
+    met === 0
+      ? '[compound] A failed call was just fixed. This session now owes a lesson, so the next session does not repeat the failure.'
+      : `[compound] This failure was met before, in ${met} earlier session${met === 1 ? '' : 's'}, and no recorded lesson describes it: each of them worked it out again, as this one just did. This session now owes the lesson, so the next one does not.`,
     EVIDENCE_RULE,
     CAPTURE_OPEN,
     'THE CALL THAT FAILED:',
