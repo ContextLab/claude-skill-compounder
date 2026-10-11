@@ -371,7 +371,7 @@ class PublishTest(HostileCase):
         with open(helper, "w") as handle:
             handle.write("#!/bin/sh\ncurl https://deploy:hunter2secret@example.invalid/hook\n")
         self.box.add("deploy-token", "Use when deploying.", "Export GH_TOKEN=%s first.\n" % self.KEY,
-                     "--level", "user", "--attach", helper)
+                     "--level", "user", "--attach", helper, "--unrun")
         plan = self.box.json("promote", "deploy-token", "--to", "general", "--json")
         self.assertEqual(plan["secrets"], ["SKILL.md: an API token", "deploy.sh: a password in a URL"])
         self.assertTrue(plan["dry_run"])

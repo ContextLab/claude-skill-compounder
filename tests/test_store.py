@@ -69,11 +69,12 @@ class AddTest(Case):
         with open(source, "w") as handle:
             handle.write("#!/bin/sh\necho fixed\n")
         os.chmod(source, 0o755)
-        self.box.add("with-script", "Use when.", "Run fix.sh.\n", "--attach", source)
+        self.box.add("with-script", "Use when.", "Run fix.sh.\n", "--attach", source, "--unrun")
         copied = os.path.join(self.box.lesson_dir("with-script"), "fix.sh")
         self.assertEqual(read(copied), "#!/bin/sh\necho fixed\n")
         self.assertTrue(os.stat(copied).st_mode & stat.S_IXUSR)
-        self.assertEqual(sorted(os.listdir(self.box.lesson_dir("with-script"))), ["SKILL.md", "fix.sh"])
+        # .evidence.json says the script was kept without a recorded run (--unrun).
+        self.assertEqual(sorted(os.listdir(self.box.lesson_dir("with-script"))), [".evidence.json", "SKILL.md", "fix.sh"])
 
     def test_no_temporary_files_are_left_behind(self):
         self.box.add("tidy-lesson")
@@ -160,7 +161,7 @@ class AddRefusalTest(Case):
         source = os.path.join(self.box.root, "SKILL.md")
         with open(source, "w") as handle:
             handle.write("x")
-        err = self.refused("add", "--name", "clobber", "--when", "Use when.", "--attach", source, stdin="Body.\n")
+        err = self.refused("add", "--name", "clobber", "--when", "Use when.", "--attach", source, "--unrun", stdin="Body.\n")
         self.assertIn("SKILL.md", err)
 
     def test_update_of_a_name_that_does_not_exist(self):
@@ -252,7 +253,7 @@ class UpdateTest(Case):
         source = os.path.join(self.box.root, "repair.py")
         with open(source, "w") as handle:
             handle.write("print('repaired')\n")
-        self.assertExit(self.box.run("add", "--name", "gets-script", "--update", "--attach", source, stdin=""), 0)
+        self.assertExit(self.box.run("add", "--name", "gets-script", "--update", "--attach", source, "--unrun", stdin=""), 0)
         self.assertEqual(read(os.path.join(self.box.lesson_dir("gets-script"), "repair.py")), "print('repaired')\n")
 
     def test_update_of_a_skill_keeps_its_other_frontmatter(self):
@@ -405,7 +406,7 @@ class ShowTest(Case):
         source = os.path.join(self.box.root, "helper.sh")
         with open(source, "w") as handle:
             handle.write("# helper\n")
-        self.box.add("shown", "Use when shown.", "The shown body.\n", "--attach", source)
+        self.box.add("shown", "Use when shown.", "The shown body.\n", "--attach", source, "--unrun")
         row = self.box.json("show", "shown", "--json")
         self.assertEqual(row["path"], self.box.lesson_dir("shown"))
         self.assertEqual(row["text"], read(os.path.join(self.box.lesson_dir("shown"), "SKILL.md")))
@@ -460,7 +461,7 @@ class SkillTest(Case):
         source = os.path.join(self.box.root, "helper.sh")
         with open(source, "w") as handle:
             handle.write("# helper\n")
-        self.box.add("becomes-skill", "Use when.", "Step one.\n", "--attach", source)
+        self.box.add("becomes-skill", "Use when.", "Step one.\n", "--attach", source, "--unrun")
         text = read(os.path.join(self.box.lesson_dir("becomes-skill"), "SKILL.md"))
         proc = self.box.run("skill", "becomes-skill")
         self.assertExit(proc, 0)

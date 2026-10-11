@@ -6,14 +6,14 @@ import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt
 import {
   bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
   sameCall, soleCli, soleCliShape,
-  heldStep, inputOf, isCommand, judged, knownContext, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
-  reuseContext, reuseStatus, shellError, shellFailure, stopDebt, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
+  heldStep, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
+  reuseContext, reuseStatus, shellError, shellFailure, stopDebt, stopEvidence, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
   unsettledContext, usedStatus, userOrigin,
   type Failure, type Held, type Repeat, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
-  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseLogged, parseMoved, parseOwed, parseShow,
+  askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseInventory, parseLogged, parseMoved, parseOwed, parseScripts, parseShow,
   parseTimedOut, parseUnsettled, parseUsed, settlers,
   type Earlier, type Event, type Found, type Item,
 } from './store'
@@ -1414,6 +1414,27 @@ async function settle($: EngineInterface, sid: string, was: Owing): Promise<void
   if (goneIds.length > 0 || goneWeak.length > 0) $.ui.status(ids.length > 0 ? owedStatus(newest) : `strengthen ${weak[0] ?? ''}`)
 }
 
+// ---- a script that ran -----------------------------------------------------------------
+
+// A Bash call that may have run a script file has finished: the CLI is told the command and
+// whether it passed, and keeps the bytes of each script it ran, as they are now. Nothing
+// waits for this: it is started after the call's result is in hand and answers to nobody.
+async function noteRun($: EngineInterface, sid: string, command: string, ok: boolean, call: string | undefined, agent: string | undefined): Promise<void> {
+  try {
+    let cwd: string | undefined
+    try {
+      cwd = await $.session.cwd()
+    } catch {
+      cwd = undefined
+    }
+    const run = { command, ok, call: call ?? '', agent: agent ?? '', turn: turns.get(sid)?.n ?? 0, ...(cwd === undefined ? {} : { cwd }) }
+    const ran = await spawn($, ['evidence', 'note'], JSON.stringify(run), undefined, BUDGET.call, false)
+    if (ran.code !== 0 && ran.code !== SKIPPED && ran.code !== TIMED_OUT) await cliFailed($, 'evidence', ran)
+  } catch (err) {
+    await fail($, 'evidence', err)
+  }
+}
+
 // ---- moment 5: stop -------------------------------------------------------------------
 
 // The stop goes through: the turn is over, and a prompt that was waiting starts the next.
@@ -1466,6 +1487,25 @@ async function onStop($: EngineInterface, followsBlock: boolean): Promise<string
   if (refusals.length > 0) {
     $.ui.status(fresh.length > 0 ? owedStatus(newest) : `strengthen ${weakFresh[0]?.name ?? ''}`)
     return refusals.join('\n\n')
+  }
+  // A script this session ran until it worked, which nothing keeps: asked once per script,
+  // with the script named. What is due is the CLI's to say (`evidence list --due`).
+  if (!followsBlock) {
+    const listed = await spawn($, ['evidence', 'list', '--due', '--session', sid, '--json'])
+    const due = listed.code === 0 ? parseScripts(listed.stdout) : undefined
+    if (due === undefined) {
+      if (listed.code !== SKIPPED && listed.code !== TIMED_OUT) await cliFailed($, 'evidence', listed)
+    } else {
+      const unasked = []
+      for (const s of due) {
+        if (await mayRefuse($, sid, `evidence-${s.id}`)) unasked.push(s)
+      }
+      if (unasked.length > 0) {
+        await log($, { type: 'refuse', why: 'evidence', evidence: unasked.map(s => s.id) })
+        $.ui.status(`script to keep: ${unasked[0]?.name ?? ''}`)
+        return stopEvidence(unasked, cliAt)
+      }
+    }
   }
   const turn = turns.get(sid)
   const k = await knobs($)
@@ -1632,6 +1672,13 @@ export const register: Register = on => {
         return ran
       }
       if (verb !== undefined || (tool === 'Bash' && typeof input.command === 'string' && mentionsCli(input.command))) await onCliCall($, sid, 'add', began)
+      // A script that ran is kept as it ran, passed or failed; a call refused before it ran ran nothing.
+      if (tool === 'Bash' && typeof input.command === 'string' && mayRunScript(input.command)) {
+        const output = String(ran.text ?? '')
+        if (!(ran.isError === true && refusal(output) !== undefined)) {
+          void noteRun($, sid, input.command, ran.isError !== true && shellError(output) === undefined, e.tool_use_id, e.agentId)
+        }
+      }
       const key = `${sid}:${e.agentId ?? 'main'}`
       // What this loop holds now: a call that runs while it is held ran between the failure
       // and whatever fixes it, and the judge is shown it.

@@ -711,7 +711,7 @@ class PromotePublishesNoOriginTest(Case):
         source = os.path.join(self.box.root, "fix.sh")
         write(source, "#!/bin/sh\necho fixed\n")
         self.box.add("zsh-equals-word", "Use when a zsh line has a bare equals word.", "Quote the word.\n",
-                     "--level", "user", "--match", r"echo\s+=+", "--attach", source)
+                     "--level", "user", "--match", r"echo\s+=+", "--attach", source, "--unrun")
         self.dir = self.box.lesson_dir("zsh-equals-word", "user")
         write(os.path.join(self.dir, ".env"), "TOKEN=secret\n")
         write(os.path.join(self.dir, ".hidden", "inner.txt"), "hidden\n")
@@ -728,7 +728,7 @@ class PromotePublishesNoOriginTest(Case):
         self.assertNotIn("origin", plan["skill_md"])
         self.assertNotIn("sess-000", json.dumps(plan))
         self.assertEqual(plan["files"], ["lessons/zsh-equals-word/SKILL.md", "lessons/zsh-equals-word/fix.sh"])
-        self.assertEqual(plan["excluded"], [".env", ".hidden", "home-link", "hosts-link"])
+        self.assertEqual(plan["excluded"], [".env", ".evidence.json", ".hidden", "home-link", "hosts-link"])
 
     def test_the_text_plan_shows_the_published_text_and_what_was_excluded(self):
         out = self.box.run("promote", "zsh-equals-word", "--to", "general").stdout

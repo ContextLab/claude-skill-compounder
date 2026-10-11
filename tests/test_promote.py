@@ -24,7 +24,7 @@ class PromoteUserTest(Case):
         source = os.path.join(self.box.root, "helper.sh")
         with open(source, "w") as handle:
             handle.write("# helper\n")
-        self.box.add("travels", "Use when.", "Body.\n", "--attach", source)
+        self.box.add("travels", "Use when.", "Body.\n", "--attach", source, "--unrun")
         text = read(os.path.join(self.box.lesson_dir("travels"), "SKILL.md"))
         proc = self.box.run("promote", "travels", "--to", "user")
         self.assertExit(proc, 0)
@@ -88,7 +88,7 @@ class PromoteGeneralTest(Case):
         with open(source, "w") as handle:
             handle.write("#!/bin/sh\necho fixed\n")
         self.box.add("zsh-equals-word", "Use when a zsh line has a bare equals word.", "Quote the word.\n",
-                     "--level", "user", "--match", r"echo\s+=+", "--attach", source)
+                     "--level", "user", "--match", r"echo\s+=+", "--attach", source, "--unrun")
 
     def test_the_dry_run_prints_the_plan_and_writes_nothing_anywhere(self):
         before = self.box.snapshot()

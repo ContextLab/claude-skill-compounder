@@ -312,6 +312,22 @@ export function seconds(event: Event): number {
   return 0
 }
 
+// A script a session ran, as `compound evidence list --json` gives it: `id` names the bytes
+// the CLI kept, `ok` and `failed` are its runs, `command` the newest call that passed.
+export type Script = { id: string; name: string; path: string; ok: number; failed: number; versions: number; command: string }
+const EVIDENCE_ID = /^[0-9a-f]{16}$/
+
+// The scripts of a reply to `compound evidence list --json`, or undefined when the reply
+// is not a list. A row whose id is not an evidence id is dropped: the id goes into a command.
+export function parseScripts(stdout: string): Script[] | undefined {
+  const list = rows(parsed(stdout), [])
+  if (list === undefined) return undefined
+  const whole = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0)
+  return list
+    .filter(r => EVIDENCE_ID.test(str(r.id)) && ONE_LINE.test(str(r.name)))
+    .map(r => ({ id: str(r.id), name: str(r.name), path: str(r.path), ok: whole(r.ok), failed: whole(r.failed), versions: whole(r.versions), command: str(r.command) }))
+}
+
 // A lesson owed: `id` is the capture's, `key` is what its one refusal is claimed under.
 export type Debt = { id: string; key: string; tool: string; failed: string; error: string; fixed: string }
 export type Strengthening = { name: string; guard: boolean; call: string }

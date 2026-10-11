@@ -3,7 +3,7 @@
 // so the two skills can be followed in a session where `compound` is not on PATH.
 
 import { excerpt, oneLine, plain, redact, shq } from './safe'
-import type { Debt, Earlier, Event, Hit, Item, Strengthening, Unsettled } from './store'
+import type { Debt, Earlier, Event, Hit, Item, Script, Strengthening, Unsettled } from './store'
 import { base, listed, NOTES, OWED, WORDS } from './view'
 
 export const EARLIER_MAX = 3
@@ -915,6 +915,51 @@ export function unsettledContext(captures: readonly Unsettled[], cli: string): s
     )
   }
   out.push(`\`${cli} status\` lists them under Open until then. This is said once per session.`, cliLine(cli))
+  return out.join('\n')
+}
+
+// A Bash command that may have RUN a script file: it names a file with a program's ending,
+// or its program is a path. A hint and nothing more: the CLI reads the command, finds the
+// files that ran and keeps them (`compound evidence note`), and a command that ran none
+// costs one call nobody waits for.
+const SCRIPT_HINT = /\.(?:py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|r|jl|awk|lua|php|applescript)(?![\w.-])|(?:^|[;&|(]\s*)(?:\.{1,2}|~|\$\w+|\$\{\w+\})?\/[^\s;&|]+/im
+
+export function mayRunScript(command: string): boolean {
+  return SCRIPT_HINT.test(command)
+}
+
+// The most scripts one refused stop names.
+export const SCRIPTS_SHOWN = 3
+
+// Moment 5, a script the session wrote and ran until it worked, which nothing keeps: the
+// stop is refused once for it, with the script named and the two ways to settle it. The
+// name, the path and the call are read back from the CLI's record, so they are quoted.
+export function stopEvidence(scripts: readonly Script[], cli: string): string {
+  const shown = scripts.slice(0, SCRIPTS_SHOWN)
+  const out = [
+    scripts.length === 1
+      ? '[compound] This session ran a script until it worked, and nothing keeps it.'
+      : `[compound] This session ran ${scripts.length} scripts until they worked, and nothing keeps them.`,
+    'A copy of each was kept as it ran. A later session with the same job would write it again, unless it is recorded now, from that copy and not from memory.',
+  ]
+  for (const s of shown) {
+    out.push(
+      '',
+      `- ${flat(s.name, NAME_CHARS)} (evidence ${s.id}): passed ${s.ok} time${s.ok === 1 ? '' : 's'}${s.failed > 0 ? `, failed ${s.failed}` : ''}${s.versions > 1 ? `, in ${s.versions} versions` : ''}; ran as ${flat(s.path, PATH_CHARS)}`,
+      ...(s.command === '' ? [] : [`  the last call that passed: ${flat(s.command, 300)}`]),
+      `  record it: ${cli} add --name <slug> --when "Use when <the job it does>" --from-evidence ${s.id} --body "<what it does, how to call it, what it needs>"`,
+      `  or decline it: ${cli} skip --evidence ${s.id} --why "<reason>"`,
+    )
+  }
+  if (scripts.length > shown.length) out.push('', `${scripts.length - shown.length} more: ${cli} evidence list --due`)
+  out.push(
+    '',
+    'Record a script when a later session would have the same job: say in the body what it is for, the call that runs it and what it expects, in words that hold outside this session. If the job belongs to this repository, the better home may be the repository itself: commit the script there and decline here.',
+    'Decline a probe, a one-off, or a script that only makes sense inside this task. The compound:learn skill has the full procedure.',
+    'This is asked once per script. The next stop is not refused.',
+    cliLine(cli),
+    AGAIN,
+  )
   return out.join('\n')
 }
 

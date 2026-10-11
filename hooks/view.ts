@@ -524,7 +524,7 @@ export function eventText(e: Record<string, unknown>): string {
     case 'remind':
       return `${count(names(e.captures).length, 'lesson')} owed`
     case 'refuse':
-      return str(e.why) === 'debt' ? 'lesson owed' : str(e.why) === 'strengthen' ? 'to strengthen' : 'long turn'
+      return str(e.why) === 'debt' ? 'lesson owed' : str(e.why) === 'strengthen' ? 'to strengthen' : str(e.why) === 'evidence' ? 'script to keep' : 'long turn'
     case 'learn':
       return e.update === true ? `${lesson} (rewritten)` : lesson
     case 'skip':

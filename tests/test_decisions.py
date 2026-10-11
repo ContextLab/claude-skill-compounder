@@ -480,7 +480,7 @@ class PublishScanTest(Case):
 
     def test_a_file_that_cannot_be_read_is_refused_and_named(self):
         helper = self.attach("helper.sh", b"#!/bin/sh\necho ok\n")
-        self.box.add("locked-note", "Use when locked.", "Run helper.sh.\n", "--level", "user", "--attach", helper)
+        self.box.add("locked-note", "Use when locked.", "Run helper.sh.\n", "--level", "user", "--attach", helper, "--unrun")
         inside = os.path.join(self.box.lesson_dir("locked-note", "user"), "helper.sh")
         os.chmod(inside, 0)
         self.addCleanup(os.chmod, inside, 0o644)
@@ -514,7 +514,7 @@ class PublishScanTest(Case):
         helper = self.attach("fix.sh", script, 0o755)
         data = self.attach("table.bin", blob)
         self.box.add("zsh-equals-word", "Use when a zsh line has a bare equals word.", "Quote the word.\n",
-                     "--level", "user", "--match", r"echo\s+=+", "--attach", helper, "--attach", data)
+                     "--level", "user", "--match", r"echo\s+=+", "--attach", helper, "--unrun", "--attach", data)
         plan = self.box.json("promote", "zsh-equals-word", "--to", "general", "--json")
         self.assertEqual((plan["secrets"], plan["unpublishable"]), ([], []))
         before = self.box.snapshot(self.box.chome)
@@ -546,7 +546,7 @@ class PublishScanTest(Case):
 
     def test_the_staging_copy_is_removed_and_the_dry_run_writes_nothing(self):
         helper = self.attach("fix.sh", b"#!/bin/sh\necho ok\n")
-        self.box.add("plain-note", "Use when plain.", "Body.\n", "--level", "user", "--attach", helper)
+        self.box.add("plain-note", "Use when plain.", "Body.\n", "--level", "user", "--attach", helper, "--unrun")
         scratch = os.path.join(self.box.root, "scratch")
         os.makedirs(scratch)
         before = self.box.snapshot()
@@ -572,13 +572,13 @@ class PublishScanTest(Case):
         became a link to something outside the lesson is refused, not published."""
         secret = self.attach("outside.txt", b"token " + self.KEY.encode() + b"\n")
         helper = self.attach("fix.sh", b"#!/bin/sh\necho ok\n")
-        self.box.add("linked-note", "Use when linked.", "Body.\n", "--level", "user", "--attach", helper)
+        self.box.add("linked-note", "Use when linked.", "Body.\n", "--level", "user", "--attach", helper, "--unrun")
         inside = os.path.join(self.box.lesson_dir("linked-note", "user"), "fix.sh")
         os.unlink(inside)
         os.symlink(secret, inside)
         plan = self.box.json("promote", "linked-note", "--to", "general", "--json")
         self.assertEqual(plan["files"], ["lessons/linked-note/SKILL.md"])
-        self.assertEqual(plan["excluded"], ["fix.sh"])
+        self.assertEqual(plan["excluded"], [".evidence.json", "fix.sh"])
         self.assertExit(self.box.run("promote", "linked-note", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env), 0)
         tree = git_ok("ls-tree", "-r", "--name-only", "compound/lesson-linked-note", cwd=self.upstream).splitlines()
         self.assertNotIn("lessons/linked-note/fix.sh", tree)

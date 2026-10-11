@@ -2237,6 +2237,8 @@ def settled_by(debt, event):
     """Whether `event`, later in the log than `debt`, settles it. THE definition of
     settled: every reader goes through `unsettled`, which asks this."""
     kind = event.get("type")
+    if kind == "skip" and event.get("evidence"):
+        return False
     session = _text(event.get("session"))
     same_session = bool(session) and session == debt.get("session")
     if debt.get("type") == "capture":
@@ -2686,6 +2688,506 @@ def duplicate_of(description, body, patterns, items):
     return None
 
 
+# ----------------------------------------------------------------------------- evidence
+
+# The largest script a snapshot keeps, the runs one snapshot lists (it counts them all),
+# the longest command one run keeps, and how long a snapshot no lesson holds is kept.
+EVIDENCE_BYTES = 262144
+EVIDENCE_RUNS = 40
+EVIDENCE_COMMAND = 2000
+EVIDENCE_DAYS = 30
+# The passing runs after which a script that nothing keeps is owed a decision.
+EVIDENCE_MIN_RUNS = 3
+EVIDENCE_FILE = ".evidence.json"
+SCRIPT_EXTS = (".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".r", ".jl", ".awk",
+               ".lua", ".php", ".applescript")
+# A program that runs the file named after it, and the words that may stand before a program.
+RUNNER_RE = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|sh|bash|zsh|dash|ksh|node|bun|deno|ruby|perl|Rscript|osascript"
+                       r"|tsx|ts-node|php|lua|julia|awk|source|\.)$")
+WRAPPERS = frozenset(("nohup", "time", "env", "command", "exec", "nice", "caffeinate", "timeout", "gtimeout", "uv",
+                      "uvx", "npx", "bunx", "pipx", "poetry", "pdm", "hatch", "run", "arch", "stdbuf", "xvfb-run"))
+# After a runner, the options that say the program is not a file.
+INLINE_OPTIONS = frozenset(("-c", "-m", "-e", "-p", "--eval", "--print", "-"))
+# Where a tool keeps other people's code: a file under one of these is not the session's.
+NOT_OURS = ("/node_modules/", "/site-packages/", "/dist-packages/", "/.venv/", "/venv/", "/.git/", "/.tox/")
+SYSTEM_ROOTS = ("/usr/", "/opt/", "/bin/", "/sbin/", "/System/", "/Library/", "/nix/")
+HEREDOC_RE = re.compile(r"(?<!<)<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+VAR_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+EVIDENCE_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def without_heredocs(command):
+    """The command without the bodies of its here-documents: a body is the text a program
+    reads, not words of the command line. A here-document whose end line is not there is
+    left as it is, so nothing after an unfinished one is lost."""
+    lines = command.split("\n")
+    out = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        out.append(line)
+        index += 1
+        for found in HEREDOC_RE.finditer(line):
+            strip_tabs = found.group(1) == "-"
+            word = found.group(2) or found.group(3) or found.group(4)
+            end = None
+            for later in range(index, len(lines)):
+                if (lines[later].lstrip("\t") if strip_tabs else lines[later]) == word:
+                    end = later
+                    break
+            if end is None:
+                break
+            index = end + 1
+    return "\n".join(out)
+
+
+def shell_commands(text):
+    """The simple commands of a shell line: split at `;`, `&`, `|`, a newline and a
+    parenthesis, except inside quotes."""
+    out = []
+    current = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < len(text):
+                index += 1
+                current.append(text[index])
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+            current.append(char)
+        elif char == "\\" and index + 1 < len(text):
+            current.append(char)
+            index += 1
+            current.append(text[index])
+        elif char in ";&|\n()":
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    out.append("".join(current))
+    return [one.strip() for one in out if one.strip()]
+
+
+def _shell_words(simple):
+    import shlex
+
+    try:
+        return shlex.split(simple, comments=False, posix=True)
+    except ValueError:
+        return []
+
+
+def _expand_word(word, names):
+    """The word with `$NAME`, `${NAME}` and a leading `~` filled in, or None when a name
+    in it has no value here."""
+    def value(found):
+        name = found.group(1) or found.group(2)
+        return names.get(name, os.environ.get(name, found.group(0)))
+
+    text = VAR_RE.sub(value, word)
+    if "$" in text or "`" in text:
+        return None
+    return os.path.expanduser(text) if text.startswith("~") else text
+
+
+def is_script(path, data=None):
+    """Whether the file is a program a session would run: by its ending, or by a `#!` line."""
+    if os.path.splitext(path)[1].lower() in SCRIPT_EXTS:
+        return True
+    if data is None:
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read(2)
+        except OSError:
+            return False
+    return data[:2] == b"#!"
+
+
+def scripts_run(command, cwd):
+    """The files a Bash command RAN as programs, as real paths, in order: the program of a
+    simple command when it is a file named with a directory (`./build.sh`,
+    `$S/validate.sh`), and the file a runner is given (`python3 x.py`, `uv run x.py`,
+    `bash x.sh`). A file that is only named (`cat x.py`, `git add x.py`, `pytest
+    tests/test_x.py`) was not run. `NAME=value` and `cd DIR` earlier in the command are
+    followed; a word whose variables have no value here names nothing."""
+    names = {}
+    here = cwd
+    found = []
+
+    def resolve(word):
+        text = _expand_word(word, names)
+        if not text:
+            return None
+        path = text if os.path.isabs(text) else os.path.join(here, text)
+        return os.path.realpath(path) if os.path.isfile(path) else None
+
+    for simple in shell_commands(without_heredocs(command)):
+        words = _shell_words(simple)
+        while words:
+            assigned = ASSIGN_RE.match(words[0])
+            if not assigned:
+                break
+            value = _expand_word(assigned.group(2), names)
+            if value is not None:
+                names[assigned.group(1)] = value
+            words = words[1:]
+        if words and words[0] == "export":
+            for word in words[1:]:
+                assigned = ASSIGN_RE.match(word)
+                value = _expand_word(assigned.group(2), names) if assigned else None
+                if value is not None:
+                    names[assigned.group(1)] = value
+            continue
+        if len(words) >= 2 and words[0] == "cd":
+            target = _expand_word(words[1], names)
+            if target:
+                target = target if os.path.isabs(target) else os.path.join(here, target)
+                if os.path.isdir(target):
+                    here = target
+            continue
+        while words and (words[0] in WRAPPERS or words[0].startswith("-") or ASSIGN_RE.match(words[0])
+                         or re.match(r"^[0-9.]+[smhd]?$", words[0])):
+            words = words[1:]
+        if not words:
+            continue
+        script = None
+        if RUNNER_RE.match(os.path.basename(words[0])):
+            for word in words[1:8]:
+                if word in INLINE_OPTIONS:
+                    break
+                if word.startswith("-"):
+                    continue
+                script = resolve(word)
+                if script:
+                    break
+        elif "/" in words[0]:
+            script = resolve(words[0])
+            if script and not is_script(script):
+                script = None
+        if script and script not in found:
+            found.append(script)
+    return found
+
+
+def evidence_dir():
+    return os.path.join(home_dir(), "evidence")
+
+
+def _own_script(path):
+    """Whether the file is this package's, or another tool's, and not work of the session."""
+    if path == os.path.realpath(__file__) or _under(path, pkg_root()):
+        return True
+    if any(part in path for part in NOT_OURS):
+        return True
+    return any(path.startswith(root) for root in SYSTEM_ROOTS)
+
+
+def _git_tracked_file(path):
+    """True when git tracks the file, False when it does not, None when git cannot say."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(["git", "ls-files", "--error-unmatch", "--", os.path.basename(path)],
+                              cwd=os.path.dirname(path), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 0:
+        return True
+    return None if b"not a git repository" in proc.stderr else False
+
+
+def _read_meta(ident):
+    path = os.path.join(evidence_dir(), ident, "meta.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict) or meta.get("id") != ident or not isinstance(meta.get("runs"), list):
+        return None
+    meta["_file"] = os.path.join(evidence_dir(), ident, _text(meta.get("name")) or "script")
+    return meta
+
+
+def _write_meta(meta):
+    kept = dict((key, value) for key, value in meta.items() if not key.startswith("_"))
+    atomic_write(os.path.join(evidence_dir(), meta["id"], "meta.json"), dumps(kept, indent=1) + "\n", mode=0o600)
+
+
+def all_evidence():
+    """Every snapshot that reads, oldest last run first."""
+    try:
+        names = sorted(os.listdir(evidence_dir()))
+    except OSError:
+        return []
+    out = [meta for meta in (_read_meta(name) for name in names if EVIDENCE_ID_RE.match(name)) if meta]
+    return sorted(out, key=lambda meta: (_text(meta.get("last")), meta["id"]))
+
+
+def evidence_snapshot(ident):
+    """The snapshot of that id, or Fail(2)."""
+    meta = _read_meta(ident) if EVIDENCE_ID_RE.match(_text(ident)) else None
+    if meta is None or not os.path.isfile(meta["_file"]):
+        raise usage("no evidence %r (see `compound evidence list`)" % one_line(_text(ident))[:40])
+    return meta
+
+
+def evidence_of_file(path):
+    """The snapshot whose bytes are this file's, or None."""
+    import hashlib
+
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(EVIDENCE_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > EVIDENCE_BYTES:
+        return None
+    digest = hashlib.sha256(data).hexdigest()
+    same = [meta for meta in all_evidence() if meta.get("sha256") == digest and os.path.isfile(meta["_file"])]
+    # The same bytes may have run under two paths: the one that passed, the newest first.
+    same.sort(key=lambda meta: (int(meta.get("ok") or 0) > 0, _text(meta.get("last"))))
+    return same[-1] if same else None
+
+
+def _sweep_evidence(clock):
+    """Once a day: a snapshot that no lesson holds and nothing ran for EVIDENCE_DAYS goes."""
+    import shutil
+
+    stamp = os.path.join(evidence_dir(), ".swept")
+    try:
+        if clock - os.path.getmtime(stamp) < 86400:
+            return
+    except OSError:
+        pass
+    for meta in all_evidence():
+        last = parse_ts(meta.get("last"))
+        if not meta.get("lesson") and last is not None and clock - last > EVIDENCE_DAYS * 86400:
+            shutil.rmtree(os.path.join(evidence_dir(), meta["id"]), ignore_errors=True)
+    atomic_write(stamp, "")
+    os.utime(stamp, (clock, clock))
+
+
+def note_run(path, run, project):
+    """Keep the file's bytes as they are now, with this run. The row that was written, or
+    None for a file that is not kept: too large, not text, or not the session's."""
+    import hashlib
+
+    if _own_script(path):
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(EVIDENCE_BYTES + 1)
+        mode = os.stat(path).st_mode
+    except OSError:
+        return None
+    if not data or len(data) > EVIDENCE_BYTES or b"\0" in data:
+        return None
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    digest = hashlib.sha256(data).hexdigest()
+    # One snapshot is one file's bytes at one path: the same bytes at another path are
+    # another script, with its own runs.
+    ident = hashlib.sha256(path.encode("utf-8", "surrogateescape") + b"\0" + data).hexdigest()[:16]
+    meta = _read_meta(ident)
+    stamp = run["ts"]
+    if meta is None:
+        directory = os.path.join(evidence_dir(), ident)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        name = os.path.basename(path)
+        target = os.path.join(directory, name)
+        fd = os.open(target + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700 if mode & 0o111 else 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(target + ".tmp", target)
+        meta = {"id": ident, "sha256": digest, "name": name, "size": len(data), "first": stamp, "runs": [],
+                "ok": 0, "failed": 0, "lesson": None, "declined": None}
+    meta["path"] = path
+    meta["project"] = project
+    meta["tracked"] = _git_tracked_file(path)
+    meta["last"] = stamp
+    meta["ok" if run["ok"] else "failed"] = int(meta.get("ok" if run["ok"] else "failed") or 0) + 1
+    meta["runs"] = (meta["runs"] + [run])[-EVIDENCE_RUNS:]
+    _write_meta(meta)
+    return meta
+
+
+def _scratch(path):
+    import tempfile
+
+    roots = set(os.path.realpath(root) for root in (tempfile.gettempdir(), "/tmp", "/var/tmp", "/var/folders")
+                if os.path.isdir(root))
+    return "/scratchpad/" in path or any(path.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
+
+
+def evidence_rows(session=None):
+    """One row for each script, by its path: the newest version of it, with what all its
+    versions ran. With `session`, the scripts that session ran, counted for that session."""
+    by_path = {}
+    for meta in all_evidence():
+        by_path.setdefault(_text(meta.get("path")), []).append(meta)
+    rows = []
+    for path, versions in by_path.items():
+        runs = sorted((dict(run, _id=meta["id"]) for meta in versions for run in meta["runs"]
+                       if isinstance(run, dict) and (session is None or run.get("session") == session)),
+                      key=lambda run: _text(run.get("ts")))
+        if not runs:
+            continue
+        newest = [meta for meta in versions if meta["id"] == runs[-1]["_id"]][0]
+        passed = [run for run in runs if run.get("ok") is True]
+        mine = [run for run in passed if run["_id"] == newest["id"]]
+        first_pass = _text(passed[0].get("ts")) if passed else None
+        kept = [meta for meta in versions if meta.get("lesson")]
+        declined = [meta for meta in versions if meta.get("declined")]
+        row = {
+            "id": newest["id"], "name": newest.get("name"), "path": path, "project": newest.get("project"),
+            "ok": len(passed), "failed": len(runs) - len(passed), "ok_this": len(mine),
+            "versions": len(set(run["_id"] for run in runs)),
+            "turns": len(set((run.get("session"), run.get("turn")) for run in runs)),
+            "sessions": len(set(run.get("session") for run in runs)),
+            "failed_first": bool(first_pass) and any(run.get("ok") is False and _text(run.get("ts")) <= first_pass
+                                                    for run in runs),
+            "first": _text(runs[0].get("ts")), "last": _text(runs[-1].get("ts")),
+            "tracked": newest.get("tracked"), "scratch": _scratch(path),
+            "command": _text(mine[-1].get("command")) if mine else "",
+            "lesson": kept[-1].get("lesson") if kept else None,
+            "changed": bool(kept) and not newest.get("lesson"),
+            "declined": declined[-1]["declined"].get("why") if declined else None,
+        }
+        row["due"] = evidence_due(row)
+        rows.append(row)
+    return sorted(rows, key=lambda row: (row["last"], row["id"]))
+
+
+def evidence_min_runs():
+    value, _where = setting("COMPOUND_EVIDENCE_MIN_RUNS")
+    return int(value) if re.match(r"^[1-9][0-9]{0,5}$", value) else EVIDENCE_MIN_RUNS
+
+
+def evidence_due(row):
+    """THE rule for a script that is owed a decision: its newest version passed, it passed
+    often enough, git does not already keep it, and no lesson holds it and nobody declined."""
+    return bool(row["ok_this"] >= 1 and row["ok"] >= evidence_min_runs() and row["tracked"] is not True
+                and not row["lesson"] and not row["declined"])
+
+
+def cmd_evidence(args):
+    clock = now()
+    if args.action == "note":
+        if args.id:
+            raise usage("evidence note takes its run on stdin, not an id")
+        try:
+            given = json.loads(read_stdin())
+        except ValueError:
+            raise usage("evidence note reads one JSON object on stdin")
+        if not isinstance(given, dict) or not isinstance(given.get("command"), str) \
+                or not isinstance(given.get("ok"), bool):
+            raise usage("evidence note reads {\"command\": TEXT, \"ok\": true|false} on stdin")
+        project = project_root(fast=True)
+        cwd = given.get("cwd") if isinstance(given.get("cwd"), str) and os.path.isdir(given["cwd"]) else project
+        session = given.get("session") if isinstance(given.get("session"), str) \
+            else os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        run = {"ts": iso(clock), "session": session, "ok": given["ok"],
+               "command": redact(given["command"])[:EVIDENCE_COMMAND]}
+        for key in ("call", "agent"):
+            if isinstance(given.get(key), str) and given[key]:
+                run[key] = found_by(key, given[key][:200])
+        if isinstance(given.get("turn"), int) and not isinstance(given.get("turn"), bool):
+            run["turn"] = given["turn"]
+        noted = []
+        for path in scripts_run(given["command"][:CHECK_TEXT_CAP], cwd):
+            meta = note_run(path, run, project)
+            if meta is not None:
+                noted.append({"id": meta["id"], "name": meta["name"], "path": path})
+        if noted:
+            _sweep_evidence(clock)
+        emit({"noted": noted})
+        return 0
+    if args.action == "show":
+        if not args.id:
+            raise usage("evidence show takes the id `compound evidence list` prints")
+        meta = evidence_snapshot(args.id)
+        if args.json:
+            emit(dict(((key, value) for key, value in meta.items() if not key.startswith("_")),
+                      file=meta["_file"], text=read_text(meta["_file"])))
+            return 0
+        passed = [run for run in meta["runs"] if isinstance(run, dict) and run.get("ok") is True]
+        sys.stdout.write("%s  %s\n  ran as %s\n  kept at %s\n  passed %d, failed %d\n" % (
+            meta["id"], meta.get("name"), meta.get("path"), meta["_file"], int(meta.get("ok") or 0),
+            int(meta.get("failed") or 0)))
+        if passed:
+            sys.stdout.write("  last passing call: %s\n" % one_line(passed[-1].get("command", "")))
+        if meta.get("lesson"):
+            sys.stdout.write("  kept by the lesson %s\n" % meta["lesson"])
+        sys.stdout.write("\n" + read_text(meta["_file"]))
+        return 0
+    if args.id:
+        raise usage("evidence list takes no id; `compound evidence show %s` prints one" % one_line(args.id)[:40])
+    rows = [row for row in evidence_rows(args.session) if row["due"] or not args.due]
+    if args.json:
+        emit(rows)
+        return 0
+    for row in rows:
+        state = ("kept by %s%s" % (row["lesson"], ", changed since" if row["changed"] else "") if row["lesson"]
+                 else "declined" if row["declined"] else "owed a decision" if row["due"] else "")
+        sys.stdout.write("%s  %-28s passed %d, failed %d, %s  %s\n    %s\n" % (
+            row["id"], clip(_text(row["name"]), 28), row["ok"], row["failed"],
+            plural(row["versions"], "version"), state, row["path"]))
+    return 0
+
+
+def write_proof(directory, proof, unrun, lesson):
+    """Beside the lesson, what its attachments are known by: for each one that ran, the
+    snapshot it is, the call that passed and how often it ran; and the names of the ones
+    kept without a run. The snapshots are marked as held by the lesson."""
+    path = os.path.join(directory, EVIDENCE_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            kept = json.load(handle)
+    except (OSError, ValueError):
+        kept = {}
+    rows = dict((row.get("name"), row) for row in kept.get("attachments", []) if isinstance(row, dict))
+    names = [name for name in kept.get("unrun", []) if isinstance(name, str)]
+    for meta in proof:
+        passed = [run for run in meta["runs"] if isinstance(run, dict) and run.get("ok") is True]
+        last = passed[-1] if passed else {}
+        rows[meta["name"]] = {"name": meta["name"], "id": meta["id"], "sha256": meta["sha256"],
+                              "path": meta.get("path"), "command": last.get("command", ""),
+                              "session": last.get("session", ""), "ts": last.get("ts", ""),
+                              "ok": int(meta.get("ok") or 0), "failed": int(meta.get("failed") or 0)}
+        names = [name for name in names if name != meta["name"]]
+        meta["lesson"] = lesson
+        _write_meta(meta)
+    for name in unrun:
+        if name not in rows and name not in names:
+            names.append(name)
+    atomic_write(path, dumps({"attachments": [rows[name] for name in sorted(rows)], "unrun": sorted(names)},
+                             indent=1) + "\n")
+
+
+def read_proof(directory):
+    """({attachment name: its proof}, [names kept without a run]) of a lesson."""
+    try:
+        with open(os.path.join(directory, EVIDENCE_FILE), "r", encoding="utf-8") as handle:
+            kept = json.load(handle)
+    except (OSError, ValueError):
+        return {}, []
+    if not isinstance(kept, dict):
+        return {}, []
+    return (dict((row.get("name"), row) for row in kept.get("attachments", []) if isinstance(row, dict)),
+            [name for name in kept.get("unrun", []) if isinstance(name, str)])
+
+
 def cmd_add(args):
     name = args.name
     if not SLUG_RE.match(name):
@@ -2726,9 +3228,34 @@ def cmd_add(args):
         if os.path.basename(source) == "SKILL.md":
             raise usage("--attach cannot replace SKILL.md")
         attachments.append(os.path.abspath(source))
+    # An attachment that is a program is kept as the bytes that ran: a snapshot named by
+    # its id, or a file whose bytes a snapshot holds. One that never ran is a guess.
+    proof = []
+    unrun = []
+    for source in attachments:
+        meta = evidence_of_file(source)
+        if meta is not None and int(meta.get("ok") or 0) > 0:
+            proof.append(meta)
+        elif is_script(source):
+            if not args.unrun:
+                raise usage("--attach %s is a program with no recorded passing run%s. A lesson keeps the "
+                            "script that worked, as it ran: run it in the session, then attach it (`compound "
+                            "evidence list` shows what was recorded, and --from-evidence ID attaches a "
+                            "recorded one). To keep a program that was never run, pass --unrun; the lesson "
+                            "then says so" % (source, " (its recorded runs failed, or it changed since it ran)"
+                                              if meta is not None else ""))
+            unrun.append(os.path.basename(source))
+    for ident in args.from_evidence or []:
+        meta = evidence_snapshot(ident)
+        if int(meta.get("ok") or 0) < 1:
+            raise usage("evidence %s (%s) has no passing run: %d recorded, all failed. Attach the version "
+                        "that worked" % (meta["id"], meta.get("name"), int(meta.get("failed") or 0)))
+        if meta["id"] not in [one["id"] for one in proof]:
+            attachments.append(meta["_file"])
+            proof.append(meta)
     names = [os.path.basename(path) for path in attachments]
     if len(set(names)) != len(names):
-        raise usage("two --attach files share a file name")
+        raise usage("two attached files share a file name")
     body, body_given = body_of(args)
     if body_given and not body.strip():
         raise usage("the body is empty: --body and --body-file take the text of the lesson")
@@ -2855,17 +3382,30 @@ def cmd_add(args):
         _pin_mtime(os.path.join(directory, "SKILL.md"), stamp)
         level, kind = args.level, "lesson"
 
+    if proof or unrun:
+        write_proof(directory, proof, unrun, name)
     extra = {"settles": settles} if settles else {}
+    if proof:
+        extra["evidence"] = [meta["id"] for meta in proof]
     log_soft("learn", project, lesson=name, level=level, kind=kind, path=directory,
              guard=guard, update=bool(args.update), **extra)
     result = {"name": name, "level": level, "kind": kind, "path": directory,
               "updated": bool(args.update), "guard": guard}
+    if proof:
+        result["evidence"] = [meta["id"] for meta in proof]
+    if unrun:
+        result["unrun"] = unrun
     if args.json:
         emit(result)
     else:
         sys.stdout.write("%s %s %s (%s)\n  %s\n" % (
             "updated" if args.update else "recorded", "guard" if result["guard"] else kind,
             name, level, directory))
+        for meta in proof:
+            sys.stdout.write("  %s is the script that ran (evidence %s, passed %d)\n" % (
+                meta["name"], meta["id"], int(meta.get("ok") or 0)))
+        for one in unrun:
+            sys.stdout.write("  %s was kept without a recorded run\n" % one)
     return 0
 
 
@@ -3008,6 +3548,9 @@ def cmd_show(args):
                  if event.get("type") in ("reuse", "guard", "recall", "use") and item["name"] in event_names(event)]
         row["last"] = {"ts": fired[-1].get("ts"), "type": fired[-1].get("type")} if fired else None
         row["files"] = files
+        proof, unrun = read_proof(item["path"])
+        row["evidence"] = [proof[name] for name in files if name in proof]
+        row["unrun"] = [name for name in files if name in unrun]
         emit(row)
         return 0
     sys.stdout.write("%s (%s %s)\n%s\n" % (item["name"], item["level"], item["kind"], item["path"]))
@@ -3022,8 +3565,13 @@ def cmd_show(args):
             for key, wanted, here in gaps))
     elif not item.get("applies", True):
         sys.stdout.write("  does not apply here: its platform or shell condition does not read\n")
+    proof, unrun = read_proof(item["path"])
     for name in files:
-        sys.stdout.write("  attached: %s\n" % name)
+        ran = proof.get(name)
+        sys.stdout.write("  attached: %s%s\n" % (name, (
+            " (the script as it ran: passed %d; last as `%s`)" % (int(ran.get("ok") or 0),
+                                                                clip(one_line(ran.get("command") or ""), 160))
+            if ran else " (kept without a recorded run)" if name in unrun else "")))
     sys.stdout.write("\n" + text)
     if not text.endswith("\n"):
         sys.stdout.write("\n")
@@ -4274,6 +4822,22 @@ def cmd_skip(args):
     why = one_line(args.why)
     if not why:
         raise usage("--why cannot be empty: say why no lesson is being recorded")
+    if args.evidence:
+        # A script that is not worth a lesson: said once, for every version of it. It
+        # settles no capture and no strengthening.
+        if args.settles:
+            raise usage("--evidence declines a recorded script and --settles a capture: one decline does one")
+        meta = evidence_snapshot(args.evidence)
+        meta["declined"] = {"why": redact(why)[:OPEN_TEXT * 3], "ts": iso(now()),
+                            "session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
+        _write_meta(meta)
+        event = log_event("skip", project_root(), why=why, evidence=meta["id"])
+        if args.json:
+            emit(event)
+        else:
+            sys.stdout.write("declined: %s\n  the script %s (evidence %s) is not asked about again\n" % (
+                event["why"], meta.get("name"), meta["id"]))
+        return 0
     events, _bad = read_events()
     settles = settling(args.settles, events)
     project = project_root()
@@ -6048,6 +6612,9 @@ def build_parser():
                      help="the lesson applies only where the Bash tool runs this shell (zsh, bash); repeatable")
     one.add_argument("--no-condition", action="store_true", help="with --update: drop the platform and the shell")
     one.add_argument("--attach", action="append", metavar="FILE", help="a file to keep beside the lesson; repeatable")
+    one.add_argument("--from-evidence", action="append", metavar="ID",
+                     help="a recorded script to keep beside the lesson, as it ran; repeatable")
+    one.add_argument("--unrun", action="store_true", help="keep an attached program that has no recorded passing run")
     one.add_argument("--origin")
     one.add_argument("--update", action="store_true",
                      help="rewrite the lesson where it is; flags left out keep their value")
@@ -6114,8 +6681,15 @@ def build_parser():
     one = command("skip", cmd_skip, "Decline an owed lesson.")
     one.add_argument("--why", required=True)
     one.add_argument("--settles", metavar="ID", help="the id of the unsettled capture being declined")
+    one.add_argument("--evidence", metavar="ID", help="the id of the recorded script being declined")
 
     command("log", cmd_log, "Append one event (a JSON object on stdin).")
+
+    one = command("evidence", cmd_evidence, "The scripts sessions ran, kept as they ran: note a run, list, show.")
+    one.add_argument("action", choices=("note", "list", "show"))
+    one.add_argument("id", nargs="?")
+    one.add_argument("--session", help="list: only what this session ran")
+    one.add_argument("--due", action="store_true", help="list: only the scripts owed a decision")
 
     one = command("events", cmd_events, "Read the event log.")
     one.add_argument("--since", metavar="TS")
