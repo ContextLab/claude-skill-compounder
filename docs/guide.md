@@ -754,6 +754,7 @@ The rows under `Open`:
 | Row | Meaning | What to do |
 |-|-|-|
 | `owed` | a fix was found and its lesson is not recorded or declined; it stays for 14 days, also after its session ended | [settle it](#settle-a-lesson-an-earlier-session-left-open) with one of the two commands the row prints |
+| `script` | a session ran a script until it worked, used it as a tool, and nothing keeps it; listed for 14 days | [record it from the copy that ran, or decline it](#keep-a-script-that-worked) with the command the row prints |
 | `candidate` | a project lesson applied in a second project and was not moved | run the command the row prints, if you want it at the user level |
 | `unparseable` | a lesson file does not read | fix the file the row names, or `compound rm <name>` |
 | `ineffective` | a lesson keeps being recalled | [strengthen it](#strengthen-an-ineffective-lesson) |

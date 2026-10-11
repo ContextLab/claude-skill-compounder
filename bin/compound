@@ -4115,6 +4115,14 @@ def cmd_add(args):
         level, kind = args.level, "lesson"
 
     if proof or unrun:
+        # The proof file is added to, and what it held is kept, only when what it held was
+        # vouched for: otherwise it is written anew from what this command attaches.
+        if args.update and there_before is not None and there_before.get(EVIDENCE_FILE) is not None and not (
+                vouched_before is not None and there_before.get(EVIDENCE_FILE) == vouched_before.get(EVIDENCE_FILE)):
+            try:
+                os.unlink(os.path.join(directory, EVIDENCE_FILE))
+            except OSError:
+                pass
         write_proof(directory, proof, unrun, name)
     extra = {"settles": settles} if settles else {}
     # What this command vouches for: the files of the lesson as they are now, when every
@@ -4123,19 +4131,20 @@ def cmd_add(args):
     # user's put there is not vouched for by being found beside a lesson that was updated.
     now_there = tree_files(directory)
     # A file counts as written by this command only when nothing of what it now holds was
-    # taken from a file nobody vouched for. An update edits SKILL.md and the proof file IN
-    # PLACE, keeping what they held: they count only when what they held before was
-    # vouched for. An attachment counts when its bytes came from outside the lesson's own
-    # directory: attaching a lesson's file to itself puts nothing there.
-    def kept_was_vouched(one):
-        return (there_before or {}).get(one) is None or (
-            vouched_before is not None and (there_before or {}).get(one) == vouched_before.get(one))
-
+    # taken from a file nobody vouched for. An update edits SKILL.md IN PLACE, keeping what
+    # it held: it counts only when what it held before was vouched for, or when the update
+    # gave its whole text. The proof file counts when this command wrote it (above: anew,
+    # unless what it held was vouched for). An attachment counts when its bytes came from
+    # outside the lesson's own directory: attaching a lesson's file to itself puts nothing there.
     written = set(os.path.basename(path) for path in attachments if not _under(path, directory))
-    if not args.update or (there_before is not None and vouched_before is not None
-                           and there_before.get("SKILL.md") == vouched_before.get("SKILL.md")):
+    # An update that gives the lesson's whole text (its body AND its description) wrote
+    # SKILL.md anew: what it keeps of the old file is frontmatter that is no text to act on
+    # (its dates, its origin, its patterns, which are in force in its own project only).
+    rewritten = bool(args.update and body_given and body.strip() and description)
+    if not args.update or rewritten or (there_before is not None and vouched_before is not None
+                                        and there_before.get("SKILL.md") == vouched_before.get("SKILL.md")):
         written.add("SKILL.md")
-    if (proof or unrun) and (not args.update or (there_before is not None and kept_was_vouched(EVIDENCE_FILE))):
+    if proof or unrun:
         written.add(EVIDENCE_FILE)
     if now_there is not None and all(one in written or (vouched_before or {}).get(one) == digest
                                      for one, digest in now_there.items()):
@@ -4143,8 +4152,8 @@ def cmd_add(args):
     elif args.update and level == "project":
         sys.stderr.write("compound: note: %s holds text or a file that no command of this user's recorded as it "
                          "is; the lesson is in force in its own project and is not offered to others. To offer "
-                         "it, record it anew: `compound rm` it and `compound add` it, with its script attached "
-                         "from a recorded run (--from-evidence)\n" % directory)
+                         "it, record it anew: `compound add --update` with its whole text (--when and --body) "
+                         "and its script from a recorded run (--from-evidence)\n" % directory)
     if proof:
         extra["evidence"] = [meta["id"] for meta in proof]
     log_soft("learn", project, lesson=name, level=level, kind=kind, path=directory,
@@ -6807,6 +6816,13 @@ def build_status():
                            "recall": row["counts"]["recall"]} for row in rows if row["recurring"] and active(row)],
             "unsettled": unsettled,
             "candidates": candidates,
+            # The scripts sessions ran that are owed a decision, of the last UNSETTLED_DAYS days.
+            "scripts": [{"id": row["id"], "name": row["name"], "path": row["path"], "project": row["project"],
+                         "ok": row["ok"], "failed": row["failed"], "last": row["last"],
+                         "command": "compound add --name NAME --when WHEN --from-evidence %s" % row["id"],
+                         "decline": "compound skip --evidence %s --why \"...\"" % row["id"]}
+                        for row in evidence_rows()
+                        if row["due"] and (parse_ts(row["last"]) or 0) >= clock - UNSETTLED_DAYS * 86400],
             "skips": skips,
             "errors": errors,
         },
@@ -6902,12 +6918,17 @@ def cmd_status(args):
     head("Open")
     opened = data["open"]
     if not (opened["ineffective"] or opened["skips"] or opened["errors"] or data["unparseable"]
-            or opened["unsettled"] or opened["candidates"] or opened["recurring"]):
+            or opened["unsettled"] or opened["candidates"] or opened["recurring"] or opened["scripts"]):
         out("  nothing open\n")
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
             "%s  Or decline it: %s\n" % (
                 row["id"], row["age"], os.path.basename(str(row["project"])) or "-", row["failed"], row["fixed"],
+                row["command"], row["decline"]))
+    for row in opened["scripts"]:
+        out("  script       %s %s: a session ran it until it worked (passed %d, failed %d) and nothing keeps it; "
+            "it ran as %s. Record it from the copy that ran: %s  Or decline it: %s\n" % (
+                row["id"], one_line(_text(row["name"])), row["ok"], row["failed"], one_line(_text(row["path"])),
                 row["command"], row["decline"]))
     for row in opened["candidates"]:
         if row.get("conflict"):

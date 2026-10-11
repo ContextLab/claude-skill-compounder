@@ -382,8 +382,10 @@ changed text or script an update would have carried along, and one whose script 
 never seen to run are none of them offered anywhere but in their own project, where a
 project's lessons are in force as they always were. `--attach` refuses the name
 `.evidence.json`: that file is the command's to write. A lesson that does not cross and
-should is recorded anew: `compound rm` it and `compound add` it, with its script from a
-recorded run (`--from-evidence`). That makes it this
+should is recorded anew: `compound add --update` with its whole text (both `--when` and a
+body, which makes `SKILL.md` the command's writing again; what the file keeps is
+frontmatter that is no text to act on) and its script from a recorded run
+(`--from-evidence`). That makes it this
 user's word again. The mod's own words tell the session to read a note first; whether to
 run the program beside one is the session's to decide with the note in front of it, as
 for every recorded note.
@@ -1550,6 +1552,8 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   that keep a committed copy of a user-level lesson; **Recent**, the last ten events, each
   with how long ago it was and the word for its type; and under **Open** everything that
   waits for someone: lessons owed, promotion candidates with the command that moves each,
+  scripts a session ran until they worked that nothing keeps (the last 14 days, each with
+  the command that records it from the copy that ran and the one that declines it),
   ineffective lessons, recurring general lessons with what a user can do about each, debts
   declined and why, and errors in the last seven days. A lesson not in force is flagged
   `not here` or `disabled` in the per-lesson table, and `status --json` says under `here`

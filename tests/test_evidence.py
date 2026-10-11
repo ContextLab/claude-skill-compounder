@@ -373,6 +373,25 @@ class LessonTest(EvidenceCase):
         self.assertEqual((event["update"], event["evidence"]), (True, [ident]))
 
 
+class StatusTest(EvidenceCase):
+    def test_status_lists_a_script_owed_a_decision_with_the_two_commands_and_drops_it_when_settled(self):
+        ident = self.passed(self.script("validate.sh", "#!/bin/sh\ntrue\n"), 3)
+        self.passed(self.script("probe.sh", "#!/bin/sh\ntrue\n"), 1)
+        proc = self.box.run("status", COMPOUND_NOW=NOW + 60)
+        opened = proc.stdout.split("Open")[1]
+        self.assertRegex(opened, r"script\s+%s validate\.sh: a session ran it until it worked \(passed 3, failed 0\)" % ident)
+        self.assertIn("compound add --name NAME --when WHEN --from-evidence %s" % ident, opened)
+        self.assertIn("compound skip --evidence %s --why" % ident, opened)
+        self.assertNotIn("probe.sh", opened)
+        data = json.loads(self.box.run("status", "--json", COMPOUND_NOW=NOW + 60).stdout)
+        self.assertEqual([(row["id"], row["name"], row["ok"]) for row in data["open"]["scripts"]], [(ident, "validate.sh", 3)])
+        # Fourteen days on it is no longer listed; recorded or declined it is gone at once.
+        late = json.loads(self.box.run("status", "--json", COMPOUND_NOW=NOW + 15 * DAY).stdout)
+        self.assertEqual(late["open"]["scripts"], [])
+        self.assertExit(self.box.run("skip", "--evidence", ident, "--why", "not worth keeping"), 0)
+        self.assertNotIn("validate.sh: a session ran it", self.box.run("status", COMPOUND_NOW=NOW + 60).stdout)
+
+
 class DeclineTest(EvidenceCase):
     def test_a_declined_script_is_not_asked_about_again_and_settles_no_capture(self):
         self.box.log({"type": "capture", "tool": "Bash", "failed": "x", "error": "boom", "fixed": "x --flag",
