@@ -249,7 +249,11 @@ means the lesson did not prevent it. The session owes a strengthening, and will 
 finish until it is done or declined. Strengthen it with `--update`, which keeps every
 value you do not give. Do not add a second lesson.
 
-- Add a `--match` so the call is stopped before it runs. This is the strongest form:
+- When the failure is zsh's "no matches found" (a glob that matched no file), no pattern
+  can tell a glob that matches from one that does not: give the lesson the probe that
+  checks the files, `compound add --update --name <name> --probe unmatched-glob`.
+- Add a `--match` so the call is stopped before it runs. This is the strongest form. A
+  pattern that begins with `--` is passed as `--match='<pattern>'`, with the equals sign:
 
   ```bash
   compound add --update --name build-needs-profile --match '(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)\./build\.sh\s*($|[;&|)])'

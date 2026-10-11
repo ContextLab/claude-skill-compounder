@@ -161,6 +161,26 @@ class UnmatchedGlobTest(Case):
                              stdin=json.dumps({"tool": "Bash", "input": {"command": "true"}, "cwd": self.work}))
         self.assertEqual((said["guards"], said["tools"]), (1, ["Bash"]))
 
+    def test_add_gives_a_lesson_a_probe_and_no_match_takes_it_away(self):
+        self.box.add("own-glob-lesson", "Use when a glob may match nothing.", "Quote it, the user's way.\n", "--level",
+                     "user", "--shell", "zsh", "--probe", "unmatched-glob", "--new")
+        event = self.box.read_events()[-1]
+        self.assertEqual((event["lesson"], event["guard"]), ("own-glob-lesson", True))
+        self.assertEqual(sorted(hit["name"] for hit in self.check("echo *.nope")),
+                         ["glob-matches-nothing", "own-glob-lesson"])
+        row = [row for row in self.box.json("list", "--json") if row["name"] == "own-glob-lesson"][0]
+        self.assertEqual(row["probe"], "unmatched-glob")
+        # A lesson that exists gets one with --update, beside the pattern it has.
+        self.box.add("plain-pattern", "Use when echoing a marker.", "Do not.\n", "--level", "user", "--match",
+                     r"echo MARKER", "--new")
+        self.assertExit(self.box.run("add", "--name", "plain-pattern", "--update", "--probe", "unmatched-glob"), 0)
+        self.assertEqual(sorted(hit["name"] for hit in self.check("echo MARKER")), ["plain-pattern"])
+        self.assertIn("plain-pattern", [hit["name"] for hit in self.check("echo *.nope")])
+        self.assertExit(self.box.run("add", "--name", "own-glob-lesson", "--update", "--no-match"), 0)
+        self.assertEqual(sorted(hit["name"] for hit in self.check("echo *.nope")), ["glob-matches-nothing", "plain-pattern"])
+        for flags in (("--probe", "time-travel"), ("--probe", "unmatched-glob", "--no-match")):
+            self.assertExit(self.box.run("add", "--name", "refused-probe", "--when", "Use when.", *flags, stdin="Body.\n"), 2)
+
     def test_a_probe_this_version_does_not_have_is_reported_and_stops_nothing(self):
         self.box.write_lesson(self.box.lesson_dir("from-the-future", "user"), "from-the-future",
                               "Use when a later version checks more.", "Body.\n", extra="probe: time-travel\n")

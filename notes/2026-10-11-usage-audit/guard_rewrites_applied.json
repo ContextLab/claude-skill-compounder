@@ -1,0 +1,35 @@
+{
+ "old": {
+  "zsh-nomatch-glob": {
+   "level": "user",
+   "match": [
+    "--(include|exclude)=\\*|gh api [^\\s'\"]*\\?|(?<![\\x27\"])\\b[\\w./-]*\\*[\\w./*-]*\\s+2>\\s*/dev/null"
+   ]
+  },
+  "macos-no-timeout": {
+   "level": "user",
+   "match": [
+    "(^|[;&|]\\s*)timeout\\s+\\d"
+   ]
+  },
+  "zsh-function-name-is-alias": {
+   "level": "user",
+   "match": [
+    "(^|[;&|]\\s*)[a-z]\\(\\)\\s*\\{"
+   ]
+  }
+ },
+ "new": {
+  "zsh-nomatch-glob": [
+   "--(include|exclude)=[^\\s'\\\"]*[*?\\[]",
+   "\\bhttps?://[^\\s'\\\"<>|;&)]*\\?",
+   "gh api [^\\s'\\\"]*\\?"
+  ],
+  "macos-no-timeout": [
+   "(?<![\\w=./-])timeout\\s+(?:-\\w+\\s+\\S+\\s+)*\\d"
+  ],
+  "zsh-function-name-is-alias": [
+   "(^\\s*|[;&|(]\\s*|\\b(?:do|then|else)\\s+)(?:c|e|g|h|l|u)\\s*\\(\\)"
+  ]
+ }
+}

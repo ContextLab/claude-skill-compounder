@@ -3911,6 +3911,10 @@ def cmd_add(args):
         raise usage("a lesson reaches general only through `compound promote %s --to general`" % name)
     if args.match and args.no_match:
         raise usage("--match and --no-match cannot both be given")
+    if args.probe is not None and args.probe not in PROBES:
+        raise usage("--probe %r is not a probe this version has: %s" % (one_line(args.probe)[:40], ", ".join(sorted(PROBES))))
+    if args.probe and args.no_match:
+        raise usage("--probe and --no-match cannot both be given")
     tools = []
     for tool in args.tool or []:
         if not TOOL_RE.match(tool):
@@ -4014,8 +4018,13 @@ def cmd_add(args):
             changes["match"] = json.dumps(args.match, ensure_ascii=False)
             guard = True
         elif args.no_match:
-            removals.extend(["match", "match-tools"])
+            removals.extend(["match", "match-tools", "probe"])
             guard = False
+        if args.probe:
+            changes["probe"] = yaml_string(args.probe)
+            guard = True
+        elif item.get("probe") and not args.no_match:
+            guard = True
         if tools:
             if not guard:
                 raise usage("--tool names the tools a --match pattern is tested against, and %r has no pattern: "
@@ -4088,6 +4097,9 @@ def cmd_add(args):
         for key in CONDITION_KEYS:
             if key in condition:
                 fields[key] = yaml_string(", ".join(condition[key]))
+        if args.probe:
+            fields["probe"] = yaml_string(args.probe)
+            guard = True
         fields["created"] = local_date(stamp)
         session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         origin = one_line(args.origin or "") or "project %s%s" % (
@@ -4128,7 +4140,7 @@ def cmd_add(args):
     if now_there is not None and all(one in written or (vouched_before or {}).get(one) == digest
                                      for one, digest in now_there.items()):
         extra["files"] = now_there
-    elif args.update:
+    elif args.update and level == "project":
         sys.stderr.write("compound: note: %s holds text or a file that no command of this user's recorded as it "
                          "is; the lesson is in force in its own project and is not offered to others. To offer "
                          "it, record it anew: `compound rm` it and `compound add` it, with its script attached "
@@ -7528,7 +7540,9 @@ def build_parser():
     one.add_argument("--when", help="when the lesson applies (its description)")
     one.add_argument("--level", choices=LEVELS, default="project")
     one.add_argument("--match", action="append", metavar="RE", help="a guard pattern; repeatable")
-    one.add_argument("--no-match", action="store_true", help="with --update: drop the guard patterns")
+    one.add_argument("--no-match", action="store_true", help="with --update: drop the guard patterns and the probe")
+    one.add_argument("--probe", metavar="NAME",
+                     help="a check of the call against the machine, built into the CLI (unmatched-glob)")
     one.add_argument("--tool", action="append", metavar="TOOL",
                      help="a tool whose calls the patterns are tested against (default Bash); repeatable")
     one.add_argument("--platform", action="append", metavar="NAME",
