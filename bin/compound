@@ -4087,7 +4087,9 @@ def cmd_add(args):
     # for and that has not changed since. A file that is there and that no command of this
     # user's put there is not vouched for by being found beside a lesson that was updated.
     now_there = tree_files(directory)
-    written = set(["SKILL.md", EVIDENCE_FILE] + [os.path.basename(path) for path in attachments])
+    # SKILL.md is written by every `add`; the proof file only when this one wrote it.
+    written = set(["SKILL.md"] + [os.path.basename(path) for path in attachments]
+                  + ([EVIDENCE_FILE] if proof or unrun else []))
     if now_there is not None and all(one in written or (vouched_before or {}).get(one) == digest
                                      for one, digest in now_there.items()):
         extra["files"] = now_there
