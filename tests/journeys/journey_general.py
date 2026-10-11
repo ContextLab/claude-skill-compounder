@@ -8,15 +8,16 @@ by hand, on macOS with zsh as the login shell: that is where the shipped guards 
             quoted as the reason, and one `guard` event names each lesson. `timeout` is
             refused by no guard: `macos-gnu-only-commands` is recalled when it fails, and
             where this Mac has a `timeout` (Homebrew's coreutils) it simply runs.
-  glob      a session runs `rm -f` on a glob that matches nothing. zsh refuses it, and the
-            failure is given the shipped recall lesson `zsh-no-matches-found`.
+  glob      a session sends `rm -f` on a glob that matches nothing, which zsh would refuse
+            whole. The shipped lesson `zsh-no-matches-found` checks the files and stops
+            the call before it runs, with the word at fault.
   pip       a session runs `pip install --dry-run` against a Python its package manager
             owns, and is told to run nothing else. The failure is given
             `pip-externally-managed`. The commands the session says it would run next are
             printed and not judged; nothing is installed anywhere. Skipped, and said so,
             when no such Python is found.
-  twice     three sessions in a row meet the glob failure with COMPOUND_RECUR_LIMIT=2. The
-            lesson is recalled each time, no recall is marked ineffective, no stop is
+  twice     three sessions in a row meet the missing `timeout` with COMPOUND_RECUR_LIMIT=2.
+            The lesson of the package for it, which stops no call, is recalled each time, no recall is marked ineffective, no stop is
             refused for a strengthening, and `compound status` lists the lesson as
             recurring with `compound disable`.
   off       with `zsh-equals-not-found` disabled and COMPOUND_PLATFORM=linux, the same wrong
@@ -50,6 +51,9 @@ GUARDS_PROMPT = (
 GLOB = "rm -f build/*.journeyobj && echo JOURNEY_CLEANED"
 GLOB_PROMPT = ("Run exactly this Bash command first, as written: %s\nIf it fails, read what comes back with the "
                "error, make it work, and tell me what you ran." % GLOB)
+RECURS = "macos-gnu-only-commands"
+TIMEOUT_PROMPT = ("Run exactly this Bash command first, as written: timeout 5 echo JOURNEY_TIMEOUT\nIf it fails, read "
+                  "what comes back with the error, print JOURNEY_TIMEOUT a way that works here, and tell me what you ran.")
 OFF_PROMPT = ("Run these two Bash commands, one Bash call each, exactly as written: first\necho ===== ; echo JOURNEY_EQUALS\n"
               "then\ntimeout 5 echo JOURNEY_TIMEOUT\nBoth may fail, and that is expected: do not retry or fix them. "
               "Then tell me what each printed.")
@@ -121,13 +125,18 @@ def main():
     w.show("event", [e for e in rows if e["type"] in ("recall", "guard", "capture", "judge")])
     sent = [c for c in s.bash() if "journeyobj" in c[0]]
     recalls = [e for e in rows if e["type"] == "recall"]
-    w.check("glob", "the glob that matches nothing failed in zsh", bool(sent) and "no matches found" in sent[0][2],
-            sent[0][2][:200] if sent else "no such call")
-    w.check("glob", "the failure was given the shipped lesson zsh-no-matches-found",
-            any(e.get("lesson") == "zsh-no-matches-found" for e in recalls), [e.get("lesson") for e in recalls])
-    # What the mod adds beside a result is not in the stream: the event is its record.
+    # The shipped lesson names the probe: the files are checked, and the call that zsh would
+    # refuse whole is stopped before it runs, with the word at fault.
+    w.check("glob", "the glob that matches nothing was stopped before it ran, the word named",
+            bool(sent) and sent[0][1] is True and "cannot run as it is written" in sent[0][2]
+            and "build/*.journeyobj" in sent[0][2], sent[0][2][:200] if sent else "no such call")
+    w.check("glob", "one guard event names the shipped lesson zsh-no-matches-found",
+            [e.get("lesson") for e in rows if e["type"] == "guard"] == ["zsh-no-matches-found"],
+            [e.get("lesson") for e in rows if e["type"] == "guard"])
     w.check("glob", "a later call then did the job", any(c[1] is False and "JOURNEY_CLEANED" in c[2] for c in s.bash()[1:]))
-    w.check("glob", "a recalled failure is not captured as a new lesson", not any(e["type"] == "capture" for e in rows))
+    w.check("glob", "a call stopped before it ran is not a failure: nothing was captured, and no recall is owed for it",
+            not any(e["type"] == "capture" for e in rows) and not any(e.get("ineffective") for e in recalls),
+            [e["type"] for e in rows if e["type"] in ("capture", "recall")])
     print("      calls: %s" % " | ".join("%s -> %s" % (c[0][:70], "error" if c[1] else "ok") for c in s.bash()))
 
     python = managed_python()
@@ -154,12 +163,16 @@ def main():
         print("      names --break-system-packages: %s; names a virtual environment: %s" % (
             "--break-system-packages" in said, "venv" in said))
 
-    # The glob lesson was recalled once above. Twice more, past COMPOUND_RECUR_LIMIT=2.
+    # A lesson of the package that stops no call, recalled in three sessions, past
+    # COMPOUND_RECUR_LIMIT=2: `timeout` on a Mac that has none. It was recalled once above.
     limit = {"COMPOUND_RECUR_LIMIT": "2"}
+    if not any(e.get("lesson") == RECURS for e in w.events(project, kind="recall")):
+        print("SKIP  twice    this Mac has a `timeout`: %s is never recalled here" % RECURS)
+        return finish_off(w, project, args)
     for _ in range(2):
-        s = w.session(project, GLOB_PROMPT, args.model, **dict(QUIET, **limit))
+        s = w.session(project, TIMEOUT_PROMPT, args.model, **dict(QUIET, **limit))
     rows = w.events(project, session=s.sid)
-    recalls = [e for e in w.events(project, kind="recall") if e.get("lesson") == "zsh-no-matches-found"]
+    recalls = [e for e in w.events(project, kind="recall") if e.get("lesson") == RECURS]
     w.show("recall", [{k: e.get(k) for k in ("ts", "session", "lesson", "ineffective")} for e in recalls])
     w.check("twice", "the lesson was recalled in three sessions", len(set(e.get("session") for e in recalls)) >= 3,
             len(recalls))
@@ -172,9 +185,12 @@ def main():
     status = w.cli(project, "status", **limit)
     line = [text for text in status.stdout.splitlines() if text.strip().startswith("recurring")]
     w.check("twice", "status lists it as recurring and names the switch",
-            len(line) == 1 and "compound disable zsh-no-matches-found" in line[0], line or status.stdout[-600:])
-    w.check("twice", "status prints no command that rewrites it", "add --update --name zsh-no-matches-found" not in status.stdout)
+            len(line) == 1 and "compound disable %s" % RECURS in line[0], line or status.stdout[-600:])
+    w.check("twice", "status prints no command that rewrites it", "add --update --name %s" % RECURS not in status.stdout)
+    finish_off(w, project, args)
 
+
+def finish_off(w, project, args):
     done = w.cli(project, "disable", "zsh-equals-not-found")
     w.check("off", "`compound disable` switched the lesson off in the throwaway home",
             done.returncode == 0 and os.path.isfile(os.path.join(w.home, "disabled.json")), done.stderr)
