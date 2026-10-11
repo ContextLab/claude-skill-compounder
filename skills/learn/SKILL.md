@@ -173,7 +173,19 @@ EOF
 ```
 
 A lesson with the script that worked (the copy kept when it ran is put beside the lesson;
-the id is the one `compound evidence list` and the `[compound]` message give):
+the id is the one `compound evidence list` and the `[compound]` message give). The body of
+such a lesson is the script's contract, and each part of it is a fact of this session,
+not a description of what the script ought to do:
+
+- what it is for, in one sentence a later session would recognise its own job in;
+- the call that runs it, as it was run (`compound evidence show <id>` prints the last call
+  that passed);
+- what it takes: its arguments, the files and the environment it reads;
+- what it gives back: what it prints, the files it writes, its exit status;
+- what was checked to know its result was right. "It exited 0" is recorded already and is
+  not that check: say what its output was compared with (a count done another way, a file
+  opened and read, a test that failed before and passes now). If nothing was checked, say
+  so in the body; do not claim it.
 
 ```bash
 compound add --name release-checklist \

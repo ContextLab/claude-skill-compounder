@@ -954,14 +954,14 @@ export function stopEvidence(scripts: readonly Script[], cli: string): string {
       '',
       `- ${flat(s.name, NAME_CHARS)} (evidence ${s.id}): passed ${s.ok} time${s.ok === 1 ? '' : 's'}${s.failed > 0 ? `, failed ${s.failed}` : ''}${s.versions > 1 ? `, in ${s.versions} versions` : ''}; ran as ${flat(s.path, PATH_CHARS)}`,
       ...(s.command === '' ? [] : [`  the last call that passed: ${flat(s.command, 300)}`]),
-      `  record it: ${cli} add --name <slug> --when "Use when <the job it does>" --from-evidence ${s.id} --body "<what it does, how to call it, what it needs>"`,
+      `  record it: ${cli} add --name <slug> --when "Use when <the job it does>" --from-evidence ${s.id} --body "<what it is for; the call that runs it; what it takes; what it gives back; what was checked to know it worked>"`,
       `  or decline it: ${cli} skip --evidence ${s.id} --why "<reason>"`,
     )
   }
   if (scripts.length > shown.length) out.push('', `${scripts.length - shown.length} more: ${cli} evidence list --due`)
   out.push(
     '',
-    'Record a script when a later session would have the same job: say in the body what it is for, the call that runs it and what it expects, in words that hold outside this session. If the job belongs to this repository, the better home may be the repository itself: commit the script there and decline here.',
+    'Record a script when a later session would have the same job. The body is its contract, in words that hold outside this session: what it is for, the call that runs it, what it takes (arguments, files, environment), what it gives back (output, files, exit status), and what was checked to know its result was right. That it ran without an error is recorded already and is not that check. If the job belongs to this repository, the better home may be the repository itself: commit the script there and decline here.',
     'Decline a probe, a one-off, or a script that only makes sense inside this task. The compound:learn skill has the full procedure.',
     'This is asked once per script. The next stop is not refused.',
     cliLine(cli),

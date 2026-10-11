@@ -629,7 +629,7 @@ A copy of each was kept as it ran. A later session with the same job would write
 
 - validate.sh (evidence 3f2a91c0b6e41d07): passed 9 times, failed 2, in 3 versions; ran as /private/tmp/scratch/validate.sh
   the last call that passed: S=/private/tmp/scratch; $S/validate.sh --all
-  record it: <cli> add --name <slug> --when "Use when <the job it does>" --from-evidence 3f2a91c0b6e41d07 --body "<what it does, how to call it, what it needs>"
+  record it: <cli> add --name <slug> --when "Use when <the job it does>" --from-evidence 3f2a91c0b6e41d07 --body "<what it is for; the call that runs it; what it takes; what it gives back; what was checked to know it worked>"
   or decline it: <cli> skip --evidence 3f2a91c0b6e41d07 --why "<reason>"
 ```
 
@@ -638,6 +638,11 @@ numbers come from reading six weeks of real sessions: of the scripts the rule pi
 were reusable tools and 8% probes (the rest worked only in one worktree or scratch
 directory, which is what the check of the script's text is for); of those it passes over,
 9% were tools.
+
+The message asks for the body to be the script's contract: what it is for, the call that
+runs it, what it takes, what it gives back, and what was checked to know its result was
+right. That the script ran without an error is what the snapshot records; it is not that
+check, and the message says so.
 
 **A lesson keeps the copy that ran.** `compound add --from-evidence ID` attaches the
 snapshot's file to the lesson under its own name: the bytes that passed, whatever the file
