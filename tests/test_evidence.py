@@ -327,6 +327,17 @@ class LessonTest(EvidenceCase):
         self.assertIn("kept without a recorded run", self.box.run("show", "a-guess").stdout)
         self.assertNotIn("evidence", self.box.read_events()[-1])
 
+    def test_the_proof_file_is_the_commands_to_write_and_cannot_be_attached(self):
+        forged = os.path.join(self.scratch, ".evidence.json")
+        with open(forged, "w") as handle:
+            handle.write('{"attachments": [{"name": "x.sh", "ok": 9}], "unrun": []}')
+        for name in (forged,):
+            proc = self.box.run("add", "--name", "forged-proof", "--when", "Use when.", "--attach", name,
+                                stdin="Body.\n")
+            self.assertExit(proc, 2)
+            self.assertIn(".evidence.json", proc.stderr)
+        self.assertFalse(os.path.exists(self.box.lesson_dir("forged-proof")))
+
     def test_a_file_that_is_not_a_program_needs_no_run(self):
         notes = os.path.join(self.scratch, "table.csv")
         with open(notes, "w") as handle:

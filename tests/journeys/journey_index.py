@@ -63,10 +63,15 @@ def main():
     with open(script, "w") as fh:
         fh.write(TOOL)
     os.chmod(script, 0o755)
+    # Only a script that RAN crosses from one project to another: the run is told to the CLI
+    # as the mod tells it, and the lesson is recorded from the copy the CLI kept.
+    import json
+    noted = json.loads(w.cli(other, "evidence", "note", "--json", stdin=json.dumps(
+        {"command": "python3 %s %s" % (script, other), "ok": True, "cwd": other})).stdout)["noted"]
     w.add(other, "tally-failed-records", "Use when counting the failed records in a directory of .rec batch logs.",
           "Run tally_failed.py (beside this lesson) on the directory: `python3 tally_failed.py runs/`. It prints a "
           "count for each file and a TALLY-TOTAL line. A failure that a later retry-of record healed is not counted.\n",
-          "--attach", script, "--unrun")
+          "--from-evidence", noted[0]["id"])
     project = w.project("alpha")
     records(os.path.join(project, "runs"))
 

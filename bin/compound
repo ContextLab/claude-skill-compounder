@@ -3922,6 +3922,8 @@ def cmd_add(args):
             raise usage("--attach %s is not a file" % source)
         if os.path.basename(source).lower() == "skill.md":
             raise usage("--attach cannot replace SKILL.md")
+        if os.path.basename(source).lower() == EVIDENCE_FILE:
+            raise usage("--attach cannot replace %s, which the command itself writes" % EVIDENCE_FILE)
         attachments.append(os.path.abspath(source))
     # An attachment that is a program is kept as the bytes that ran: a snapshot named by
     # its id, or a file whose bytes a snapshot holds. One that never ran is a guess.
@@ -3967,11 +3969,13 @@ def cmd_add(args):
     settles = settling(args.settles, events)
 
     vouched_before = None
+    there_before = None
     if args.update:
         if not existing:
             raise usage("no lesson named %r to update (drop --update to add it)" % name)
         item = existing[0]
         vouched_before = recorded_files(events, item["path"])
+        there_before = tree_files(item["path"])
         if item["level"] == "general":
             raise usage("%r is in the general pool, which changes through a pull request "
                         "(`compound promote`), not in place. Switch it off for yourself with "
@@ -4087,16 +4091,29 @@ def cmd_add(args):
     # for and that has not changed since. A file that is there and that no command of this
     # user's put there is not vouched for by being found beside a lesson that was updated.
     now_there = tree_files(directory)
-    # SKILL.md is written by every `add`; the proof file only when this one wrote it.
-    written = set(["SKILL.md"] + [os.path.basename(path) for path in attachments]
-                  + ([EVIDENCE_FILE] if proof or unrun else []))
+    # A file counts as written by this command only when nothing of what it now holds was
+    # taken from a file nobody vouched for. An update edits SKILL.md and the proof file IN
+    # PLACE, keeping what they held: they count only when what they held before was
+    # vouched for. An attachment counts when its bytes came from outside the lesson's own
+    # directory: attaching a lesson's file to itself puts nothing there.
+    def kept_was_vouched(one):
+        return (there_before or {}).get(one) is None or (
+            vouched_before is not None and (there_before or {}).get(one) == vouched_before.get(one))
+
+    written = set(os.path.basename(path) for path in attachments if not _under(path, directory))
+    if not args.update or (there_before is not None and vouched_before is not None
+                           and there_before.get("SKILL.md") == vouched_before.get("SKILL.md")):
+        written.add("SKILL.md")
+    if (proof or unrun) and (not args.update or (there_before is not None and kept_was_vouched(EVIDENCE_FILE))):
+        written.add(EVIDENCE_FILE)
     if now_there is not None and all(one in written or (vouched_before or {}).get(one) == digest
                                      for one, digest in now_there.items()):
         extra["files"] = now_there
     elif args.update:
-        sys.stderr.write("compound: note: %s holds a file this command did not write and no earlier one recorded; "
-                         "the lesson is in force in its own project and is not offered to others until that "
-                         "file is attached again with --attach\n" % directory)
+        sys.stderr.write("compound: note: %s holds text or a file that no command of this user's recorded as it "
+                         "is; the lesson is in force in its own project and is not offered to others. To offer "
+                         "it, record it anew: `compound rm` it and `compound add` it, with its script attached "
+                         "from a recorded run (--from-evidence)\n" % directory)
     if proof:
         extra["evidence"] = [meta["id"] for meta in proof]
     log_soft("learn", project, lesson=name, level=level, kind=kind, path=directory,
@@ -4286,7 +4303,13 @@ def unchanged_since_recorded(directory, events):
     there by name. The check is of content, not of dates, which anyone can set; what it
     is held against is this user's own event log."""
     vouched = recorded_files(events, directory)
-    return vouched is not None and tree_files(directory) == vouched
+    if vouched is None or tree_files(directory) != vouched:
+        return False
+    # And every program beside it is one a session RAN: the proof file, which is among the
+    # files vouched for, names none that was kept without a recorded run.
+    proof, unrun = read_proof(directory)
+    return not unrun and all(name in proof for name in vouched
+                             if name not in ("SKILL.md", EVIDENCE_FILE) and is_script(os.path.join(directory, name)))
 
 
 def _has_script(directory):

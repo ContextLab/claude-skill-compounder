@@ -359,23 +359,31 @@ RECORDED-INDEX>>>
 **What crosses from one project to another.** A repository is a place other people write
 to, and a lesson in it is a file like any other: it can arrive with a clone or a pull. A
 lesson of another project is listed here, and printed here by `compound show`, only when
-this user's own event log vouches for it, byte for byte (`unchanged_since_recorded` in
-the CLI). Every `learn` event carries `files`, the SHA-256 of each file of the lesson as
-`compound add` left it, when every one of those files is one the command wrote
-(`SKILL.md`, an attachment it was given, `.evidence.json`) or one an earlier `learn`
-event vouched for and that has not changed. A lesson crosses over when the newest
-`learn` event for its directory carries `files` and the directory holds exactly those
-files with those contents, all of them regular files. What is compared is content, never
-a date, which anyone can set, and what it is compared with is a log only this user
-writes. So a lesson that came with the repository, one that was edited or pulled since
-it was recorded, and one with a file added beside it are none of them offered anywhere
-but in their own project, where a project's lessons are in force as they always were.
-Updating a lesson does not vouch for a file the command did not write: after `compound
-add --update` of a lesson whose script was changed where it lay, the event carries no
-`files`, the command says so, and the lesson stays in its project until the script is
-attached again (`--attach`, `--from-evidence`), which makes it a file the command wrote.
-A lesson recorded before `learn` events carried `files` crosses over once it has been
-recorded again that way. That is the
+this user's own event log vouches for it, byte for byte, and its programs are ones a
+session ran (`unchanged_since_recorded` in the CLI).
+
+- Every `learn` event carries `files`, the SHA-256 of each file of the lesson as
+  `compound add` left it, when every one of those files is the command's own writing.
+  For a new lesson that is all of them. An update edits `SKILL.md` and `.evidence.json`
+  IN PLACE and keeps what they held, so after an update each counts only when what it
+  held before was itself vouched for; an attachment counts when its bytes came from
+  outside the lesson's own directory (a lesson's file attached to itself puts nothing
+  there); any other file must be one an earlier `learn` event vouched for, unchanged.
+  When one file fails this, the event carries no `files`, and the command says so.
+- A lesson crosses over when the newest `learn` event for its directory carries `files`
+  and the directory holds exactly those files with those contents, all regular files;
+  and when `.evidence.json`, which is one of them, names a recorded passing run for every
+  program beside the lesson and none kept without one (`--unrun`).
+
+What is compared is content, never a date, which anyone can set, and what it is compared
+with is a log only this user writes. So a lesson that came with the repository, one that
+was edited or pulled since it was recorded, one with a file added beside it, one whose
+changed text or script an update would have carried along, and one whose script was
+never seen to run are none of them offered anywhere but in their own project, where a
+project's lessons are in force as they always were. `--attach` refuses the name
+`.evidence.json`: that file is the command's to write. A lesson that does not cross and
+should is recorded anew: `compound rm` it and `compound add` it, with its script from a
+recorded run (`--from-evidence`). That makes it this
 user's word again. The mod's own words tell the session to read a note first; whether to
 run the program beside one is the session's to decide with the note in front of it, as
 for every recorded note.
