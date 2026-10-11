@@ -33,7 +33,7 @@ QUIET = {"COMPOUND_PROMPT_MIN_CHARS": "100000"}
 
 
 def builds(s):
-    return [c for c in s.bash() if "build.sh" in c[0] and "compound" not in c[0]]
+    return [c for c in s.bash() if "build.sh" in c[0] and "bin/compound" not in c[0]]
 
 
 def main():

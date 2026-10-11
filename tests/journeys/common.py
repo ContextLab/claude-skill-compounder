@@ -47,6 +47,13 @@ BUILD_TASK = ("Build this project by running its build script, ./build.sh, and t
               "success. Do not read, print or inspect build.sh and do not list the directory: only invoke the script.")
 
 
+# An earlier session's meeting of the build failure: it fails the build once and fixes
+# nothing. A later session that meets the same failure and fixes it then owes the lesson
+# because the failure came back, with no model asked (see "A failure met before").
+MEET_BUILD = ("Run ./build.sh with no arguments, exactly once, as one Bash call. It fails, and that is expected: do not "
+              "retry it, do not fix it and do not run anything else. Tell me the one line of its error.")
+
+
 class Session:
     def __init__(self, sid, calls, result, returncode, stream):
         self.sid = sid

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """add, list, show, rm, skill: the store on disk."""
 
+import hashlib
 import json
 import os
 import stat
@@ -44,7 +45,10 @@ class AddTest(Case):
             "ts": "2026-09-21T14:13:20Z", "type": "learn", "session": "sess-0001-aaaa",
             "project": self.box.project, "lesson": "first-lesson", "level": "project",
             "kind": "lesson", "path": self.box.lesson_dir("first-lesson"),
-            "guard": False, "update": False})
+            "guard": False, "update": False,
+            # What the command vouches for: each file of the lesson as it left it.
+            "files": {"SKILL.md": hashlib.sha256(
+                open(os.path.join(self.box.lesson_dir("first-lesson"), "SKILL.md"), "rb").read()).hexdigest()}})
 
     def test_level_defaults_to_project_and_user_is_honoured(self):
         self.box.add("at-project")

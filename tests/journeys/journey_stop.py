@@ -28,6 +28,9 @@ def main():
     w = common.World("stop")
     project = w.project("alpha", build=True)
 
+    # An earlier session met the build failure and fixed nothing: this one's fix is then
+    # owed a lesson because the failure came back, whatever a model would say of it.
+    w.session(project, common.MEET_BUILD, args.model, **QUIET)
     s = w.session(project, FINISH_NOW, args.model, tools=("Bash", "Skill"), **QUIET)
     events = w.events(project, session=s.sid)
     w.show("event", events)

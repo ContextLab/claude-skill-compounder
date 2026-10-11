@@ -359,13 +359,23 @@ RECORDED-INDEX>>>
 **What crosses from one project to another.** A repository is a place other people write
 to, and a lesson in it is a file like any other: it can arrive with a clone or a pull. A
 lesson of another project is listed here, and printed here by `compound show`, only when
-both hold (`unchanged_since_recorded` in the CLI): this user's event log has a `learn`
-event for that very directory, so the lesson was recorded with the CLI on this machine;
-and no file in the directory was written after the newest such event, and every entry
-in it is a regular file. A lesson that came with the repository, one that was edited or
-pulled since it was recorded, and one with a file added beside it are none of them
-offered anywhere but in their own project, where a project's lessons are in force as
-they always were. Recording the lesson again with `compound add --update` makes it the
+this user's own event log vouches for it, byte for byte (`unchanged_since_recorded` in
+the CLI). Every `learn` event carries `files`, the SHA-256 of each file of the lesson as
+`compound add` left it, when every one of those files is one the command wrote
+(`SKILL.md`, an attachment it was given, `.evidence.json`) or one an earlier `learn`
+event vouched for and that has not changed. A lesson crosses over when the newest
+`learn` event for its directory carries `files` and the directory holds exactly those
+files with those contents, all of them regular files. What is compared is content, never
+a date, which anyone can set, and what it is compared with is a log only this user
+writes. So a lesson that came with the repository, one that was edited or pulled since
+it was recorded, and one with a file added beside it are none of them offered anywhere
+but in their own project, where a project's lessons are in force as they always were.
+Updating a lesson does not vouch for a file the command did not write: after `compound
+add --update` of a lesson whose script was changed where it lay, the event carries no
+`files`, the command says so, and the lesson stays in its project until the script is
+attached again (`--attach`, `--from-evidence`), which makes it a file the command wrote.
+A lesson recorded before `learn` events carried `files` crosses over once it has been
+recorded again that way. That is the
 user's word again. The mod's own words tell the session to read a note first; whether to
 run the program beside one is the session's to decide with the note in front of it, as
 for every recorded note.

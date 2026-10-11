@@ -19,8 +19,7 @@ usage: journey_capture.py [--model haiku] [--keep]
 """
 import common
 
-MEET = ("Run ./build.sh with no arguments, exactly once, as one Bash call. It fails, and that is expected: do not "
-        "retry it, do not fix it and do not run anything else. Tell me the one line of its error.")
+MEET = common.MEET_BUILD
 LATE = ("Do these steps in order, each as its own Bash call, and do not skip or merge any. 1: run ./build.sh with no "
         "arguments (it will fail; do not fix it yet). 2: run echo alpha . 3: run echo beta . 4: run echo gamma . "
         "5: now run the build correctly, as its error message said. Do not read or inspect build.sh. "
@@ -41,7 +40,7 @@ def main():
             w.events(project, session=first.sid, kind="capture") == [], w.events(project, session=first.sid, kind="capture"))
 
     s = w.session(project, common.BUILD_TASK, args.model, tools=("Bash", "Skill"), COMPOUND_PROMPT_MIN_CHARS="100000")
-    builds = [c for c in s.bash() if "build.sh" in c[0] and "compound" not in c[0]]
+    builds = [c for c in s.bash() if "build.sh" in c[0] and "bin/compound" not in c[0]]
     w.check("capture", "the session failed the build and then fixed it",
             len(builds) >= 2 and builds[0][1] is True and any(c[1] is False for c in builds[1:]),
             " | ".join("%s -> %s" % (c[0][:60], "error" if c[1] else "ok") for c in builds))
@@ -80,7 +79,7 @@ def main():
     late = w2.project("beta", build=True)
     w2.session(late, MEET, args.model, COMPOUND_PROMPT_MIN_CHARS="100000")
     s = w2.session(late, LATE, args.model, tools=("Bash", "Skill"), COMPOUND_PROMPT_MIN_CHARS="100000")
-    order = [c for c in s.bash() if "compound" not in c[0]]
+    order = [c for c in s.bash() if "bin/compound" not in c[0]]
     print("      calls: %s" % " | ".join("%s -> %s" % (c[0][:40], "error" if c[1] else "ok") for c in order))
     failed = next((i for i, c in enumerate(order) if "build.sh" in c[0] and c[1] is True), None)
     fixed = next((i for i, c in enumerate(order) if "build.sh" in c[0] and c[1] is False), None)
