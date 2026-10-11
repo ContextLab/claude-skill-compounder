@@ -46,6 +46,9 @@ def main():
     w.check("told", "the unusable claims directory was logged once", len(errors) == 1,
             "%d claim errors of %d events" % (len(errors), len(rows)))
 
+    # An earlier session met the build failure, so this one's fix is owed a lesson without a
+    # model being asked (see "A failure met before").
+    w.session(project, common.MEET_BUILD, args.model, **QUIET)
     s = w.session(project, FINISH_NOW, args.model, tools=("Bash", "Skill"), **QUIET)
     rows = w.events(project, session=s.sid)
     w.show("event", rows)

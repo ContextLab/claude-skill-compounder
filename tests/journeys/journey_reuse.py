@@ -55,7 +55,7 @@ def main():
     # The lesson shares `settings` and `page` with the prompt, so the judge is asked: its
     # verdict is logged, and it names nothing.
     w.check("other", "a prompt that only shares words with the store and the log got nothing",
-            [e for e in rows if e["type"] != "judge"] == [], ", ".join(e["type"] for e in rows))
+            [e for e in rows if e["type"] not in ("judge", "index")] == [], ", ".join(e["type"] for e in rows))
     w.check("other", "the judge, if it was asked, named nothing",
             all(e.get("verdict") in ("nothing", "not-substantial") for e in rows if e["type"] == "judge"),
             [e.get("verdict") for e in rows])
@@ -74,7 +74,9 @@ def main():
 
     s = w.session(project, "Say the single word hi.", args.model)
     w.check("trivial", "a short prompt wrote no reuse event", w.events(project, session=s.sid, kind="reuse") == [])
-    w.check("trivial", "and no event at all", w.events(project, session=s.sid) == [], w.events(project, session=s.sid))
+    # The index of what is recorded is shown at any first prompt, short or not: that is its one event.
+    w.check("trivial", "and no event but the index every first prompt is given",
+            [e["type"] for e in w.events(project, session=s.sid)] == ["index"], w.events(project, session=s.sid))
 
     s = w.session(project, "/compound " + "x" * 120, args.model)
     w.check("command", "a slash command wrote no reuse event", w.events(project, session=s.sid, kind="reuse") == [])

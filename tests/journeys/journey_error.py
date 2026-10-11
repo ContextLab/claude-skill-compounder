@@ -16,8 +16,11 @@ import common
 
 FIRST = ("I need a shell script for this project that tags a new release, updates the changelog and pushes the tag "
          "to the remote. Do not run any tool: reply with the single word READY.")
-SECOND = ("Do not run any tool. Were you told, in a message that starts with [compound], that the compound mod itself "
-          "failed in this session? If so, quote the line that says where it failed. If not, say NOT TOLD.")
+# It names a release, as the recorded lesson does, so that this prompt's own reuse check has
+# a candidate to put to the judge model, which is the call that fails.
+SECOND = ("Before the release script: do not run any tool. Were you told, in a message that starts with [compound], that the compound mod itself "
+          "failed in this session, while tagging or publishing a release of this project was being looked up? If so, quote "
+          "the line that says where it failed. If not, say NOT TOLD.")
 THIRD = ("Do not run any tool. Each [compound] message that says the compound mod itself failed ends by giving its "
          "failure report number. What is the highest failure report number you have been given in this conversation? "
          "Answer in exactly this form and nothing else: REPORT=<number>")
