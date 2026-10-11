@@ -368,13 +368,19 @@ built into the CLI that reads the command and the machine. There is one,
 `unmatched-glob`: a word of command text with an unquoted `*` or `?` that matches no
 file, read from the directory the call would run in (the mod passes it as `cwd`, and `cd
 DIR` and `NAME=value` earlier in the command are followed), is a word zsh refuses with "no
-matches found" before it runs anything of the line. The probe leaves alone what it cannot
+matches found" before it runs anything of the line. The probe runs before the
+call is permitted, and a refusal says "no file matches", so it is kept from answering
+anything about the rest of the machine: it reads only inside the directory the call runs
+in and the project, it leaves alone a pattern whose directory is anywhere else (a home
+directory, an absolute path outside, `..`), a pattern with a wildcard in a directory
+name, and every word after a `cd` out of those two; and it reads no environment, only
+the values the command itself assigns. The probe also leaves alone what it cannot
 be sure of: a word with a bracket, a brace, a parenthesis, `**`, a command substitution
 or a parameter that has no value here; the words of `[[ ]]`, `case` and an assignment,
 which the shell does not expand; the words of a string another shell runs (`sh -c
 '...'`); and a whole command that changes how the shell globs (`setopt`, `noglob`, `set
--f`). `tests/test_probe.py` runs 40 commands in the real zsh and holds the probe to stop
-exactly the ones zsh refused. A probe's hit is **sure** (`"sure": true` and the `words`
+-f`). `tests/test_probe.py` runs 39 commands in the real zsh and holds the probe to stop
+exactly the ones zsh refused, and 9 more that zsh refuses and the probe must not answer. A probe's hit is **sure** (`"sure": true` and the `words`
 at fault in `compound check`'s reply): the call cannot run as written. So it is refused
 for the call's own text, not once per session for the lesson: the same mistake written a
 new way is stopped again, and the same call sent again runs. That matters because a

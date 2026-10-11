@@ -3141,10 +3141,11 @@ def _command_words(command):
                 quote = char
             elif char == quote:
                 quote = ""
-                word.append((char, kind))
-                end_word()
-                nested = False
-                continue
+                if nested:
+                    # The string was another shell's command line: the word it was is dropped.
+                    del word[:]
+                    nested = False
+                    continue
             word.append((char, kind))
             continue
         if quote:
@@ -3199,8 +3200,9 @@ def _glob_pattern(word, names):
             found = VAR_RE.match(raw, index)
             if not found:
                 return None
-            name = found.group(1) or found.group(2)
-            value = names.get(name, os.environ.get(name))
+            # Only a value the command itself gives: the environment is not read, so a
+            # refusal says nothing about what a variable of the session holds.
+            value = names.get(found.group(1) or found.group(2))
             if value is None:
                 return None
             out.append(glob.escape(value))
@@ -3217,8 +3219,10 @@ def _glob_pattern(word, names):
     pattern = "".join(out)
     if not wild or not pattern:
         return None
-    if pattern.startswith("~"):
-        pattern = os.path.expanduser(pattern)
+    # A home directory is outside what the probe may read, and so is a pattern with a
+    # wildcard in a directory name, which could be followed out through a link.
+    if pattern.startswith("~") or any(char in os.path.dirname(pattern) for char in "*?"):
+        return None
     return pattern, raw
 
 
@@ -3227,7 +3231,12 @@ def unmatched_globs(command, cwd):
     unquoted `*` or `?` that matches no file, read from the directory the command would
     run in (`cd DIR` earlier in the command is followed). zsh then runs nothing of the
     line. Words this reading cannot be sure of are left alone, and so is a command that
-    changes how the shell globs."""
+    changes how the shell globs.
+
+    THE PROBE RUNS BEFORE THE CALL IS PERMITTED, and a refusal says "no file matches". So
+    it reads only inside the directory the call runs in and the project: a pattern whose
+    directory is anywhere else is left alone, as is every word after a `cd` out of them.
+    It answers nothing about the rest of the machine, and it reads no environment."""
     import glob
 
     view = guard_view(command)[0]
@@ -3235,6 +3244,11 @@ def unmatched_globs(command, cwd):
         return []
     names = {}
     here = cwd
+    roots = [os.path.realpath(cwd), os.path.realpath(project_root(fast=True))]
+
+    def inside(directory):
+        real = os.path.realpath(directory)
+        return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
     found = []
     tried = 0
     for words in _command_words(command):
@@ -3254,9 +3268,11 @@ def unmatched_globs(command, cwd):
             target = _expand_word(plain[1].strip("\"'"), names)
             if target:
                 target = target if os.path.isabs(target) else os.path.join(here, target)
-                if os.path.isdir(target):
+                if os.path.isdir(target) and inside(target):
                     here = target
-            continue
+                    continue
+            # A `cd` this reading cannot follow, or one that leaves: nothing after it is read.
+            return found
         for position, word in enumerate(words):
             if position and plain[position - 1] in ("=~", "==", "!=", "="):
                 continue
@@ -3268,6 +3284,10 @@ def unmatched_globs(command, cwd):
                 return found
             pattern, raw = made
             full = pattern if os.path.isabs(pattern) else os.path.join(glob.escape(here), pattern)
+            # The directory the pattern is read in, as plain text again (it holds no wildcard).
+            where = re.sub(r"\[([*?\[])\]", r"\1", os.path.dirname(pattern))
+            if not inside(where if os.path.isabs(where) else os.path.join(here, where)):
+                continue
             try:
                 if next(glob.iglob(full), None) is None and raw not in found:
                     found.append(raw)

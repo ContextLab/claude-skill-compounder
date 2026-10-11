@@ -51,7 +51,6 @@ CASES = [
     "echo 'sp ace'.nope*",
     "printf '%s\\n' a.py *.txt",
     "printf '%s\\n' a.py *.txt *.nope",
-    "echo ~/definitely-not-here-*",
     "sh -c 'echo *.nope'",
     "bash -c 'true; echo *.nope' && echo ran",
     "echo before; sh -c \"echo *.nope\"; echo after",
@@ -66,6 +65,20 @@ LEFT_ALONE = [
     "echo $UNSET_HERE/*.nope",
     "echo \"$(echo *.nope)\"",
     "zsh -f -c 'echo *.nope'",
+]
+# What zsh refuses and the probe must not answer: it runs before the call is permitted, and
+# a refusal says "no file matches". Outside the directory of the call and the project it
+# reads nothing, so it says nothing about the rest of the machine or about the environment.
+OUTSIDE = [
+    "echo ~/definitely-not-here-*",
+    "ls /etc/definitely-not-here-*",
+    "ls ../definitely-not-here-*",
+    "cd / && ls definitely-not-here-*",
+    "cd .. ; ls definitely-not-here-*",
+    "ls $HOME/definitely-not-here-*",
+    "ls $SECRET_NAME*",
+    "ls */definitely-not-here-*",
+    "ls link-out/definitely-not-here-*",
 ]
 
 
@@ -85,7 +98,8 @@ class UnmatchedGlobTest(Case):
     def zsh_refuses(self, command):
         out = subprocess.run(["zsh", "-f", "-c", command], cwd=self.work, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, universal_newlines=True, timeout=20,
-                             env={"PATH": "/usr/bin:/bin", "HOME": self.box.home, "UNSET_HERE": ""})
+                             env={"PATH": "/usr/bin:/bin", "HOME": self.box.home, "UNSET_HERE": "",
+                                  "SECRET_NAME": "definitely-not-here-"})
         return "no matches found" in out.stderr
 
     def check(self, command, cwd=None, **kw):
@@ -111,6 +125,15 @@ class UnmatchedGlobTest(Case):
             with self.subTest(command=command):
                 self.assertTrue(self.zsh_refuses(command) or "UNSET" in command, command)
                 self.assertEqual(self.check(command), [], command)
+
+    def test_it_answers_nothing_about_what_is_outside_the_call_s_directory_and_the_project(self):
+        os.symlink("/etc", os.path.join(self.work, "link-out"))
+        for command in OUTSIDE:
+            with self.subTest(command=command):
+                self.assertTrue(self.zsh_refuses(command), command)
+                self.assertEqual(self.check(command, SECRET_NAME="definitely-not-here-"), [], command)
+        # Inside the project, which is not where this call runs, it reads.
+        self.assertTrue(self.check("ls %s/definitely-not-here-*" % self.box.project))
 
     def test_a_hit_is_sure_and_names_the_words(self):
         hits = self.check("grep -rn TODO --include=*.rs . ; ls q*.txt")
