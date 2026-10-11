@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Moment 5, the stop. Real `claude -p` sessions; run by hand.
 
-  refuse    a session fixes a failed build and is told to finish at once, recording
-            nothing. Its stop is refused once (one `refuse` event, why "debt"), the
+  refuse    after an earlier session met the build failure, a session fixes the failed build
+            and is told to finish at once. Its stop is refused once (one `refuse` event, why "debt"), the
             session settles the debt with a `learn` or a `skip`, and its final message
             still carries the answer the user asked for.
   nudge     with COMPOUND_TURN_MIN_CALLS=3, a turn of four tool calls that recorded nothing
@@ -16,8 +16,12 @@ usage: journey_stop.py [--model haiku] [--keep]
 """
 import common
 
-FINISH_NOW = (common.BUILD_TASK + " The moment the build succeeds, end your turn with that line. Do not record a lesson, "
-              "do not invoke a skill and do not run any other command before you have tried to finish.")
+# The session is hurried to its stop, so that the stop is tried with the lesson still owed,
+# and is not told to leave the lesson unrecorded: a session told by its user not to record
+# one takes the user's word over the mod's (measured: it then settles in about half the
+# runs), which is the session's to decide and not what this journey is about.
+FINISH_NOW = (common.BUILD_TASK + " The moment the build succeeds, end your turn with that line, before doing anything "
+              "else. If your attempt to finish is refused, do what the refusal asks, and then finish.")
 FOUR = ("Run these four Bash commands one at a time, each as its own call: echo one ; echo two ; echo three ; echo four . "
         "Then tell me the four words.")
 QUIET = {"COMPOUND_PROMPT_MIN_CHARS": "100000"}
