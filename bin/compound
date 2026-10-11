@@ -3255,9 +3255,13 @@ def unmatched_globs(command, cwd):
         plain = ["".join(char for char, _kind in word) for word in words]
         while plain and ASSIGN_RE.match(plain[0]) and not any(kind == "c" and char in "*?" for char, kind in words[0]):
             assigned = ASSIGN_RE.match(plain[0])
-            value = _expand_word(assigned.group(2).strip("\"'"), names)
+            value = _expand_word(assigned.group(2).strip("\"'"), names, environment=False)
             if value is not None:
                 names[assigned.group(1)] = value
+            else:
+                # A value this reading cannot give: the name is unknown from here on,
+                # whatever the environment holds under it.
+                names.pop(assigned.group(1), None)
             plain, words = plain[1:], words[1:]
         if not plain:
             continue
@@ -3265,7 +3269,7 @@ def unmatched_globs(command, cwd):
         if head in ("[[", "((", "case", "let", "function", "alias", "typeset", "local", "export", "declare"):
             continue
         if head == "cd" and len(plain) >= 2:
-            target = _expand_word(plain[1].strip("\"'"), names)
+            target = _expand_word(plain[1].strip("\"'"), names, environment=False)
             if target:
                 target = target if os.path.isabs(target) else os.path.join(here, target)
                 if os.path.isdir(target) and inside(target):
@@ -3347,17 +3351,22 @@ def _shell_words(simple):
         return []
 
 
-def _expand_word(word, names):
+def _expand_word(word, names, environment=True):
     """The word with `$NAME`, `${NAME}` and a leading `~` filled in, or None when a name
-    in it has no value here."""
+    in it has no value here. With `environment` false only the values in `names` are
+    used, and a `~` is left as it is: nothing of the process's own is read."""
     def value(found):
         name = found.group(1) or found.group(2)
-        return names.get(name, os.environ.get(name, found.group(0)))
+        if name in names:
+            return names[name]
+        return os.environ.get(name, found.group(0)) if environment else found.group(0)
 
     text = VAR_RE.sub(value, word)
     if "$" in text or "`" in text:
         return None
-    return os.path.expanduser(text) if text.startswith("~") else text
+    if text.startswith("~"):
+        return os.path.expanduser(text) if environment else None
+    return text
 
 
 def is_script(path, data=None):

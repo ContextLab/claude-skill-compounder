@@ -77,6 +77,11 @@ OUTSIDE = [
     "cd .. ; ls definitely-not-here-*",
     "ls $HOME/definitely-not-here-*",
     "ls $SECRET_NAME*",
+    "X=$SECRET_NAME; ls $X*",
+    "X=${SECRET_NAME}x; ls $X*",
+    "X=~; ls $X/definitely-not-here-*",
+    "cd $SECRET_DIR && ls definitely-not-here-*",
+    "D=$SECRET_DIR; cd $D; ls definitely-not-here-*",
     "ls */definitely-not-here-*",
     "ls link-out/definitely-not-here-*",
 ]
@@ -99,7 +104,7 @@ class UnmatchedGlobTest(Case):
         out = subprocess.run(["zsh", "-f", "-c", command], cwd=self.work, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, universal_newlines=True, timeout=20,
                              env={"PATH": "/usr/bin:/bin", "HOME": self.box.home, "UNSET_HERE": "",
-                                  "SECRET_NAME": "definitely-not-here-"})
+                                  "SECRET_NAME": "definitely-not-here-", "SECRET_DIR": "sub"})
         return "no matches found" in out.stderr
 
     def check(self, command, cwd=None, **kw):
@@ -131,7 +136,8 @@ class UnmatchedGlobTest(Case):
         for command in OUTSIDE:
             with self.subTest(command=command):
                 self.assertTrue(self.zsh_refuses(command), command)
-                self.assertEqual(self.check(command, SECRET_NAME="definitely-not-here-"), [], command)
+                self.assertEqual(self.check(command, SECRET_NAME="definitely-not-here-", SECRET_DIR="sub"), [],
+                                 command)
         # Inside the project, which is not where this call runs, it reads.
         self.assertTrue(self.check("ls %s/definitely-not-here-*" % self.box.project))
 
