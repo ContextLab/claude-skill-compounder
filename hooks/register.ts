@@ -387,7 +387,7 @@ async function refreshBoard($: EngineInterface): Promise<void> {
     const now = await $.clock.now()
     const board: CompoundBoard | undefined = status.code === 0 || status.code === 1 ? boardFrom(status.stdout, recent.code === 0 ? recent.stdout : '', sid, now) : undefined
     const problem = status.code === 0 || status.code === 1 ? 'compound status --json printed something unreadable' : `compound status ${why(status)}`
-    await update($, BOARD, () => board ?? { session: sid, at: now, health: [], checks: 0, levels: [], lessons: [], recent: [], open: { unsettled: [], ineffective: [], candidates: [], errors: [], skips: 0 }, problem: oneLine(problem, 300) })
+    await update($, BOARD, () => board ?? { session: sid, at: now, health: [], checks: 0, levels: [], lessons: [], recent: [], open: { unsettled: [], ineffective: [], candidates: [], errors: [], skips: 0, scripts: [] }, problem: oneLine(problem, 300) })
     // The list or the lesson on screen is read again with the dashboard.
     const pane = forPane(await read($, VIEW), sid)
     if (pane.view === 'all') await readItems($, sid)

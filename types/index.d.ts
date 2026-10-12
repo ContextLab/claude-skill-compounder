@@ -79,7 +79,9 @@ export type CompoundBoard = {
   levels: CompoundLevel[]
   lessons: CompoundLesson[]
   recent: CompoundRecent[]
-  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number }
+  // `scripts`: the scripts a session ran until they worked that nothing keeps. Absent on a
+  // board kept by an earlier version of the mod.
+  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number; scripts?: CompoundOpen[] }
   // Why the CLI could not be read, when it could not.
   problem: string
 }

@@ -1060,3 +1060,19 @@ test('the row lets go of a failure that is no longer held, and leaves a lesson o
   const idle = fresh()
   expect(watched(idle, false, T0)).toBe(idle)
 })
+
+test('a script that worked and that nothing keeps is on the pane with the two commands that settle it', async () => {
+  const status = JSON.parse(STATUS) as { open: Record<string, unknown> }
+  status.open.scripts = [{ id: '3f2a91c0b6e41d07', name: 'validate.sh', path: '/tmp/s/validate.sh', project: '/work/alpha', ok: 9, failed: 2, command: 'compound add --name NAME --when WHEN --from-evidence 3f2a91c0b6e41d07', decline: 'compound skip --evidence 3f2a91c0b6e41d07 --why "..."' }]
+  const board = boardFrom(JSON.stringify(status), EVENTS, 'pane-session', 0)
+  expect(board.open.scripts).toEqual([{ text: 'validate.sh (passed 9, failed 2, alpha)', command: 'compound add --name NAME --when WHEN --from-evidence 3f2a91c0b6e41d07', more: 'compound skip --evidence 3f2a91c0b6e41d07 --why "..."' }])
+  const text = boardLines(board, 140).map(line => line.map(seg => seg.text).join('')).join('\n')
+  expect(text).toContain('1 script that worked and nothing keeps')
+  expect(text).toContain('validate.sh (passed 9, failed 2, alpha)')
+  expect(text).toContain('compound add --name NAME --when WHEN --from-evidence 3f2a91c0b6e41d07')
+  // A board kept by an earlier version of the mod has no such list, and is drawn all the same.
+  const older = boardFrom(STATUS, EVENTS, 'pane-session', 0)
+  const { scripts: _gone, ...open } = older.open
+  expect(boardLines({ ...older, open }, 140).length > 5).toBe(true)
+  expect(older.open.scripts).toEqual([])
+})

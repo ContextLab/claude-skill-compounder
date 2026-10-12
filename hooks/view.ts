@@ -599,6 +599,7 @@ export function boardFrom(status: string, events: string, session: string, now: 
       unsettled: list(open.unsettled).map(u => openRow(`${str(u.id)} ${oneLine(str(u.fixed), 50)} (${str(u.age)}${str(u.project) === '' ? '' : `, ${base(str(u.project))}`})`, u.command, u.decline)),
       ineffective: list(open.ineffective).map(i => ({ ...openRow(`${str(i.name)} (recalled ${num(i.recall)} times)`, i.command), ...(str(i.name) === '' ? {} : { lesson: str(i.name) }) })),
       candidates: list(open.candidates).map(c => openRow(`${str(c.lesson)} in ${base(str(c.from))}`, c.command)),
+      scripts: list(open.scripts).map(s => openRow(`${oneLine(str(s.name), 60)} (passed ${num(s.ok)}${num(s.failed) > 0 ? `, failed ${num(s.failed)}` : ''}${str(s.project) === '' ? '' : `, ${base(str(s.project))}`})`, s.command, s.decline)),
       errors: list(open.errors).map(e => openRow(oneLine(`${str(e.where)}: ${str(e.message)}`, 100))),
       skips: list(open.skips).length,
     },
@@ -827,7 +828,8 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
 
   // What waits for someone comes before the tables: the pane may show only its top rows.
   const o = board.open
-  const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length
+  const scripts = o.scripts ?? []
+  const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length + scripts.length
   out.push([], ...flow([[{ text: 'Open', bold: true }], ...(waiting === 0 ? words('nothing waits for anyone', { dim: true }, '  ') : [])], columns, '  '))
   // Under each row, the command that settles it, whole: broken at its spaces where the pane
   // is narrow, never cut. The second way to settle a row is shown where there is room for it.
@@ -847,6 +849,7 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
     if (command !== '') out.push(...wrapped(command, columns, COMMAND_INDENT))
   }
   group(o.unsettled, OWED, count(o.unsettled.length, 'lesson owed', 'lessons owed'))
+  group(scripts, OWED, count(scripts.length, 'script that worked and nothing keeps', 'scripts that worked and nothing keeps'))
   group(o.ineffective, WEAK, count(o.ineffective.length, 'ineffective lesson'))
   group(o.candidates, eventLook('candidate'), count(o.candidates.length, 'lesson that could move to the user level', 'lessons that could move to the user level'))
   group(o.errors, ERROR, `${count(o.errors.length, 'error')} in the last 7 days`, READ_ERRORS)
