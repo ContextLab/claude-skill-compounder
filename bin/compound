@@ -4042,11 +4042,44 @@ def cmd_add(args):
         stamp = now()
         changes["updated"] = local_date(stamp)
         directory = item["path"]
-        try:
-            text = edit_frontmatter(item["_text"], changes, removals,
-                                    body=body if body.strip() else None, first=("name",))
-        except Fail as exc:
-            raise usage("%s was not updated: %s" % (item["_file"], exc.message))
+        skill_vouched = (there_before is not None and vouched_before is not None
+                         and there_before.get("SKILL.md") == vouched_before.get("SKILL.md"))
+        if (item["kind"] == "lesson" and item["level"] == "project" and body_given and body.strip() and description
+                and not skill_vouched):
+            # The update gives the lesson's whole text and the file it would edit is not one
+            # any command vouched for: the file is WRITTEN ANEW from what this command was
+            # given and from the values the old file parsed to (its patterns, its tools, its
+            # condition, its probe, its date). No line of the old file is carried over, so
+            # nothing that was put into it rides along into what is vouched for.
+            fields = {"name": yaml_string(name), "description": yaml_string(description)}
+            patterns = args.match or ([] if args.no_match else item["match"])
+            if patterns:
+                fields["match"] = json.dumps(patterns, ensure_ascii=False)
+                kept_tools = tools or [one for one in item["_tools"] if TOOL_RE.match(one)]
+                if kept_tools and kept_tools != list(MATCH_TOOLS):
+                    fields["match-tools"] = json.dumps(kept_tools, ensure_ascii=False)
+            for key in CONDITION_KEYS:
+                names = condition.get(key) or ([] if args.no_condition else [one for one in item.get(key) or []
+                                                                             if CONDITION_RE.match(one)])
+                if names:
+                    fields[key] = yaml_string(", ".join(names))
+            probe = args.probe or (None if args.no_match else item.get("probe"))
+            if probe in PROBES:
+                fields["probe"] = yaml_string(probe)
+            made = _unquote(item["_fields"].get("created", ""))
+            fields["created"] = made if re.match(r"^\d{4}-\d{2}-\d{2}$", made) else local_date(stamp)
+            fields["updated"] = local_date(stamp)
+            session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+            fields["origin"] = yaml_string(one_line(args.origin or "") or "project %s%s" % (
+                os.path.basename(project) or project, (", session " + session[:8]) if session else ""))
+            text = render_skill(fields, body)
+            guard = bool(patterns) or probe in PROBES
+        else:
+            try:
+                text = edit_frontmatter(item["_text"], changes, removals,
+                                        body=body if body.strip() else None, first=("name",))
+            except Fail as exc:
+                raise usage("%s was not updated: %s" % (item["_file"], exc.message))
         atomic_write(item["_file"], text)
         for source in attachments:
             atomic_copy(source, os.path.join(directory, os.path.basename(source)))
@@ -4117,8 +4150,13 @@ def cmd_add(args):
     if proof or unrun:
         # The proof file is added to, and what it held is kept, only when what it held was
         # vouched for: otherwise it is written anew from what this command attaches.
-        if args.update and there_before is not None and there_before.get(EVIDENCE_FILE) is not None and not (
-                vouched_before is not None and there_before.get(EVIDENCE_FILE) == vouched_before.get(EVIDENCE_FILE)):
+        # Kept only on positive knowledge: the directory was read, the log vouched for the
+        # file, and it is that file. In every other case, a directory that could not be
+        # read included, what was there is not carried over.
+        keep_old = (there_before is not None and vouched_before is not None
+                    and there_before.get(EVIDENCE_FILE) is not None
+                    and there_before.get(EVIDENCE_FILE) == vouched_before.get(EVIDENCE_FILE))
+        if args.update and not keep_old:
             try:
                 os.unlink(os.path.join(directory, EVIDENCE_FILE))
             except OSError:
@@ -4140,7 +4178,8 @@ def cmd_add(args):
     # An update that gives the lesson's whole text (its body AND its description) wrote
     # SKILL.md anew: what it keeps of the old file is frontmatter that is no text to act on
     # (its dates, its origin, its patterns, which are in force in its own project only).
-    rewritten = bool(args.update and body_given and body.strip() and description)
+    rewritten = bool(args.update and kind == "lesson" and level == "project" and body_given and body.strip()
+                     and description)
     if not args.update or rewritten or (there_before is not None and vouched_before is not None
                                         and there_before.get("SKILL.md") == vouched_before.get("SKILL.md")):
         written.add("SKILL.md")
