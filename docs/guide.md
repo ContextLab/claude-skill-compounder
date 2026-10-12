@@ -784,18 +784,22 @@ Window
   A percentage, a median and a 90th percentile are printed for 10 or more; fewer says "n is too small". What followed an event is looked for in the whole log.
 
 The learn loop
-  captures                 11
-  a lesson recorded        6/11 (54.5%)
-  declined                 3/11 (27.3%)
+  captures                           11
+  a lesson recorded                  6/11 (54.5%)
+  declined                           3/11 (27.3%)
     3  a one-off
-  still unsettled          2/11 (18.2%)
-  expired (over 14 days)   0/11 (0.0%)
-  capture to settlement    n is too small: 9
-  lessons recorded         6 new, 1 rewritten
-  stops refused            debt 0, strengthen 0, nudge 0
-  asked after a long turn  0
-  reminded of unsettled    0
-  moved                    0, 0 candidates left in place
+  still unsettled                    2/11 (18.2%)
+  expired (over 14 days)             0/11 (0.0%)
+  capture to settlement              n is too small: 9
+  lessons recorded                   6 new, 1 rewritten
+  stops refused                      debt 0, strengthen 0, nudge 0
+  owed because it came back          0/11 (0.0%)
+  failures met                       0, 0 signatures, 0 of them in more than one session
+  recorded with the script that ran  0
+  sessions shown the index           0
+  asked after a long turn            0
+  reminded of unsettled              0
+  moved                              0, 0 candidates left in place
 
 Guards
   refusals                                   12
@@ -892,6 +896,11 @@ How to read it:
   ISO 8601 time or epoch seconds) and `--project <path>` narrow it. What followed a
   counted event, such as the lesson that settled a capture, is looked for in the whole
   log.
+- **The learn loop** also says how many captures were owed because the failure came
+  back (`owed because it came back`: a failure an earlier session met, captured with no
+  model asked), how many failures with a signature were met and how many of those
+  signatures more than one session met, how many lessons were recorded with the script a
+  session ran, and how many sessions were shown the index.
 - **The learn loop**: each capture ended with a lesson recorded, was declined (the
   reasons are grouped by their opening words), is still unsettled, or expired after 14
   days.

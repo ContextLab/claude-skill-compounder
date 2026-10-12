@@ -4048,16 +4048,21 @@ def cmd_add(args):
                 and not skill_vouched):
             # The update gives the lesson's whole text and the file it would edit is not one
             # any command vouched for: the file is WRITTEN ANEW from what this command was
-            # given and from the values the old file parsed to (its patterns, its tools, its
-            # condition, its probe, its date). No line of the old file is carried over, so
-            # nothing that was put into it rides along into what is vouched for.
+            # given and from the values of the old file that are held to a shape (its
+            # condition and its probe, which are names from a fixed list, and its date). No
+            # line of the old file and no free text from it is carried over, so nothing that
+            # was put into it rides along into what is vouched for.
             fields = {"name": yaml_string(name), "description": yaml_string(description)}
-            patterns = args.match or ([] if args.no_match else item["match"])
+            # A pattern is free text: the old file's patterns are not carried over. The
+            # lesson keeps a guard only when this command gives its patterns again.
+            patterns = args.match or []
+            if item["match"] and not args.match and not args.no_match:
+                sys.stderr.write("compound: note: %s was written anew and its old --match patterns were not carried "
+                                 "over; give them again with --match to keep the guard\n" % name)
             if patterns:
                 fields["match"] = json.dumps(patterns, ensure_ascii=False)
-                kept_tools = tools or [one for one in item["_tools"] if TOOL_RE.match(one)]
-                if kept_tools and kept_tools != list(MATCH_TOOLS):
-                    fields["match-tools"] = json.dumps(kept_tools, ensure_ascii=False)
+                if tools:
+                    fields["match-tools"] = json.dumps(tools, ensure_ascii=False)
             for key in CONDITION_KEYS:
                 names = condition.get(key) or ([] if args.no_condition else [one for one in item.get(key) or []
                                                                              if CONDITION_RE.match(one)])
@@ -7016,7 +7021,7 @@ REPORT_VERDICTS = {
 }
 # The types `report` reads. An event of any other type is counted under "unread".
 REPORT_TYPES = ("reuse", "guard", "retry", "recall", "capture", "remind", "learn", "skill", "rm", "skip",
-                "refuse", "nudge", "judge", "promote", "candidate", "error")
+                "refuse", "nudge", "judge", "promote", "candidate", "error", "met", "index")
 REPORT_NOT_MEASURED = (
     "time or tokens saved: no duration of a failed call or of its fix is logged",
     "whether an offered item was then used: no event this report reads says that an offered lesson, skill, "
@@ -7128,6 +7133,13 @@ def report_learn(events, picked, clock):
             why = one_line(events[index].get("why", "")) or "?"
             refused[why] = refused.get(why, 0) + 1
     learned = [events[index] for index in picked if events[index].get("type") == "learn"]
+    # Failures met: the signatures in the window, and how many of them more than one session met.
+    met = [events[index] for index in picked if events[index].get("type") == "met" and events[index].get("sig")]
+    by_sig = {}
+    for event in met:
+        by_sig.setdefault(event["sig"], set()).add(_text(event.get("session")))
+    recurred = sum(1 for index in picked if events[index].get("type") == "capture"
+                   and events[index].get("why") == "recurred")
     out = {"captures": captures}
     out.update((key, figure(ends[key], captures)) for key in ("recorded", "declined", "unsettled", "expired"))
     out.update({
@@ -7140,6 +7152,13 @@ def report_learn(events, picked, clock):
         "lessons_rewritten": sum(1 for event in learned if event.get("update")),
         "moved": kinds.count("promote"),
         "candidates": kinds.count("candidate"),
+        # Owed because the failure came back, with no model asked; and what was met.
+        "recurred": figure(recurred, captures),
+        "met": {"meetings": len(met), "signatures": len(by_sig),
+                "again": sum(1 for sessions in by_sig.values() if len(sessions) > 1)},
+        # Lessons that carry the script a session ran, and sessions shown the index.
+        "from_evidence": sum(1 for event in learned if event.get("evidence")),
+        "indexed": kinds.count("index"),
     })
     return out
 
@@ -7488,6 +7507,11 @@ def cmd_report(args):
             ("lessons recorded", "%d new, %d rewritten" % (learn["lessons_recorded"], learn["lessons_rewritten"])),
             ("stops refused", ", ".join("%s %d" % (one_line(why), count)
                                         for why, count in learn["stops_refused"].items())),
+            ("owed because it came back", figure_text(learn["recurred"])),
+            ("failures met", "%d, %s, %d of them in more than one session" % (
+                learn["met"]["meetings"], plural(learn["met"]["signatures"], "signature"), learn["met"]["again"])),
+            ("recorded with the script that ran", str(learn["from_evidence"])),
+            ("sessions shown the index", str(learn["indexed"])),
             ("asked after a long turn", str(learn["nudges"])),
             ("reminded of unsettled", str(learn["reminded"])),
             ("moved", "%d, %s left in place" % (learn["moved"], plural(learn["candidates"], "candidate")))]

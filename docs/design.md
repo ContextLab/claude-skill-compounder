@@ -392,9 +392,11 @@ project's lessons are in force as they always were. `--attach` refuses the name
 should is recorded anew: `compound add --update` with its whole text (both `--when` and a
 body) and its script from a recorded run (`--from-evidence`). For a project lesson whose
 `SKILL.md` is not one the log vouches for, such an update does not edit the file: it
-writes it anew from what the command was given and from the values the old file parsed
-to (its patterns, tools, condition, probe and date), so that no line of the old file is
-carried into what is vouched for. The proof file is likewise kept and added to only when
+writes it anew from what the command was given and from the values of the old file that
+are held to a shape (its condition and its probe, which are names from a fixed list, and
+its date), so that no line and no free text of the old file is carried into what is
+vouched for. Its old patterns are free text and are not carried over: the command says
+so, and `--match` gives them again. The proof file is likewise kept and added to only when
 the log vouched for it as it is; otherwise it is written anew from what the command
 attaches. That makes it this
 user's word again. The mod's own words tell the session to read a note first; whether to

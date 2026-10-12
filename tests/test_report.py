@@ -54,7 +54,8 @@ class EmptyLogTest(ReportCase):
             "captures": 0, "recorded": fig(0, 0), "declined": fig(0, 0), "unsettled": fig(0, 0),
             "expired": fig(0, 0), "reasons": [], "settle_seconds": spread(0), "reminded": 0,
             "stops_refused": {"debt": 0, "strengthen": 0, "nudge": 0}, "nudges": 0, "lessons_recorded": 0,
-            "lessons_rewritten": 0, "moved": 0, "candidates": 0})
+            "lessons_rewritten": 0, "moved": 0, "candidates": 0, "recurred": fig(0, 0),
+            "met": {"meetings": 0, "signatures": 0, "again": 0}, "from_evidence": 0, "indexed": 0})
         self.assertEqual(data["guards"], {
             "refusals": 0, "watched": 0, "changed": fig(0, 0), "same": fig(0, 0), "none": fig(0, 0),
             "unwatched": 0, "failed_after": fig(0, 0), "lessons": []})
@@ -115,7 +116,40 @@ class LearnLoopTest(ReportCase):
             "captures": 5, "recorded": fig(1, 5), "declined": fig(2, 5), "unsettled": fig(1, 5),
             "expired": fig(1, 5), "reasons": [{"reason": "one-off", "n": 2}], "settle_seconds": spread(3),
             "reminded": 1, "stops_refused": {"debt": 1, "strengthen": 1, "nudge": 1}, "nudges": 1,
-            "lessons_recorded": 1, "lessons_rewritten": 0, "moved": 0, "candidates": 0})
+            "lessons_recorded": 1, "lessons_rewritten": 0, "moved": 0, "candidates": 0, "recurred": fig(0, 5),
+            "met": {"meetings": 0, "signatures": 0, "again": 0}, "from_evidence": 0, "indexed": 0})
+
+    def test_failures_met_captures_that_came_back_script_lessons_and_index_showings_are_counted(self):
+        """What the newer moments leave in the log: meetings of a failure by signature, a
+        capture owed because the failure came back, a lesson recorded with the script that
+        ran, a session shown the index, a stop refused for a script."""
+        for session, at in (("s1", 10), ("s2", 20), ("s2", 30)):
+            self.box.put({"type": "met", "sig": "command not found: timeout", "tool": "Bash", "sessions": 0,
+                          "session": session}, COMPOUND_NOW=NOW + at)
+        self.box.put({"type": "met", "sig": "parse error near `()'", "tool": "Bash", "sessions": 0, "session": "s1"},
+                     COMPOUND_NOW=NOW + 40)
+        self.box.log({"type": "capture", "tool": "Bash", "failed": "timeout 5 x", "error": "e", "fixed": "gtimeout 5 x",
+                      "why": "recurred", "sig": "command not found: timeout", "met": 1, "call": "c1"},
+                     COMPOUND_NOW=NOW + 50, CLAUDE_CODE_SESSION_ID="s2")
+        self.box.log({"type": "capture", "tool": "Bash", "failed": "a", "error": "e", "fixed": "b", "call": "c2"},
+                     COMPOUND_NOW=NOW + 60, CLAUDE_CODE_SESSION_ID="s3")
+        self.box.put({"type": "learn", "lesson": "with-script", "level": "user", "kind": "lesson", "path": "/x",
+                      "guard": False, "update": False, "evidence": ["0123456789abcdef"], "session": "s4"},
+                     COMPOUND_NOW=NOW + 70)
+        self.box.log({"type": "index", "lessons": 12, "scripts": 2, "elsewhere": 1, "chars": 900}, COMPOUND_NOW=NOW + 80)
+        self.box.log({"type": "refuse", "why": "evidence", "evidence": ["0123456789abcdef"]}, COMPOUND_NOW=NOW + 90)
+        data = json.loads(self.box.run("report", "--json", COMPOUND_NOW=NOW + 100).stdout)
+        learn = data["learn"]
+        self.assertEqual(learn["met"], {"meetings": 4, "signatures": 2, "again": 1})
+        self.assertEqual(learn["recurred"], fig(1, 2))
+        self.assertEqual((learn["from_evidence"], learn["indexed"]), (1, 1))
+        self.assertEqual(learn["stops_refused"]["evidence"], 1)
+        self.assertEqual(data["window"]["unread"], {})
+        text = self.box.run("report", COMPOUND_NOW=NOW + 100).stdout
+        self.assertRegex(text, r"(?m)^  owed because it came back +1/2")
+        self.assertRegex(text, r"(?m)^  failures met +4, 2 signatures, 1 of them in more than one session$")
+        self.assertRegex(text, r"(?m)^  recorded with the script that ran +1$")
+        self.assertRegex(text, r"(?m)^  sessions shown the index +1$")
 
     def test_the_text_gives_counts_over_the_captures_and_no_percentage_for_five(self):
         self.seed()
