@@ -9,6 +9,7 @@ Events, in file order:
   {'k':'call','ts','id','name','inp','err','res'}  a tool call joined to its result
 """
 import json, os, glob, sys, pickle, re
+from ep_common import write_private
 
 ROOT = os.path.expanduser('~/.claude/projects')
 
@@ -64,7 +65,8 @@ def main(out):
         S.append({'file': f, 'project': rel[0], 'session': rel[1].replace('.jsonl', ''), 'sub': len(rel) > 2,
                   'agent': rel[-1].replace('.jsonl', '') if len(rel) > 2 else None,
                   'entry': entry, 'cwd': cwd, 'start': start, 'end': end, 'ev': ev})
-    pickle.dump(S, open(os.path.join(out, 'sessions.pkl'), 'wb'))
+    with write_private(os.path.join(out, 'sessions.pkl')) as fh:
+        pickle.dump(S, fh)
     print(len(files), 'files', len(S), 'with events', sum(len(s['ev']) for s in S), 'events')
 
 if __name__ == '__main__':

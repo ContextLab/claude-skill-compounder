@@ -87,7 +87,7 @@ def run():
 
 if __name__ == '__main__':
     S, C, T, t1_all, seen = run()
-    json.dump(T, open(os.path.join(CACHE, 'triggers.json'), 'w'))
+    json.dump(T, write_private(os.path.join(CACHE, 'triggers.json'), 'w'))
     cnt = collections.Counter(t['rule'] for t in T); print('triggers over the corpus (2026-09-02 to 2026-10-11):', dict(cnt), 'total', len(T))
     print('T1 before first-meeting-only:', t1_all, '-> distinct signatures:', len(seen))
     wk = collections.defaultdict(collections.Counter)

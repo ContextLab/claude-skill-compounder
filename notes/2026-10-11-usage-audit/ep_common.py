@@ -17,15 +17,30 @@ def env_list(name):
     return [x.strip() for x in os.environ.get(name, '').split(',') if x.strip()]
 SKIP_SESSIONS = tuple(env_list('EP_SKIP_SESSIONS'))
 def skip_session(sid): return bool(SKIP_SESSIONS) and sid.startswith(SKIP_SESSIONS)
-def own_file(path):
-    """The path, once it is shown to be this user's and in a directory no one else can write to."""
-    for p in (path, os.path.dirname(os.path.abspath(path))):
-        st = os.stat(p)
-        if st.st_uid != os.getuid() or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise SystemExit('%s is open to other users: a pickle from it is not loaded' % p)
+def private_dir(path):
+    """Make the cache directory, readable and writable by this user alone."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
     return path
+def write_private(path, mode='wb'):
+    """Open a cache file for writing, readable by this user alone: it holds transcript text."""
+    private_dir(os.path.dirname(os.path.abspath(path)))
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600), mode)
+def open_own(path):
+    """Open a pickle for reading, once the opened file itself is shown to be this user's and
+    closed to others. The check is made on the descriptor, so the file checked is the file read."""
+    d = os.stat(os.path.dirname(os.path.abspath(path)))
+    if d.st_uid != os.getuid() or d.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit('%s is in a directory open to other users: not loaded' % path)
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        os.close(fd)
+        raise SystemExit('%s is open to other users: a pickle from it is not loaded' % path)
+    return os.fdopen(fd, 'rb')
 def load():
-    return pickle.load(open(own_file(os.path.join(CACHE, 'sessions.pkl')), 'rb'))
+    with open_own(os.path.join(CACHE, 'sessions.pkl')) as fh:
+        return pickle.load(fh)
 def proj(s):
     p = s['project']
     p = re.sub('^' + re.escape(HOME_KEY) + '-', '', p)
