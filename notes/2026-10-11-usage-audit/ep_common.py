@@ -3,20 +3,29 @@
 Settings, all optional, all read from the environment so that nothing about the machine
 the study ran on is written here:
   EP_CACHE           directory holding sessions.pkl (ep_parse.py writes it). It holds
-                     private transcript text: keep it outside the repository.
+                     private transcript text: keep it outside the repository. The
+                     default is under the home directory, never a shared temporary
+                     directory: a pickle is code to whoever loads it.
   EP_SKIP_SESSIONS   comma-separated session-id prefixes to leave out (the session that
                      ran the study, for one)
 """
-import pickle, os, re, tempfile
-CACHE = os.environ.get('EP_CACHE') or os.path.join(tempfile.gettempdir(), 'compound-usage-audit-cache')
+import pickle, os, re, stat
+CACHE = os.environ.get('EP_CACHE') or os.path.expanduser('~/.cache/compound-usage-audit')
 HOME_KEY = re.sub(r'[^A-Za-z0-9]', '-', os.path.expanduser('~'))    # how a project directory under the home directory is named
 def env_list(name):
     """A comma-separated environment variable as a list; empty when unset."""
     return [x.strip() for x in os.environ.get(name, '').split(',') if x.strip()]
 SKIP_SESSIONS = tuple(env_list('EP_SKIP_SESSIONS'))
 def skip_session(sid): return bool(SKIP_SESSIONS) and sid.startswith(SKIP_SESSIONS)
+def own_file(path):
+    """The path, once it is shown to be this user's and in a directory no one else can write to."""
+    for p in (path, os.path.dirname(os.path.abspath(path))):
+        st = os.stat(p)
+        if st.st_uid != os.getuid() or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise SystemExit('%s is open to other users: a pickle from it is not loaded' % p)
+    return path
 def load():
-    return pickle.load(open(os.path.join(CACHE, 'sessions.pkl'), 'rb'))
+    return pickle.load(open(own_file(os.path.join(CACHE, 'sessions.pkl')), 'rb'))
 def proj(s):
     p = s['project']
     p = re.sub('^' + re.escape(HOME_KEY) + '-', '', p)
