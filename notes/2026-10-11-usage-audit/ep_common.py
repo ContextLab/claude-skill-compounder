@@ -18,14 +18,37 @@ def env_list(name):
 SKIP_SESSIONS = tuple(env_list('EP_SKIP_SESSIONS'))
 def skip_session(sid): return bool(SKIP_SESSIONS) and sid.startswith(SKIP_SESSIONS)
 def private_dir(path):
-    """Make the cache directory, readable and writable by this user alone."""
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    os.chmod(path, 0o700)
+    """The cache directory, made for this user alone. One that is already there is used only
+    when it is a real directory of this user's, never a link or another user's."""
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise SystemExit('%s is a link or is not this user\'s directory: nothing is written there' % path)
+    if st.st_mode & 0o077:
+        os.chmod(path, 0o700)
     return path
-def write_private(path, mode='wb'):
-    """Open a cache file for writing, readable by this user alone: it holds transcript text."""
-    private_dir(os.path.dirname(os.path.abspath(path)))
-    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600), mode)
+class write_private(object):
+    """Write a cache file readable by this user alone: it holds transcript text. The bytes go
+    to a new file of this process's own making, which then takes the name, so a file or a
+    link already at that name is replaced and never written through."""
+    def __init__(self, path, mode='wb'):
+        self.path = os.path.abspath(path)
+        folder = private_dir(os.path.dirname(self.path))
+        self.tmp = os.path.join(folder, '.%s.%d.tmp' % (os.path.basename(self.path), os.getpid()))
+        if os.path.lexists(self.tmp): os.unlink(self.tmp)
+        self.fh = os.fdopen(os.open(self.tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600), mode)
+    def write(self, data): return self.fh.write(data)
+    def __enter__(self): return self
+    def __exit__(self, kind, value, tb):
+        self.fh.close()
+        if kind is None: os.replace(self.tmp, self.path)
+        else: os.unlink(self.tmp)
+        return False
 def open_own(path):
     """Open a pickle for reading, once the opened file itself is shown to be this user's and
     closed to others. The check is made on the descriptor, so the file checked is the file read."""

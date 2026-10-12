@@ -43,7 +43,8 @@ def main(n):
     print('signatures met in >=3 sessions:', sum(r[0] >= 3 for r in rows), 'covering', sum(r[2] for r in rows if r[0] >= 3))
     print('\nsessions projects calls days first last signature')
     for r in rows[:n]: print('%3d %2d %4d %3d %s %s  %s' % r)
-    json.dump({g: v for g, v in sig.items() if len({x[0] for x in v}) >= 2}, write_private(os.path.join(CACHE, 'recurrence.json'), 'w'))
+    with write_private(os.path.join(CACHE, 'recurrence.json'), 'w') as fh:
+        json.dump({g: v for g, v in sig.items() if len({x[0] for x in v}) >= 2}, fh)
 
 if __name__ == '__main__':
     main(int(sys.argv[1]) if len(sys.argv) > 1 else 60)
