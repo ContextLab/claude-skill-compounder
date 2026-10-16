@@ -1527,6 +1527,46 @@ function turnEnded(sid: string): undefined {
   return undefined
 }
 
+// ---- the in-flight check at the stop ------------------------------------------------------
+
+// hooks/inflight-stop-check.sh is the same script a person can register directly as a Stop
+// hook. It answers one question: is work still in flight (a detached process, a workflow
+// run dispatched by hand, the user's own pull request with pending checks) with no polling
+// loop alive to see it finish? When it is, the script prints a Stop-hook JSON decision and
+// its reason is the refusal. The script itself refuses only once per stop: it is told
+// whether this stop follows a block and stays silent when it does.
+//
+// The failure it prevents: a turn starts a three-hour run, dispatches a workflow, opens
+// pull requests, writes a status summary and ends. Nothing fails; the work finishes or
+// stalls unseen. A lesson that says "keep a waiter going" is not enough, because the
+// session that forgets the waiter forgets the lesson too.
+//
+// It never throws and never blocks on its own failure: a script that is missing, times
+// out or prints something unreadable lets the stop through.
+const INFLIGHT_SH = 'hooks/inflight-stop-check.sh'
+const INFLIGHT_BUDGET_MS = 45000
+const BASH = '/bin/bash'
+
+async function inflight($: EngineInterface, followsBlock: boolean): Promise<string | undefined> {
+  if (await off($)) return undefined
+  const script = `${$.plugin.root}/${INFLIGHT_SH}`
+  try {
+    if (!(await $.fs.exists(script))) return undefined
+    const done = await $.process.run([BASH, script], {
+      cwd: await projectRoot($),
+      timeoutMs: INFLIGHT_BUDGET_MS,
+      stdin: JSON.stringify({ stop_hook_active: followsBlock }),
+    })
+    const printed = done.stdout.trim()
+    if (printed === '') return undefined
+    const said = JSON.parse(printed) as { decision?: unknown, reason?: unknown }
+    if (said.decision !== 'block' || typeof said.reason !== 'string' || said.reason === '') return undefined
+    return `[compound] ${said.reason}`
+  } catch {
+    return undefined
+  }
+}
+
 async function onStop($: EngineInterface, followsBlock: boolean): Promise<string | undefined> {
   if (await off($)) return undefined
   const sid = await $.session.id()
@@ -1906,7 +1946,10 @@ export const register: Register = on => {
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
     try {
-      const block = await onStop($, e.stop_hook_active === true)
+      const followsBlock = e.stop_hook_active === true
+      const owed = await onStop($, followsBlock)
+      const unwatched = await inflight($, followsBlock)
+      const block = owed === undefined ? unwatched : (unwatched === undefined ? owed : `${owed}\n\n${unwatched}`)
       if (block === undefined) return result
       return { ...result, block: result.block === undefined ? block : `${result.block}\n\n${block}` }
     } catch (err) {
