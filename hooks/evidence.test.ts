@@ -145,6 +145,9 @@ function world(on: On): World {
   return w
 }
 
+// The test runner has a timer; the types the mod is checked against do not declare one.
+declare function setTimeout(run: () => void, ms: number): unknown
+
 // The note is started after the call's result is in hand and nobody waits for it.
 const settled = async (): Promise<void> => {
   for (let i = 0; i < 20; i += 1) await Promise.resolve()
