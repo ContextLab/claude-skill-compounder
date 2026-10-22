@@ -53,3 +53,19 @@ fix from the data, update the local install, push when tested.
   refusal out of the ineffective count. Counting the ones the pattern missed would flag
   lessons whose misses the pattern cannot reach (zsh-nomatch-glob's are outside the probe's
   roots), which would ask for rewrites that cannot help.
+
+## Pull requests and issues (same day)
+- PR 45 (`proposal-ships-the-working-fix` into the general pool): merged into main from a
+  scratch worktree; it applied cleanly, all checks green. Never recalled or offered since
+  10 Oct, but sound and small.
+- PR 44 (in-flight check as a mod Stop hook): closed. The script has a 45 s budget and makes
+  `gh` network calls at every stop (the rule is 2 s); its waiter test sees only `sleep N`
+  loops, so `wait-for-ci.py` does not count; 35 commits behind; the same script is already a
+  Stop hook in the user's settings.
+- Issue 19: closed. Repeat offer, skill, and `use` events form the whole loop (one project,
+  13 Oct: repeat, then learn + skill; 6 uses since), and the shipped skills chain three deep.
+- Issue 42: still blocked (fresh config dir: "Not logged in"; no credential in env).
+  Status comment added; left open.
+- Found on the way: `seed_event` accepted a log inside the checkout when the checkout itself
+  is under /tmp (a scratch worktree), so a test wrote REPO/events.jsonl. Fixed (b18f954).
+- CI for 9f3044c: green on ubuntu and macos, 7m35s wall.
