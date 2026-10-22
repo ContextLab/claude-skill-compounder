@@ -1878,7 +1878,9 @@ moves the checkout to `REF` and follows it from then on: a branch of `origin` is
 out and pulled, a tag is checked out; a name `origin` does not have is exit 1 and nothing
 moves. `--json` carries `old`, `new` (commits), `old_ref`, `ref` (the branch or tag
 before and after) and `changed`. After any of them, a user lesson whose name and text
-now exist at `general` is removed, so the pool stays the only copy.
+now exist at `general` is removed, so the pool stays the only copy. The user lesson is
+compared as `promote --to general` publishes it, without its `origin` and its dotfiles,
+so a lesson whose proposal was merged is the pool's copy; any other difference keeps it.
 
 Uninstall is also one line that needs no `compound` on `PATH`:
 

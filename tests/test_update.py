@@ -87,6 +87,32 @@ class UpdateTest(UpstreamCase):
         self.assertEqual([(row["level"], row["name"]) for row in rows if row["kind"] == "lesson"],
                          [("user", "still-mine"), ("general", "now-general")])
 
+    def test_a_user_lesson_whose_proposal_was_merged_is_removed(self):
+        """`promote --to general` publishes the lesson without its `origin` and without its
+        dotfiles, so the copy the pool carries once the pull request is merged differs from
+        the user's by exactly those: it is the same lesson."""
+        directory = self.box.lesson_dir("proposed", "user")
+        write(os.path.join(directory, "SKILL.md"),
+              "---\nname: proposed\ndescription: Use when shipped.\norigin: project a, session 1\n---\nThe text.\n")
+        write(os.path.join(directory, ".evidence.json"), "{}\n")
+        write(os.path.join(self.upstream, "lessons", "proposed", "SKILL.md"), LESSON % ("proposed", "The text."))
+        self.commit("merge the proposal")
+        proc = self.update()
+        self.assertExit(proc, 0)
+        self.assertFalse(os.path.exists(directory), "the pool is the only copy now")
+        self.assertIn("removed user lesson proposed", proc.stdout)
+
+    def test_a_user_lesson_that_differs_beyond_its_origin_is_kept(self):
+        directory = self.box.lesson_dir("proposed", "user")
+        write(os.path.join(directory, "SKILL.md"),
+              "---\nname: proposed\ndescription: Use when shipped.\norigin: project a, session 1\n---\nThe text, revised.\n")
+        write(os.path.join(self.upstream, "lessons", "proposed", "SKILL.md"), LESSON % ("proposed", "The text."))
+        self.commit("merge the proposal")
+        proc = self.update()
+        self.assertExit(proc, 0)
+        self.assertTrue(os.path.isfile(os.path.join(directory, "SKILL.md")))
+        self.assertIn("kept user lesson proposed", proc.stdout)
+
     def test_a_same_name_lesson_with_different_text_is_reported_and_kept(self):
         mine = self.user_lesson("diverged", "My wording.")
         write(os.path.join(self.upstream, "lessons", "diverged", "SKILL.md"), LESSON % ("diverged", "Their wording."))

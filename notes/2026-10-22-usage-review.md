@@ -69,3 +69,6 @@ fix from the data, update the local install, push when tested.
 - Found on the way: `seed_event` accepted a log inside the checkout when the checkout itself
   is under /tmp (a scratch worktree), so a test wrote REPO/events.jsonl. Fixed (b18f954).
 - CI for 9f3044c: green on ubuntu and macos, 7m35s wall.
+- After PR 45 merged, `compound update` kept the user copy beside the pool's ("different
+  text"): the two differed only by `origin:`, which promote strips. update now compares the
+  user lesson as it would be published (no `origin`, no dotfiles); tests in test_update.py.

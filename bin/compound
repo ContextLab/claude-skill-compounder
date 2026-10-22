@@ -6623,7 +6623,9 @@ def cmd_update(args):
 
     # Only a lesson under the user lessons directory is ever a candidate, and only
     # against the general LESSON of its name; nothing under <claude dir>/skills is
-    # touched. It goes when its whole tree is the general one: same files, same bytes.
+    # touched. It goes when its whole tree is the general one: same files, same bytes, once
+    # it is read as it would be published (without `origin` and dotfiles), which is the form
+    # a merged proposal of it takes.
     removed = []
     differing = []
     user_lessons, _user_skills = dirs_of(project_root(), "user")
@@ -6640,7 +6642,11 @@ def cmd_update(args):
             continue
         if os.path.realpath(directory) == os.path.realpath(theirs):
             continue
-        if same_tree(directory, theirs):
+        try:
+            same = published_tree(directory) == tree_of(theirs)
+        except OSError:
+            same = False
+        if same:
             shutil.rmtree(directory)
             removed.append({"name": name, "path": directory})
         else:
@@ -6682,6 +6688,24 @@ def tree_of(top):
             else:
                 with open(path, "rb") as handle:
                     out[rel] = ("file", handle.read())
+    return out
+
+
+def published_tree(top):
+    """`tree_of(top)` for a user lesson as `promote --to general` publishes it: its SKILL.md
+    without `origin` (`published_text`), and none of its dotfiles."""
+    out = {}
+    for rel, entry in tree_of(top).items():
+        if any(part.startswith(".") for part in rel.split(os.sep)):
+            continue
+        if rel == "SKILL.md" and entry[0] == "file":
+            try:
+                text = edit_frontmatter(entry[1].decode("utf-8"), {}, removals=("origin",))
+            except (Fail, UnicodeDecodeError):
+                text = None
+            if text is not None:
+                entry = ("file", text.encode("utf-8"))
+        out[rel] = entry
     return out
 
 
