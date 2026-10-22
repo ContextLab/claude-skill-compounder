@@ -39,13 +39,16 @@ def _real_home():
 
 def sandbox_problem(log_path):
     """Why `log_path` is not an event log a test may write by hand, or None. It must lie in
-    a temporary directory, and never under the real `~/.claude`."""
+    a temporary directory, and never under the real `~/.claude` or in this checkout, which
+    can itself lie in a temporary directory (a scratch worktree)."""
     real = os.path.realpath(log_path)
     if os.path.basename(real) != "events.jsonl":
         return "%s is not an events.jsonl" % real
     claude = os.path.join(_real_home(), ".claude")
     if real == claude or real.startswith(claude + os.sep):
         return "%s is inside the real %s" % (real, claude)
+    if real == REPO or real.startswith(REPO + os.sep):
+        return "%s is inside the checkout %s" % (real, REPO)
     roots = set(os.path.realpath(root) for root in (tempfile.gettempdir(), "/tmp", "/var/tmp", "/var/folders")
                 if os.path.isdir(root))
     if not any(real.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
