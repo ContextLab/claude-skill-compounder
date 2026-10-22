@@ -144,6 +144,23 @@ export function shellFailure(line: string, output: string): string {
   return `The call exited with status 0, and its output carries a shell error: ${line}\n${output}`
 }
 
+// WHICH FAILURE IS THE SAME FAILURE, for a lesson already shown in full in the session. A
+// shell's or a refusal's text carries numbers that differ from call to call for the one
+// mistake (`(eval):14: no matches found: --include=*.py` is line 14 of one command and line
+// 3 of the next), so digits are folded to 0, and the word after `no matches found:` is
+// dropped, as the CLI's signature drops it: it is the glob, not the mistake. Paths are kept: `permission denied: /a` and
+// `permission denied: /b` can have different causes, and a key that is too narrow costs
+// only a judge call, where one too wide gives a failure another failure's lesson. When the text holds a line of the shell's own, that line is the key: the
+// output around it is whatever the command printed before it failed, and the same line
+// comes back under an exit status or none. With no such line the whole text, folded, is
+// the key, so two failures whose words differ are never taken for one: the output of a
+// failed test run begins with the same line whatever failed. The tool is part of the key.
+const KEY_CHARS = 4000
+export function errorKey(tool: string, error: string): string {
+  const text = shellError(error) ?? error.slice(0, KEY_CHARS)
+  return `${tool}\u0000${text.replace(/no matches found: \S+/g, 'no matches found:').replace(/\d+/g, '0').replace(/\s+/g, ' ').trim()}`
+}
+
 // A tool call's arguments without the three keys the engine adds beside them.
 export function inputOf(e: Record<string, unknown>): Record<string, unknown> {
   const { tool: _tool, tool_use_id: _id, agentId: _agent, consent: _consent, ...input } = e
@@ -706,7 +723,9 @@ export function guardReason(hits: readonly Hit[], cli: string): string {
     hits.length <= 1
       ? 'If the note applies to this call, adjust it; if not, send the call again and it will run.'
       : 'If a note applies to this call, adjust it; if none does, send the call again and it will run.',
-    sure.length > 0 ? 'A call that was checked against the files is stopped each time it is written a new way; the same call sent again runs. Any other lesson stops a call once per session.' : 'Each lesson stops a call once per session.',
+    sure.length > 0
+      ? 'A call that was checked against the files is stopped each time it is written a new way; the same call sent again runs. Any other lesson stops each new call that matches it, until a call it stopped is sent again unchanged: it then stops nothing more in this session.'
+      : 'A lesson stops each new call that matches it; the same call sent again runs, and once a call it stopped is sent again unchanged, it stops nothing more in this session.',
     cliLine(cli),
   )
   const shipped = hits.filter(h => h.level === 'general')
@@ -731,6 +750,13 @@ export function recallContext(lesson: Item, text: string, count: number, ineffec
   ]
   if (ineffective) out.push('', ineffectiveText(lesson.name, count, cli, lesson.match, call))
   return out.join('\n')
+}
+
+// Moment 3, when the lesson was shown in full earlier in this session for the same failure:
+// one line, and the command that prints it again.
+export function repeatRecallContext(lesson: Item, cli: string): string {
+  const name = flat(lesson.name, NAME_CHARS)
+  return `[compound] Lesson ${name} (${flat(lesson.level, 20)}), shown in full earlier in this session for this same failure, may describe it again: \`${cli} show ${shq(name)}\` prints it.`
 }
 
 // "When a lesson does not work": the instruction to strengthen it.

@@ -83,7 +83,7 @@ const NO_MATCH: Answer = { text: 'Exit code 1\n(eval):1: no matches found: *.nop
 
 test('a failure that a lesson is recalled for leaves an earlier held failure held: its fix is still captured', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
 
@@ -105,9 +105,17 @@ test('a failure that a lesson is recalled for leaves an earlier held failure hel
   const asked = w.prompts.length
   w.judge = async () => FIX
   const fixed = await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  // The judge runs behind the call: the result came back without waiting for it.
+  expect(JSON.stringify(fixed.context ?? [])).not.toContain('owes a lesson')
+  await clock.settle()
   expect(w.prompts.length).toBe(asked + 1)
   expect(of(w, 'capture').map(e => [e.failed, e.fixed])).toEqual([['./deploy.sh', './deploy.sh --target staging']])
-  expect(JSON.stringify(fixed.context ?? [])).toContain('./deploy.sh --target staging')
+  // What it produced is given beside the loop's next result, of any tool, and once.
+  const next = await $.tool.call({ tool: 'Read', file_path: '/work/notes.md' } as never)
+  expect(JSON.stringify(next.context ?? [])).toContain('./deploy.sh --target staging')
+  expect(JSON.stringify(next.context ?? [])).toContain('owes a lesson')
+  const after = await $.tool.call({ tool: 'Read', file_path: '/work/notes.md' } as never)
+  expect(JSON.stringify(after.context ?? [])).not.toContain('owes a lesson')
   expect(await shown()).toContain('✓ failed → ✓ fixed → ● owed → ○ recorded')
   // The judge was shown the call that failed between the two.
   expect(w.prompts[asked]).toContain('Bash (failed): ls *.nope')
@@ -135,7 +143,7 @@ test('the held call itself, failing again with a lesson recalled for it, is let 
 
 test('a held failure still gets five judged successes and no more, whatever fails between them', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   w.tool = command => (command.startsWith('ls ') ? NO_MATCH : undefined)
   for (let i = 0; i < 7; i += 1) {
@@ -143,6 +151,7 @@ test('a held failure still gets five judged successes and no more, whatever fail
     await $.tool.call({ tool: 'Bash', command: `ls *.nope${i}` })
     w.judge = async () => NO_FIX
     await $.tool.call({ tool: 'Bash', command: `echo ${i}` })
+    await clock.settle()
   }
   expect(of(w, 'judge').filter(e => e.moment === 'fix').length).toBe(5)
   expect(of(w, 'recall').length).toBe(7)
@@ -254,6 +263,7 @@ test('COMPOUND_QUIET=1 hides a held failure, and the failure is still held and i
   expect(await shown()).toBe(BENEATH)
   w.judge = async () => FIX
   await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  await clock.settle()
   expect(of(w, 'capture').length).toBe(1)
   expect(await shown()).toBe(BENEATH)
   await ui.unmount()
@@ -291,15 +301,17 @@ test('the failed call passing when sent again, with nothing between, is no fix: 
 
 test('the failed call passing unchanged after other calls is put to the judge with those calls, and let go when they explain nothing', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   let down = true
   w.tool = command => (command === CURL && down ? TIMED_OUT : undefined)
   await $.tool.call({ tool: 'Bash', command: CURL })
   w.judge = async () => NO_FIX
   await $.tool.call({ tool: 'Bash', command: 'git status --short' })
+  await clock.settle()
   down = false
   const asked = w.prompts.length
   await $.tool.call({ tool: 'Bash', command: CURL })
+  await clock.settle()
   expect(w.prompts.length).toBe(asked + 1)
   const prompt = w.prompts[asked]!
   expect(prompt).toContain('CALLS BETWEEN THE TWO')
@@ -313,7 +325,7 @@ test('the failed call passing unchanged after other calls is put to the judge wi
 
 test('the failed call passing unchanged after a call that made it work is a fix: the judge sees that call, and the lesson is owed', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   const JQ = "jq -r '.version' package.json"
   let installed = false
   w.tool = command => (command === JQ && !installed ? { text: 'Exit code 127\n(eval):1: command not found: jq', isError: true } : undefined)
@@ -323,14 +335,165 @@ test('the failed call passing unchanged after a call that made it work is a fix:
   await $.tool.call({ tool: 'Read', file_path: '/work/package.json' } as never)
   w.judge = async () => NO_FIX
   await $.tool.call({ tool: 'Bash', command: 'brew install jq' })
+  await clock.settle()
   installed = true
   const asked = w.prompts.length
   w.judge = async () => fix('command not found: jq')
   await $.tool.call({ tool: 'Bash', command: JQ })
+  await clock.settle()
   expect(w.prompts.length).toBe(asked + 1)
   const prompt = w.prompts[asked]!
   const between = prompt.slice(prompt.indexOf('CALLS BETWEEN THE TWO, in'), prompt.indexOf('LATER SUCCESSFUL CALL:'))
   expect(between.split('\n').slice(1, 3)).toEqual(['Write: {"file_path":"/work/.tool-versions","content":"jq 1.7"}', 'Bash: brew install jq'])
   expect(between).not.toContain('Read')
   expect(of(w, 'capture').map(e => [e.failed, e.fixed])).toEqual([[JQ, JQ]])
+})
+
+// ---- the same failure again: the lesson is named, not judged or quoted again ----
+
+test('a failure a lesson was shown for in this session, met again, is named in one line: no judge, no show, and a recall marked repeat', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.tool = command => (command.startsWith('ls ') ? { text: `Exit code 1\n(eval):${command.length}: no matches found: /work/learn/${command.slice(3)}`, isError: true } : undefined)
+  w.judge = async () => RECALLED
+  const first = await $.tool.call({ tool: 'Bash', command: 'ls *.nope' })
+  expect(JSON.stringify(first.context ?? [])).toContain('RECORDED-NOTE')
+  const asked = w.prompts.length
+  const shows = () => w.calls.filter(c => c[1] === 'show').length
+  const shown = shows()
+  // The same mistake in another call: another line number, another path.
+  const again = await $.tool.call({ tool: 'Bash', command: 'ls src/*.nothing' })
+  expect(w.prompts.length).toBe(asked)
+  expect(shows()).toBe(shown)
+  const said = (again.context ?? []).join('\n')
+  expect(said.split('\n').length).toBe(1)
+  expect(said).toContain('zsh-no-matches-found')
+  expect(said).toContain('shown in full earlier in this session')
+  expect(said).toMatch(/\/bin\/compound show zsh-no-matches-found` prints it/)
+  expect(said).not.toContain('RECORDED-NOTE')
+  // It is logged as a recall all the same, so the CLI counts it as it counts any.
+  expect(of(w, 'recall').map(e => [e.lesson, e.repeat, e.at])).toEqual([['zsh-no-matches-found', undefined, 'failure'], ['zsh-no-matches-found', true, 'failure']])
+})
+
+test('another failure is judged as before, and so is the same one once the store has changed', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.tool = command => (command.startsWith('ls ') ? NO_MATCH : command.startsWith('cat ') ? { text: 'Exit code 1\ncat: x: No such file or directory', isError: true } : undefined)
+  w.judge = async () => RECALLED
+  await $.tool.call({ tool: 'Bash', command: 'ls *.nope' })
+  const asked = w.prompts.length
+  // Words that differ are another failure: the judge is asked.
+  await $.tool.call({ tool: 'Bash', command: 'cat x' })
+  expect(w.prompts.length).toBe(asked + 1)
+  // A command that changes the store: the lesson may have been rewritten, so it is shown in full.
+  await $.tool.call({ tool: 'Bash', command: 'compound add --update --name zsh-no-matches-found --when w --body b' })
+  const full = await $.tool.call({ tool: 'Bash', command: 'ls *.nope' })
+  expect(w.prompts.length).toBe(asked + 2)
+  expect(JSON.stringify(full.context ?? [])).toContain('RECORDED-NOTE')
+  expect(of(w, 'recall').filter(e => e.repeat === true)).toEqual([])
+})
+
+// ---- the fix judge runs behind the call ----
+
+test('a success is returned before the fix judge answers, and what it produced comes with the loop\'s next result', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => {
+    await clock.sleep(3000)
+    return FIX
+  }
+  // The call returns while the judge has three seconds still to go.
+  const fixed = await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  await clock.settle()
+  expect(w.prompts.length).toBe(2)
+  expect(of(w, 'capture')).toEqual([])
+  expect(JSON.stringify(fixed.context ?? [])).not.toContain('owes a lesson')
+  // A call made while it is still thinking gets nothing of it.
+  const early = await $.tool.call({ tool: 'Write', file_path: '/work/a.txt', content: 'x' } as never)
+  expect(JSON.stringify(early.context ?? [])).not.toContain('owes a lesson')
+  await clock.advance(3000)
+  expect(of(w, 'capture').map(e => e.fixed)).toEqual(['./deploy.sh --target staging'])
+  expect(of(w, 'judge').map(e => [e.moment, e.verdict])).toEqual([['recall', 'none'], ['fix', 'fix']])
+  // Another loop's result does not carry it; this loop's next does, once.
+  const sub = await $.tool.call({ tool: 'Read', file_path: '/work/a.txt', agentId: 'agent-2' } as never)
+  expect(JSON.stringify(sub.context ?? [])).not.toContain('owes a lesson')
+  const next = await $.tool.call({ tool: 'Read', file_path: '/work/a.txt' } as never)
+  expect(JSON.stringify(next.context ?? [])).toContain('This session now owes a lesson')
+})
+
+test('the stop waits for a judge still running, within its budget, and refuses for the lesson it made owed', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => {
+    await clock.sleep(1500)
+    return FIX
+  }
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  const stopping = $.classic.Stop({ stop_hook_active: false } as never)
+  await clock.advance(1500)
+  const stop = await stopping
+  expect(String((stop as { block?: unknown }).block ?? '')).toContain('This session owes a lesson')
+  expect(of(w, 'capture').length).toBe(1)
+})
+
+test('a judge slower than the stop\'s budget lets the stop go, and what it produced comes with the next result', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => {
+    await clock.sleep(6000)
+    return FIX
+  }
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  const stopping = $.classic.Stop({ stop_hook_active: false } as never)
+  await clock.advance(2000)
+  const stop = await stopping
+  expect((stop as { block?: unknown }).block).toBe(undefined)
+  expect(of(w, 'capture')).toEqual([])
+  await clock.advance(4000)
+  expect(of(w, 'capture').length).toBe(1)
+  const next = await $.tool.call({ tool: 'Bash', command: 'git status' })
+  expect(JSON.stringify(next.context ?? [])).toContain('This session now owes a lesson')
+})
+
+test('two successes judged at once capture one held failure once: the later answer is dropped', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => {
+    await clock.sleep(500)
+    return FIX
+  }
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target prod' })
+  await clock.settle()
+  expect(w.prompts.length).toBe(3)
+  await clock.advance(500)
+  expect(of(w, 'judge').filter(e => e.moment === 'fix').map(e => e.verdict)).toEqual(['fix', 'fix'])
+  expect(of(w, 'capture').map(e => e.fixed)).toEqual(['./deploy.sh --target staging'])
+  const next = (await $.tool.call({ tool: 'Bash', command: 'git status' })).context ?? []
+  expect(next.filter(c => c.includes('owes a lesson')).length).toBe(1)
+})
+
+test('the failed call passing while a judge runs lets the failure go at once: a later success asks no judge', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  let deploys = 0
+  w.tool = command => (command === './deploy.sh' && ++deploys > 1 ? { text: 'ok' } : undefined)
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => {
+    await clock.sleep(500)
+    return NO_FIX
+  }
+  await $.tool.call({ tool: 'Bash', command: './setup.sh' })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  await $.tool.call({ tool: 'Bash', command: 'git commit -m x' })
+  await clock.settle()
+  // One question for the failure, one for each of the two calls before it was let go.
+  expect(w.prompts.length).toBe(3)
+  await clock.advance(500)
+  expect(of(w, 'judge').filter(e => e.moment === 'fix').length).toBe(2)
+  expect(of(w, 'capture')).toEqual([])
 })

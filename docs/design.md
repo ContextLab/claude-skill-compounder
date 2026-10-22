@@ -424,8 +424,20 @@ measured on the listing was already over that budget before a single lesson was 
 ### 2. Guard: a tool call is about to run
 
 The call is tested against the `match` of every lesson that applies to its tool. On a hit
-the call is refused once per session per lesson, with the lesson quoted as the reason. The
-same call sent again runs. A mistake already made is stopped before it is repeated.
+the call is refused, with the lesson quoted as the reason, once for the call's own text
+per lesson: the same call sent again runs, and a new call that makes the mistake again is
+refused again. A mistake already made is stopped before it is repeated.
+
+**Until the session overrides the lesson.** A refused call sent again unchanged, as the
+first call of that tool in that agent loop after the refusal (the `retry` event with
+`same: true`), is the session disagreeing with the pattern: from then on that lesson's
+pattern refuses nothing in that session. The override is a claim (`override-<lesson>`),
+so it holds across copies of the mod and a reload. A refusal once per session per lesson
+lets the mistake through, measured on an event log of 3 to 22 October 2026 where guards
+refused that way: of 206 recalls that came after the lesson's own guard had refused in that
+session, 124 were of calls the lesson's pattern matches (`zsh-equals-word` 54 of 57,
+`macos-no-timeout` 21 of 25, `zsh-nomatch-glob` 34 of 86), while a refused call was sent
+again unchanged after 16 of 256 refusals (6.2%).
 
 **Guards match commands, not prose.** A lesson's patterns are tested against the command
 of a Bash call and against nothing else, unless the lesson names other tools in
@@ -466,21 +478,35 @@ DIR` and `NAME=value` earlier in the command are followed), is a word zsh refuse
 matches found" before it runs anything of the line. The probe runs before the
 call is permitted, and a refusal says "no file matches", so it is kept from answering
 anything about the rest of the machine: it reads only inside the directory the call runs
-in and the project, it leaves alone a pattern whose directory is anywhere else (a home
-directory, an absolute path outside, `..`), a pattern with a wildcard in a directory
-name, and every word after a `cd` out of those two; and it reads no environment, only
-the values the command itself assigns. The probe also leaves alone what it cannot
+in, the project, and the harness's per-user temporary directory (the real path of
+`/tmp/claude-<uid>`, `/private/tmp/claude-501` on macOS, when it is a directory of the
+user's own and not a link: sessions write their scratch files there); it leaves alone a
+pattern whose directory is anywhere else (a home directory, an absolute path outside,
+`..`), a pattern with a wildcard in a directory name, and every word after a `cd` it
+cannot follow or out of those three; and it reads no environment, only the values the
+command itself assigns. One word is reported after such a `cd` too: an option with a
+value, a word that begins with `-` and has `=` and no `/` before its first wildcard
+(`--include=*.py`, `--exclude=*`). zsh matches it against the names in the current
+directory that begin with the option's text, and no file is named `--include=...` in
+practice, so it is refused wherever the call runs, and the probe reports it without
+reading anything. Of the 29 "no matches found" failures that ran in the eleven days after
+the probe shipped, 8 were such words after a `cd ~/dir;` or `cd $S` the probe could not
+follow, and others were patterns in the harness's temporary directory. The probe also leaves alone what it cannot
 be sure of: a word with a bracket, a brace, a parenthesis, `**`, a command substitution
 or a parameter that has no value here; the words of `[[ ]]`, `case` and an assignment,
 which the shell does not expand; the words of a string another shell runs (`sh -c
 '...'`); and a whole command that changes how the shell globs (`setopt`, `noglob`, `set
--f`). `tests/test_probe.py` runs 39 commands in the real zsh and holds the probe to stop
-exactly the ones zsh refused, and 9 more that zsh refuses and the probe must not answer. A probe's hit is **sure** (`"sure": true` and the `words`
-at fault in `compound check`'s reply): the call cannot run as written. So it is refused
-for the call's own text, not once per session for the lesson: the same mistake written a
-new way is stopped again, and the same call sent again runs. That matters because a
-session repeats a mistake: 57 of the 72 recalls of the lesson for this failure came after
-the session's one refusal. A probe named by a lesson that this version of the CLI does
+-f`). `tests/test_probe.py` runs 43 commands in the real zsh and holds the probe to stop
+exactly the ones zsh refused, 22 more that zsh refuses and the probe must leave alone (8
+it cannot be sure of, 14 outside what it may read), options with a pattern after a `cd`
+it cannot follow (`pushd`, `builtin cd`, `command cd` and a bare `cd` are not followed),
+and patterns in the harness's temporary directory. A probe's hit is **sure** (`"sure": true` and the `words`
+at fault in `compound check`'s reply): the call cannot run as written. It is refused for
+the call's own text, as a pattern's hit is, and it has no override: a sure hit's call
+sent again runs, and the same mistake written a new way is stopped again, however the
+session answered an earlier refusal. That matters because a session repeats a mistake:
+57 of the 72 recalls of the lesson for this failure came after a session's one refusal,
+where a refusal was once per session. A probe named by a lesson that this version of the CLI does
 not have is reported like a pattern that does not read, and stops nothing.
 
 **Which lessons are guards here.** Only a lesson in force: one whose platform and shell
@@ -491,7 +517,8 @@ switched off (see "The general pool").
 matches a call is a hit of `compound check`, whatever its level, and the call gets one
 refusal: it says how many lessons matched and names them, quotes each once (the first
 four in full, each cut at the length a single one is; the rest are named, with the
-command that prints one), and each of them has then refused for the session. A user who
+command that prints one), and each of them has then refused that call's text; the call
+sent again unchanged overrides each of them whose hit was a pattern's. A user who
 keeps a lesson of their own for a mistake the general pool also covers switches the
 general one off with `compound disable <name>`: when a user's guard and a general guard
 both matched, the refusal's last line names that command and says the choice is the
@@ -550,6 +577,28 @@ event log knows. A match is returned beside the error, quoted, and counted as a
 **recurrence** of that lesson; a match from another project is moved to the user level or
 left in place as described under Levels. With no match the failure is held, per agent, as
 the possible start of a new lesson.
+
+**The same failure again is named, not judged.** When a lesson was shown in full beside a
+failure earlier in the session (recalled for it, or named by the fix judge for it), a
+later failure of the same tool with the same key gets no model call, no `promote` and no
+`show`: the recall is logged with `repeat: true`, so the CLI counts it as it counts any,
+and the text beside the error is one line that names the lesson, says it was shown in
+full earlier in this session for this same failure, and gives `compound show <name>`.
+The key (`errorKey` in `hooks/render.ts`) folds what differs from call to call for one
+mistake: every digit is read as 0, so `(eval):14: no matches found: --include=*.py` and
+`(eval):3: ...` are one failure, and the word after `no matches found:` is dropped, as
+the signature drops it (see "A failure met before"). Paths are kept: `permission denied: /a` and `/b` can have
+different causes, and a key too narrow costs one judge call where one too wide hands a
+failure another failure's lesson.
+When the error holds a line of the shell's own (see "What counts as a failed call"), that
+line alone is the key; otherwise the whole text, folded, is, so two failures whose words
+differ are never one. The record is per session and is forgotten whenever the session
+runs a `compound` command that changes the store, since the lesson may have been
+rewritten. When the CLI's reply says the repeat made the lesson ineffective, the lesson
+is read and shown in full with the instruction to strengthen it. Measured on the event
+log of 3 to 22 October 2026, 233 of 430 recalls named a lesson already recalled for the
+same error line in the same session, one session 115 times for one lesson, and each of
+them waited for the judge (median 1.8 s) and quoted the lesson in full again.
 
 The model is asked for one line of JSON, `{"name":"<exact lesson name>"}` or
 `{"name":null}`, with no code fence, markdown or explanation. What it sends is read as
@@ -613,10 +662,29 @@ held call word for word, nothing was rewritten, so the call fixed nothing:
 - Either way the failure is let go once its own call has passed: recovered, whatever the
   model said.
 
-When the model says a success is the fix, the mod returns, beside the result, the failing call, its error and
-the working call word for word, with the instruction to record the lesson now using the
-`compound:learn` skill. The session then owes a lesson. The `capture` event carries an
-`id`, a short stable hash.
+**The judge runs behind the call.** The success is returned at once: the model is asked
+after the hook has answered, and the band's spinner turns while it thinks. Measured on
+the event log of 3 to 22 October 2026, the fix judge was asked 1121 times, took 2443 ms
+at the median and 4250 ms at the 90th percentile, and answered "not the fix" 1077 times
+(96%); a tool result that waited for it waited for nothing nearly every time. What the
+answer produces is given as context beside the next tool result of the same agent loop,
+of any tool, once: the message of a capture, or of a lesson already recorded (KNOWN). The
+`judge` and `capture` events are written when the answer comes. When several successes of
+one held failure are being judged at once, the first answer that names a fix or a lesson
+resolves the failure, and a later such answer about it is dropped. A judge that throws is
+caught and logged as an `error`. Before the stop asks the CLI what is owed, it waits for
+the session's judges still running, for 2 s at most (the stop's budget, `BUDGET` in
+`hooks/render.ts`), so a capture they make refuses that stop; a judge still running after
+that goes on, and what it produces comes with the loop's next tool result. What the main
+loop's finished judges produced and the loop was not given is dropped at the stop: what
+the session owes, the CLI then says.
+
+When the model says a success is the fix, the mod gives, beside that next result, the
+failing call, its error and the working call word for word, with the instruction to
+record the lesson now using the `compound:learn` skill. The session then owes a lesson.
+The `capture` event carries an `id`, a short stable hash. A failure an earlier session met
+too asks no model (see "A failure met before"), and its capture is given beside the result
+of the success itself.
 
 A capture is **settled** by a later `learn` or `skip` event that carries `settles: <id>`,
 from any session or from none (`compound add --settles ID`, `compound skip --settles
@@ -701,7 +769,9 @@ say nothing was then widened for.
 
 ### 5. Stop: Claude is about to finish
 
-The mod asks the CLI what the session owes (`compound events --unsettled --session S`).
+The mod first waits, within the stop's budget, for any fix judge of the session still
+running (see moment 4), then asks the CLI what the session owes (`compound events
+--unsettled --session S`).
 If the answer holds a lesson owed, the stop is refused once and the debt is restated. If
 it holds a strengthening owed (see "When a lesson does not work"), the stop is refused
 once with the lesson named and the ways to settle it. Separately, a
@@ -774,7 +844,14 @@ one definition; `compound evidence list --due`):
   passing runs were given different arguments, or its text reads its arguments:
   `sys.argv`, `argparse`, `$1`, `"$@"`, `process.argv` and the like), OR the main loop
   ran it `COMPOUND_EVIDENCE_MIN_RUNS` times (3) with success, which is how a check that
-  takes no arguments is used.
+  takes no arguments is used;
+- and when none of its passing runs came from the main loop (every one was a
+  subagent's), it also passed at least twice `COMPOUND_EVIDENCE_MIN_RUNS` times (6). A
+  subagent's script is most often its one-off probe: of 125 scripts declined with
+  `compound skip --evidence`, 112 had only subagent passes (107 of them from a single
+  subagent), and 84 of those 112 passed fewer than 6 times; of the 5 scripts recorded as
+  lessons, 1 had only subagent passes, and it passed 6 times. A script with one passing
+  run from the main loop is held to the rule above alone.
 
 Whether a file is in a repository is read from the directories above it. Git is not run
 there: the directory is wherever a script happened to run, and a repository's own config
@@ -948,7 +1025,8 @@ with `compound skip --settles <id> --why`. It refuses no stop.
 
 ### Once, and only once
 
-A refusal never repeats. Each guard refuses once per session per lesson, each debt
+A refusal never repeats. Each guard refuses a call's text once (and a lesson's pattern
+refuses nothing more once the session has overridden it), each debt
 refuses one stop, each ineffective lesson refuses one stop per session, and each turn is
 asked about lessons once. The mod keeps that record in
 two places: in the running process, which is checked first, and as a directory under
@@ -1157,8 +1235,8 @@ directory called `sk-learn-experiments`. A line already in the log is not rewrit
 - The text of a quoted note or of quoted evidence still reaches Claude, marked as a
   quotation. Whether Claude gives it weight is Claude's judgement, as with any file it
   reads in the repository.
-- A guard is advice, not a barrier: it refuses a call once per session and the call sent
-  again runs. A Bash call that is one simple invocation of the `compound` CLI by the
+- A guard is advice, not a barrier: it refuses a call once and the call sent again runs,
+  after which that lesson's pattern refuses nothing more in the session. A Bash call that is one simple invocation of the `compound` CLI by the
   path the mod runs is not tested against the guards (see "The CLI's own call"). A
   global alias of the shell (`alias -g` in zsh) can rewrite any word of any command,
   that call included; it is the user's own shell configuration.
@@ -1171,7 +1249,8 @@ directory called `sk-learn-experiments`. A line already in the log is not rewrit
 - `compound log` keeps a `counted` or `ineffective` that a `recall` event already
   carries, as it keeps a `ts` and an `id`. The mod sends neither; a process that calls
   `log` itself can say either.
-- A project guard can refuse a call once per session per lesson, and a project pattern
+- A project guard can refuse each call it matches once, until the session overrides it,
+  and a project pattern
   that is slow on a call costs that call up to `COMPOUND_CHECK_BUDGET_MS`. Both are
   reported (`guard` and `error` events), and `compound rm` removes the lesson.
 - Output that carries a line shaped like a shell's error is taken for a failed call (see
@@ -1265,8 +1344,10 @@ rewrite. A recall is not counted against a lesson the session first recorded aft
 failing call: a lesson younger than the failure it matches is that failure's own lesson,
 written before the fixing call was sent, and meeting it at the fix writes no `recall`.
 A recall is not counted either when the lesson's guard already refused a call in the same
-session: a guard refuses once per session and the call sent again runs, so a failure
-after the refusal is the session going ahead, not the lesson failing to stop it. The
+session: the call sent again runs and then overrides the pattern, so a failure after the
+refusal is taken for the session going ahead, not the lesson failing to stop it. (A failure
+after a refusal can also be a call the pattern did not match; such a recall is still left
+out of the count, and `compound report` shows it per lesson under Recall.) The
 `recall` event is written with `after_guard: true` and `ineffective: false`, and the CLI,
 which holds the one definition, leaves every such recall out of the count.
 A lesson that already carries a `match` and still recurs
@@ -1312,8 +1393,8 @@ Three of the six are guards. `macos-gnu-only-commands` is recalled and stops not
 on a Mac with Homebrew's coreutils `timeout` is installed and the call is right, and a
 pattern is tested against the command's text and cannot look at `PATH`. For the same
 reason `sed-in-place-bsd` assumes the stock tool: where `sed` is GNU sed the guarded call
-is right. The guard refuses once per session, its text says to send the call again when
-the tool is there, and the call sent again runs. A user for whom that is every session
+is right. The guard's text says to send the call again when the tool is there, and the
+call sent again runs and overrides the lesson for the rest of the session. A user for whom that is every session
 switches the lesson off.
 
 `skills/` in this package holds four skills, which a session sees as `compound:<name>`:
@@ -1546,8 +1627,9 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   call of the tool by that loop while the process lived. Like a `judge` event it is left
   out of Recent and counted for no lesson.
 - **Claims**: `~/.claude/compound/claims/<session id>/`, one empty directory per thing
-  the mod did once in that session: `guard-<lesson>` (a guard's refusal; `guard-<lesson>-<digest>`, with the digest of the
-  call's text, for a hit that is sure),
+  the mod did once in that session: `guard-<lesson>-<digest>` (a guard's refusal of a call,
+  with the digest of the call's text), `override-<lesson>` (a refused call sent again
+  unchanged: the lesson's pattern refuses nothing more),
   `stop-<call id>` (a stop refused for an owed lesson), `strengthen-<lesson>` (a stop
   refused for an ineffective lesson), `nudge-<turn>` (the question after a long turn), `evidence-<id>` (a stop refused for a
   script that ran),

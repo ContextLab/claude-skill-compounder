@@ -1,4 +1,4 @@
-import { expect, mock, test, type TestBody } from 'claude-code/testing'
+import { expect, mock, test, type MockClock, type TestBody } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { BUSY, ERROR, FRAME_MS, FRAMES, FRESH_MS, GONE_MS, HINT, NOTES, OWED, WEAK } from './view'
 
@@ -212,7 +212,7 @@ test('a guard that stops a call is shown with the lesson\'s name, in the guard\'
   const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
   mock.clock(on, { now: T0 })
   for (const surface of SURFACES) {
-    // A guard stops a call once a session per lesson: each surface meets a lesson of its own.
+    // A guard stops a call's text once per lesson: each surface meets a lesson of its own.
     w.check = hit(`no-marker-echo-${surface}`)
     const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'AbovePrompt', props: BAND })
     const ran = await $.tool.call({ tool: 'Bash', command: 'echo GUARDED_MARKER' })
@@ -717,12 +717,14 @@ test('/compound status, and a run nobody typed, print the report as text and ope
 // ---- settled is what the log says, however the CLI was run ---------------------------------
 
 // A failed call and its fix: the session owes a lesson, and the band and the status entry say so.
-async function owe($: Parameters<TestBody>[0], w: World, agentId?: string): Promise<void> {
+// The fix judge runs behind the call: `clock.settle` lets it answer.
+async function owe($: Parameters<TestBody>[0], w: World, clock: MockClock, agentId?: string): Promise<void> {
   const agent = agentId === undefined ? {} : { agentId }
   w.judge = async () => '{"name":null}'
   await $.tool.call({ tool: 'Bash', command: './deploy.sh', ...agent } as never)
   w.judge = async () => FIX
   await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+  await clock.settle()
 }
 
 const ADD = 'add --name deploy-needs-target --when "Use when deploying." --body "Pass --target."'
@@ -749,7 +751,7 @@ test('a lesson recorded settles the band and the status entry, however the comma
   let n = 0
   for (const command of RECORDING_FORMS) {
     n += 1
-    await owe($, w)
+    await owe($, w, clock)
     expect(await shown(), command).toContain(OWED.label)
     expect(w.statuses[w.statuses.length - 1], command).toBe('lesson owed: ./deploy.sh --target staging')
     // The call writes the lesson: the log now holds its `learn`, and nothing is owed.
@@ -775,7 +777,7 @@ test('a lesson declined settles them too: after another command in the same call
   const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
   const skip = (minute: number, more: Record<string, unknown>) => JSON.stringify([{ ts: `2026-10-03T13:0${minute}:00Z`, type: 'skip', why: 'a typo', ...more }])
 
-  await owe($, w)
+  await owe($, w, clock)
   w.owed = []
   w.events = skip(1, { session: 'session-under-test' })
   await $.tool.call({ tool: 'Bash', command: 'compound show deploy-needs-target; compound skip --why "a typo"' })
@@ -785,7 +787,7 @@ test('a lesson declined settles them too: after another command in the same call
   await clock.advance(GONE_MS)
 
   // A subagent fixes a call and declines the lesson in its own loop.
-  await owe($, w, 'agent-7')
+  await owe($, w, clock, 'agent-7')
   expect(await shown()).toContain(OWED.label)
   w.owed = []
   w.events = skip(2, { session: 'session-under-test' })
@@ -796,7 +798,7 @@ test('a lesson declined settles them too: after another command in the same call
 
   // Declined in a terminal, by its id: the row belongs to no session, and the next call of
   // any tool finds the debt gone.
-  await owe($, w)
+  await owe($, w, clock)
   const id = String(w.owed[0]?.id)
   await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md' } as never)
   expect(await shown(), 'still owed while the log says so').toContain(OWED.label)
@@ -821,10 +823,10 @@ const KNOWN = JSON.stringify({ verdict: 'KNOWN', name: 'release-notes-format' })
 
 test('with a lesson and a strengthening both owed, rewriting the weak lesson leaves the band what the log holds: nothing', async ($, on) => {
   const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_RECUR_LIMIT: '1' })
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
-  await owe($, w)
+  await owe($, w, clock)
   // The same call fails again, and this time a recorded lesson describes it: it did not prevent it.
   w.judge = async () => '{"name":"release-notes-format"}'
   w.verdict = () => ({ counted: true, ineffective: true })
@@ -866,8 +868,8 @@ test('a strengthening whose lesson was removed is no longer owed, on the band or
 
 test('the stop asks the CLI what the session owes, and refuses for exactly that', async ($, on) => {
   const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
-  mock.clock(on, { now: T0 })
-  await owe($, w)
+  const clock = mock.clock(on, { now: T0 })
+  await owe($, w, clock)
   // The session's own events hold a capture and nothing after it: declined in a terminal,
   // the row that settles it is in no session's events. The CLI's answer is what counts.
   w.events = JSON.stringify([{ ts: '2026-10-03T12:00:00Z', type: 'capture', session: 'session-under-test', call: 'c1', failed: './deploy.sh', fixed: './deploy.sh --target staging' }])
@@ -888,7 +890,7 @@ test('the stop asks the CLI what the session owes, and refuses for exactly that'
 
 test('a lesson recorded between a failure and its fix is that failure\'s lesson, not a recurrence of it', async ($, on) => {
   const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   const agent = { agentId: 'agent-9' }
   w.judge = async () => '{"name":null}'
   await $.tool.call({ tool: 'Bash', command: './deploy.sh', ...agent } as never)
@@ -896,7 +898,10 @@ test('a lesson recorded between a failure and its fix is that failure\'s lesson,
   w.events = JSON.stringify([{ ts: '2026-10-03T16:00:00Z', type: 'learn', lesson: 'release-notes-format', update: false, session: 'session-under-test' }])
   await $.tool.call({ tool: 'Bash', command: `compound add --name release-notes-format --when w --body b`, ...agent } as never)
   w.judge = async () => KNOWN
-  const fixed = await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+  await clock.settle()
+  // What the judge produced would go beside the loop's next result: nothing.
+  const fixed = await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md', ...agent } as never)
   expect(w.logged.filter(e => e.type === 'recall')).toEqual([])
   expect(w.logged.filter(e => e.type === 'capture')).toEqual([])
   expect(JSON.stringify(fixed)).not.toContain('already recorded')
@@ -907,7 +912,13 @@ test('a lesson recorded between a failure and its fix is that failure\'s lesson,
   await $.tool.call({ tool: 'Bash', command: './deploy.sh', ...agent } as never)
   w.judge = async () => KNOWN
   await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging', ...agent } as never)
+  await clock.settle()
   expect(w.logged.filter(e => e.type === 'recall').map(e => [e.lesson, e.at])).toEqual([['release-notes-format', 'fix']])
+  // Given beside the subagent's next result, and not the main loop's.
+  const main = await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md' } as never)
+  expect(JSON.stringify(main.context ?? [])).not.toContain('already recorded')
+  const sub = await $.tool.call({ tool: 'Read', file_path: '/work/alpha/README.md', ...agent } as never)
+  expect(JSON.stringify(sub.context ?? [])).toContain('already recorded')
 })
 
 // ---- what counts as a failed call ----
@@ -949,7 +960,7 @@ test('a call refused before it ran is not a failed call: no judge, nothing held,
 
 test('a Bash call that exits 0 with a shell error in its output is a failed call: recalled, held, and captured when fixed', async ($, on) => {
   const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000' })
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
   // A pipeline's status is its last command's: `timeout` is missing and the call "succeeds".
@@ -963,6 +974,7 @@ test('a Bash call that exits 0 with a shell error in its output is a failed call
   w.tool = () => ({ text: 'done' })
   w.judge = async () => JSON.stringify({ same_goal: true, call_mistake: true, recurs: true, evidence: 'command not found: timeout', verdict: 'FIX' })
   await $.tool.call({ tool: 'Bash', command: 'perl -e "alarm 5; exec @ARGV" ./slow.sh | tail -5' })
+  await clock.settle()
   const capture = w.logged.find(e => e.type === 'capture')
   expect(capture?.failed).toBe('timeout 5 ./slow.sh | tail -5')
   expect(String(capture?.error)).toContain('(eval):1: command not found: timeout')
@@ -1010,8 +1022,29 @@ test('a failure after the lesson\'s guard refused in this session is recalled an
   // Without a refusal in the session, the CLI says the recurrence counts.
   w.verdict = () => ({ counted: true, ineffective: true })
   w.show = JSON.stringify({ name: 'release-notes-format', text: 'Print it with printf.', counts: { recall: 1 }, recalls_since: 0, recur_limit: 1, guarded_in_session: false })
+  // Another failure of the call (the same one again would be named in one line, unjudged).
+  w.tool = () => ({ text: 'deploy.sh: error: no profile is set', isError: true })
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(w.logged.filter(e => e.type === 'recall').map(e => [e.ineffective, e.after_guard])).toEqual([[false, true], [true, false]])
+})
+
+test('the same failure met again, when the CLI says that recall makes the lesson ineffective, shows the lesson in full and asks for it to be strengthened', async ($, on) => {
+  const w = world(on, { COMPOUND_PROMPT_MIN_CHARS: '100000', COMPOUND_RECUR_LIMIT: '1' })
+  mock.clock(on, { now: T0 })
+  w.judge = async () => '{"name":"release-notes-format"}'
+  w.verdict = () => ({ counted: false, ineffective: false })
+  w.show = JSON.stringify({ name: 'release-notes-format', level: 'project', path: '/p/l/release-notes-format', text: 'Print it with printf.', counts: { recall: 0 }, recalls_since: 0, recur_limit: 1, guarded_in_session: false })
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  const asked = w.asked
+  w.verdict = event => ({ counted: true, ineffective: event.repeat === true })
+  const again = await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  expect(w.asked).toBe(asked)
+  expect(w.logged.filter(e => e.type === 'recall').map(e => e.repeat)).toEqual([undefined, true])
+  const said = JSON.stringify(again.context ?? [])
+  expect(said).toContain('RECORDED-NOTE')
+  expect(said).toContain('is not preventing that failure')
+  expect(said).toContain('add --update --name release-notes-format')
+  expect(w.owed.map(e => e.type)).toEqual(['recall'])
 })
 
 // ---- a lesson of the general pool ----
@@ -1036,6 +1069,8 @@ test('a general lesson that recurs past the limit is recalled, and the session o
   expect(w.logged.filter(e => e.type === 'refuse')).toEqual([])
   // The same answer for a lesson of the user's own is a strengthening owed.
   w.show = JSON.stringify({ name: 'release-notes-format', level: 'user', path: '/u/l/release-notes-format', text: 'Print it with printf.', counts: { recall: 5 }, recalls_since: 5, recur_limit: 1, guarded_in_session: false })
+  // Another failure of the call (the same one again would be named in one line, unjudged).
+  w.tool = () => ({ text: 'deploy.sh: error: no profile is set', isError: true })
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(w.logged.filter(e => e.type === 'recall').map(e => e.ineffective)).toEqual([false, true])
 })
@@ -1044,7 +1079,7 @@ test('a general lesson that recurs past the limit is recalled, and the session o
 
 test('every question put to the judge writes a judge event with its ms, whatever the answer', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   const verdicts = () => w.logged.filter(e => e.type === 'judge').map(e => [e.moment, e.verdict])
   // Reuse: nothing named, not substantial, named, unreadable.
   for (const [n, reply] of ['{"substantial":true,"items":[],"requests":[]}', '{"substantial":false,"items":[],"requests":[]}', NAMED, 'I cannot say.'].entries()) {
@@ -1061,10 +1096,13 @@ test('every question put to the judge writes a judge event with its ms, whatever
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   w.judge = async () => '{"verdict":"NONE","reason":"the next step"}'
   await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
   w.judge = async () => KNOWN
   await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
-  // Recall: named.
+  await clock.settle()
+  // Recall: named, for a failure no lesson was shown for in this session.
   w.judge = async () => '{"name":"release-notes-format"}'
+  w.tool = command => (command === './deploy.sh' ? { text: 'deploy.sh: error: no profile is set', isError: true } : undefined)
   await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
   expect(verdicts()).toEqual([['recall', 'none'], ['fix', 'none'], ['fix', 'known'], ['recall', 'named']])
   const rows = w.logged.filter(e => e.type === 'judge')

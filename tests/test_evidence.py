@@ -244,19 +244,50 @@ class DueTest(EvidenceCase):
         """A tool is told from a probe by how it is used, not by how often: given different
         arguments, or written to read them."""
         fixed = self.script("probe.py", "print(open('/etc/hosts').read()[:10])\n")
-        self.passed("python3 %s" % fixed, 2, agent="worker-1")
+        self.passed("python3 %s" % fixed, 2)
         varied = self.script("render.py", "import os\nprint(os.environ.get('PAGE'))\n")
-        self.note("python3 %s chapter1.md" % varied, agent="worker-1")
+        self.note("python3 %s chapter1.md" % varied)
         self.note("python3 %s chapter2.md" % varied, agent="worker-1", COMPOUND_NOW=NOW + 1)
         reads = self.script("fill.sh", "#!/bin/sh\nsed \"s/NAME/$1/\" template.txt\n")
-        self.passed("sh %s" % reads, 2, agent="worker-1")
+        self.passed("sh %s" % reads, 1, agent="worker-1")
+        self.passed("sh %s" % reads, 1, COMPOUND_NOW=NOW + 1)
         once = self.script("once.py", "import sys\nprint(sys.argv[1:])\n")
-        self.passed("python3 %s a" % once, 1, agent="worker-1")
+        self.passed("python3 %s a" % once, 1)
         rows = dict((row["name"], row) for row in self.rows())
         self.assertEqual([(name, rows[name]["varied"], rows[name]["reads_args"], rows[name]["due"])
                           for name in ("probe.py", "render.py", "fill.sh", "once.py")],
                          [("probe.py", False, False, False), ("render.py", True, False, True),
                           ("fill.sh", False, True, True), ("once.py", False, True, False)])
+
+    def test_a_script_only_subagents_ran_is_owed_after_twice_the_runs(self):
+        """A subagent's script is most often its one-off probe: with no passing run from the
+        main loop, it is owed a decision only after 2 x COMPOUND_EVIDENCE_MIN_RUNS passes."""
+        varied = self.script("render.py", "import sys\nprint(sys.argv[1:])\n")
+        for index in range(5):
+            self.note("python3 %s chapter%d.md" % (varied, index), agent="worker-1", COMPOUND_NOW=NOW + index)
+        row = self.rows()[0]
+        self.assertEqual((row["ok"], row["ok_main"], row["varied"], row["reads_args"], row["due"]),
+                         (5, 0, True, True, False))
+        self.note("python3 %s chapter5.md" % varied, agent="worker-2", COMPOUND_NOW=NOW + 5)
+        self.assertEqual([(row["ok"], row["due"]) for row in self.rows()], [(6, True)])
+        # The number follows the setting.
+        self.assertEqual(self.rows("--due", COMPOUND_EVIDENCE_MIN_RUNS="4"), [])
+        # Twice as many passes do not make a probe a tool: it must still take its input.
+        fixed = self.script("probe.py", "print(open('/etc/hosts').read()[:10])\n")
+        self.passed("python3 %s" % fixed, 8, agent="worker-1", COMPOUND_NOW=NOW + 10)
+        self.assertEqual([row["name"] for row in self.rows("--due")], ["render.py"])
+
+    def test_two_varied_passes_from_a_subagent_are_not_enough_and_one_from_the_main_loop_is(self):
+        alone = self.script("alone.py", "import sys\nprint(sys.argv[1:])\n")
+        self.note("python3 %s a" % alone, agent="worker-1")
+        self.note("python3 %s b" % alone, agent="worker-1", COMPOUND_NOW=NOW + 1)
+        joined = self.script("joined.py", "import sys\nprint(sys.argv[1:])\n")
+        self.note("python3 %s a" % joined, agent="worker-1")
+        self.note("python3 %s b" % joined, COMPOUND_NOW=NOW + 1)
+        rows = dict((row["name"], row) for row in self.rows())
+        self.assertEqual([(name, rows[name]["ok"], rows[name]["ok_main"], rows[name]["varied"], rows[name]["due"])
+                          for name in ("alone.py", "joined.py")],
+                         [("alone.py", 2, 0, True, False), ("joined.py", 2, 1, True, True)])
 
     def test_runs_alone_count_only_when_the_main_loop_made_them(self):
         path = self.script("progress.sh", "#!/bin/sh\ndate\n")

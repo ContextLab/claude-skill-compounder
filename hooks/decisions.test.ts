@@ -340,7 +340,7 @@ test('S2: the bare name is checked like any other call, whatever a shell would s
 
 test('S2: another path to the CLI, and another file called compound, are checked', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: 1_800_000_000_000 })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const own = await ownPath(w, () => $.tool.call({ tool: 'Bash', command: 'true' }))
   for (const command of [`/home/me/.local/bin/compound list`, `${own.replace('/bin/compound', '/bin/../bin/compound')} list`, `/tmp/x/compound add --name a --when b --body c`, `${own}x list`]) {
     const before = checks(w)
@@ -354,7 +354,7 @@ test('S2: another path to the CLI, and another file called compound, are checked
 
 test('D6: a here-document body that holds "; rm -rf" is text: the lesson is written and no guard reads it', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: 1_800_000_000_000 })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const own = await ownPath(w, () => $.tool.call({ tool: 'Bash', command: 'true' }))
   const before = checks(w)
   const ran = await $.tool.call({ tool: 'Bash', command: `${own} add --name tidy --when 'Use when tidying.' <<'EOF'\nDo not run make clean; rm -rf build. Move it.\nEOF` })
@@ -367,7 +367,7 @@ test('D6: a here-document body that holds "; rm -rf" is text: the lesson is writ
 
 test('D6: a failed call that contains the CLI is recalled and held like any other; the CLI alone is not', async ($, on) => {
   const w = world(on)
-  mock.clock(on, { now: 1_800_000_000_000 })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const own = await ownPath(w, () => $.tool.call({ tool: 'Bash', command: 'true' }))
   w.fails = () => true
   // The CLI's own call failing (a refused `add`) is the CLI's business: no model is asked.
@@ -380,6 +380,8 @@ test('D6: a failed call that contains the CLI is recalled and held like any othe
   w.fails = () => false
   w.judge = JSON.stringify({ same_goal: true, call_mistake: true, recurs: true, evidence: 'it failed', verdict: 'FIX' })
   await $.tool.call({ tool: 'Bash', command: 'make test PROFILE=dev && compound add --name a --when b --body c' })
+  // The fix judge runs behind the call.
+  await clock.settle()
   expect(w.asked).toBe(2)
   expect(w.logged.filter(e => e.type === 'capture').map(e => e.failed)).toEqual(['make test && compound add --name a --when b --body c'])
 })

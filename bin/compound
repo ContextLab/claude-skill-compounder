@@ -143,6 +143,12 @@ EVENT LOG
                                                        `guard` events and does not
                                                        read the field
                                     ms       int       milliseconds the judge took
+                                    repeat   bool      the lesson was shown in full for
+                                                       the same failure earlier in this
+                                                       session: no judge was asked and
+                                                       Claude was given one line. The
+                                                       CLI counts it as any recall;
+                                                       it carries no after_guard
                                     counted  bool      `log` fills it in: this recall
                                                        is one that counts toward
                                                        ineffective (see Ineffective).
@@ -3331,6 +3337,45 @@ def _glob_pattern(word, names):
     return pattern, raw
 
 
+def _option_shaped(pattern):
+    """True when a pattern from `_glob_pattern` is an option with a value, as
+    `--include=*.py` is: the text before its first wildcard begins with `-`, holds `=`, and
+    holds no `/`. zsh matches such a word against the names in the current directory that
+    begin with the option's text, and no file is named `--include=...` in practice."""
+    text = []
+    index = 0
+    while index < len(pattern):
+        if pattern[index] == "[" and index + 2 < len(pattern) and pattern[index + 2] == "]":
+            # A character `glob.escape` wrapped: plain text, not a wildcard.
+            text.append(pattern[index + 1])
+            index += 3
+            continue
+        if pattern[index] in "*?":
+            break
+        text.append(pattern[index])
+        index += 1
+    prefix = "".join(text)
+    return prefix.startswith("-") and "=" in prefix and "/" not in prefix
+
+
+def _harness_temp():
+    """The real path of the harness's per-user temporary directory, `/tmp/claude-<uid>`,
+    when it is a directory of this user's and not a link; else None. Sessions write their
+    scratch files there, so it is theirs to read."""
+    import stat
+
+    if not hasattr(os, "getuid"):
+        return None
+    path = os.path.join(os.path.realpath("/tmp"), "claude-%d" % os.getuid())
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return None
+    return path
+
+
 def unmatched_globs(command, cwd):
     """The words of a command that zsh would refuse with "no matches found": a word with an
     unquoted `*` or `?` that matches no file, read from the directory the command would
@@ -3339,9 +3384,13 @@ def unmatched_globs(command, cwd):
     changes how the shell globs.
 
     THE PROBE RUNS BEFORE THE CALL IS PERMITTED, and a refusal says "no file matches". So
-    it reads only inside the directory the call runs in and the project: a pattern whose
-    directory is anywhere else is left alone, as is every word after a `cd` out of them.
-    It answers nothing about the rest of the machine, and it reads no environment."""
+    it reads only inside the directory the call runs in, the project, and the harness's
+    per-user temporary directory (`_harness_temp`): a pattern whose directory is anywhere
+    else is left alone, as is every word after a `cd` it cannot follow or that leaves
+    them, except an option with a value (`--include=*.py`, `_option_shaped`). That word
+    matches only a file whose name begins with the option's text, and no file is named so
+    in practice: after such a `cd` it is reported without reading anything. It answers
+    nothing about the rest of the machine, and it reads no environment."""
     import glob
 
     view = guard_view(command)[0]
@@ -3350,6 +3399,12 @@ def unmatched_globs(command, cwd):
     names = {}
     here = cwd
     roots = [os.path.realpath(cwd), os.path.realpath(project_root(fast=True))]
+    temp = _harness_temp()
+    if temp:
+        roots.append(temp)
+    # False after a `cd` this reading cannot follow or that leaves the roots: from then on
+    # only an option-shaped word is reported, and nothing is read.
+    known = True
 
     def inside(directory):
         real = os.path.realpath(directory)
@@ -3373,15 +3428,23 @@ def unmatched_globs(command, cwd):
         head = plain[0]
         if head in ("[[", "((", "case", "let", "function", "alias", "typeset", "local", "export", "declare"):
             continue
+        # Every other way to change directory (`pushd`, `popd`, `builtin cd`, `command cd`, a
+        # bare `cd` that goes home) is one this reading does not follow.
+        if head in ("pushd", "popd", "chdir") or (head == "cd" and len(plain) < 2) or (
+                head in ("builtin", "command") and len(plain) >= 2 and plain[1] in ("cd", "pushd", "popd", "chdir")):
+            known = False
+            continue
         if head == "cd" and len(plain) >= 2:
             target = _expand_word(plain[1].strip("\"'"), names, environment=False)
-            if target:
+            if target and (known or os.path.isabs(target)):
                 target = target if os.path.isabs(target) else os.path.join(here, target)
                 if os.path.isdir(target) and inside(target):
                     here = target
+                    known = True
                     continue
             # A `cd` this reading cannot follow, or one that leaves: nothing after it is read.
-            return found
+            known = False
+            continue
         for position, word in enumerate(words):
             if position and plain[position - 1] in ("=~", "==", "!=", "="):
                 continue
@@ -3392,6 +3455,10 @@ def unmatched_globs(command, cwd):
             if tried > GLOB_WORDS:
                 return found
             pattern, raw = made
+            if not known:
+                if _option_shaped(pattern) and raw not in found:
+                    found.append(raw)
+                continue
             full = pattern if os.path.isabs(pattern) else os.path.join(glob.escape(here), pattern)
             # The directory the pattern is read in, as plain text again (it holds no wildcard).
             where = re.sub(r"\[([*?\[])\]", r"\1", os.path.dirname(pattern))
@@ -3417,7 +3484,8 @@ EVIDENCE_RUNS = 40
 EVIDENCE_COMMAND = 2000
 EVIDENCE_DAYS = 30
 # A script that takes its input from the call is owed a decision after this many passing
-# runs; any other after EVIDENCE_MIN_RUNS passing runs by the main loop.
+# runs; any other after EVIDENCE_MIN_RUNS passing runs by the main loop. A script that only
+# subagents ran passing is owed one after twice EVIDENCE_MIN_RUNS passing runs.
 EVIDENCE_TOOL_RUNS = 2
 EVIDENCE_MIN_RUNS = 3
 EVIDENCE_FILE = ".evidence.json"
@@ -3785,14 +3853,23 @@ def evidence_due(row):
     holds it and nobody declined it. And it was USED AS A TOOL: it passed twice and takes
     its input from the call (it was given different arguments, or its text reads them), or
     the main loop ran it EVIDENCE_MIN_RUNS times. The number of runs alone does not tell
-    a tool from a probe (notes/2026-10-11-usage-audit/threshold-study.md)."""
+    a tool from a probe (notes/2026-10-11-usage-audit/threshold-study.md).
+
+    A script none of whose passing runs came from the main loop is a subagent's, and a
+    subagent's script is most often its one-off probe: it is owed a decision only when it
+    also passed twice EVIDENCE_MIN_RUNS times. Of 125 scripts declined at a stop, 112 had
+    only subagent passes, and 84 of those passed fewer than 6 times; the one subagent-only
+    script recorded as a lesson passed 6 times."""
     if row["ok_this"] < 1 or row["in_repo"] or row["test"] or row["bound"] or row["lesson"] or row["declined"]:
         return False
     # A snapshot kept before the rule about whose scripts are kept: held to it when read.
     if _own_script(_text(row.get("path")), _text(row.get("project")) or None):
         return False
+    runs = evidence_min_runs()
+    if row["ok_main"] < 1 and row["ok"] < 2 * runs:
+        return False
     return bool((row["ok"] >= EVIDENCE_TOOL_RUNS and (row["varied"] or row["reads_args"]))
-                or row["ok_main"] >= evidence_min_runs())
+                or row["ok_main"] >= runs)
 
 
 def cmd_evidence(args):

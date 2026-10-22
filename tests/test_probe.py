@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 from test_support import Case
@@ -54,6 +55,11 @@ CASES = [
     "sh -c 'echo *.nope'",
     "bash -c 'true; echo *.nope' && echo ran",
     "echo before; sh -c \"echo *.nope\"; echo after",
+    "cd sub && : --include=*.md",
+    "cd sub && : --include=*.rs",
+    "pushd sub >/dev/null && echo *.md",
+    "builtin cd sub && echo *.md",
+    "pushd sub >/dev/null && : --include=*.rs",
 ]
 # What zsh refuses and the probe leaves alone, because this reading does not follow it. A
 # probe's hit is certain; what it is not sure of it does not stop.
@@ -65,6 +71,8 @@ LEFT_ALONE = [
     "echo $UNSET_HERE/*.nope",
     "echo \"$(echo *.nope)\"",
     "zsh -f -c 'echo *.nope'",
+    # `command cd` runs /usr/bin/cd, in a child: zsh stays where it was.
+    "command cd sub; echo *.md",
 ]
 # What zsh refuses and the probe must not answer: it runs before the call is permitted, and
 # a refusal says "no file matches". Outside the directory of the call and the project it
@@ -93,7 +101,8 @@ class UnmatchedGlobTest(Case):
         super().setUp()
         self.work = os.path.join(self.box.root, "work")
         os.makedirs(os.path.join(self.work, "sub"))
-        for name in ("a.py", "b.py", "notes.txt", "sp ace.txt", os.path.join("sub", "c.md")):
+        for name in ("a.py", "b.py", "notes.txt", "sp ace.txt", os.path.join("sub", "c.md"),
+                     os.path.join("sub", "--include=x.md")):
             with open(os.path.join(self.work, name), "w") as handle:
                 handle.write("x\n")
         self.box.write_lesson(self.box.lesson_dir("glob-matches-nothing", "user"), "glob-matches-nothing",
@@ -140,6 +149,42 @@ class UnmatchedGlobTest(Case):
                                  command)
         # Inside the project, which is not where this call runs, it reads.
         self.assertTrue(self.check("ls %s/definitely-not-here-*" % self.box.project))
+
+    def test_an_option_with_a_pattern_is_refused_after_a_cd_the_probe_cannot_follow(self):
+        """`--include=*.py` matches only a file whose name begins with `--include=`, and no
+        directory holds one: after a `cd` the probe does not follow, it is still sure."""
+        empty = os.path.join(self.work, "empty")
+        os.makedirs(empty)
+        for command in ("cd $SECRET_DIR; grep -rn TODO --include=*.py .",
+                        "cd ~; grep -rn TODO --exclude=* .",
+                        "cd / && : --include=*.py"):
+            with self.subTest(command=command):
+                self.assertTrue(self.zsh_refuses(command.replace("$SECRET_DIR", empty)), command)
+                hits = self.check(command, SECRET_DIR=empty)
+                self.assertEqual([(hit["sure"], hit["words"]) for hit in hits],
+                                 [(True, [command.split()[-2] if command.endswith(" .") else command.split()[-1]])])
+        # Every other word after such a `cd` is still left alone, and so is an option whose
+        # pattern has a directory in it.
+        for command in ("cd $SECRET_DIR; ls definitely-not-here-*", "cd $SECRET_DIR; : --x=sub/*.nope",
+                        "cd $SECRET_DIR; : -x*=y"):
+            with self.subTest(command=command):
+                self.assertEqual(self.check(command, SECRET_DIR=empty), [], command)
+
+    def test_it_reads_the_harness_s_temporary_directory(self):
+        root = os.path.join(os.path.realpath("/tmp"), "claude-%d" % os.getuid())
+        if not os.path.isdir(root) or os.path.islink(root):
+            self.skipTest("the harness's temporary directory %s does not exist on this machine" % root)
+        scratch = tempfile.mkdtemp(prefix="compound-probe-", dir=root)
+        self.addCleanup(shutil.rmtree, scratch, True)
+        os.makedirs(os.path.join(scratch, "t10"))
+        with open(os.path.join(scratch, "t10", "run-results.json"), "w") as handle:
+            handle.write("{}\n")
+        for command, refused in (("S=%s; cd $S; ls $S/t10/*nothing*" % scratch, True),
+                                 ("S=%s; cd $S; ls $S/t10/*results*" % scratch, False),
+                                 ("S=%s; cd $S; ls t10/*nothing*" % scratch, True)):
+            with self.subTest(command=command):
+                self.assertEqual(self.zsh_refuses(command), refused, command)
+                self.assertEqual(bool(self.check(command)), refused, command)
 
     def test_a_hit_is_sure_and_names_the_words(self):
         hits = self.check("grep -rn TODO --include=*.rs . ; ls q*.txt")

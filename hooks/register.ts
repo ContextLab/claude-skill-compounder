@@ -4,9 +4,9 @@ import type { CompoundBand, CompoundBoard, CompoundBusyKind } from '../types'
 import { isOff, isQuiet, knobsFrom, type Knobs } from './knobs'
 import { fixPrompt, parseFix, parseRecall, parseReuse, recallPrompt, reusePrompt } from './judge'
 import {
-  bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
+  bareRetry, betweenLine, BUDGET, callText, candidateText, captureContext, changesStore, cliCall, digest, errorKey, errorReport, errorStatus, FIX_ATTEMPTS, guarded, guardReason, mentionsCli, ranBetween,
   sameCall, soleCli, soleCliShape,
-  heldStep, indexContext, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatKey, repeatStatus, reportsEvents, reusable,
+  heldStep, indexContext, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatRecallContext, repeatKey, repeatStatus, reportsEvents, reusable,
   resembles, reuseContext, reuseStatus, ruleRefusal, shellError, shellFailure, stopDebt, stopEvidence, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
   unsettledContext, usedStatus, userOrigin,
   type Failure, type Held, type Repeat, type Turn,
@@ -28,14 +28,17 @@ import {
 // problem is solved it has the lesson written down. Five moments, each one a hook:
 //
 //   1 reuse    prompt.submit   a typed, substantial prompt gets the existing work that covers it
-//   2 guard    tool.call       a call matching a lesson's `match` is refused once per session
+//   2 guard    tool.call       a call matching a lesson's `match` is refused, once for its text,
+//                              until the session sends a refused call again unchanged
 //   3 recall   tool.call       a failed call gets the recorded lesson that describes it
 //                              (a call refused before it ran is not a failed call, and a Bash
-//                              call that exited 0 with a shell error in its output is one)
+//                              call that exited 0 with a shell error in its output is one; the
+//                              same failure again in the session gets the lesson's name alone)
 //   4 capture  tool.call       a success after a held failure makes the session owe a lesson
 //                              (one failure is held per agent loop; a failure a lesson is
 //                              recalled for leaves it held; the held call passing unchanged
-//                              with nothing run between is a retry, not a fix)
+//                              with nothing run between is a retry, not a fix; the judge runs
+//                              behind the call, and its answer comes with the loop's next result)
 //   5 stop     classic.Stop    an owed lesson, or an owed strengthening of one, refuses the stop
 //                              once; a long turn is asked once
 //
@@ -57,7 +60,8 @@ import {
 // it is read only to turn the "recording" spinner, to leave the CLI's own calls unguarded,
 // and to know that a call may have written an event worth a toast.
 //
-// A REFUSAL HAPPENS AT MOST ONCE. A guard's deny and a stop's refusal each need a claim
+// A REFUSAL HAPPENS AT MOST ONCE FOR WHAT IT IS ABOUT (a guard's for a lesson and a call
+// text, a stop's for a debt). A guard's deny and a stop's refusal each need a claim
 // (see `claim`), and a claim that cannot be made means the mod does not refuse.
 //
 // A plugin gets ONE unmatched tool.call hook, so moments 2, 3 and 4 share it.
@@ -152,9 +156,22 @@ const noGuards = new Set<string>()
 // The tools some guard applies to, as a session's last `check` said: before a call of any
 // other tool nothing can hit, so no call is made. Forgotten when `noGuards` is.
 const guardTools = new Map<string, Set<string>>()
+// THE FIX JUDGE RUNS BEHIND THE CALL. Each question running or answered and not yet given
+// to Claude, per agent loop (`<session>:<agent loop>`): what it produced goes on the loop's
+// next tool result, of any tool, and the stop awaits the session's still running.
+type Judging = { done: boolean; out: string[]; running: Promise<void> }
+const judging = new Map<string, Judging[]>()
+// The held failures a fix judge has resolved (a fix, or a lesson already recorded).
+const resolved = new WeakSet<Held>()
+// The lessons shown in full beside a failure, per session, by the failure's key (./render
+// errorKey): the same failure met again gets one line naming the lesson, and no judge.
+// Forgotten when the store changes, since the lesson may have been rewritten.
+const recalledFor = new Map<string, Map<string, Item>>()
 // What a guard refused, as `<session>:<agent loop>:<tool>`, until that loop's next call of
 // the tool: a `retry` event then says whether it was the refused call sent again.
-const refusedCalls = new Map<string, { lessons: string[]; text: string }>()
+// `patterns`: the lessons among them whose hit was a pattern's, which the call sent again
+// unchanged overrides.
+const refusedCalls = new Map<string, { lessons: string[]; patterns: string[]; text: string }>()
 // The events of a session's own CLI calls that were already toasted, per session.
 const told = new Map<string, Set<string>>()
 // What each session owes, as the CLI last said: the ids of its unsettled captures, the
@@ -679,6 +696,7 @@ function forgetInventory(sid: string): void {
   elsewhere = undefined
   noGuards.delete(sid)
   guardTools.delete(sid)
+  recalledFor.delete(sid)
 }
 
 // One `judge` event for a question put to the model, whatever it answered: the verdict and
@@ -718,8 +736,13 @@ async function ask($: EngineInterface, prompt: string, k: Knobs): Promise<Reply>
 // REFUSAL (a guard's deny, a stop's refusal) needs `mine`: with no record that it happened,
 // a refusal could repeat, so the mod does not refuse. Anything else proceeds, since this
 // process's own record already keeps it to once here.
+//
+// A claim may name a claim that vetoes it (`$3`): when that one is on record, the claim is
+// `taken` without being made. A guard's claim is vetoed by the session's override of its
+// lesson, and the test and the claim are one process.
 const CLAIM_SH = [
   'mkdir -p "$1" 2>/dev/null',
+  'if [ -n "$3" ] && [ -d "$1/$3" ]; then exit 1; fi',
   'if mkdir "$1/$2" 2>/dev/null; then exit 0; fi',
   'if [ -d "$1/$2" ]; then exit 1; fi',
   'echo "cannot create $1/$2" >&2',
@@ -746,9 +769,10 @@ async function claimsRoot($: EngineInterface): Promise<string | undefined> {
   return `${strip(home)}/claims`
 }
 
-async function claim($: EngineInterface, sid: string, key: string): Promise<Claim> {
+async function claim($: EngineInterface, sid: string, key: string, unless?: string): Promise<Claim> {
   const id = `${sid}\u0000${key}`
   if (claimed.has(id)) return 'taken'
+  if (unless !== undefined && claimed.has(`${sid}\u0000${unless}`)) return 'taken'
   claimed.add(id)
   const safe = (t: string) => t.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 96) || '_'
   try {
@@ -761,7 +785,7 @@ async function claim($: EngineInterface, sid: string, key: string): Promise<Clai
       sweptClaims = true
       await $.process.run([SH, '-c', SWEEP_SH, 'sh', root, String(CLAIMS_KEPT_DAYS)], { timeoutMs: BUDGET.claim })
     }
-    const ran = await $.process.run([SH, '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key)], { timeoutMs: BUDGET.claim })
+    const ran = await $.process.run([SH, '-c', CLAIM_SH, 'sh', `${root}/${safe(sid)}`, safe(key), ...(unless === undefined ? [] : [safe(unless)])], { timeoutMs: BUDGET.claim })
     if (ran.exitCode === 0) return 'mine'
     if (ran.exitCode === 1) return 'taken'
     await failOnce($, sid, 'claim', `${ran.stderr.trim() || `exit ${ran.exitCode}`}; the claims directory is unusable, so nothing is refused in this session`)
@@ -777,9 +801,9 @@ async function firstTime($: EngineInterface, sid: string, key: string): Promise<
   return (await claim($, sid, key)) !== 'taken'
 }
 
-// For a refusal: act only when the claim is on record.
-async function mayRefuse($: EngineInterface, sid: string, key: string): Promise<boolean> {
-  return (await claim($, sid, key)) === 'mine'
+// For a refusal: act only when the claim is on record, and not when `unless` is.
+async function mayRefuse($: EngineInterface, sid: string, key: string, unless?: string): Promise<boolean> {
+  return (await claim($, sid, key, unless)) === 'mine'
 }
 
 async function registerCommand($: EngineInterface): Promise<void> {
@@ -1109,15 +1133,17 @@ async function guard($: EngineInterface, sid: string, loop: string, tool: string
     await fail($, 'guard.parse', `compound check printed something unreadable: ${ran.stdout.slice(0, 200)}`)
     return undefined
   }
-  // Once per session per lesson: the claim is the record, so the same call sent again
-  // runs. With no record there is no refusal. A hit that is sure (a probe read the files:
-  // the call cannot run as written) is claimed for the call's own text instead, so the
-  // mistake written a new way is stopped again, and the same call sent again still runs.
+  // Once per call text per lesson: the claim is the record, so the same call sent again
+  // runs, and the mistake made again in a new call is stopped again (a session repeats its
+  // mistakes: most recalls after a refusal were of calls the pattern matched). With no
+  // record there is no refusal. A pattern's hit is vetoed by the session's override of its
+  // lesson: once a refused call was sent again unchanged, the session disagrees with the
+  // pattern, and it refuses nothing more in that session. A hit that is sure (a probe read
+  // the files: the call cannot run as written) has no override.
   const whole = callText(tool, input)
   const fresh = []
   for (const h of hits) {
-    const once = h.sure === true ? `-${digest(whole)}` : ''
-    if (await mayRefuse($, sid, `guard-${h.name}${once}`)) fresh.push(h)
+    if (await mayRefuse($, sid, `guard-${h.name}-${digest(whole.trim())}`, h.sure === true ? undefined : `override-${h.name}`)) fresh.push(h)
   }
   const first = fresh[0]
   if (first === undefined) return undefined
@@ -1125,7 +1151,7 @@ async function guard($: EngineInterface, sid: string, loop: string, tool: string
   const ms = Date.now() - began
   // `watched`: this loop's next call of the tool is logged as a `retry` event.
   for (const h of fresh) await log($, { type: 'guard', lesson: h.name, tool, text, ms, watched: true })
-  refusedCalls.set(`${loop}:${tool}`, { lessons: fresh.map(h => h.name), text: whole })
+  refusedCalls.set(`${loop}:${tool}`, { lessons: fresh.map(h => h.name), patterns: fresh.filter(h => h.sure !== true).map(h => h.name), text: whole })
   $.ui.status(`guard ${first.name}`)
   await paint($, (band, now) => noted(band, 'guard', fresh.length > 1 ? `${first.name} +${fresh.length - 1}` : first.name, now, `${tool === 'Bash' ? '' : `${tool} `}${oneLine(redact(text), 60)}`))
   return guardReason(fresh, await cliPath($))
@@ -1135,13 +1161,23 @@ async function guard($: EngineInterface, sid: string, loop: string, tool: string
 // first call of that tool that follows, saying whether it was the same call. It is written
 // after that call has run (or was itself refused), so the call does not wait for it. A
 // call of the CLI itself is not that call: a refused session reads the lesson first.
-function refusedBefore(loop: string, tool: string, input: Record<string, unknown>): Record<string, unknown> | undefined {
+type Retry = { event: Record<string, unknown>; overrides: string[] }
+function refusedBefore(loop: string, tool: string, input: Record<string, unknown>): Retry | undefined {
   const key = `${loop}:${tool}`
   const was = refusedCalls.get(key)
   if (was === undefined) return undefined
   refusedCalls.delete(key)
   const text = callText(tool, input)
-  return { type: 'retry', lessons: was.lessons, tool, same: sameCall(was.text, text), text: text.slice(0, LOGGED_CALL) }
+  const same = sameCall(was.text, text)
+  return { event: { type: 'retry', lessons: was.lessons, tool, same, text: text.slice(0, LOGGED_CALL) }, overrides: same ? was.patterns : [] }
+}
+
+// The `retry` event is written, and a refused call sent again unchanged overrides the
+// patterns that refused it: each of those lessons refuses nothing more in this session. The
+// override is a claim, so it holds across copies of the mod and a reload.
+async function afterRefusal($: EngineInterface, sid: string, retry: Retry): Promise<void> {
+  await log($, retry.event)
+  for (const name of retry.overrides) await firstTime($, sid, `override-${name}`)
 }
 
 // ---- moments 3 and 4: recall and capture ----------------------------------------------
@@ -1150,6 +1186,45 @@ function refusedBefore(loop: string, tool: string, input: Record<string, unknown
 // level, and does so only when git does not track it there: a tracked lesson stays, is read
 // from where it is, and is offered to the user as a move. The recurrence is logged, marked
 // ineffective when this one makes it so. Answers the text Claude reads beside the result.
+// The `recall` event, as both a recall shown in full and a repeat write it.
+function recallEvent(lesson: Item, level: string, tool: string, call: string, error: string, known: boolean, ms: number, more: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: 'recall',
+    lesson: lesson.name,
+    ...(level === '' ? {} : { level }),
+    ...(lesson.path === '' ? {} : { path: lesson.path }),
+    tool,
+    call: call.slice(0, LOGGED_CALL),
+    error: error.slice(-LOGGED_ERROR),
+    at: known ? 'fix' : 'failure',
+    guard: lesson.match.length > 0,
+    ...more,
+    ms,
+  }
+}
+
+// A lesson met again for a failure it was shown in full for earlier in this session. No
+// judge was asked, and nothing is promoted or read: the recall is logged (`repeat`), so
+// the CLI counts it as it counts any, and Claude is given one line. When the CLI's reply
+// says this recall made the lesson ineffective, the lesson is read and shown in full with
+// the instruction to strengthen it, as any recall that does is.
+async function recurredAgain($: EngineInterface, sid: string, lesson: Item, tool: string, call: string, error: string): Promise<string[]> {
+  const wrote = await written($, recallEvent(lesson, lesson.level, tool, call, error, false, 0, { repeat: true }))
+  if (wrote?.ineffective !== true) {
+    $.ui.status(`recalled ${lesson.name}`)
+    await paint($, (band, now) => noted(unfixed(band), 'recall', lesson.name, now))
+    return [repeatRecallContext(lesson, await cliPath($))]
+  }
+  const shown = await cli($, ['show', lesson.name, '--json'])
+  const read = shown === undefined ? undefined : parseShow(shown.stdout)
+  const count = (read?.recalls ?? 0) + 1
+  owes(sid, [], [lesson.name])
+  $.ui.toast(toast('ineffective', lesson.name, `recalled ${count} times`))
+  $.ui.status(`${lesson.name} ineffective`)
+  await paint($, (band, now) => weakened(band, lesson.name, now))
+  return [recallContext(lesson, read === undefined || read.text === '' ? lesson.description : read.text, count, true, await cliPath($), call)]
+}
+
 async function recurred($: EngineInterface, sid: string, found: Item, tool: string, call: string, error: string, known: boolean, ms: number): Promise<string[]> {
   const cliAt = await cliPath($)
   const out: string[] = []
@@ -1181,7 +1256,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   if (read !== undefined && read.path !== '') lesson = { ...lesson, path: read.path }
   // The CLI's counts are from before this recurrence is logged: this one is added.
   const count = (read?.recalls ?? 0) + 1
-  // A guard refuses once per session, and the call sent again runs. A failure after the
+  // A guard's refusal is advice: the call sent again runs. A failure after the
   // lesson's guard refused in this session is the session going ahead, not the lesson
   // failing to stop it: it is recalled, and it does not count toward "ineffective". The CLI
   // says whether that refusal is in the log, and leaves such a recall out of its own count.
@@ -1195,19 +1270,7 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   // lesson since it was last written, so failures that arrive together are one. With no
   // readable reply the recall asks for nothing.
   const level = read?.level || lesson.level
-  const wrote = await written($, {
-    type: 'recall',
-    lesson: lesson.name,
-    ...(level === '' ? {} : { level }),
-    ...(lesson.path === '' ? {} : { path: lesson.path }),
-    tool,
-    call: call.slice(0, LOGGED_CALL),
-    error: error.slice(-LOGGED_ERROR),
-    at: known ? 'fix' : 'failure',
-    guard: lesson.match.length > 0,
-    after_guard: afterGuard,
-    ms,
-  })
+  const wrote = await written($, recallEvent(lesson, level, tool, call, error, known, ms, { after_guard: afterGuard }))
   const ineffective = wrote?.ineffective === true
   if (ineffective) {
     owes(sid, [], [lesson.name])
@@ -1216,6 +1279,10 @@ async function recurred($: EngineInterface, sid: string, found: Item, tool: stri
   $.ui.status(ineffective ? `${lesson.name} ineffective` : `recalled ${lesson.name}`)
   await paint($, (band, now) => (ineffective ? weakened(band, lesson.name, now) : noted(unfixed(band), moved ? 'moved' : 'recall', lesson.name, now)))
   out.push(known ? knownContext(lesson, text, count, ineffective, cliAt, call) : recallContext(lesson, text, count, ineffective, cliAt, call))
+  // Shown in full for this failure: met again in this session, it is named in one line.
+  const shownFor = recalledFor.get(sid) ?? new Map<string, Item>()
+  recalledFor.set(sid, shownFor)
+  shownFor.set(errorKey(tool, error), { ...lesson, ...(level === '' ? {} : { level }) })
   return out
 }
 
@@ -1233,10 +1300,26 @@ async function metBefore($: EngineInterface, tool: string, call: string, error: 
   return ran === undefined ? undefined : parseMet(ran.stdout)
 }
 
+// A failure a lesson is recalled for, and what the loop holds.
+function letHeldGo(key: string, tool: string, call: string): void {
+  const was = held.get(key)
+  if (was !== undefined && was.tool === tool && sameCall(was.call, call)) held.delete(key)
+  else if (was !== undefined) ranBetween(was, betweenLine(tool, call, true))
+}
+
 async function onFailure($: EngineInterface, sid: string, key: string, tool: string, callId: string, call: string, errorText: string, known_?: Met): Promise<string[]> {
   // The instance that claims the failure holds it, and so is the only one that judges the fix.
   if (!(await firstTime($, sid, `fail-${callId}`))) return []
   const error = redact(errorText)
+  // The same failure as one a lesson was shown in full for in this session: the judge is
+  // not asked again (it would name the same lesson, at its cost, before the result returns).
+  const shownBefore = recalledFor.get(sid)?.get(errorKey(tool, error))
+  if (shownBefore !== undefined) {
+    letHeldGo(key, tool, call)
+    const out = await recurredAgain($, sid, shownBefore, tool, call, error)
+    await watch($, sid)
+    return out
+  }
   const known = await lessons($)
   const k = await knobs($)
   let hit: Item | undefined
@@ -1274,12 +1357,63 @@ async function onFailure($: EngineInterface, sid: string, key: string, tool: str
   // failure held from before stays held: this one is another mistake, and the fix of the
   // first is still to come. Only when this is the held call itself, sent again and failing
   // again, does the lesson answer the held failure too, and it is let go.
-  const was = held.get(key)
-  if (was !== undefined && was.tool === tool && sameCall(was.call, call)) held.delete(key)
-  else if (was !== undefined) ranBetween(was, betweenLine(tool, call, true))
+  letHeldGo(key, tool, call)
   const out = await recurred($, sid, hit, tool, call, error, false, ms)
   await watch($, sid)
   return out
+}
+
+// Starts `work` without waiting for it. A rejection is caught and logged: a hook never
+// breaks a turn, and one running behind it least of all.
+function behind($: EngineInterface, sid: string, loop: string, work: () => Promise<string[]>): void {
+  const entry: Judging = { done: false, out: [], running: Promise.resolve() }
+  entry.running = (async () => {
+    try {
+      entry.out = await work()
+    } catch (err) {
+      try {
+        await fail($, 'capture', err)
+      } catch {
+        // Nothing is left to tell it to.
+      }
+    } finally {
+      entry.done = true
+    }
+  })()
+  judging.set(loop, [...(judging.get(loop) ?? []), entry])
+}
+
+// What the loop's finished judges produced, taken: given beside the loop's next result.
+function judgedText(loop: string): string[] {
+  const all = judging.get(loop)
+  if (all === undefined) return []
+  const left = all.filter(j => !j.done)
+  if (left.length === 0) judging.delete(loop)
+  else judging.set(loop, left)
+  return all.filter(j => j.done).flatMap(j => j.out)
+}
+
+// At the stop: the session's judges still running are awaited, within the stop's budget, so
+// that a capture they make is in the log when the CLI is asked what is owed. A judge still
+// running after that goes on, and what it produces goes on the loop's next result. What the
+// session's finished judges produced, in any of its loops, and the loop was not given is
+// dropped: the stop is
+// the end of the turn, and what it owes, the CLI says.
+async function judgesDone($: EngineInterface, sid: string): Promise<void> {
+  const running = [...judging].filter(([loop]) => loop.startsWith(`${sid}:`)).flatMap(([, all]) => all.filter(j => !j.done).map(j => j.running))
+  if (running.length > 0) {
+    let timer: Timer | undefined
+    const waited = new Promise<void>(resolve => {
+      try {
+        timer = $.clock.after(BUDGET.call, resolve)
+      } catch {
+        resolve()
+      }
+    })
+    await Promise.race([Promise.all(running), waited])
+    timer?.cancel()
+  }
+  for (const loop of [...judging.keys()]) if (loop.startsWith(`${sid}:`)) judgedText(loop)
 }
 
 async function onSuccess($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string): Promise<string[]> {
@@ -1337,6 +1471,21 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   // The judge has had its attempts, or the failed call itself now passes and was no fix:
   // either way the failure is over, and it is let go.
   const done = was.left <= 0 || sameCall(was.call, call)
+  // A failure that is over is let go now, not when its judge answers: a success that comes
+  // while the judge runs is no attempt at it, and asks no judge of its own.
+  if (done && held.get(key) === was) held.delete(key)
+  // THE JUDGE IS OFF THE CALL'S PATH. It takes seconds and nearly always answers "not the
+  // fix", so the result goes back at once, and what the judge produces is given to the
+  // loop's next tool result, or awaited at the stop (see `judging`).
+  // What ran between is taken now, before this call is itself listed as having run between.
+  const pair = { failed: was.call, error: was.error, worked: call, between: [...was.between], skipped: was.skipped }
+  behind($, sid, key, () => judgeFix($, sid, key, tool, callId, agent, call, was, done, pair))
+  return []
+}
+
+// The fix judge's question about one success, and what follows from its answer: the text
+// for Claude (a capture, or a lesson already recorded), delivered later by `behind`.
+async function judgeFix($: EngineInterface, sid: string, key: string, tool: string, callId: string, agent: string | undefined, call: string, was: Held, done: boolean, pair: Parameters<typeof fixPrompt>[0]): Promise<string[]> {
   const letGo = async (): Promise<void> => {
     if (done && held.get(key) === was) held.delete(key)
     await paint($, band => unfixed(band))
@@ -1345,7 +1494,6 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
   const known = await lessons($)
   const k = await knobs($)
   await paint($, (band, now) => stepped(band, 'fixed', now))
-  const pair = { failed: was.call, error: was.error, worked: call, between: [...was.between], skipped: was.skipped }
   const reply = await during($, 'fix', () => ask($, fixPrompt(pair, known), k))
   if (reply.text === undefined) {
     await letGo()
@@ -1369,6 +1517,10 @@ async function onSuccess($: EngineInterface, sid: string, key: string, tool: str
     await letGo()
     return []
   }
+  // Two successes judged at once: the first that names a fix (or a lesson) resolves the
+  // failure, and a later answer about the same failure is dropped.
+  if (resolved.has(was)) return []
+  resolved.add(was)
   if (held.get(key) === was) held.delete(key)
   if (answer.verdict === 'KNOWN') {
     // A lesson this session first recorded AFTER the call failed is younger than the
@@ -1530,6 +1682,7 @@ function turnEnded(sid: string): undefined {
 async function onStop($: EngineInterface, followsBlock: boolean): Promise<string | undefined> {
   if (await off($)) return undefined
   const sid = await $.session.id()
+  await judgesDone($, sid)
   // A failure an earlier session met too, still held when the turn ends: whatever the
   // session did about it, it did with another tool or in a way no later call showed. The
   // lesson is owed all the same, and the session has the turn in front of it to write it from.
@@ -1720,7 +1873,7 @@ export const register: Register = on => {
     let own: string | undefined
     let sid = ''
     let recording: string | undefined
-    let retry: Record<string, unknown> | undefined
+    let retry: Retry | undefined
     try {
       if (await off($)) return next(e)
       sid = await $.session.id()
@@ -1733,7 +1886,7 @@ export const register: Register = on => {
         retry = refusedBefore(loop, tool, input)
         const deny = await guard($, sid, loop, tool, input)
         if (deny !== undefined) {
-          if (retry !== undefined) await log($, retry)
+          if (retry !== undefined) await afterRefusal($, sid, retry)
           return { deny }
         }
       }
@@ -1756,7 +1909,7 @@ export const register: Register = on => {
     }
     if (sid === '') return ran
     try {
-      if (retry !== undefined) await log($, retry)
+      if (retry !== undefined) await afterRefusal($, sid, retry)
     } catch (err) {
       await fail($, 'retry', err)
     }
@@ -1769,13 +1922,19 @@ export const register: Register = on => {
       await fail($, 'settle', err)
     }
     if (ran.deny !== undefined) return ran
+    // What a fix judge of this loop produced since its last result goes beside this one.
+    const late = judgedText(`${sid}:${e.agentId ?? 'main'}`)
+    const give = (r: typeof ran, more: readonly string[] = []): typeof ran => {
+      const all = [...late, ...more]
+      return all.length === 0 ? r : { ...r, context: [...(r.context ?? []), ...all] }
+    }
     try {
       // What is told about a `compound` command follows the events it wrote. The call that
       // is the CLI's own is read by its verb; one that runs the CLI among other things, or
       // reaches it through a variable or a wrapper, may have written anything.
       if (own !== undefined) {
         await onCliCall($, sid, own, began)
-        return ran
+        return give(ran)
       }
       if (verb !== undefined || (tool === 'Bash' && typeof input.command === 'string' && mentionsCli(input.command))) await onCliCall($, sid, 'add', began)
       // A script that ran is kept as it ran, passed or failed; a call refused before it ran ran nothing.
@@ -1790,7 +1949,7 @@ export const register: Register = on => {
       // and whatever fixes it, and the judge is shown it.
       // A tool that only reads or keeps books changes nothing, and is not listed.
       const before = held.get(key)
-      if (!judged(tool) && (before === undefined || !guarded(tool))) return ran
+      if (!judged(tool) && (before === undefined || !guarded(tool))) return give(ran)
       const text = String(ran.text ?? '')
       // A call that was refused before it ran (a permission, a safety check, the harness, a
       // hook) is not a failed call: no judge is asked, nothing is held, nothing is watched.
@@ -1799,16 +1958,16 @@ export const register: Register = on => {
       // is recorded and owed if none is.
       const refused = ran.isError === true ? refusal(text) : undefined
       if (refused !== undefined) {
-        if (!judged(tool) || !ruleRefusal(refused)) return ran
+        if (!judged(tool) || !ruleRefusal(refused)) return give(ran)
         const met = await metBefore($, tool, callText(tool, input), redact(text))
-        if (met === undefined || (met.sessions === 0 && !met.captured)) return ran
+        if (met === undefined || (met.sessions === 0 && !met.captured)) return give(ran)
         const more = await onFailure($, sid, key, tool, e.tool_use_id, callText(tool, input), text, met)
-        return more.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...more] }
+        return give(ran, more)
       }
       const call = callText(tool, input)
       if (!judged(tool)) {
         if (before !== undefined) ranBetween(before, betweenLine(tool, call, ran.isError === true))
-        return ran
+        return give(ran)
       }
       // A Bash call that exited 0 with the shell's own error in its output did fail.
       const shell = ran.isError !== true && tool === 'Bash' ? shellError(text) : undefined
@@ -1819,13 +1978,14 @@ export const register: Register = on => {
           : shell !== undefined
             ? await onFailure($, sid, key, tool, e.tool_use_id, call, shellFailure(shell, text))
             : await onSuccess($, sid, key, tool, e.tool_use_id, e.agentId, call)
-      // A success that was judged no fix, or that another tool made, ran between as well.
+      // A success whose judge has not said it is the fix, or that another tool made, ran
+      // between as well.
       // (A failure that was recalled is noted where it is recalled.)
       if (!failed && before !== undefined && held.get(key) === before) ranBetween(before, betweenLine(tool, call, false))
-      return extra.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...extra] }
+      return give(ran, extra)
     } catch (err) {
       await fail($, ran.isError === true ? 'recall' : 'capture', err)
-      return ran
+      return give(ran)
     }
   }).catch(($, e, next) => {
     failQuietly($, 'tool.call', `${next.error.kind}: ${next.error.message ?? ""}`)

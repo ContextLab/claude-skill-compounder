@@ -16,18 +16,20 @@ const ISOLATED = 'This agent is isolated in the worktree /w/.claude/worktrees/ag
 const DENIED = "The user doesn't want to proceed with this tool use. The tool use was rejected."
 
 type Met = { sig: string | null; sessions: number; captured: boolean }
-type World = { logged: Record<string, unknown>[]; asked: string[]; met: (error: string) => Met; metCalls: string[]; fail: (command: string) => string | undefined }
+// `settle`: lets the fix judge, which runs behind the call, finish.
+type World = { logged: Record<string, unknown>[]; asked: string[]; met: (error: string) => Met; metCalls: string[]; fail: (command: string) => string | undefined; settle: () => Promise<void> }
 
 let worlds = 0
 
 function world(on: On): World {
   worlds += 1
   const n = worlds
-  const w: World = { logged: [], asked: [], met: () => ({ sig: null, sessions: 0, captured: false }), metCalls: [], fail: () => undefined }
+  const w: World = { logged: [], asked: [], met: () => ({ sig: null, sessions: 0, captured: false }), metCalls: [], fail: () => undefined, settle: async () => undefined }
   const claims = new Set<string>()
   const owed: Record<string, unknown>[] = []
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000' })
-  mock.clock(on, { now: 1_800_000_000_000 })
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  w.settle = () => clock.settle()
   on('session.id', () => ({ value: `recur-session-${n}` }))
   on('session.root', () => ({ value: `/work/recur-${n}` }))
   on('session.cwd', () => ({ value: `/work/recur-${n}` }))
@@ -155,6 +157,7 @@ test('a failure met for the first time goes to the judge as before', async ($, o
   w.met = () => ({ sig: 'command not found: timeout', sessions: 0, captured: false })
   await $.tool.call({ tool: 'Bash', command: 'timeout 5 make test' })
   await $.tool.call({ tool: 'Bash', command: 'gtimeout 5 make test' })
+  await w.settle()
   expect(w.asked.length).toBe(1)
   expect(captures(w)).toEqual([])
 })
@@ -165,6 +168,7 @@ test('a failure a lesson was owed for once already is not owed again', async ($,
   w.met = () => ({ sig: 'command not found: timeout', sessions: 4, captured: true })
   await $.tool.call({ tool: 'Bash', command: 'timeout 5 make test' })
   await $.tool.call({ tool: 'Bash', command: 'gtimeout 5 make test' })
+  await w.settle()
   expect(captures(w)).toEqual([])
   expect(w.asked.length).toBe(1)
 })
