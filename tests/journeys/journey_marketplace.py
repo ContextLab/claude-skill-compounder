@@ -7,7 +7,9 @@ journey requires), so the install writes nothing to the real `~/.claude`, and th
 load the mod only because the install enabled it: no `--plugin-dir` is passed.
 
   install   a copy of the package with a scratch `.claude-plugin/marketplace.json` is added
-            as a marketplace and `compound` is installed from it; both commands succeed,
+            as a marketplace (or, with `--source owner/repo`, that repository, under the
+            name this checkout's `.claude-plugin/marketplace.json` gives) and `compound`
+            is installed from it; both commands succeed,
             the fresh configuration's settings enable it, and the real `~/.claude` files the
             commands would write are byte for byte as they were.
   load      a session's `init` message lists the installed plugin, and no `--plugin-dir`.
@@ -19,8 +21,9 @@ load the mod only because the install enabled it: no `--plugin-dir` is passed.
             `<plugin root>/bin/compound`, the session settled the debt by running it, and
             nothing in the mod failed.
 
-usage: journey_marketplace.py [--model haiku] [--keep]
+usage: journey_marketplace.py [--model haiku] [--keep] [--source copy|OWNER/REPO]
 """
+import argparse
 import hashlib
 import json
 import os
@@ -58,27 +61,37 @@ def init_message(stream):
 
 
 def main():
-    args = common.arguments(__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model", default="haiku", help="the session's model (the judge is COMPOUND_MODEL)")
+    ap.add_argument("--keep", action="store_true", help="keep the throwaway root even when everything passes")
+    ap.add_argument("--source", default="copy",
+                    help="copy (default): a copy of this checkout with a scratch marketplace; OWNER/REPO: that GitHub "
+                         "repository, as a user would add it")
+    args = common.parse(ap)
     if common.CONFIG != "fresh":
         raise SystemExit("this journey installs a plugin, which only --config fresh keeps out of the real ~/.claude")
     w = common.World("marketplace")
-    package = w.copy_of_package()
-    with open(os.path.join(package, ".claude-plugin", "marketplace.json"), "w") as fh:
-        json.dump({"name": MARKETPLACE, "owner": {"name": "journey"},
-                   "plugins": [{"name": "compound", "source": "./"}]}, fh, indent=2)
+    if args.source == "copy":
+        source, name = w.copy_of_package(), MARKETPLACE
+        with open(os.path.join(source, ".claude-plugin", "marketplace.json"), "w") as fh:
+            json.dump({"name": name, "owner": {"name": "journey"},
+                       "plugins": [{"name": "compound", "source": "./"}]}, fh, indent=2)
+    else:
+        with open(os.path.join(common.REPO, ".claude-plugin", "marketplace.json")) as fh:
+            source, name = args.source, json.load(fh)["name"]
     project = w.project("alpha", build=True)
     before = digests()
 
-    added = w.run_claude(project, "plugin", "marketplace", "add", package)
-    w.check("install", "the copy was added as a marketplace", added.returncode == 0, (added.stdout + added.stderr).strip())
-    put = w.run_claude(project, "plugin", "install", "compound@" + MARKETPLACE)
+    added = w.run_claude(project, "plugin", "marketplace", "add", source)
+    w.check("install", "%s was added as a marketplace" % source, added.returncode == 0, (added.stdout + added.stderr).strip())
+    put = w.run_claude(project, "plugin", "install", "compound@" + name)
     w.check("install", "compound was installed from it", put.returncode == 0, (put.stdout + put.stderr).strip())
     settings = os.path.join(w.config, "settings.json")
     enabled = {}
     if os.path.isfile(settings):
         with open(settings) as fh:
             enabled = json.load(fh).get("enabledPlugins", {})
-    w.check("install", "the fresh configuration enables it", enabled.get("compound@" + MARKETPLACE) is True, enabled)
+    w.check("install", "the fresh configuration enables it", enabled.get("compound@" + name) is True, enabled)
 
     quiet = {"COMPOUND_PROMPT_MIN_CHARS": "100000"}
     first = w.session(project, common.MEET_BUILD, args.model, installed=True, **quiet)

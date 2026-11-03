@@ -1,0 +1,14 @@
+{
+  "name": "claude-skill-compounder",
+  "owner": {
+    "name": "Jeremy Manning"
+  },
+  "description": "Checks for existing work before a substantial task, and has the lesson written down after a problem is solved.",
+  "plugins": [
+    {
+      "name": "compound",
+      "source": "./",
+      "description": "Checks for existing work before a substantial task, and has the lesson written down after a problem is solved."
+    }
+  ]
+}

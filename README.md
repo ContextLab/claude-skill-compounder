@@ -30,6 +30,16 @@ curl -fsSL https://raw.githubusercontent.com/ContextLab/claude-skill-compounder/
 
 Then start a new Claude Code session. Sessions that are already open do not load the mod.
 
+Or, from inside Claude Code (2.1.275 or later):
+
+```
+/plugin install compound --marketplace ContextLab/claude-skill-compounder
+```
+
+This install puts no `compound` command on your terminal's PATH. The mod runs the copy of
+the CLI that comes with it; the `compound` commands this README shows in a terminal need
+the installer above.
+
 The installer installs the newest release: the highest version tag (`v0.4.0` or later) of
 this repository, or the `main` branch when there is no such tag. To install the tip of
 `main` instead, or to pin one release, set `COMPOUND_REF`:

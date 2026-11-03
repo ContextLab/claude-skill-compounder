@@ -21,8 +21,17 @@ a fresh config answers a model turn. No token from `claude setup-token` was need
 
 ## Not done
 
-- The marketplace route is still not shipped or documented for users: no
-  `marketplace.json` in the repo (its name, owner and description are the maintainer's
-  words), and a GitHub source (versioned cache copy) is untested.
 - Not every journey was re-run in fresh mode (guard, general, evidence, compose, repeat,
   reuse, strengthen, unsettled, claims, error, measure_*, probe_injection).
+
+## 2026-11-03: marketplace route shipped
+
+- Maintainer approved: `.claude-plugin/marketplace.json` named `claude-skill-compounder`
+  (a name with `/` is refused by the validator), owner and descriptions from plugin.json.
+  README Install gives `/plugin install compound --marketplace ContextLab/claude-skill-compounder`
+  and says that route puts no `compound` on the terminal PATH.
+- `claude plugin validate --strict .` fails without a marketplace `description` and
+  without a README install line once a marketplace.json exists.
+- `journey_marketplace.py --source ContextLab/claude-skill-compounder` tests the GitHub
+  route (run after the push).
+- Untested: the curl install and the marketplace install both at once.
