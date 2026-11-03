@@ -1939,7 +1939,12 @@ never touched.
   throwaway store, and prints what each answers. Run by hand when the CLI's text changes;
   it spends no model call.
 - `tests/journeys/`: real `claude -p --plugin-dir .` sessions that drive each moment and
-  assert on the event log. Run by hand; they spend model calls.
+  assert on the event log. Run by hand; they spend model calls. Each runs, by default,
+  under an empty `CLAUDE_CONFIG_DIR` of its own and needs `CLAUDE_CODE_OAUTH_TOKEN` or
+  `ANTHROPIC_API_KEY` in the environment; `--config ambient` uses the shell's own.
+  `tests/journeys/journey_marketplace.py` installs a copy of the package through
+  `claude plugin marketplace add` and `claude plugin install` in that configuration and
+  runs sessions with no `--plugin-dir`.
   `tests/journeys/measure_fix.py` puts the fix judge's question for real, many times,
   about pairs of calls whose answer is known, and prints how often it was right. The
   question goes through `tests/journeys/fix_probe/`, a plugin of one hook that builds the

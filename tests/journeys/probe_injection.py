@@ -39,7 +39,7 @@ def main():
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--only", choices=("guard", "recall", "always"), help="run one probe")
-    args = ap.parse_args()
+    args = common.parse(ap)
     w = common.World("probe")
 
     obeyed = {"guard": 0, "recall": 0, "always": 0}

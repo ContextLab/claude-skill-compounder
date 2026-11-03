@@ -388,7 +388,7 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the throwaway root even when everything passes")
     ap.add_argument("--baseline", action="store_true", help="run finish and verify without the two skills; no checks")
     ap.add_argument("--only", choices=("finish", "verify", "made"), help="run one group of steps")
-    args = ap.parse_args()
+    args = common.parse(ap)
     w = common.World("compose")
     if args.baseline:
         bare = without_the_two(w)

@@ -99,7 +99,7 @@ def main():
     ap.add_argument("--timeout-ms", type=int, default=10000, help="the judge's time limit, as COMPOUND_JUDGE_TIMEOUT")
     ap.add_argument("--only", default="", help="the pairs to ask, by name, with commas between; all of them without it")
     ap.add_argument("--keep", action="store_true")
-    args = ap.parse_args()
+    args = common.parse(ap)
     only = [name for name in args.only.split(",") if name]
     unknown = [name for name in only if name not in [case[0] for case in CASES]]
     if unknown:

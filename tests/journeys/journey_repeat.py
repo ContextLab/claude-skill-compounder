@@ -98,7 +98,7 @@ def main():
     ap.add_argument("--model", default="haiku", help="the session's model (the judge is COMPOUND_MODEL)")
     ap.add_argument("--keep", action="store_true", help="keep the throwaway roots even when everything passes")
     ap.add_argument("--runs", type=int, default=1, help="how many times each case is run, each in a world of its own")
-    args = ap.parse_args()
+    args = common.parse(ap)
     tally = {}
     worlds = []
     for run in range(args.runs):

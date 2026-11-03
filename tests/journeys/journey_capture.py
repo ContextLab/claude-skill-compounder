@@ -91,7 +91,7 @@ def main():
             len(captures) >= 1 and "--profile" in captures[0].get("fixed", "") and captures[0].get("why") == "recurred",
             ", ".join(e["type"] for e in w2.events(late, session=s.sid)))
     print("      second root %s" % w2.root)
-    w.finish(args.keep)
+    w.finish(args.keep, also=(w2,))
 
 
 if __name__ == "__main__":

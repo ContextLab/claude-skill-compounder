@@ -104,7 +104,7 @@ def main():
             len(rows) == 1 and rows[0].get("elsewhere") == 0 and rows[0].get("lessons", 0) >= 1, rows)
     w.check("empty", "no error was written", w2.events(bare, session=s.sid, kind="error") == [],
             w2.events(bare, session=s.sid, kind="error"))
-    w.finish(args.keep)
+    w.finish(args.keep, also=(w2,))
 
 
 if __name__ == "__main__":

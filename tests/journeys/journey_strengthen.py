@@ -108,7 +108,7 @@ def main():
     w.check("guard", "the session did not end with the strengthening owed", bool(settled) and len(refused) <= 1,
             "%s; refused %d time(s)" % (", ".join(e["type"] for e in rows), len(refused)))
     print("      second root %s" % w2.root)
-    w.finish(args.keep)
+    w.finish(args.keep, also=(w2,))
 
 
 if __name__ == "__main__":
