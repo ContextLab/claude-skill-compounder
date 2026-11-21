@@ -9,7 +9,7 @@ import { BUSY, GONE_MS, NOTES, OWED } from './view'
 
 const BENEATH = 'drawn beneath the mod'
 const T0 = 1_800_000_000_000
-const BAND = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} }
+const BAND = { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 const LESSONS = JSON.stringify([
   { kind: 'lesson', name: 'zsh-no-matches-found', level: 'general', description: 'Use when zsh says no matches found.', path: '/g/l/zsh-no-matches-found', match: [] },
 ])
@@ -69,7 +69,7 @@ function world(on: On, env: Record<string, string> = {}): World {
   })
   on('classic.Stop', () => ({}) as never)
   on('prompt.submit', (_$, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
-  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  on('ui.render', { component: 'AbovePrompt', plugin: 'compound' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, null, BENEATH) as never
   })

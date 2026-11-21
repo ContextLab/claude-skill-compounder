@@ -134,18 +134,18 @@ function world(on: On, env: Record<string, string> = {}): World {
   // The engine's own expansion of a skill: its text as computed.
   on('skill.prompt', (_$, e) => ({ text: e.text }))
   on('prompt.submit', (_$, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
-  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  on('ui.render', { component: 'AbovePrompt', plugin: 'compound' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, null, BENEATH) as never
   })
-  on('ui.render', { component: 'Pane' }, ($, e) => {
+  on('ui.render', { component: 'Pane', plugin: 'compound' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, null, BENEATH) as never
   })
   return w
 }
 
-const BAND = { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 95, scroll: { offset: 0, bodyRows: 10 }, view: {} }
+const BAND = { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 10, bodyColumns: 95, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 const PANE = { title: 'compound', isFocused: false, bodyColumns: 60, placement: 'inline' as const, scroll: { offset: 0, bodyRows: 30 }, view: {} }
 
 test('the band spins while the reuse check runs, shows what it found, fades, and then draws nothing', async ($, on) => {

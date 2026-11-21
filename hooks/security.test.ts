@@ -234,11 +234,11 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('classic.Stop', () => ({}) as never)
   on('prompt.submit', (_$, e) => ({ text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }))
   // What the engine would draw where the mod draws nothing.
-  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  on('ui.render', { component: 'AbovePrompt', plugin: 'compound' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, null, 'beneath') as never
   })
-  on('ui.render', { component: 'Pane' }, ($, e) => {
+  on('ui.render', { component: 'Pane', plugin: 'compound' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
     return h(Text, null, 'beneath') as never
   })
@@ -383,7 +383,7 @@ test('through the hooks: every text the band and the pane hand a surface is free
   for (const surface of ['terminal', 'desktop'] as const) {
     // A guard whose stopped call carries the sequences, drawn on the band.
     w.check = JSON.stringify({ hits: [{ name: `painted-guard-${surface}`, level: 'project', path: '/p/g', text: 'Do not.' }], guards: 1, tools: ['Bash'] })
-    const band = await $.ui.mount({ plugin: 'compound', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 95, scroll: { offset: 0, bodyRows: 10 }, view: {} } })
+    const band = await $.ui.mount({ plugin: 'compound', surface, component: 'AbovePrompt', props: { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 10, bodyColumns: 95, scroll: { offset: 0, bodyRows: 10 }, view: {} } })
     const ran = await $.tool.call({ tool: 'Bash', command: `echo ${PAINT}` } as never)
     expect(ran.deny).toContain(`lesson=painted-guard-${surface}`)
     const drawn = (await band.findAll({ type: 'Text' })).map(t => t.text)
