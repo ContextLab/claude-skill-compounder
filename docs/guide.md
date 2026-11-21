@@ -557,6 +557,64 @@ compound events --unsettled
 Each row is a lesson owed: how long ago, the start of the session's id, the project and
 the call that worked. `compound status` prints the id each one is settled by.
 
+## Candidates from /insights
+
+Claude Code's `/insights` command reads your recent sessions and writes what it found under
+`~/.claude/usage-data/`. compound runs it for you: when at least 7 days have passed since
+the last run started and at least 25 sessions are in the event log since then, the first
+prompt of a session starts one run in the background. It costs one headless `/insights`
+(one run cost $1.73 at list price). compound then reads two things from what it wrote:
+
+- the friction `/insights` named in one session, which becomes a candidate in that
+  session's project;
+- the CLAUDE.md additions its report suggests, which become candidates in every project.
+
+A candidate is shown at the first prompt of up to three later sessions, at most three
+candidates a session, between `RECORDED-INSIGHT` markers. Claude is asked to check it and
+record a lesson or decline it. The band shows `◈ 2 candidates from /insights`. After 14
+days a candidate is no longer shown or settled.
+
+`compound insights` shows the last run and every candidate:
+
+```bash
+compound insights
+```
+
+```
+last run: 2026-11-21T21:16:46Z
+outcome: ok
+in-96a72ee6f0c92a07  open     facet  Claude ran the release script without its --channel flag three times before reading its usage line.
+in-860285d0f021fd1f  open     report Run the test suite with `make test`, never `pytest` directly.
+```
+
+Each row is a candidate: its id, its state (`open` is still shown; `quiet` was shown to
+three sessions and can still be settled; `settled`; `expired`), where it came from
+(`facet` for one session's friction, `report` for a suggestion) and its text. `outcome` is
+`ok`, `failed`, `timeout`, `unreadable` (Claude Code's files were not in a shape compound
+can read, and nothing was recorded) or `running`; `interrupted` means the run was killed
+before it finished, and a `message:` line says when it started. `compound status` lists
+the open candidates under `Open` and the last run under its checks.
+
+| To | Do this |
+|-|-|
+| record one | in a session in that project, `/compound:learn settle <id>`; a `report` candidate is recorded at the user level |
+| decline one | `compound skip --settles <id> --why "<reason>"` |
+| read what you ran yourself | after typing `/insights` in a session, `compound insights --harvest` |
+| turn the runs off | `COMPOUND_INSIGHTS_DAYS=0` |
+
+```bash
+compound insights --harvest
+```
+
+```
+2 new findings (1 from the report); 2 facets read, 0 skipped, 0 dropped
+```
+
+A facet is the record `/insights` keeps of one session. A session with no friction gives
+no candidate; `skipped` counts records compound could not read, and `dropped` the ones
+whose session has no metadata or whose project directory no longer exists. A second harvest of the same files records
+nothing again.
+
 ## Strengthen an ineffective lesson
 
 A lesson that was recalled in two sessions since it was last written has not prevented
@@ -988,7 +1046,7 @@ Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`
 | `compound evidence` | the scripts sessions ran, kept as they ran | [Keep a script that worked](#keep-a-script-that-worked) |
 | `compound events` | read the event log | [Read the event log](#read-the-event-log) |
 | `compound status` | health, totals and what is open | [Read `compound status`](#read-compound-status) |
-| `compound insights` | read what Claude Code's `/insights` wrote and record its findings as candidates; print the outcome of the last harvest | [Findings from /insights](design.md#findings-from-insights) in the design |
+| `compound insights` | read what Claude Code's `/insights` wrote and record its findings as candidates; print the outcome of the last run and every candidate | [Candidates from /insights](#candidates-from-insights) |
 | `compound report` | what the event log says compound did | [Read `compound report`](#read-compound-report) |
 | `compound install`, `compound update`, `compound uninstall` | set the package up, move it to a newer version, take it out | the [README](../README.md#install) |
 

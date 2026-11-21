@@ -300,6 +300,19 @@ class StatusTest(Case):
         self.assertEqual(check["status"], "PASS", "informational, never a failing check")
         self.assertIn("ok", check["detail"])
 
+    def test_an_open_report_finding_is_recorded_at_the_user_level_and_its_text_ends_once(self):
+        self.box.seed({"type": "insight", "session": "insights", "id": "in-0123456789abcdef", "source": "facet",
+                       "project": self.box.project, "text": "It used the wrong flag."}, COMPOUND_NOW=NOW + 2)
+        self.box.seed({"type": "insight", "session": "insights", "id": "in-fedcba9876543210", "source": "report",
+                       "text": "Run the tests with make test.", "why": "Invented."}, COMPOUND_NOW=NOW + 2)
+        opened = self.box.run("status", COMPOUND_NOW=NOW + 20).stdout.split("Open")[1]
+        self.assertNotIn(".. Check", opened)
+        facet = [line for line in opened.splitlines() if "in-0123456789abcdef" in line][0]
+        report = [line for line in opened.splitlines() if "in-fedcba9876543210" in line][0]
+        self.assertIn("flag. Check it", facet)
+        self.assertIn("(--settles in-0123456789abcdef)", facet)
+        self.assertIn("(--settles in-fedcba9876543210 --level user)", report)
+
     def test_the_insights_row_says_interrupted_for_a_run_nothing_is_running(self):
         os.makedirs(self.box.chome)
         with open(os.path.join(self.box.chome, "insights.json"), "w") as handle:

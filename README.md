@@ -238,6 +238,17 @@ to record it or decline it. A lesson recorded that way carries the copy that ran
 script rewritten from memory, and a program that was never run is refused as an
 attachment. [The guide](docs/guide.md#keep-a-script-that-worked) shows it.
 
+compound also learns from many sessions at once. Claude Code's own `/insights` command
+reads your recent sessions and names the friction in each. When a week has passed since
+the last run and at least 25 sessions have been logged, the first prompt of a session
+starts one `/insights` run in the background; no session waits for it. The friction it
+finds in a session is offered to the next sessions in that session's project as a
+candidate lesson, and its suggested CLAUDE.md additions are offered in every project.
+Claude is asked to check each one against the project and record it or decline it; nothing
+is written unless a session decides to. One run cost $1.73 at list price in the one
+measured run. `COMPOUND_INSIGHTS_DAYS=0` turns the runs off. [The
+guide](docs/guide.md#candidates-from-insights) shows what a run leaves.
+
 Recorded text is always shown to Claude as a quoted note to weigh. It is never passed on
 as an instruction.
 

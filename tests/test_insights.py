@@ -510,6 +510,16 @@ class StartTest(RunTest):
         self.assertEqual(self.box.json("insights", "--json")["outcome"], "running")
         fcntl.flock(fd, fcntl.LOCK_UN)
 
+    def test_an_interrupted_run_has_a_message_that_says_what_happened(self):
+        self.write_state(started=NOW - 3600, outcome="running", message="")
+        state = self.box.json("insights", "--json")
+        self.assertEqual(state["outcome"], "interrupted")
+        self.assertIn("ended before it finished", state["message"])
+        self.assertIn("message: the run started", self.box.run("insights").stdout)
+        fd = self.hold_lock()
+        self.assertEqual(self.box.json("insights", "--json")["message"], "")
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
     def test_a_run_by_hand_after_a_killed_one_takes_a_fresh_started(self):
         self.write_state(started=NOW - 3600, outcome="running", message="")
         self.assertExit(self.box.run("insights", "--run"), 1)

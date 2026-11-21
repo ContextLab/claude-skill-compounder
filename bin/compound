@@ -505,9 +505,10 @@ INSIGHTS
     since then. It takes the lock without waiting, checks again under it, writes `started`
     and outcome `running` to insights.json, lets go of the lock and starts `compound
     insights --run`. `--run` and `--harvest` typed by hand ignore COMPOUND_OFF. `--run`
-    tries for the lock for 30 seconds (then exits 1 with an `error` event), holds it for its life, runs `claude -p /insights` in <COMPOUND_HOME> with
-    COMPOUND_OFF=1 added to the environment (and CLAUDE_CONFIG_DIR when either directory
-    variable is set) in a process group of its own, which is killed after 900 seconds
+    tries for the lock for 30 seconds (then exits 1 with an `error` event), holds it for
+    its life, runs `claude -p /insights` in <COMPOUND_HOME> with COMPOUND_OFF=1 added to
+    the environment (and CLAUDE_CONFIG_DIR when either directory variable is set) in a
+    process group of its own, which is killed after 900 seconds
     (outcome `timeout`), and harvests when claude exited 0 and wrote a report.html newer
     than `started`. Otherwise the outcome is `failed`, with one `error` event (where
     `insights.run`). It exits 0 when the run and the harvest finished, 1 otherwise.
@@ -618,8 +619,9 @@ LOG_TYPES = tuple(kind for kind in EVENT_TYPES if kind not in CLI_WRITES)
 # mod last fired.
 MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "use", "repeat", "error",
              "retry", "index")
-# Written to be measured (`compound report`), one for every question put to the model and
-# one for the call after a refusal: left out of `status`'s Recent.
+# Left out of `status`'s Recent: the types written to be measured (`compound report`), one
+# for every question put to the model, one for the call after a refusal and one for a
+# failure met, and the findings of /insights, which `status` lists under Open.
 VERDICT_TYPES = ("judge", "retry", "met", "insight")
 # The tools a lesson's patterns are tested against when it names none.
 MATCH_TOOLS = ("Bash",)
@@ -2985,6 +2987,11 @@ def cmd_insights(args):
         state.update(read_insights_state())
         state["claude_dir"] = insights_claude_dir()
         state["outcome"] = insights_outcome(state)
+        if state["outcome"] == "interrupted" and not state["message"]:
+            started = state.get("started")
+            state["message"] = "the run started %s ended before it finished; no process holds its lock" % (
+                iso(started) if isinstance(started, (int, float)) and not isinstance(started, bool)
+                else "at a time not recorded")
         events, _bad = read_events()
         state["findings"] = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
                               "state": kind, "text": _text(event.get("text"))}
@@ -7796,9 +7803,11 @@ def cmd_status(args):
             or opened["findings"]):
         out("  nothing open\n")
     for row in opened["findings"]:
+        # A report finding is recorded at the user level or not at all (see `compound add`).
         out("  finding      %s %s %s: %s. Check it against this project; record it with compound:learn "
-            "(--settles %s) or decline it: compound skip --settles %s --why \"...\"\n" % (
-                row["id"], row["age"], row["source"], row["text"], row["id"], row["id"]))
+            "(--settles %s%s) or decline it: compound skip --settles %s --why \"...\"\n" % (
+                row["id"], row["age"], row["source"], str(row["text"]).rstrip(". "), row["id"],
+                " --level user" if row["source"] == "report" else "", row["id"]))
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
             "%s  Or decline it: %s\n" % (

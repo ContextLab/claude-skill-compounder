@@ -1,5 +1,7 @@
 # 2026-11-21: design for automatic `/insights` runs as a source of candidate lessons
 
+Built (2026-11-21): commits 43b6ed7 to 8dd8796, then the journey, guide and README commit.
+
 Status: design, not built. When it is built, `docs/design.md` takes the description of the
 behaviour and this note stays as the record of why.
 

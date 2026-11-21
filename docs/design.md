@@ -3,7 +3,10 @@
 compound is a Claude Code mod that makes each session start from what earlier sessions
 already built and learned. It does two things without being asked: before a substantial
 task it looks for existing work to reuse, and after a problem is solved it has the lesson
-written down where the next session will meet it.
+written down where the next session will meet it. Besides the failures and scripts of the
+session at hand, it learns from Claude Code's own `/insights`, which it runs in the
+background when one is due; what that analysis finds is offered to later sessions as
+candidate lessons (see "Findings from /insights").
 
 This document is the technical contract. The [README](../README.md) is the place to
 start, and the [user guide](guide.md) shows each command with its output.
@@ -1113,8 +1116,9 @@ State is `insights.json` in `COMPOUND_HOME`: `started` (epoch seconds), `finishe
 `outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`), `message` and `harvested`.
 `compound insights` also prints `claude_dir`, the Claude directory the harvest reads, and
 reports `interrupted` in place of `running` when no process holds the lock: the worker was
-killed, and the week's `started` stands. `compound status` says the same. `--run` and
-`--harvest`, typed by hand, are the user's own commands and run whatever `COMPOUND_OFF`
+killed, and the week's `started` stands. Its `message`, when the state file holds none,
+says when that run started and that it ended before it finished. `compound status` says
+the same. `--run` and `--harvest`, typed by hand, are the user's own commands and run whatever `COMPOUND_OFF`
 says; only `--start` answers `off`.
 
 - **One run at a time, and a crash does not reset the week.** The lock is an `fcntl.flock`
@@ -1136,9 +1140,9 @@ says; only `--start` answers `off`.
   takes the `started` of the `--start` that spawned it when the state says `running` and
   `started` is at most 60 seconds old, and writes a fresh one otherwise, so a report older
   than this run never passes for its output. Any error it meets ends in outcome `failed`
-  and one `error` event, never in a `running` nothing is running. It runs `claude -p /insights` (`claude` as found on `PATH`) with
-  `COMPOUND_HOME` as its working directory and no standard input, in a process group of
-  its own. When `claude` is not on `PATH` the outcome is `failed` with a message that says
+  and one `error` event, never in a `running` nothing is running. It runs `claude -p
+  /insights` (`claude` as found on `PATH`) with `COMPOUND_HOME` as its working directory
+  and no standard input, in a process group of its own. When `claude` is not on `PATH` the outcome is `failed` with a message that says
   so. After 900 seconds the whole group is killed (SIGTERM, then SIGKILL after 5 seconds)
   and the outcome is `timeout`.
 - **The child's environment** is the worker's with `COMPOUND_OFF=1` added, so the child
@@ -1916,7 +1920,8 @@ The health checks, in order:
 | `insights` | informational, always PASS: when the last run or `compound insights --harvest` finished and its outcome, `the last run, started T, is running` or `is interrupted`, or `never run` |
 
 Under Open, `compound status` also lists each open finding (`findings` in `status --json`:
-`id`, `source`, `project`, `text`, `age`) with the two ways to settle it.
+`id`, `source`, `project`, `text`, `age`) with the two ways to settle it; for a report
+finding, recording it names `--level user`.
 
 ## CLI contract
 
