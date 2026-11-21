@@ -326,6 +326,29 @@ class FindingSettling(Settling):
         self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
         self.assertEqual(self.listed(), [])
 
+    def test_settles_a_finding_while_the_session_has_two_unsettled_captures(self):
+        self.finding()
+        first, second = self.capture(offset=1), self.capture(offset=2, call="another")
+        proc = self.box.run("skip", "--settles", FINDING, "--why", "not real", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 0)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+        self.assertEqual(sorted(event["id"] for event in self.unsettled() if event["type"] == "capture"),
+                         sorted([first["id"], second["id"]]))
+        self.assertEqual(self.listed(), [])
+
+    def test_a_limit_keeps_what_is_owed_before_the_findings(self):
+        for index in range(3):
+            self.finding("in-00000000000000a%d" % index, offset=index)
+        first, second = self.capture(offset=5), self.capture(offset=6, call="another")
+        both = self.unsettled("--limit", "2")
+        self.assertEqual([event["id"] for event in both], [first["id"], second["id"]])
+        one = self.unsettled("--limit", "1")
+        self.assertEqual([event["id"] for event in one], [second["id"]])
+        three = self.unsettled("--limit", "3")
+        self.assertEqual([event["type"] for event in three], ["capture", "capture", "insight"])
+        self.assertEqual(three[-1]["id"], "in-00000000000000a2")
+        self.assertEqual(len(self.unsettled("--limit", "9")), 5)
+
     def test_a_finding_shown_three_times_can_still_be_settled(self):
         self.finding()
         for index, session in enumerate(("s-one", "s-two", "s-three")):

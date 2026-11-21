@@ -1003,7 +1003,7 @@ killed:
 | `check`, before a tool call | 1500 ms |
 | `sh`, asked whether `compound` on `PATH` is the package's CLI, before a tool call that is one bare `compound ...` invocation, at most once in five minutes | 2000 ms |
 | any other call while a tool call or a stop waits, and `use` after a skill's prompt was expanded | 2000 ms |
-| at a typed prompt (the listing, `find`, the unsettled captures), and the pane's `events --json`, `list --json` and `show --json` | 5000 ms |
+| at a typed prompt (the listing, `find`, the unsettled captures, `insights --start`), and the pane's `events --json`, `list --json` and `show --json` | 5000 ms |
 | `/compound status`, the report the user asked for, and the pane's own `status --json` | 15000 ms |
 
 A subcommand that ran out of time is not called again for the rest of the turn: the next
@@ -1064,6 +1064,51 @@ check.
 
 `insight` is a type the CLI writes: `compound log` refuses it, so no session can put a
 finding into the log by hand.
+
+**A run of /insights starts by itself when one is due.** `compound insights --start`
+answers `{"started": bool, "why": string}` and exits 0 whatever it answers. `why` is one of
+`off` (`COMPOUND_OFF` is `1`), `disabled` (`COMPOUND_INSIGHTS_DAYS` is `0`), `too soon`,
+`too few sessions`, `busy` or `due`. A run is due when:
+
+- at least `COMPOUND_INSIGHTS_DAYS` days (default 7) have passed since the last run
+  **started**, whatever its outcome, so a failing run is tried weekly and not at every
+  prompt; and
+- the event log holds at least `COMPOUND_INSIGHTS_MIN_SESSIONS` (default 25) distinct
+  session ids since then, or since the start of the log when there was no earlier run. The
+  `insights` session of the findings is not one.
+
+State is `insights.json` in `COMPOUND_HOME`: `started` (epoch seconds), `finished`,
+`outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`), `message` and `harvested`.
+`compound insights` also prints `claude_dir`, the Claude directory the harvest reads.
+
+- **One run at a time, and a crash does not reset the week.** The lock is an `fcntl.flock`
+  on `insights.lock` in `COMPOUND_HOME`. The kernel releases it when its holder dies, so
+  there is no stale-lock rule and no takeover by age. `--start` takes the lock without
+  waiting; when it cannot, a run or another starter holds it and the answer is `busy`.
+  Holding it, `--start` asks again whether a run is due, writes `started` and outcome
+  `running`, starts the worker (`compound insights --run`, in a session of its own, with no
+  terminal and not holding the lock's file) and lets go. A second starter a moment later
+  finds a run that started now, which is not due. `started` is written before the worker
+  exists, so a worker that dies still counts as this week's run.
+- **The worker** takes the lock without waiting, and exits 1 when it cannot. It holds the
+  lock for its whole life. It runs `claude -p /insights` (`claude` as found on `PATH`) with
+  `COMPOUND_HOME` as its working directory and no standard input, in a process group of
+  its own. When `claude` is not on `PATH` the outcome is `failed` with a message that says
+  so. After 900 seconds the whole group is killed (SIGTERM, then SIGKILL after 5 seconds)
+  and the outcome is `timeout`.
+- **The child's environment** is the worker's with `COMPOUND_OFF=1` added, so the child
+  session's mod does nothing: it writes no event and makes no reuse check, and it does not
+  call `insights --start`, which is what keeps a run from starting a run. When
+  `COMPOUND_CLAUDE_DIR` or `CLAUDE_CONFIG_DIR` is set, the child also gets
+  `CLAUDE_CONFIG_DIR=<the Claude directory>`, so what it writes is what the harvest reads;
+  with neither, its environment is left alone.
+- **A run counts** when `claude` exits 0 and `usage-data/report.html` is newer than
+  `started`. The worker then harvests, inside the same lock. Any other end is outcome
+  `failed` (the message is the first line of `claude`'s standard error) and one `error`
+  event, `where` `insights.run`. `compound insights --run` run by hand writes `started`
+  itself, and exits 0 when the run and the harvest finished, 1 otherwise.
+- **Cost.** A run is one headless `/insights` a week, which cost $1.73 at list price in
+  the one measured run. `COMPOUND_INSIGHTS_DAYS=0` turns it off, as does `COMPOUND_OFF=1`.
 
 A finding is in one of four states, which `compound insights` names for each of them:
 
@@ -1839,7 +1884,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound skip --why T [--settles ID] [--evidence ID]` | `--settles` also takes the id of a finding of `/insights`, which it settles and nothing else. With `--evidence ID`: declines the script of that snapshot, which is then not asked about again and settles nothing else; `--settles` with it is exit 2. Otherwise: declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound index` | The lessons a session of this project could use, as a JSON list of rows: `name`, `level`, `description`, `script` (a program sits beside it), `path`, and `project` on a lesson of another project (the project root). The lessons in force here, then the lessons of other projects the event log knows that carry a script; a lesson with a script first, then by level. Skills are left out. Writes nothing. The mod runs it at a session's first prompt (see "The index"). |
 | `compound met` | stdin `{"tool","call","error"}`: a call failed. Prints `{"sig","sessions","captured"}`: the signature of the error (null when it says nothing about the call), the number of OTHER sessions that met that signature, and whether a `capture` event already carries it. Logs `met` when there is a signature. The mod runs it (see "A failure met before"). |
-| `compound insights [--harvest]` | `--harvest` reads what Claude Code's `/insights` wrote under `usage-data/` and records each finding not yet recorded, as an `insight` event (see "Findings from /insights"); it prints `{"new","facets","skipped","dropped","report","outcome","message"}`. Without it, prints the state the last harvest left: `started`, `finished`, `outcome` (`ok` or `unreadable`, null before any harvest), `message`, `harvested`, and `findings`, one `{"id","source","project","state","text"}` for each finding, where `state` is `open`, `quiet`, `settled` or `expired`. Exit 0 either way, an unreadable harvest included. |
+| `compound insights [--harvest \| --start \| --run]` | `--start` starts a run of `/insights` in the background when one is due (see "A run of /insights starts by itself when one is due") and prints `{"started","why"}`; exit 0 in every case. `--run` is the worker it starts: it runs `claude -p /insights`, then harvests; exit 0 when both finished, 1 otherwise. `--harvest` reads what Claude Code's `/insights` wrote under `usage-data/` and records each finding not yet recorded, as an `insight` event (see "Findings from /insights"); it prints `{"new","facets","skipped","dropped","report","outcome","message"}`. Without it, prints the state the last harvest left: `started`, `finished`, `outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`, null before any run or harvest), `message`, `harvested`, `claude_dir`, and `findings`, one `{"id","source","project","state","text"}` for each finding, where `state` is `open`, `quiet`, `settled` or `expired`. Exit 0 either way, an unreadable harvest included. |
 | `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. Without `--session`, it also lists the open findings (see "Findings from /insights"). `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |
@@ -1876,6 +1921,8 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | CLI | Passing runs of a script by the main loop, all its versions together, before a stop asks for it to be recorded or declined, when nothing else says the script is a tool (see "A script that ran"). At least 1; anything else is the default. |
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | mod | Seconds between two such questions, across all sessions. |
 | `COMPOUND_RECUR_LIMIT` | 2 | CLI | Recurrences of a lesson that count, since it was last written, that make it ineffective. One recall counts for a session. |
+| `COMPOUND_INSIGHTS_DAYS` | 7 | CLI | Days between the starts of two runs of Claude Code's `/insights`; `0` turns the runs off. Not a whole number is the default. Resolved like `COMPOUND_RECUR_LIMIT`. |
+| `COMPOUND_INSIGHTS_MIN_SESSIONS` | 25 | CLI | Distinct sessions the event log must hold since the last run started before the next is due. At least 1; anything else is the default. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_PLATFORM` | this machine's | CLI | The platform a lesson's `platform` is held against: `darwin`, `linux`, `windows`. Resolved like `COMPOUND_RECUR_LIMIT`. For tests, and for a machine the CLI names wrongly. |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | CLI | The shell a lesson's `shell` is held against (`zsh`, `bash`), when the Bash tool's shell is not the one inferred. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_MODEL` | `haiku` | mod | The model that answers the mod's three questions: an alias or a model id. |

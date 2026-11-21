@@ -497,6 +497,19 @@ INSIGHTS
     `message`, `harvested` counts). When every facet read is skipped, or the report has
     its section and no item, the outcome is `unreadable`, one `error` event (where
     `insights.harvest`) names the file and key, and nothing is recorded.
+    `compound insights --start` starts a run in the background when one is due, and answers
+    {"started", "why"} (why: off, disabled, too soon, too few sessions, busy or due) with
+    exit 0 in every case. A run is due when COMPOUND_OFF is not 1, COMPOUND_INSIGHTS_DAYS
+    (default 7; 0 is off) days have passed since the last run started, whatever its outcome,
+    and COMPOUND_INSIGHTS_MIN_SESSIONS (default 25) distinct sessions are in the event log
+    since then. It takes the lock without waiting, checks again under it, writes `started`
+    and outcome `running` to insights.json, starts `compound insights --run` and lets go.
+    `--run` holds the lock for its life, runs `claude -p /insights` in <COMPOUND_HOME> with
+    COMPOUND_OFF=1 added to the environment (and CLAUDE_CONFIG_DIR when either directory
+    variable is set) in a process group of its own, which is killed after 900 seconds
+    (outcome `timeout`), and harvests when claude exited 0 and wrote a report.html newer
+    than `started`. Otherwise the outcome is `failed`, with one `error` event (where
+    `insights.run`). It exits 0 when the run and the harvest finished, 1 otherwise.
 
 WHAT A REPOSITORY CAN WRITE
     A project lesson is a file in a repository, and whoever can commit to it can write
@@ -543,6 +556,8 @@ ENVIRONMENT
     COMPOUND_NOW         pins the clock: epoch seconds or an ISO 8601 time
     COMPOUND_CHECK_BUDGET_MS  wall-clock budget of one `check`, default 500
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
+    COMPOUND_INSIGHTS_DAYS  days between runs of /insights (default 7; 0 turns them off)
+    COMPOUND_INSIGHTS_MIN_SESSIONS  sessions in the log before a run is due (default 25, at least 1)
     COMPOUND_PLATFORM    the platform a lesson's `platform` is held against (default: this one)
     COMPOUND_SHELL       the shell a lesson's `shell` is held against (default: CLAUDE_CODE_SHELL, else SHELL)
     COMPOUND_REUSE_FLOOR the weight a candidate of `find --request` must reach (default 1.5)
@@ -563,7 +578,8 @@ ENVIRONMENT
 
     COMPOUND_RECUR_LIMIT and COMPOUND_OFF are shared with the mod, which reads them in
     a session where Claude Code has applied the `env` block of its settings. Run from
-    a terminal the CLI has no such environment, so it resolves each of the two from
+    a terminal the CLI has no such environment, so it resolves each of the two (and the
+    two insights settings, which only the CLI reads) from
     the process environment first, then from `env` in <claude dir>/settings.json,
     then the default (see `setting`). COMPOUND_PLATFORM and COMPOUND_SHELL are resolved
     the same way, so a terminal and a session agree on which lessons apply.
@@ -2723,10 +2739,197 @@ def harvest_insights(events, clock):
     return result
 
 
+INSIGHTS_TIMEOUT = 900
+INSIGHTS_DAYS, INSIGHTS_MIN_SESSIONS = 7, 25
+
+
+def insights_days():
+    """COMPOUND_INSIGHTS_DAYS, resolved as COMPOUND_RECUR_LIMIT is: a whole number, `0` for off;
+    anything else is the default."""
+    value = setting("COMPOUND_INSIGHTS_DAYS")[0]
+    return int(value) if re.match(r"^\d{1,9}$", value) else INSIGHTS_DAYS
+
+
+def insights_min_sessions():
+    value = setting("COMPOUND_INSIGHTS_MIN_SESSIONS")[0]
+    if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
+        return int(value)
+    return INSIGHTS_MIN_SESSIONS
+
+
+def insights_due(events, state, clock):
+    """(whether a run is due, why): `off` (COMPOUND_OFF is 1), `disabled` (COMPOUND_INSIGHTS_DAYS
+    is 0), `too soon` (the last run started less than that many days ago, whatever its outcome),
+    `too few sessions` (fewer than COMPOUND_INSIGHTS_MIN_SESSIONS distinct sessions in the log
+    since it started, or since the start of the log) or `due`."""
+    if setting("COMPOUND_OFF")[0] == "1":
+        return False, "off"
+    days = insights_days()
+    if days == 0:
+        return False, "disabled"
+    started = state.get("started")
+    started = started if isinstance(started, (int, float)) and not isinstance(started, bool) else None
+    if started is not None and clock - started < days * 86400:
+        return False, "too soon"
+    sessions = set()
+    for event in events:
+        session = _text(event.get("session"))
+        if not session or session == INSIGHT_SESSION:
+            continue
+        stamp = parse_ts(event.get("ts"))
+        if stamp is not None and (started is None or stamp >= started):
+            sessions.add(session)
+    if len(sessions) < insights_min_sessions():
+        return False, "too few sessions"
+    return True, "due"
+
+
+def insights_fail(clock, outcome, message):
+    """Record a run that did not produce a report: the state and one `error` event."""
+    state = read_insights_state()
+    state.update({"finished": iso(clock), "outcome": outcome, "message": message})
+    try:
+        write_insights_state(state)
+    except OSError as exc:
+        sys.stderr.write("compound: warning: the state file %s could not be written (%s)\n" % (
+            insights_state_path(), exc.strerror or exc))
+    log_soft("error", project_root(), where="insights.run", message=message)
+
+
+def start_insights(clock):
+    """(whether a worker was started, why). Under the lock, which is not waited for, and after
+    asking again whether a run is due, `started` is written before the worker exists."""
+    import subprocess
+
+    with insights_lock(False) as held:
+        if not held:
+            return False, "busy"
+        state = read_insights_state()
+        events, _bad = read_events()
+        due, why = insights_due(events, state, clock)
+        if not due:
+            return False, why
+        state.update({"started": int(clock), "outcome": "running", "message": ""})
+        try:
+            write_insights_state(state)
+            subprocess.Popen([sys.executable, os.path.realpath(__file__), "insights", "--run"],
+                             start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            insights_fail(clock, "failed", "the worker could not be started: %s" % (exc.strerror or exc))
+            return False, "could not start"
+    return True, "due"
+
+
+def stop_group(proc):
+    """Kill the whole process group of `proc`: SIGTERM, and SIGKILL after 5 seconds."""
+    import signal
+    import subprocess
+
+    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 30)):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            pass
+        try:
+            return proc.communicate(timeout=wait)
+        except subprocess.TimeoutExpired:
+            continue
+    return "", ""
+
+
+def run_insights(clock):
+    """The worker: runs `claude -p /insights` and harvests what it wrote, holding the lock for
+    its whole life. Exit status 0 when both finished."""
+    import shutil
+    import subprocess
+
+    with insights_lock(False) as held:
+        if not held:
+            sys.stderr.write("compound: a run of /insights is already going\n")
+            return 1
+        state = read_insights_state()
+        started = state.get("started")
+        if state.get("outcome") != "running" or not isinstance(started, (int, float)) \
+                or isinstance(started, bool):
+            started = int(clock)
+            state.update({"started": started, "outcome": "running", "message": ""})
+            write_insights_state(state)
+        program = shutil.which("claude")
+        if not program:
+            insights_fail(now(), "failed", "claude was not found on PATH")
+            return 1
+        env = dict(os.environ)
+        env["COMPOUND_OFF"] = "1"
+        if os.environ.get("COMPOUND_CLAUDE_DIR") or os.environ.get("CLAUDE_CONFIG_DIR"):
+            env["CLAUDE_CONFIG_DIR"] = insights_claude_dir()
+        try:
+            proc = subprocess.Popen([program, "-p", "/insights"], cwd=home_dir(), env=env, start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    universal_newlines=True)
+        except OSError as exc:
+            insights_fail(now(), "failed", "claude could not be started: %s" % (exc.strerror or exc))
+            return 1
+        try:
+            _out, err = proc.communicate(timeout=INSIGHTS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            stop_group(proc)
+            insights_fail(now(), "timeout", "claude did not finish within %d seconds" % INSIGHTS_TIMEOUT)
+            return 1
+        report = os.path.join(insights_claude_dir(), "usage-data", "report.html")
+        try:
+            wrote = os.stat(report).st_mtime >= started
+        except OSError:
+            wrote = False
+        if proc.returncode != 0:
+            lines = (err or "").strip().splitlines()
+            insights_fail(now(), "failed", lines[0] if lines else "claude exited %d" % proc.returncode)
+            return 1
+        if not wrote:
+            insights_fail(now(), "failed", "claude finished and left no usage-data/report.html newer than the start")
+            return 1
+        return 0 if harvest_locked(now())[0]["outcome"] == "ok" else 1
+
+
+def harvest_locked(clock):
+    """The harvest, for a caller that holds the lock: (the result of `harvest_insights`, the
+    number of events written). Records what it did in the state file."""
+    events, _bad = read_events()
+    result = harvest_insights(events, clock)
+    if result["outcome"] == "unreadable":
+        log_soft("error", project_root(), where="insights.harvest", message=result["message"])
+    for event in result["new"]:
+        append_event(event)
+    written = len(result["new"])
+    counts = {"facets": result["facets"], "findings": written - result["report"], "report": result["report"],
+              "skipped": result["skipped"], "dropped": result["dropped"]}
+    state = read_insights_state()
+    state.update({"finished": iso(clock), "outcome": result["outcome"], "message": result["message"],
+                  "harvested": counts})
+    try:
+        write_insights_state(state)
+    except OSError as exc:
+        sys.stderr.write("compound: warning: the state file %s could not be written (%s); "
+                         "the harvest itself was done\n" % (insights_state_path(), exc.strerror or exc))
+    return result, written
+
+
 def cmd_insights(args):
+    if args.start and args.run or (args.start or args.run) and args.harvest:
+        raise usage("--start, --run and --harvest are three different things: give one")
+    if args.start:
+        started, why = start_insights(now())
+        if args.json:
+            emit({"started": started, "why": why})
+        else:
+            sys.stdout.write("started a run of /insights\n" if started else "not started: %s\n" % why)
+        return 0
+    if args.run:
+        return run_insights(now())
     if not args.harvest:
         state = {"started": None, "finished": None, "outcome": None, "message": "", "harvested": {}}
         state.update(read_insights_state())
+        state["claude_dir"] = insights_claude_dir()
         events, _bad = read_events()
         state["findings"] = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
                               "state": kind, "text": _text(event.get("text"))}
@@ -2739,28 +2942,11 @@ def cmd_insights(args):
         if state["message"]:
             sys.stdout.write("message: %s\n" % one_line(state["message"]))
         for row in state["findings"]:
-            sys.stdout.write("%s  %-8s %-6s %s\n" % (row["id"], row["state"], row["source"],
+            sys.stdout.write("%s  %-8s %-6s %s\n" % (row["id"], row["state"], row["source"] or "-",
                                                        one_line(row["text"])[:OPEN_TEXT]))
         return 0
-    clock = now()
     with insights_lock(True):
-        events, _bad = read_events()
-        result = harvest_insights(events, clock)
-        if result["outcome"] == "unreadable":
-            log_soft("error", project_root(), where="insights.harvest", message=result["message"])
-        for event in result["new"]:
-            append_event(event)
-        written = len(result["new"])
-        counts = {"facets": result["facets"], "findings": written - result["report"], "report": result["report"],
-                  "skipped": result["skipped"], "dropped": result["dropped"]}
-        state = read_insights_state()
-        state.update({"finished": iso(clock), "outcome": result["outcome"], "message": result["message"],
-                      "harvested": counts})
-        try:
-            write_insights_state(state)
-        except OSError as exc:
-            sys.stderr.write("compound: warning: the state file %s could not be written (%s); "
-                             "the harvest itself was done\n" % (insights_state_path(), exc.strerror or exc))
+        result, written = harvest_locked(now())
     out = {"new": written, "facets": result["facets"], "skipped": result["skipped"],
            "dropped": result["dropped"], "report": result["report"], "outcome": result["outcome"],
            "message": result["message"]}
@@ -2782,7 +2968,9 @@ INSIGHT_SHOWN_SESSIONS = 3
 
 def insight_states(events, clock):
     """{finding id: (the `insight` event, its state)} for every finding in `events`, in one
-    pass over them. The state is "settled", "expired", "quiet" or "open" (see `insight_state`)."""
+    pass over them. The state is "open" (still listed for the reminder), "quiet" (told to INSIGHT_SHOWN_SESSIONS
+    distinct sessions, so no longer listed, but still settleable), "settled", or "expired"
+    (older than UNSETTLED_DAYS, counted from the harvest, so neither listed nor settleable)."""
     found, sessions, settled = {}, {}, set()
     for event in events:
         kind = event.get("type")
@@ -2813,14 +3001,6 @@ def insight_states(events, clock):
             state = "open"
         out[ident] = (event, state)
     return out
-
-
-def insight_state(event, events, clock):
-    """"open" (still listed for the reminder), "quiet" (told to INSIGHT_SHOWN_SESSIONS
-    distinct sessions, so no longer listed, but still settleable), "settled" or "expired"
-    (older than UNSETTLED_DAYS, counted from the harvest, so neither listed nor settleable)."""
-    found = insight_states(events, clock).get(event.get("id"))
-    return found[1] if found else "expired"
 
 
 def settled_by(debt, event):
@@ -6465,7 +6645,12 @@ def cmd_events(args):
             if stamp is None or stamp < since:
                 continue
         out.append(event)
-    if args.limit:
+    if args.limit and args.unsettled:
+        # What is owed first, then the findings that fit after it.
+        owed = [event for event in out if event.get("type") != "insight"][-args.limit:]
+        room = args.limit - len(owed)
+        out = owed + ([event for event in out if event.get("type") == "insight"][-room:] if room > 0 else [])
+    elif args.limit:
         out = out[-args.limit:]
     if bad:
         sys.stderr.write("compound: %d line(s) of %s do not parse and were skipped\n" % (bad, events_path()))
@@ -8292,9 +8477,13 @@ def build_parser():
     command("log", cmd_log, "Append one event (a JSON object on stdin).")
 
     one = command("insights", cmd_insights,
-                  "Findings from Claude Code's /insights: harvest what it wrote, or print the last outcome.")
+                  "Findings from Claude Code's /insights: start a run when one is due, harvest what it wrote, or print the last outcome.")
     one.add_argument("--harvest", action="store_true",
                      help="read usage-data/ and record the findings not yet recorded")
+    one.add_argument("--start", action="store_true",
+                     help="start a run of /insights in the background when one is due")
+    one.add_argument("--run", action="store_true",
+                     help="the worker --start starts: run /insights, then harvest what it wrote")
 
     command("index", cmd_index, "The lessons a session here could use, as rows, the ones with a script first (JSON).",
             json_flag=False)

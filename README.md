@@ -524,6 +524,8 @@ These are the ones you are likely to change.
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
 | `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | passing runs of a script that takes no arguments before Claude is asked to record or decline it |
 | `COMPOUND_RECUR_LIMIT` | 2 | sessions a lesson is recalled in before it is ineffective |
+| `COMPOUND_INSIGHTS_DAYS` | 7 | days between runs of Claude Code's `/insights`, which `compound insights --start` begins when one is due; `0` turns the runs off |
+| `COMPOUND_INSIGHTS_MIN_SESSIONS` | 25 | sessions in the event log since the last run started before the next is due |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | the shell a lesson for one shell is held against (`zsh`, `bash`); set it when Claude Code runs your commands in another shell than your login shell |
 | `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for that model |
@@ -535,6 +537,11 @@ These are the ones you are likely to change.
 
 compound asks a small model (`haiku` by default) a few short questions. The calls use
 the same account as your session.
+
+`compound insights --start` runs Claude Code's `/insights` headless in the background at
+most once a week, and only when at least 25 sessions have been logged since the last run:
+one run, which cost $1.73 at list price in the one measured run. `COMPOUND_INSIGHTS_DAYS=0` or
+`COMPOUND_OFF=1` turns it off.
 
 | When | Model calls | Added time |
 |-|-|-|
