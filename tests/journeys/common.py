@@ -109,7 +109,12 @@ class World:
                    CLAUDE_HISTORY_SURFER_DIR=self.surfer, TMPDIR=self.tmp, CLAUDE_CODE_PLUGIN_DIRS="")
         if self.fresh:
             env["CLAUDE_CONFIG_DIR"] = self.config
-        env.update(extra)
+        # A value of None leaves that name out of the environment altogether.
+        for name, value in extra.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
         return env
 
     def project(self, name, build=False):
