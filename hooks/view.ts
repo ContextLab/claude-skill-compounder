@@ -44,9 +44,13 @@ export const NOTES: Record<CompoundNoteKind, Look> = {
   nudge: { glyph: '?', color: 'suggestion', label: 'asked whether anything was learned' },
   used: { glyph: '▸', color: 'suggestion', label: 'skill used' },
   repeat: { glyph: '↻', color: 'cyan', label: 'asked before' },
+  insights: { glyph: '◈', color: 'suggestion', label: 'insights' },
   ready: { glyph: '◇', color: 'suggestion', label: 'ready' },
   idle: { glyph: '◇', color: 'inactive', label: 'nothing to reuse' },
 }
+
+// What lists every finding of /insights with its state, under the pane's findings.
+export const INSIGHTS_COMMAND = 'compound insights'
 
 // What the greeting says beside the counts.
 export const HINT = '/compound opens the dashboard'
@@ -76,6 +80,7 @@ const EVENTS: Record<string, Look> = {
   rm: NOTES.removed,
   use: NOTES.used,
   repeat: NOTES.repeat,
+  insight: NOTES.insights,
   error: ERROR,
 }
 
@@ -524,8 +529,11 @@ export function eventText(e: Record<string, unknown>): string {
       return e.ineffective === true ? `${lesson} (ineffective)` : lesson
     case 'capture':
       return oneLine(str(e.fixed), 120)
-    case 'remind':
-      return `${count(names(e.captures).length, 'lesson')} owed`
+    case 'remind': {
+      const owed = names(e.captures).length
+      const findings = names(e.insights).length
+      return [owed > 0 || findings === 0 ? `${count(owed, 'lesson')} owed` : '', findings > 0 ? count(findings, 'insights candidate') : ''].filter(t => t !== '').join(', ')
+    }
     case 'refuse':
       return str(e.why) === 'debt' ? 'lesson owed' : str(e.why) === 'strengthen' ? 'to strengthen' : str(e.why) === 'evidence' ? 'script to keep' : 'long turn'
     case 'learn':
@@ -601,6 +609,8 @@ export function boardFrom(status: string, events: string, session: string, now: 
       ineffective: list(open.ineffective).map(i => ({ ...openRow(`${str(i.name)} (recalled ${num(i.recall)} times)`, i.command), ...(str(i.name) === '' ? {} : { lesson: str(i.name) }) })),
       candidates: list(open.candidates).map(c => openRow(`${str(c.lesson)} in ${base(str(c.from))}`, c.command)),
       scripts: list(open.scripts).map(s => openRow(`${oneLine(str(s.name), 60)} (passed ${num(s.ok)}${num(s.failed) > 0 ? `, failed ${num(s.failed)}` : ''}${str(s.project) === '' ? '' : `, ${base(str(s.project))}`})`, s.command, s.decline)),
+      // A finding of /insights: its id, its text, its age and its project (a report's has none).
+      findings: list(open.findings).map(f => openRow(`${str(f.id)} ${oneLine(str(f.text), 60)} (${str(f.age)}, ${str(f.project) === '' ? 'report' : base(str(f.project))})`)),
       errors: list(open.errors).map(e => openRow(oneLine(`${str(e.where)}: ${str(e.message)}`, 100))),
       skips: list(open.skips).length,
     },
@@ -830,7 +840,8 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
   // What waits for someone comes before the tables: the pane may show only its top rows.
   const o = board.open
   const scripts = o.scripts ?? []
-  const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length + scripts.length
+  const findings = o.findings ?? []
+  const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length + scripts.length + findings.length
   out.push([], ...flow([[{ text: 'Open', bold: true }], ...(waiting === 0 ? words('nothing waits for anyone', { dim: true }, '  ') : [])], columns, '  '))
   // Under each row, the command that settles it, whole: broken at its spaces where the pane
   // is narrow, never cut. The second way to settle a row is shown where there is room for it.
@@ -852,6 +863,7 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
   group(o.unsettled, OWED, count(o.unsettled.length, 'lesson owed', 'lessons owed'))
   group(scripts, OWED, count(scripts.length, 'script that worked and nothing keeps', 'scripts that worked and nothing keeps'))
   group(o.ineffective, WEAK, count(o.ineffective.length, 'ineffective lesson'))
+  group(findings, NOTES.insights, count(findings.length, 'insights candidate'), INSIGHTS_COMMAND)
   group(o.candidates, eventLook('candidate'), count(o.candidates.length, 'lesson that could move to the user level', 'lessons that could move to the user level'))
   group(o.errors, ERROR, `${count(o.errors.length, 'error')} in the last 7 days`, READ_ERRORS)
   if (o.skips > 0) out.push([{ text: `  ${NOTES.declined.glyph} `, dim: true }, { text: `${count(o.skips, 'lesson')} declined`, dim: true }])

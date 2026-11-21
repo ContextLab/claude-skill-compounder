@@ -456,6 +456,36 @@ export function parseUnsettled(stdout: string, session: string, now: number): Un
   return out
 }
 
+// A FINDING OF /insights: a row of kind `insight` of the same `events --unsettled` reply. A
+// `facet` finding is about one earlier session of this project; a `report` finding is a
+// suggestion from the whole report, listed in every project. Its id goes into the commands
+// that settle it, so a row whose id is not one is not shown; `kinds` are the harvest's slugs
+// and `learned` lesson names, so anything else in either is dropped.
+export type Insight = { id: string; source: 'facet' | 'report'; kinds: string[]; text: string; goal: string; why: string; learned: string[]; age: string }
+export const INSIGHT_ID = /^in-[0-9a-f]{16}$/
+const INSIGHT_KIND = /^[a-z_]{1,40}$/
+const INSIGHT_KINDS = 8
+
+function words(value: unknown, shape: RegExp): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && shape.test(v)) : []
+}
+
+// `compound events --unsettled --json`: the findings still to be shown, in the order the CLI
+// lists them (the oldest first). undefined when the reply is not a list.
+export function parseInsights(stdout: string, now: number): Insight[] | undefined {
+  const events = parseEvents(stdout)
+  if (events === undefined) return undefined
+  const out: Insight[] = []
+  for (const e of events) {
+    const id = str(e.id)
+    const source = e.source === 'facet' || e.source === 'report' ? e.source : undefined
+    const text = str(e.text)
+    if (e.type !== 'insight' || !INSIGHT_ID.test(id) || source === undefined || text.trim() === '') continue
+    out.push({ id, source, kinds: words(e.kinds, INSIGHT_KIND).slice(0, INSIGHT_KINDS), text, goal: str(e.goal), why: str(e.why), learned: words(e.learned, SLUG), age: ageText(now - seconds(e)) })
+  }
+  return out
+}
+
 // `compound promote <name> --to user --auto --json` when it left the lesson where it is:
 // the project root that holds it. undefined for a move, or for output that is not that.
 export function parseLeft(stdout: string): string | undefined {

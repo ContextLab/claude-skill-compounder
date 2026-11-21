@@ -51,12 +51,12 @@ type Answer = { text: string; isError?: true }
 // `listed` is what the CLI prints for the pane's `list --json`, `showCode` and `listCode` their exit
 // codes, `wait` is awaited before either answers, `closed` are the panes the mod closed, and
 // `focusAsked` is what each open asked of the keyboard.
-type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[]; used: (name: string) => string; verdict: (event: Record<string, unknown>) => { counted: boolean; ineffective: boolean } }
+type World = { calls: string[][]; logged: Record<string, unknown>[]; memos: Record<string, unknown>[]; found: () => string; judge: () => Promise<string>; check: string; events: string; owed: Record<string, unknown>[]; statuses: (string | undefined)[]; opened: string[]; isLost: boolean; tool: (command: string) => Answer | undefined; show: string; asked: number; listed: string; showCode: number; listCode: number; wait: () => Promise<void>; closed: string[]; status: string; focusAsked: unknown[]; used: (name: string) => string; verdict: (event: Record<string, unknown>) => { counted: boolean; ineffective: boolean }; unsettled: string }
 
 // Everything the mod reaches for through `$`, answered from memory: the CLI by its
 // subcommand, the judge by `world.judge`, and a marker where the engine's own band would be.
 function world(on: On, env: Record<string, string> = {}): World {
-  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [], used: () => '{"used":false,"name":""}', verdict: () => ({ counted: true, ineffective: false }) }
+  const w: World = { calls: [], logged: [], memos: [], found: () => FOUND, judge: async () => NAMED, check: '{"hits":[],"guards":1}', events: EVENTS, owed: [], statuses: [], opened: [], isLost: false, tool: () => undefined, show: '', asked: 0, listed: LISTED, showCode: 0, listCode: 0, wait: async () => undefined, closed: [], status: STATUS, focusAsked: [], used: () => '{"used":false,"name":""}', verdict: () => ({ counted: true, ineffective: false }), unsettled: '[]' }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', ...env })
   on('session.id', () => {
     if (w.isLost) throw new Error('the session is gone')
@@ -106,7 +106,7 @@ function world(on: On, env: Record<string, string> = {}): World {
     if (verb === 'status') return done(w.status)
     if (verb === 'show' && w.showCode !== 0) return w.wait().then(() => failed(w.showCode, `compound: no lesson or skill named '${argv[2]}'`))
     if (verb === 'show') return w.wait().then(() => done(w.show))
-    if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(w.owed) : '[]') : w.events)
+    if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(w.owed) : w.unsettled) : w.events)
     if (verb === 'find') return done(w.found())
     if (verb === 'memo') {
       w.memos.push(JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>)
@@ -439,6 +439,40 @@ test('/compound opens the dashboard: levels, the most used, recent events and wh
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('')).toContain('guard.check: timed out')
     expect((await ui.find({ type: 'Text', text: new RegExp(`^${ERROR.glyph} $`) }))?.props.color).toBe(ERROR.color)
     expect(await ui.find({ type: 'Button', key: 'close' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('findings of /insights: the first prompt notes them on the band beside the captures, and the pane lists them as open, on every surface', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  const findings = [
+    { id: 'in-0123456789abcdef', source: 'facet', project: '/work/alpha', text: 'The build was rerun without its profile.', age: '2d' },
+    { id: 'in-fedcba9876543210', source: 'report', project: '', text: 'Always pass --profile to ./build.sh.', age: '1d' },
+  ]
+  w.unsettled = JSON.stringify([
+    { ts: '2026-10-03T12:00:00Z', type: 'capture', session: 'an-earlier-session', id: 'abc123', failed: './x', error: 'e', fixed: './x --y' },
+    ...findings.map(f => ({ ts: '2026-10-03T12:00:00Z', type: 'insight', session: 'insights', ...f })),
+  ])
+  const status = JSON.parse(STATUS) as { open: Record<string, unknown>; health: Record<string, unknown>[] }
+  status.open.findings = findings
+  status.health.push({ check: 'insights', status: 'PASS', detail: 'the last run, started 2026-10-03T11:00:00Z, is interrupted' })
+  w.status = JSON.stringify(status)
+  const band = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await $.prompt.submit({ text: 'carry on', wait: false, origin: { kind: 'composer' } })
+  const row = (await band.findAll({ type: 'Text' })).map(t => t.text).join('')
+  expect(row).toContain(`${NOTES.unsettled.label} · 1 lesson  insights: 2 candidates`)
+  expect(w.statuses).toContain('1 owed from earlier sessions, 2 insights candidates')
+  await band.unmount()
+  for (const surface of SURFACES) {
+    await $.command.run({ command: 'compound', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+    const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: { ...PANE, bodyColumns: 100 } })
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+    expect(all).toContain('2 insights candidates')
+    expect(all).toContain('in-0123456789abcdef The build was rerun without its profile. (2d, alpha)')
+    expect(all).toContain('in-fedcba9876543210 Always pass --profile to ./build.sh. (1d, report)')
+    // The insights check passes whatever it says: the pane stays healthy.
+    expect(all).toContain('healthy')
     await ui.unmount()
   }
 })

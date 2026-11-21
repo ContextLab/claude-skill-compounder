@@ -1076,3 +1076,44 @@ test('a script that worked and that nothing keeps is on the pane with the two co
   expect(boardLines({ ...older, open }, 140).length > 5).toBe(true)
   expect(older.open.scripts).toEqual([])
 })
+
+test('findings of /insights are on the pane among what is open, with the command that lists them; the insights check breaks nothing', async () => {
+  const status = JSON.parse(STATUS) as { open: Record<string, unknown>; health: Record<string, unknown>[] }
+  status.open.findings = [
+    { id: 'in-0123456789abcdef', source: 'facet', project: '/work/alpha', text: 'The build was rerun without its profile.', age: '2d' },
+    { id: 'in-fedcba9876543210', source: 'report', project: '', text: 'Always pass --profile to ./build.sh.', age: '1d' },
+  ]
+  status.health.push({ check: 'insights', status: 'PASS', detail: 'the last run, started 2026-11-20T00:00:00Z, is interrupted' })
+  const board = boardFrom(JSON.stringify(status), EVENTS, 'pane-session', 0)!
+  expect(board.open.findings).toEqual([
+    { text: 'in-0123456789abcdef The build was rerun without its profile. (2d, alpha)' },
+    { text: 'in-fedcba9876543210 Always pass --profile to ./build.sh. (1d, report)' },
+  ])
+  // The insights check is informational: it passes, and is not drawn as a failure or a warning.
+  expect(board.health.map(h => h.check)).toEqual(['cli', 'duplicates'])
+  expect(board.checks).toBe(4)
+  const text = boardLines(board, 140).map(line => line.map(seg => seg.text).join('')).join('\n')
+  expect(text).toContain('2 insights candidates')
+  expect(text).toContain('in-0123456789abcdef The build was rerun without its profile. (2d, alpha)')
+  expect(text).toContain('compound insights')
+  // A board kept by an earlier version of the mod has no such list, and is drawn all the same.
+  const older = boardFrom(STATUS, EVENTS, 'pane-session', 0)!
+  expect(older.open.findings).toEqual([])
+  const { findings: _gone, ...open } = older.open
+  expect(boardLines({ ...older, open }, 140).length > 5).toBe(true)
+})
+
+test('a reminder\'s line in the timeline counts what it told: lessons owed, findings, or both', async () => {
+  expect(eventText({ type: 'remind', captures: ['a', 'b'] })).toBe('2 lessons owed')
+  expect(eventText({ type: 'remind', insights: ['in-0123456789abcdef'] })).toBe('1 insights candidate')
+  expect(eventText({ type: 'remind', captures: ['a'], insights: ['in-0123456789abcdef', 'in-fedcba9876543210'] })).toBe('1 lesson owed, 2 insights candidates')
+  expect(eventText({ type: 'remind' })).toBe('0 lessons owed')
+  expect(eventLook('insight')).toEqual(NOTES.insights)
+})
+
+test('the first prompt notes the findings it was told about on the band', async () => {
+  const row = (band: CompoundBand) => text(bandRow(band, T0 + 1, 100))
+  expect(row(noted(fresh(), 'insights', '2 candidates', T0))).toBe(`${NOTES.insights.glyph} compound insights · 2 candidates`)
+  // Beside the captures' note: the band shows one note, which carries both.
+  expect(row(noted(fresh(), 'unsettled', '1 lesson', T0, 'insights: 2 candidates'))).toBe('● compound owed from earlier sessions · 1 lesson  insights: 2 candidates')
+})

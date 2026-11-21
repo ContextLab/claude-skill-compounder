@@ -8,13 +8,13 @@ import {
   sameCall, soleCli, soleCliShape,
   heldStep, indexContext, inputOf, isCommand, judged, knownContext, mayRunScript, newsKey, owedStatus, promotedText, ranOut, recallContext, refusal, repeatDue, repeatRecallContext, repeatKey, repeatStatus, reportsEvents, reusable,
   resembles, reuseContext, reuseStatus, ruleRefusal, shellError, shellFailure, stopDebt, stopEvidence, stopNudge, stopStrengthen, storeNews, toast, turnAfterCall, turnAfterPrompt, turnAfterStop, typedByUser,
-  unsettledContext, usedStatus, userOrigin,
+  insightContext, unsettledContext, usedStatus, userOrigin,
   type Failure, type Held, type Repeat, type Turn,
 } from './render'
 import { oneLine, redact } from './safe'
 import {
   askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseIndex, parseInventory, parseLogged, parseMet, parseMoved, parseOwed, parseScripts, parseShow,
-  parseTimedOut, parseUnsettled, parseUsed, settlers,
+  parseInsights, parseTimedOut, parseUnsettled, parseUsed, settlers,
   type Earlier, type Event, type Found, type Item, type Met,
 } from './store'
 import {
@@ -43,7 +43,8 @@ import {
 //                              once; a long turn is asked once
 //
 // And once per session, at its first typed prompt, it tells the session what earlier
-// sessions in this project left unsettled.
+// sessions in this project left unsettled and what Claude Code's /insights found that
+// nothing has settled, and asks the CLI to start a run of /insights when one is due.
 //
 // Two more things are seen. A SKILL THAT IS USED: when the engine expands a skill's prompt
 // (`skill.prompt`: the Skill tool, a typed `/name`, a preload, one event for each), the CLI
@@ -112,6 +113,8 @@ const INVENTORY_TTL_MS = 60000
 const OTHER_PROJECTS = 6
 // How many unsettled captures a session's first prompt is told about.
 const UNSETTLED_SHOWN = 5
+// How many findings of /insights it is shown; the CLI stops listing one after 3 sessions were.
+const INSIGHTS_SHOWN = 3
 // The pane's id, how long after an event its data is read again, and how many events it asks for.
 const PANE = 'compound'
 const BOARD_AFTER_MS = 400
@@ -835,24 +838,54 @@ async function gathered($: EngineInterface, sid: string, text: string, request: 
   return { ...found, items: reusable(found.items), earlier: found.earlier.map(e => ({ ...e, text: redact(e.text) })) }
 }
 
-// What earlier sessions in this project fixed and neither recorded nor declined. Asked of
-// the CLI at the first typed prompt of a session and told once; it refuses no stop.
+// Once a session, at its first typed prompt: `compound insights --start`, which starts a
+// detached /insights run when one is due and answers at once. Its reply is not read; the
+// CLI keeps the state. Never rejects.
+async function insightsStart($: EngineInterface): Promise<void> {
+  try {
+    await cli($, ['insights', '--start', '--json'], undefined, [0], undefined, BUDGET.prompt)
+  } catch (err) {
+    await fail($, 'insights.start', err).catch(() => undefined)
+  }
+}
+
+// What earlier sessions in this project fixed and neither recorded nor declined, and the
+// findings of /insights nothing has settled. Asked of the CLI at the first typed prompt of
+// a session and told once; it refuses no stop. The same claim makes the session's one
+// `insights --start`, at the same time as the read, so the prompt waits for the slower of
+// the two and not for both.
 async function unsettledReminder($: EngineInterface, sid: string): Promise<string> {
   if (!(await firstTime($, sid, 'unsettled'))) return ''
-  const ran = await cli($, ['events', '--unsettled', '--project', await projectRoot($), '--json'], undefined, [0], undefined, BUDGET.prompt)
+  const [, ran] = await Promise.all([
+    insightsStart($),
+    projectRoot($).then(root => cli($, ['events', '--unsettled', '--project', root, '--json'], undefined, [0], undefined, BUDGET.prompt)),
+  ])
   if (ran === undefined) return ''
   const open = parseUnsettled(ran.stdout, sid, nowS())
-  if (open === undefined) {
+  const found = parseInsights(ran.stdout, nowS())
+  if (open === undefined || found === undefined) {
     await fail($, 'unsettled.parse', `compound events --unsettled --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
     return ''
   }
-  if (open.length === 0) return ''
-  // The newest few: a long backlog is in `compound status`, not in every session's first prompt.
+  if (open.length === 0 && found.length === 0) return ''
+  // The newest few captures: a long backlog is in `compound status`, not in every session's
+  // first prompt. The oldest few findings: each is shown to at most three sessions, so the
+  // ones listed first are the ones nearest to being told enough.
   const shown = open.slice(-UNSETTLED_SHOWN).map(c => ({ ...c, failed: redact(c.failed), error: redact(c.error), fixed: redact(c.fixed) }))
-  await log($, { type: 'remind', captures: shown.map(c => c.id) })
-  $.ui.status(`${open.length} owed from earlier sessions`)
-  await paint($, (band, now) => noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'}`, now, shown[shown.length - 1]?.fixed ?? ''))
-  return unsettledContext(shown, await cliPath($))
+  const told = found.slice(0, INSIGHTS_SHOWN).map(f => ({ ...f, text: redact(f.text), goal: redact(f.goal), why: redact(f.why) }))
+  // One event: the CLI counts the sessions a finding was shown to from its `insights`.
+  await log($, { type: 'remind', ...(shown.length === 0 ? {} : { captures: shown.map(c => c.id) }), ...(told.length === 0 ? {} : { insights: told.map(f => f.id) }) })
+  const owed = open.length === 0 ? '' : `${open.length} owed from earlier sessions`
+  const candidates = found.length === 0 ? '' : `${found.length} insights ${found.length === 1 ? 'candidate' : 'candidates'}`
+  $.ui.status([owed, candidates].filter(s => s !== '').join(', '))
+  const noteText = `${found.length} ${found.length === 1 ? 'candidate' : 'candidates'}`
+  await paint($, (band, now) =>
+    open.length === 0
+      ? noted(band, 'insights', noteText, now)
+      : noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'}`, now, found.length === 0 ? (shown[shown.length - 1]?.fixed ?? '') : `insights: ${noteText}`),
+  )
+  const cliName = await cliPath($)
+  return [unsettledContext(shown, cliName), insightContext(told, cliName)].filter(t => t !== '').join('\n\n')
 }
 
 // Once per session, at its first typed prompt: the index of what is recorded. A session

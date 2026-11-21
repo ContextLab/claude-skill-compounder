@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { BUDGET } from './render'
 import { BUSY, GONE_MS, NOTES, OWED } from './view'
 
 // The learn loop through the mod's own hooks: a failed call that no lesson describes is
@@ -21,14 +22,17 @@ const NO_FIX = JSON.stringify({ same_goal: false, call_mistake: false, recurs: f
 const TRACK_FAILED = '● failed → ○ fixed → ○ owed → ○ recorded'
 
 type Answer = { text: string; isError?: true }
-type World = { logged: Record<string, unknown>[]; judge: () => Promise<string>; prompts: string[]; tool: (command: string) => Answer | undefined; calls: string[][] }
+type Run = { argv: string[]; timeoutMs: number | undefined; env: Record<string, string> }
+// `unsettled` is what the CLI answers `events --unsettled --project P`; `start` answers
+// `insights --start`, and `runs` keeps every call with its budget and environment.
+type World = { logged: Record<string, unknown>[]; judge: () => Promise<string>; prompts: string[]; tool: (command: string) => Answer | undefined; calls: string[][]; runs: Run[]; unsettled: string; start: () => Promise<{ code: number; stdout: string }> }
 
 let worlds = 0
 
 function world(on: On, env: Record<string, string> = {}): World {
   worlds += 1
   const n = worlds
-  const w: World = { logged: [], judge: async () => NO_LESSON, prompts: [], tool: () => undefined, calls: [] }
+  const w: World = { logged: [], judge: async () => NO_LESSON, prompts: [], tool: () => undefined, calls: [], runs: [], unsettled: '[]', start: async () => ({ code: 0, stdout: '{"started": false, "why": "not due"}' }) }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000', ...env })
   on('session.id', () => ({ value: `learn-session-${n}` }))
   on('session.root', () => ({ value: `/work/learn-${n}` }))
@@ -43,8 +47,10 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('process.run', (_$, e) => {
     const argv = [...e.argv]
     w.calls.push(argv)
+    w.runs.push({ argv, timeoutMs: e.init?.timeoutMs, env: { ...(e.init?.env ?? {}) } })
     const verb = argv[0]?.endsWith('/compound') ? argv[1] : argv[0]
-    const done = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    const done = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: exitCode === 0 ? '' : 'compound: failed', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (verb === 'insights') return w.start().then(r => done(r.stdout, r.code))
     if (verb === 'log') {
       const event = JSON.parse(e.init?.stdin ?? '{}') as Record<string, unknown>
       w.logged.push(event)
@@ -53,7 +59,7 @@ function world(on: On, env: Record<string, string> = {}): World {
     }
     if (verb === 'list') return done(LESSONS)
     if (verb === 'check') return done('{"hits":[],"guards":0,"tools":[]}')
-    if (verb === 'events') return done(argv.includes('--unsettled') && argv.includes('--session') ? JSON.stringify(owed) : '[]')
+    if (verb === 'events') return done(argv.includes('--unsettled') ? (argv.includes('--session') ? JSON.stringify(owed) : w.unsettled) : '[]')
     return done('')
   })
   on('model.complete', async (_$, e) => {
@@ -496,4 +502,133 @@ test('the failed call passing while a judge runs lets the failure go at once: a 
   await clock.advance(500)
   expect(of(w, 'judge').filter(e => e.moment === 'fix').length).toBe(2)
   expect(of(w, 'capture')).toEqual([])
+})
+
+// ---- findings of /insights, at a session's first typed prompt ----
+
+const finding = (n: number, more: Record<string, unknown> = {}) => ({
+  ts: '2026-11-20T00:00:00Z', type: 'insight', session: 'insights', id: `in-${String(n).repeat(16).slice(0, 16)}`, source: 'facet', of: 'an-earlier-session',
+  project: '/work/learn', kinds: ['wrong_approach'], text: `Friction number ${n}: the build was rerun without its profile.`, goal: 'Ship the build', learned: [], ...more,
+})
+const EARLIER_CAPTURE = { ts: '2026-11-20T00:00:00Z', type: 'capture', session: 'an-earlier-session', id: 'ab12cd34', failed: './build.sh', error: 'a profile is required', fixed: './build.sh --profile dev' }
+const typed = (text: string) => ({ text, wait: false, origin: { kind: 'composer' as const } })
+const said = (r: { context?: readonly string[] }) => (r.context ?? []).join('\n')
+const starts = (w: World) => w.runs.filter(r => r.argv[1] === 'insights')
+
+test('a finding of /insights is shown once, at the first typed prompt, and the remind event names it', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  w.unsettled = JSON.stringify([finding(1)])
+  const first = said(await $.prompt.submit(typed('carry on')))
+  expect(first).toContain('[compound] An analysis of earlier sessions (Claude Code\'s /insights) noted friction that a lesson may not cover yet.')
+  expect(first).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111 source=facet kinds=wrong_approach\n')
+  expect(first).toContain('Friction number 1')
+  expect(first).toContain('skip --settles in-1111111111111111 --why "..."')
+  expect(of(w, 'remind')).toEqual([{ type: 'remind', insights: ['in-1111111111111111'] }])
+  // The band notes it beside what else the first prompt found.
+  expect(await shown()).toContain(`${NOTES.insights.label} · 1 candidate`)
+  // The second prompt adds nothing, and logs nothing more.
+  const second = await $.prompt.submit(typed('and then'))
+  expect(said(second)).toBe('')
+  expect(of(w, 'remind').length).toBe(1)
+  await ui.unmount()
+})
+
+test('five findings: the three oldest are shown, and the remind event names those three', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([1, 2, 3, 4, 5].map(n => finding(n)))
+  const text = said(await $.prompt.submit(typed('carry on')))
+  expect(text.split('\n').filter(l => l.startsWith('<<<RECORDED-INSIGHT')).length).toBe(3)
+  expect(of(w, 'remind').map(e => e.insights)).toEqual([['in-1111111111111111', 'in-2222222222222222', 'in-3333333333333333']])
+  expect(text.includes('in-4444444444444444')).toBe(false)
+})
+
+test('captures and findings together: the captures\' block comes first, and one remind event names both', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([EARLIER_CAPTURE, finding(1, { source: 'report', project: undefined, kinds: undefined, goal: undefined, why: 'It was forgotten twice.' })])
+  const text = said(await $.prompt.submit(typed('carry on')))
+  const capture = text.indexOf('<<<RECORDED-CAPTURE id=ab12cd34')
+  const insight = text.indexOf('<<<RECORDED-INSIGHT id=in-1111111111111111 source=report')
+  expect(capture >= 0).toBe(true)
+  expect(insight > capture).toBe(true)
+  // A finding of the report is recorded at the user level.
+  expect(text).toContain('--level user')
+  expect(of(w, 'remind')).toEqual([{ type: 'remind', captures: ['ab12cd34'], insights: ['in-1111111111111111'] }])
+})
+
+test('the first typed prompt starts an /insights run once a session, within the typed-prompt budget, and reads nothing of its reply', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  // No captures and no findings: the start is made all the same.
+  w.start = async () => ({ code: 0, stdout: '[compound] this reply is never read' })
+  const first = await $.prompt.submit(typed('carry on'))
+  expect(said(first)).toBe('')
+  expect(starts(w).map(r => r.argv.slice(1))).toEqual([['insights', '--start', '--json']])
+  expect(starts(w)[0]?.timeoutMs).toBe(BUDGET.prompt)
+  // It names this session to the CLI as every call does, and passes the store through.
+  expect(starts(w)[0]?.env.COMPOUND_HOME).toBe('/home/me/compound')
+  expect(starts(w)[0]?.env.CLAUDE_CODE_SESSION_ID).toBe(`learn-session-${worlds}`)
+  await $.prompt.submit(typed('and then'))
+  await $.prompt.submit(typed('and after that'))
+  expect(starts(w).length).toBe(1)
+})
+
+test('the start and the reminder\'s read are made together: a slow start does not hold the read back', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([finding(1)])
+  w.start = async () => {
+    await clock.sleep(3000)
+    return { code: 0, stdout: '{"started": true}' }
+  }
+  const submitting = $.prompt.submit(typed('carry on'))
+  await clock.settle()
+  // The start has not answered, and the read was already made.
+  expect(w.runs.some(r => r.argv.includes('--unsettled') && r.argv.includes('--project'))).toBe(true)
+  await clock.advance(3000)
+  expect(said(await submitting)).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111')
+})
+
+test('a start that fails is logged as an error, and the findings are shown all the same', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([finding(1)])
+  w.start = async () => ({ code: 1, stdout: '' })
+  const text = said(await $.prompt.submit(typed('carry on')))
+  expect(text).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111')
+  expect(of(w, 'error').map(e => e.where)).toEqual(['cli.insights'])
+})
+
+test('with COMPOUND_OFF=1 no start is made and no finding is shown: the CLI is not called at all', async ($, on) => {
+  const w = world(on, { COMPOUND_OFF: '1' })
+  mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([finding(1)])
+  const told = await $.prompt.submit(typed('carry on'))
+  expect(said(told)).toBe('')
+  expect(w.calls).toEqual([])
+})
+
+test('no tool call\'s path asks for a run: only the first typed prompt does', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([finding(1)])
+  // Calls before any prompt: a failure, its fix, the judge behind it, the stop.
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  w.judge = async () => FIX
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh --target staging' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Read', file_path: '/work/notes.md' } as never)
+  await $.classic.Stop({ stop_hook_active: false } as never)
+  expect(starts(w)).toEqual([])
+  expect(of(w, 'remind')).toEqual([])
+  await $.prompt.submit(typed('carry on'))
+  expect(starts(w).length).toBe(1)
+  await $.tool.call({ tool: 'Bash', command: './deploy.sh' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  expect(starts(w).length).toBe(1)
 })

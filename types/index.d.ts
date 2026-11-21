@@ -22,6 +22,7 @@ export type CompoundNoteKind =
   | 'nudge'
   | 'used'
   | 'repeat'
+  | 'insights'
   | 'ready'
   | 'idle'
 // `text` names the thing (the lesson, the items found); `detail` is what else there is room
@@ -79,9 +80,10 @@ export type CompoundBoard = {
   levels: CompoundLevel[]
   lessons: CompoundLesson[]
   recent: CompoundRecent[]
-  // `scripts`: the scripts a session ran until they worked that nothing keeps. Absent on a
-  // board kept by an earlier version of the mod.
-  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number; scripts?: CompoundOpen[] }
+  // `scripts`: the scripts a session ran until they worked that nothing keeps. `findings`:
+  // the findings of /insights still open. Each is absent on a board kept by an earlier
+  // version of the mod.
+  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number; scripts?: CompoundOpen[]; findings?: CompoundOpen[] }
   // Why the CLI could not be read, when it could not.
   problem: string
 }
