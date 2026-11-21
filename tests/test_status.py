@@ -35,14 +35,14 @@ class StatusTest(Case):
         data = self.status()
         self.assertEqual([row["check"] for row in data["health"]],
                          ["python", "claude code", "mod", "mod last fired", "cli", "prompt log", "last event",
-                          "duplicates", "lessons parse", "errors"])
+                          "duplicates", "lessons parse", "errors", "insights"])
         self.assertTrue(all(row["status"] in ("PASS", "WARN", "FAIL") for row in data["health"]))
 
     def test_json_carries_the_same_sections(self):
         data = self.status()
         for key in ("ok", "health", "store", "lessons", "recent", "open"):
             self.assertIn(key, data)
-        self.assertEqual(sorted(data["open"]), ["candidates", "errors", "ineffective", "recurring", "scripts", "skips", "unsettled"])
+        self.assertEqual(sorted(data["open"]), ["candidates", "errors", "findings", "ineffective", "recurring", "scripts", "skips", "unsettled"])
 
     def test_a_fresh_sandbox_warns_and_does_not_fail(self):
         data = self.status()
@@ -280,6 +280,25 @@ class StatusTest(Case):
         last = self.box.json("show", "flaky", "--json", COMPOUND_NOW=NOW + 40)["last"]
         self.assertEqual(last["type"], "reuse")
         self.assertEqual(last["ts"], [e for e in self.box.read_events() if e["type"] == "reuse"][0]["ts"])
+
+
+    def test_open_lists_findings_and_the_last_insights_run(self):
+        self.box.seed({"type": "insight", "session": "insights", "id": "in-0123456789abcdef", "source": "facet",
+                       "text": "It used the wrong flag.", "kinds": ["wrong_approach"]}, COMPOUND_NOW=NOW + 2)
+        data = self.status(COMPOUND_NOW=NOW + 20)
+        (row,) = data["open"]["findings"]
+        self.assertEqual((row["id"], row["source"], row["text"]), ("in-0123456789abcdef", "facet",
+                                                                    "It used the wrong flag."))
+        check = [one for one in data["health"] if one["check"] == "insights"][0]
+        self.assertEqual(check["status"], "PASS")
+        self.assertIn("never", check["detail"])
+        text = self.box.run("status", COMPOUND_NOW=NOW + 20).stdout
+        self.assertIn("in-0123456789abcdef", text.split("Open")[1])
+        self.assertNotIn("nothing open", text)
+        self.box.run("insights", "--harvest", COMPOUND_NOW=NOW + 30)
+        check = [one for one in self.status(COMPOUND_NOW=NOW + 40)["health"] if one["check"] == "insights"][0]
+        self.assertEqual(check["status"], "PASS", "informational, never a failing check")
+        self.assertIn("ok", check["detail"])
 
 
 if __name__ == "__main__":

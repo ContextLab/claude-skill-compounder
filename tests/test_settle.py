@@ -15,7 +15,7 @@ import sys
 import time
 import unittest
 
-from test_support import NOW, Case
+from test_support import NOW, Case, iso, seed_event
 
 # Longer than the CLI waits for stdin, far shorter than a hang.
 PATIENCE = 30
@@ -289,6 +289,95 @@ class StrengtheningTest(Settling):
     def test_status_still_lists_only_captures_as_unsettled(self):
         self.weak(offset=1)
         self.assertEqual(self.open_captures(), [])
+
+
+FINDING = "in-00000000000000a1"
+REPORT_FINDING = "in-00000000000000b2"
+
+
+class FindingSettling(Settling):
+    def finding(self, ident=FINDING, source="facet", offset=0):
+        event = {"ts": iso(NOW + offset), "type": "insight", "session": "insights", "id": ident, "source": source,
+                 "text": "It used the wrong flag."}
+        if source == "facet":
+            event["project"] = self.box.project
+        seed_event(self.box.events, event)  # as written: box.seed would give a report item a project
+        return event
+
+    def remind(self, session, offset):
+        self.box.log({"type": "remind", "insights": [FINDING]}, CLAUDE_CODE_SESSION_ID=session,
+                     COMPOUND_NOW=NOW + offset)
+
+    def listed(self, **kw):
+        return [row for row in self.unsettled(**kw) if row["type"] == "insight"]
+
+    def test_skip_settles_a_finding_by_id(self):
+        self.finding()
+        proc = self.box.run("skip", "--settles", FINDING, "--why", "not real", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 0)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+        self.assertEqual(self.listed(), [])
+        (row,) = self.box.json("insights", "--json")["findings"]
+        self.assertEqual((row["id"], row["state"]), (FINDING, "settled"))
+
+    def test_add_settles_a_finding_by_id(self):
+        self.finding()
+        self.box.add("a-lesson", "Use when it matters.", "Body.\n", "--settles", FINDING, COMPOUND_NOW=NOW + 10)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+        self.assertEqual(self.listed(), [])
+
+    def test_a_finding_shown_three_times_can_still_be_settled(self):
+        self.finding()
+        for index, session in enumerate(("s-one", "s-two", "s-three")):
+            self.remind(session, 1 + index)
+        self.assertEqual(self.listed(), [])
+        self.assertEqual(self.box.json("insights", "--json", COMPOUND_NOW=NOW + 20)["findings"][0]["state"], "quiet")
+        self.assertExit(self.box.run("skip", "--settles", FINDING, "--why", "no", COMPOUND_NOW=NOW + 20), 0)
+        self.assertEqual(self.box.json("insights", "--json", COMPOUND_NOW=NOW + 21)["findings"][0]["state"], "settled")
+
+    def test_settles_refuses_an_expired_or_unknown_finding(self):
+        self.finding()
+        before = self.box.snapshot()
+        late = self.box.run("skip", "--settles", FINDING, "--why", "late", COMPOUND_NOW=NOW + 15 * 86400)
+        self.assertExit(late, 2)
+        self.assertIn("names no unsettled capture or finding", late.stderr)
+        unknown = self.box.run("skip", "--settles", "in-ffffffffffffffff", "--why", "who", COMPOUND_NOW=NOW + 10)
+        self.assertExit(unknown, 2)
+        self.assertIn("--settles", unknown.stderr)
+        self.assertEqual(self.box.snapshot(), before)
+        self.assertEqual(self.box.json("insights", "--json", COMPOUND_NOW=NOW + 15 * 86400)["findings"][0]["state"],
+                         "expired")
+
+    def test_a_skip_aimed_at_a_finding_leaves_the_sessions_ineffective_recall_owed(self):
+        self.finding()
+        recall = self.weak(session="s-one", offset=1)
+        self.assertExit(self.box.run("skip", "--settles", FINDING, "--why", "no", CLAUDE_CODE_SESSION_ID="s-one",
+                                     COMPOUND_NOW=NOW + 5), 0)
+        self.assertEqual(self.unsettled("--session", "s-one"), [recall])
+
+    def test_a_capture_is_not_settled_by_an_event_that_names_a_finding(self):
+        self.finding()
+        capture = self.capture(session="s-one", offset=1)
+        self.assertExit(self.box.run("skip", "--settles", FINDING, "--why", "no", CLAUDE_CODE_SESSION_ID="s-one",
+                                     COMPOUND_NOW=NOW + 5), 0)
+        self.assertEqual([row["id"] for row in self.unsettled("--session", "s-one")], [capture["id"]])
+        self.assertEqual(self.open_captures()[0]["id"], capture["id"])
+
+    def test_add_refuses_a_report_finding_at_the_project_level(self):
+        self.finding(REPORT_FINDING, source="report")
+        before = self.box.snapshot()
+        proc = self.box.run("add", "--name", "a-lesson", "--when", "Use when it matters.", "--settles",
+                            REPORT_FINDING, stdin="Body.\n", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 2)
+        self.assertIn("--level user", proc.stderr)
+        self.assertEqual(self.box.snapshot(), before)
+
+    def test_add_records_a_report_finding_at_the_user_level(self):
+        self.finding(REPORT_FINDING, source="report")
+        self.box.add("a-lesson", "Use when it matters.", "Body.\n", "--level", "user", "--settles", REPORT_FINDING,
+                     COMPOUND_NOW=NOW + 10)
+        self.assertEqual(self.box.read_events()[-1]["settles"], REPORT_FINDING)
+        self.assertEqual(self.listed(), [])
 
 
 if __name__ == "__main__":

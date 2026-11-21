@@ -186,13 +186,16 @@ EVENT LOG
         remind    mod               captures [string]  ids of the unsettled captures a
                                                        session was told about at its
                                                        first prompt
-        learn     CLI `add`         lesson*  string
+                                    insights [string]  ids of the findings it was shown
+                                                       (a finding shown to 3 sessions is
+                                                       no longer listed)
+        learn     CLI `add`       lesson*  string
                                     level    string    project | user | general
                                     kind     string    lesson | skill
                                     path     string    the lesson's directory
                                     guard    bool      it has a match
                                     update   bool      --update rewrote it
-                                    settles* string    --settles: the capture it settles
+                                    settles* string    --settles: the capture or finding it settles
                                     evidence [string]  the ids of the snapshots its
                                                        attached scripts are (see
                                                        EVIDENCE)
@@ -209,7 +212,7 @@ EVENT LOG
         rm        CLI `rm`          lesson*  string
                                     level    string    project | user
         skip      CLI `skip`        why*     string
-                                    settles* string    --settles: the capture it settles
+                                    settles* string    --settles: the capture or finding it settles
                                     evidence* string   --evidence: the snapshot whose
                                                        script it declines; such an
                                                        event settles nothing
@@ -2724,6 +2727,10 @@ def cmd_insights(args):
     if not args.harvest:
         state = {"started": None, "finished": None, "outcome": None, "message": "", "harvested": {}}
         state.update(read_insights_state())
+        events, _bad = read_events()
+        state["findings"] = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
+                              "state": kind, "text": _text(event.get("text"))}
+                             for ident, (event, kind) in insight_states(events, now()).items()]
         if args.json:
             emit(state)
             return 0
@@ -2731,6 +2738,9 @@ def cmd_insights(args):
             state["finished"] or "never", state["outcome"] or "none yet"))
         if state["message"]:
             sys.stdout.write("message: %s\n" % one_line(state["message"]))
+        for row in state["findings"]:
+            sys.stdout.write("%s  %-8s %-6s %s\n" % (row["id"], row["state"], row["source"],
+                                                       one_line(row["text"])[:OPEN_TEXT]))
         return 0
     clock = now()
     with insights_lock(True):
@@ -2764,10 +2774,61 @@ def cmd_insights(args):
     return 0
 
 
+# A finding is listed for the reminder until 3 distinct sessions were told it (it is then
+# "quiet", and can still be settled), until a `learn` or `skip` settles it, or until
+# UNSETTLED_DAYS have passed since the harvest wrote it ("expired").
+INSIGHT_SHOWN_SESSIONS = 3
+
+
+def insight_states(events, clock):
+    """{finding id: (the `insight` event, its state)} for every finding in `events`, in one
+    pass over them. The state is "settled", "expired", "quiet" or "open" (see `insight_state`)."""
+    found, sessions, settled = {}, {}, set()
+    for event in events:
+        kind = event.get("type")
+        if kind == "insight":
+            ident = event.get("id")
+            if isinstance(ident, str) and ident not in found:
+                found[ident], sessions[ident] = event, set()
+        elif kind == "remind":
+            session, named = _text(event.get("session")), event.get("insights")
+            if session and isinstance(named, list):
+                for ident in named:
+                    if isinstance(ident, str) and ident in sessions:
+                        sessions[ident].add(session)
+        elif kind in ("learn", "skip"):
+            ident = _text(event.get("settles"))
+            if ident in found:
+                settled.add(ident)
+    out = {}
+    for ident, event in found.items():
+        stamp = parse_ts(event.get("ts"))
+        if ident in settled:
+            state = "settled"
+        elif stamp is None or clock - stamp > UNSETTLED_DAYS * 86400:
+            state = "expired"
+        elif len(sessions[ident]) >= INSIGHT_SHOWN_SESSIONS:
+            state = "quiet"
+        else:
+            state = "open"
+        out[ident] = (event, state)
+    return out
+
+
+def insight_state(event, events, clock):
+    """"open" (still listed for the reminder), "quiet" (told to INSIGHT_SHOWN_SESSIONS
+    distinct sessions, so no longer listed, but still settleable), "settled" or "expired"
+    (older than UNSETTLED_DAYS, counted from the harvest, so neither listed nor settleable)."""
+    found = insight_states(events, clock).get(event.get("id"))
+    return found[1] if found else "expired"
+
+
 def settled_by(debt, event):
     """Whether `event`, later in the log than `debt`, settles it. THE definition of
     settled: every reader goes through `unsettled`, which asks this."""
     kind = event.get("type")
+    if _text(event.get("settles")).startswith("in-"):
+        return False  # it settles a finding, and nothing else
     if kind == "skip" and event.get("evidence"):
         return False
     session = _text(event.get("session"))
@@ -2826,13 +2887,20 @@ def unsettled_captures(events, clock=None):
 
 
 def check_settles(value, events):
-    """The id `--settles` names, or Fail(2) when no unsettled capture has it."""
+    """The id `--settles` names, or Fail(2) when it is neither an unsettled capture nor a
+    finding that can still be settled (open or quiet)."""
     if value is None:
         return None
     owed = [capture_id(cap) for cap in unsettled_captures(events)]
-    if value not in owed:
-        raise usage("--settles %r names no unsettled capture (see `compound events --unsettled`%s)" % (
-            one_line(value)[:40], "; unsettled: " + ", ".join(owed[-8:]) if owed else "; there is none"))
+    if value in owed:
+        return value
+    findings = [ident for ident, (_event, state) in insight_states(events, now()).items()
+                if state in ("open", "quiet")]
+    if value not in findings:
+        listed = owed[-8:] + findings[-8:]
+        raise usage("--settles %r names no unsettled capture or finding (see `compound events --unsettled` "
+                    "and `compound insights`%s)" % (
+                        one_line(value)[:40], "; unsettled: " + ", ".join(listed) if listed else "; there is none"))
     return value
 
 
@@ -4453,6 +4521,13 @@ def cmd_add(args):
     existing = [item for item in items if item["name"] == name]
     events, _bad = read_events()
     settles = settling(args.settles, events)
+    if settles and settles.startswith("in-"):
+        target = existing[0]["level"] if args.update and existing else args.level
+        kept = insight_states(events, now()).get(settles)
+        if kept and kept[0].get("source") == "report" and target != "user":
+            raise usage("%s is a finding of the /insights report, written from sessions of several projects: "
+                        "record it at the user level (--level user), or decline it with `compound skip --settles`"
+                        % settles)
 
     vouched_before = None
     there_before = None
@@ -6367,15 +6442,21 @@ def cmd_events(args):
             raise usage("--since %r is neither epoch seconds nor an ISO 8601 time" % args.since)
     events, bad = read_events()
     if args.unsettled:
-        events = [dict(event, id=capture_id(event)) if event.get("type") == "capture" else event
-                  for event in unsettled(events, now())]
+        clock = now()
+        owed = [dict(event, id=capture_id(event)) if event.get("type") == "capture" else event
+                for event in unsettled(events, clock)]
+        # The findings still to be shown follow what is owed. A session's own debts are never one.
+        findings = [] if args.session else [event for event, state in insight_states(events, clock).values()
+                                            if state == "open"]
+        events = owed + findings
     wanted = os.path.realpath(_expand(args.project)) if args.project else None
     out = []
     for event in events:
         if args.type and event.get("type") != args.type:
             continue
         if wanted is not None and not (isinstance(event.get("project"), str) and event["project"]
-                                       and os.path.realpath(event["project"]) == wanted):
+                                       and os.path.realpath(event["project"]) == wanted) \
+                and not (event.get("type") == "insight" and not event.get("project")):
             continue
         if args.session and event.get("session") != args.session:
             continue
@@ -7256,6 +7337,10 @@ def build_status():
     check("errors", "WARN" if errors else "PASS",
           "%d in the last 7 days" % len(errors) if errors else "none in the last 7 days")
 
+    ran = read_insights_state()
+    check("insights", "PASS", "last run %s: %s" % (ran.get("finished"), ran.get("outcome") or "none")
+          if ran.get("finished") else "never run")
+
     store = {}
     for level in LEVELS:
         mine = [row for row in rows if row["level"] == level]
@@ -7287,6 +7372,11 @@ def build_status():
                           # What settles it, as the report prints it and the pane shows it.
                           "command": "/compound:learn settle %s" % capture_id(cap),
                           "decline": 'compound skip --settles %s --why "<reason>"' % capture_id(cap)})
+
+    findings = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
+                 "text": one_line(_text(event.get("text")))[:OPEN_TEXT],
+                 "age": age_text(clock - parse_ts(event.get("ts")))}
+                for ident, (event, state) in insight_states(events, clock).items() if state == "open"]
 
     candidates = []
     for event in events:
@@ -7346,6 +7436,7 @@ def build_status():
             "recurring": [{"name": row["name"], "level": row["level"], "path": row["path"],
                            "recall": row["counts"]["recall"]} for row in rows if row["recurring"] and active(row)],
             "unsettled": unsettled,
+            "findings": findings,
             "candidates": candidates,
             # The scripts sessions ran that are owed a decision, of the last UNSETTLED_DAYS days.
             "scripts": [{"id": row["id"], "name": row["name"], "path": row["path"], "project": row["project"],
@@ -7449,8 +7540,13 @@ def cmd_status(args):
     head("Open")
     opened = data["open"]
     if not (opened["ineffective"] or opened["skips"] or opened["errors"] or data["unparseable"]
-            or opened["unsettled"] or opened["candidates"] or opened["recurring"] or opened["scripts"]):
+            or opened["unsettled"] or opened["candidates"] or opened["recurring"] or opened["scripts"]
+            or opened["findings"]):
         out("  nothing open\n")
+    for row in opened["findings"]:
+        out("  finding      %s %s %s: %s. Check it against this project; record it with compound:learn "
+            "(--settles %s) or decline it: compound skip --settles %s --why \"...\"\n" % (
+                row["id"], row["age"], row["source"], row["text"], row["id"], row["id"]))
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
             "%s  Or decline it: %s\n" % (

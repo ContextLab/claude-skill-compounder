@@ -259,5 +259,19 @@ class HarvestTest(Case):
         self.assertEqual(len(self.insights()), 1)
 
 
+    def test_the_state_command_lists_each_finding_with_its_state(self):
+        self.assertEqual(self.box.json("insights", "--json")["findings"], [])
+        project = self.one_session("The run kept using the wrong flag.")
+        self.harvest()
+        (event,) = self.insights()
+        (row,) = self.box.json("insights", "--json")["findings"]
+        self.assertEqual(row, {"id": event["id"], "source": "facet", "project": project, "state": "open",
+                               "text": "The run kept using the wrong flag."})
+        listing = self.box.run("insights")
+        self.assertExit(listing, 0)
+        self.assertIn(event["id"], listing.stdout)
+        self.assertIn("open", listing.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

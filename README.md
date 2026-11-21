@@ -95,6 +95,7 @@ Health
   PASS  duplicates      every name exists once
   PASS  lessons parse   every lesson reads
   PASS  errors          none in the last 7 days
+  PASS  insights        never run
 
 Compound interest
   nothing yet: the log holds no reuse, guard, recall or lesson
@@ -588,6 +589,7 @@ exits 1 when a row fails.
 | `duplicates` | FAIL or WARN: one name at two places | the row prints both paths; remove or rename one |
 | `lessons parse` | FAIL: a lesson does not read | the row prints the file and the problem; fix the file or run `compound rm <name>` |
 | `errors` | WARN: errors in the last 7 days | the `Open` section of the report lists each one |
+| `insights` | PASS only: when the last read of Claude Code's `/insights` output finished, or `never run` | nothing; it is informational |
 
 Other things you may see:
 
