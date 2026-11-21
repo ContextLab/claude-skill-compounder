@@ -19,14 +19,21 @@ Design: `notes/2026-11-21-insights-design.md`. Plan: `notes/2026-11-21-insights-
 - Also fixed on the way: the hook test fixtures for Claude Code 2.1.330 (7e28456), which
   had both plugin checks failing before this work.
 
+## Later the same day
+
+- The user asked for the journey to run with the Claude CLI's own login, not an API key.
+  It gained `--config ambient` and passed 26 of 26 on its second real run (the first failed
+  on a fault in the script); see `notes/2026-11-21-insights-journey.md`.
+- `main` was fast-forwarded to b957788 after all three checks were run again at that
+  commit. Not pushed. The feature is live in an install that loads the plugin from this
+  checkout: the next new session's first typed prompt starts a real run when one is due.
+
 ## Open
 
-1. `tests/journeys/journey_insights.py` has never been run for real (dry run only: 9 of 9).
-   It needs an API key in the environment; the agent's read of the keychain item was
-   refused, so the user runs it. Until it runs, nothing has exercised a real session's
-   first prompt starting a run, the child's environment, or the freshness check on
-   `report.html`. The 900 s timeout kill has no test at all.
-2. The merge of b271942 into `main`, and the push, wait for the user.
+1. The push waits for the user.
+2. The 900 s timeout kill has no test. `--config fresh` of the journey was only dry-checked.
+   No real finding was about the journey's own scratch project, so showing a finding was
+   proven with report findings only.
 3. Parked: headless `claude -p` sessions count toward a finding's three showings.
 4. Noted, not changed: the mod ignores `isCollapsed`, so the band's timer runs while the
    band is collapsed.
