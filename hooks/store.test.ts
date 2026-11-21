@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, parseInsights, INSIGHT_ID, settlers, otherProjects, askedTimes, memoOf, parseEarlier, parseUsed, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, parseInsights, parseStarted, INSIGHT_ID, settlers, otherProjects, askedTimes, memoOf, parseEarlier, parseUsed, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -240,6 +240,17 @@ test('findings of /insights are read from the same reply, held to their shape; c
   expect(parseInsights('[{"type":"insight"', now)).toBe(undefined)
   // An object with no `type`, as `insights --start` prints, is no row: the reply holds no finding.
   expect(parseInsights('{"started":true}', now)).toEqual([])
+})
+
+test('the reply of insights --start says a run began only when its started is the value true', async () => {
+  expect(parseStarted('{"started": true, "why": "due"}')).toBe(true)
+  expect(parseStarted('{"started": false, "why": "too soon"}')).toBe(false)
+  expect(parseStarted('{"started": "true"}')).toBe(false)
+  expect(parseStarted('{"started": 1}')).toBe(false)
+  expect(parseStarted('[{"started": true}]')).toBe(false)
+  expect(parseStarted('[compound] this reply is never read')).toBe(false)
+  expect(parseStarted('')).toBe(false)
+  expect(parseStarted('null')).toBe(false)
 })
 
 test('a lesson left in place by the automatic move is read with the project that holds it', async () => {

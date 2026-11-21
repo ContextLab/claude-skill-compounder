@@ -101,6 +101,12 @@ export function parseTimedOut(stdout: string): string[] {
   return o.timed_out.map(t => (typeof t === 'string' ? t : str(record(t)?.name))).filter(t => t !== '')
 }
 
+// `compound insights --start --json`: whether it began a run of /insights. Only a reply
+// whose `started` is the value true says so; anything else, unreadable included, is false.
+export function parseStarted(stdout: string): boolean {
+  return record(parsed(stdout))?.started === true
+}
+
 // `compound check --guards`: the number under "guards", how many lessons carry a pattern.
 // undefined when the reply does not say.
 export function parseGuards(stdout: string): number | undefined {

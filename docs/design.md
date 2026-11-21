@@ -1053,9 +1053,14 @@ finding is recorded at the user level or not at all. A finding refuses no stop.
 The same claim (`unsettled`) makes the session's one `compound insights --start --json`,
 which starts a run of `/insights` when one is due. It is made at the same time as the read
 above, within the typed-prompt budget, so the first prompt waits for the slower of the two
-calls and not for both; no other path makes it, and no tool call waits for it. Its reply is
-not read. A start that fails is logged as an `error` (`where` `cli.insights`, or
-`insights.start` for a failure of the mod around it) and the reminder is made all the same.
+calls and not for both; no other path makes it, and no tool call waits for it. When its
+reply is an object whose `started` is `true`, the run that began, which costs money, is
+told: the status entry and the band's `◈` note say `/insights run started`, after the
+count of findings when there are any (`1 candidate from /insights, /insights run
+started`), and on their own when the first prompt has nothing else to tell. Any other
+reply, an unreadable one included, tells nothing. A start that fails is logged as an
+`error` (`where` `cli.insights`, or `insights.start` for a failure of the mod around it)
+and the reminder is made all the same.
 `COMPOUND_OFF=1` switches it off with everything else.
 
 ### Findings from /insights
@@ -1092,10 +1097,14 @@ check.
   item that parses, the outcome is `unreadable`: nothing is recorded (the findings of the
   other source are withheld too), one `error` event
   (`where` `insights.harvest`) names the file and the key, and the state says so.
+- **At most 100 at a time.** One harvest records at most 100 new findings: the facets
+  first, newest first by the modification time of their files, then the report's items.
+  What is left out is counted as `capped` and is not in the log, so the next harvest finds
+  it new and records it.
 - **One at a time.** The harvest holds a lock on `insights.lock` in `COMPOUND_HOME` from
   reading the log to its last append, so two harvests cannot both record one finding. It
-  keeps `finished`, `outcome`, `message` and the counts of the harvest in `insights.json`
-  beside it.
+  keeps `finished`, `outcome`, `message` and the counts of the harvest (`facets`,
+  `findings`, `report`, `skipped`, `dropped`, `capped`) in `insights.json` beside it.
 
 `insight` is a type the CLI writes: `compound log` refuses it, so no session can put a
 finding into the log by hand.
@@ -1140,12 +1149,19 @@ says; only `--start` answers `off`.
   takes the `started` of the `--start` that spawned it when the state says `running` and
   `started` is at most 60 seconds old, and writes a fresh one otherwise, so a report older
   than this run never passes for its output. Any error it meets ends in outcome `failed`
-  and one `error` event, never in a `running` nothing is running. It runs `claude -p
-  /insights` (`claude` as found on `PATH`) with `COMPOUND_HOME` as its working directory
-  and no standard input, in a process group of its own. When `claude` is not on `PATH` the outcome is `failed` with a message that says
-  so. After 900 seconds the whole group is killed (SIGTERM, then SIGKILL after 5 seconds)
-  and the outcome is `timeout`.
-- **The child's environment** is the worker's with `COMPOUND_OFF=1` added, so the child
+  and one `error` event, never in a `running` nothing is running. The worker's events are
+  the run's own: their `session` is the word `insights`, as its findings' is, and their
+  `project` is empty, since the run reads the sessions of every project. `--start` gives
+  the worker its own environment without `CLAUDE_CODE_SESSION_ID`, so nothing it or the
+  child does is stamped as the starting session's. It runs `claude -p /insights` with
+  `COMPOUND_HOME` as its working directory and no standard input, in a process group of
+  its own. `claude` is the one on `PATH`, else `$HOME/.local/bin/claude` when that is an
+  executable file (a session started from a desktop app may not have the shell's `PATH`;
+  with no `HOME` there is no second place). When neither is there the outcome is `failed`
+  with a message that names both places. After 900 seconds the whole group is killed
+  (SIGTERM, then SIGKILL after 5 seconds) and the outcome is `timeout`.
+- **The child's environment** is the worker's (without `CLAUDE_CODE_SESSION_ID`) with
+  `COMPOUND_OFF=1` added, so the child
   session's mod does nothing: it writes no event and makes no reuse check, and it does not
   call `insights --start`, which is what keeps a run from starting a run. When
   `COMPOUND_CLAUDE_DIR` or `CLAUDE_CONFIG_DIR` is set, the child also gets
@@ -1182,8 +1198,19 @@ A finding is in one of four states, which `compound insights` names for each of 
 
 A report finding was written from sessions of several projects, so `compound add
 --settles <id of a report finding>` exits 2 at any level but `--level user` (with
-`--update`, the level of the lesson it rewrites). `compound skip --settles` has no such
-limit.
+`--update`, the level of the lesson it rewrites). A finding about a session belongs to
+that session's project, and a project lesson can be a committed file, so `compound add
+--settles <id>` at the project level exits 2, naming the project it belongs to, unless
+the finding's `project` is this project's root (the two compared as real paths). At the
+user level it is recorded from anywhere. `compound skip --settles` has neither limit.
+
+`compound status` lists the open findings under Open. One of this project, or of the
+report, is listed with how to record it here; one of another project names that project
+and says to record it in a session there, or to decline it, as an owed capture of another
+project is listed. Its text, there and in `compound insights`, is one line of at most 100
+characters, and cannot open or close one of the mod's quotation markers or begin with
+`[compound]`: the CLI rewrites them as the mod's quoting does (`<<(RECORDED-INSIGHT`,
+`RECORDED-INSIGHT)>>`, `(compound)`).
 
 ### Once, and only once
 
@@ -1631,7 +1658,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | `−` | grey | `removed` | `compound rm` | 8 s |
   | `▲` | yellow | `lesson ineffective`, then `lesson to strengthen` | a recalled lesson did not prevent its failure | until the CLI no longer lists it as owed |
   | `●` | yellow | `owed from earlier sessions`, how many, and the newest one's working call | the session's first prompt was told of them | 8 s |
-  | `◈` | blue | `insights` and `N candidates from /insights`; beside the row above when captures were told too, as `◈ N candidates from /insights` after the working call | the session's first prompt was told of findings of `/insights` | 8 s |
+  | `◈` | blue | `insights` and `N candidates from /insights`, followed by `, /insights run started` when the first prompt's start began a run (that alone when nothing else was told); beside the row above when captures were told too, as `◈ N candidates from /insights` after the working call | the session's first prompt was told of findings of `/insights`, or began a run | 8 s |
   | `?` | blue | `asked whether anything was learned` | the question after a long turn | 8 s |
   | `▸` | blue | `skill used`, the skill's name and its level | the session invoked a skill compound lists | 8 s |
   | `↻` | cyan | `asked before`, how many sessions, and `a skill is on offer` | the reuse check offered to make a repeated request a skill | 8 s |
@@ -1758,7 +1785,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   the band (`ui.band`) and one for the pane (`ui.pane`).
 - **Status entry**: every firing sets a short entry (`reuse bibdupcheck.py +1`, `guard
   zsh-equals-word`, `lesson owed: ./deploy.sh --target staging`, `2 owed from earlier
-  sessions`, `2 owed from earlier sessions, 1 candidate from /insights`, `used finish-task`, `asked in 3 sessions: a skill is on offer`, `1 error`). Claude Code shows the plugin's name before it, so the status area
+  sessions`, `2 owed from earlier sessions, 1 candidate from /insights`, `/insights run started`, `used finish-task`, `asked in 3 sessions: a skill is on offer`, `1 error`). Claude Code shows the plugin's name before it, so the status area
   reads `compound: reuse bibdupcheck.py +1`. A hook that the engine stopped (it
   threw, or ran out of its time) sets `N errors` from its `.catch` handler. A `compound`
   command the session runs sets one for what it did (`skill <name>`, `removed <name>`,
@@ -1917,7 +1944,7 @@ The health checks, in order:
 | `duplicates` | no name is visible at two levels (FAIL for a lesson, WARN for two skills) |
 | `lessons parse` | every lesson reads: its frontmatter, its name (a slug that is the directory's name), its size, its patterns and its condition (see "What a repository can write") |
 | `errors` | the mod logged no error in the last 7 days |
-| `insights` | informational, always PASS: when the last run or `compound insights --harvest` finished and its outcome, `the last run, started T, is running` or `is interrupted`, or `never run` |
+| `insights` | PASS: when the last run or `compound insights --harvest` finished and its outcome, `the last run, started T, is running` or `is interrupted`, or `never run`. WARN, which fails nothing and which the pane shows, when the last outcome is `failed`, `timeout` or `unreadable`: `last run T: <outcome>: <message>` |
 
 Under Open, `compound status` also lists each open finding (`findings` in `status --json`:
 `id`, `source`, `project`, `text`, `age`) with the two ways to settle it; for a report
@@ -1931,7 +1958,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 
 | Command | Does |
 |-|-|
-| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--probe NAME] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--from-evidence ID]... [--unrun] [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--probe NAME` names a probe (see "A probe" under moment 2), and `--no-match` drops it with the patterns. `--from-evidence ID` attaches the script the CLI kept under that id, as it ran; `--attach` of a program with no recorded passing run is exit 2 unless `--unrun` (see "A script that ran"). `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture, or that finding of `/insights` (a report finding only at `--level user`), and is required when the session has more than one unsettled (exit 2 otherwise, listing their ids). Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
+| `compound add --name N --when D [--body TEXT \| --body-file PATH] [--level L] [--match RE]... [--tool TOOL]... [--no-match] [--probe NAME] [--platform NAME]... [--shell NAME]... [--no-condition] [--attach F]... [--from-evidence ID]... [--unrun] [--origin T] [--update] [--settles ID] [--new] [--as-written]` | Writes the lesson. `--probe NAME` names a probe (see "A probe" under moment 2), and `--no-match` drops it with the patterns. `--from-evidence ID` attaches the script the CLI kept under that id, as it ran; `--attach` of a program with no recorded passing run is exit 2 unless `--unrun` (see "A script that ran"). `--platform` and `--shell` write its condition, and `--no-condition`, with `--update`, drops it (see "Where a lesson applies"). `--update` refuses a lesson of the general pool and names `compound disable`. The body is `--body TEXT`, the file `--body-file PATH`, or stdin: `--body -` reads stdin to its end, and with no body flag a new lesson reads stdin, waiting at most 2 seconds at a time for it (a stdin that neither gives text nor ends is exit 2). Refuses a name the session can see at any level, and at `--level user` a name another project holds, unless `--update`, which rewrites that lesson where it is and keeps every value a flag does not give. `--update` keeps the body unless a body flag gives one and never reads stdin without `--body -`; text already waiting on stdin with no body flag is exit 2. `--tool TOOL` names a tool whose calls the patterns are tested against (default: Bash alone) and needs a pattern. `--no-match`, with `--update`, drops the lesson's guard patterns and its tools. `--settles ID` settles that capture, or that finding of `/insights` (a report finding only at `--level user`; a finding about another project's session not at the project level), and is required when the session has more than one unsettled (exit 2 otherwise, listing their ids). Refuses (exit 2) a second copy of a lesson the session can see unless `--new`, and text that names a path or an id of one session unless `--as-written` (see "What `add` refuses"). Logs `learn`. |
 | `compound list [--level L] [--scripts]` | Lessons and skills at every level: `level`, `kind`, `name`, `description`, `path`, `match`, `platform`, `shell`, `applies`, `disabled`, `counts` (`reuse`, `guard`, `recall`, `learn`, `use`), `ineffective`, `recurring`, and `shadowed: true` on a project lesson that carries a user or general lesson's name. A lesson not in force is listed, flagged `not here`, `disabled` or `shadowed`. `--scripts` adds the project's scripts. As text: the level, the kind, the name, the four counters (`REUSED`, `GUARDED`, `RECALLED`, `USED`), the flag and the description, fitted to the terminal; where the columns themselves do not fit, the flag goes before the description on the line under the row. |
 | `compound show N` | One lesson's path and text, and when it is not in force, why. When no lesson of that name is in scope here, the lesson of that name in another project the event log knows, said to be that project's (`project` in `--json`): the index offers those by name. For a name at two levels it is the lesson in force. With `--json` also its counts, `here` (this machine's platform and shell), `recalls_since` (the recalls that count toward ineffective: at most one for a session, since the lesson was last written), `recur_limit`, `guarded_in_session` (its guard refused a call in the caller's session), `body` (the text without its frontmatter) and `last` (the `ts` and `type` of the newest reuse, guard, recall or use that names it, or null). |
 | `compound find WORDS [--limit N] [--floor W]`, `compound find --request [--limit N] [--floor W]` | Lessons, skills and scripts ranked by the weight of the words they share with `WORDS` (see "How candidates are ranked"), the best `N` of them (default 10), then prompt-log hits. A lesson not in force is left out. `--floor W` leaves out entries below that weight. `--request` reads a whole request on stdin and lists candidates only (the floor is `COMPOUND_REUSE_FLOOR` unless `--floor` is given); its `--json` adds `memo_key`, and `memo` when a verdict is kept for the request, in which case the prompt log is not searched (`"surfer": "memo"`) and the asking session is added to the memo's `asked`. Each row under `prompts` carries `sessions`, the sessions that asked that text (its own first, at most 20). An empty stdin is exit 2; a request with no word in it has no candidates. |
@@ -1947,7 +1974,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound skip --why T [--settles ID] [--evidence ID]` | `--settles` also takes the id of a finding of `/insights`, which it settles and nothing else. With `--evidence ID`: declines the script of that snapshot, which is then not asked about again and settles nothing else; `--settles` with it is exit 2. Otherwise: declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound index` | The lessons a session of this project could use, as a JSON list of rows: `name`, `level`, `description`, `script` (a program sits beside it), `path`, and `project` on a lesson of another project (the project root). The lessons in force here, then the lessons of other projects the event log knows that carry a script; a lesson with a script first, then by level. Skills are left out. Writes nothing. The mod runs it at a session's first prompt (see "The index"). |
 | `compound met` | stdin `{"tool","call","error"}`: a call failed. Prints `{"sig","sessions","captured"}`: the signature of the error (null when it says nothing about the call), the number of OTHER sessions that met that signature, and whether a `capture` event already carries it. Logs `met` when there is a signature. The mod runs it (see "A failure met before"). |
-| `compound insights [--harvest \| --start \| --run]` | `--start` starts a run of `/insights` in the background when one is due (see "A run of /insights starts by itself when one is due") and prints `{"started","why"}`; exit 0 in every case. `--run` is the worker it starts: it runs `claude -p /insights`, then harvests; exit 0 when both finished, 1 otherwise. `--harvest` reads what Claude Code's `/insights` wrote under `usage-data/` and records each finding not yet recorded, as an `insight` event (see "Findings from /insights"); it prints `{"new","facets","skipped","dropped","report","outcome","message"}`. Without it, prints the state the last harvest left: `started`, `finished`, `outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`, null before any run or harvest), `message`, `harvested`, `claude_dir`, and `findings`, one `{"id","source","project","state","text"}` for each finding, where `state` is `open`, `quiet`, `settled` or `expired`. Exit 0 either way, an unreadable harvest included. |
+| `compound insights [--harvest \| --start \| --run]` | `--start` starts a run of `/insights` in the background when one is due (see "A run of /insights starts by itself when one is due") and prints `{"started","why"}`; exit 0 in every case. `--run` is the worker it starts: it runs `claude -p /insights`, then harvests; exit 0 when both finished, 1 otherwise. `--harvest` reads what Claude Code's `/insights` wrote under `usage-data/` and records each finding not yet recorded, as an `insight` event (see "Findings from /insights"); it records at most 100 and prints `{"new","facets","skipped","dropped","report","capped","outcome","message"}`, where `capped` counts what it left for the next harvest. Without it, prints the state the last harvest left: `started`, `finished`, `outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`, null before any run or harvest), `message`, `harvested`, `claude_dir`, and `findings`, one `{"id","source","project","state","text"}` for each finding, where `state` is `open`, `quiet`, `settled` or `expired`. Exit 0 either way, an unreadable harvest included. |
 | `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. Without `--session`, it also lists the open findings (see "Findings from /insights"). `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |

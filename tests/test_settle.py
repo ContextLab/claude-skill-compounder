@@ -296,11 +296,11 @@ REPORT_FINDING = "in-00000000000000b2"
 
 
 class FindingSettling(Settling):
-    def finding(self, ident=FINDING, source="facet", offset=0):
+    def finding(self, ident=FINDING, source="facet", offset=0, project=None):
         event = {"ts": iso(NOW + offset), "type": "insight", "session": "insights", "id": ident, "source": source,
                  "text": "It used the wrong flag."}
         if source == "facet":
-            event["project"] = self.box.project
+            event["project"] = project or self.box.project
         seed_event(self.box.events, event)  # as written: box.seed would give a report item a project
         return event
 
@@ -401,6 +401,52 @@ class FindingSettling(Settling):
                      COMPOUND_NOW=NOW + 10)
         self.assertEqual(self.box.read_events()[-1]["settles"], REPORT_FINDING)
         self.assertEqual(self.listed(), [])
+
+    def other_project(self):
+        other = os.path.join(self.box.root, "other-project")
+        os.makedirs(other, exist_ok=True)
+        return os.path.realpath(other)
+
+    def test_add_refuses_a_finding_of_another_project_at_the_project_level(self):
+        other = self.other_project()
+        self.finding(project=other)
+        before = self.box.snapshot()
+        proc = self.box.run("add", "--name", "a-lesson", "--when", "Use when it matters.", "--settles", FINDING,
+                            stdin="Body.\n", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 2)
+        self.assertIn(other, proc.stderr)
+        self.assertIn("--level user", proc.stderr)
+        self.assertEqual(self.box.snapshot(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.box.project, ".claude", "compound", "lessons", "a-lesson")))
+        self.assertEqual([row["id"] for row in self.box.json("insights", "--json", COMPOUND_NOW=NOW + 11)["findings"]
+                          if row["state"] == "open"], [FINDING])
+
+    def test_a_finding_of_another_project_is_recorded_at_the_user_level_from_here(self):
+        self.finding(project=self.other_project())
+        self.box.add("a-lesson", "Use when it matters.", "Body.\n", "--level", "user", "--settles", FINDING,
+                     COMPOUND_NOW=NOW + 10)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+        self.assertEqual(self.box.json("insights", "--json", COMPOUND_NOW=NOW + 11)["findings"][0]["state"], "settled")
+
+    def test_a_finding_of_another_project_is_declined_from_here(self):
+        self.finding(project=self.other_project())
+        proc = self.box.run("skip", "--settles", FINDING, "--why", "not real", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 0)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+
+    def test_a_finding_of_this_project_named_by_another_path_to_it_is_recorded_at_the_project_level(self):
+        link = os.path.join(self.box.root, "project-link")
+        os.symlink(self.box.project, link)
+        self.finding(project=link)
+        self.box.add("a-lesson", "Use when it matters.", "Body.\n", "--settles", FINDING, COMPOUND_NOW=NOW + 10)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+
+    def test_a_skip_that_settles_a_finding_says_finding(self):
+        self.finding()
+        proc = self.box.run("skip", "--settles", FINDING, "--why", "not real", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 0)
+        self.assertIn("settles finding %s" % FINDING, proc.stdout)
+        self.assertNotIn("capture", proc.stdout)
 
 
 if __name__ == "__main__":

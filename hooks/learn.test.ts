@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { BUDGET } from './render'
-import { BUSY, GONE_MS, NOTES, OWED } from './view'
+import { BUSY, GONE_MS, INSIGHTS_STARTED, NOTES, OWED } from './view'
 
 // The learn loop through the mod's own hooks: a failed call that no lesson describes is
 // held, later successes are put to the judge as its fix, and the band says what is held
@@ -25,14 +25,14 @@ type Answer = { text: string; isError?: true }
 type Run = { argv: string[]; timeoutMs: number | undefined; env: Record<string, string> }
 // `unsettled` is what the CLI answers `events --unsettled --project P`; `start` answers
 // `insights --start`, and `runs` keeps every call with its budget and environment.
-type World = { logged: Record<string, unknown>[]; judge: () => Promise<string>; prompts: string[]; tool: (command: string) => Answer | undefined; calls: string[][]; runs: Run[]; unsettled: string; start: () => Promise<{ code: number; stdout: string }> }
+type World = { logged: Record<string, unknown>[]; judge: () => Promise<string>; prompts: string[]; tool: (command: string) => Answer | undefined; calls: string[][]; runs: Run[]; unsettled: string; start: () => Promise<{ code: number; stdout: string }>; statuses: (string | undefined)[] }
 
 let worlds = 0
 
 function world(on: On, env: Record<string, string> = {}): World {
   worlds += 1
   const n = worlds
-  const w: World = { logged: [], judge: async () => NO_LESSON, prompts: [], tool: () => undefined, calls: [], runs: [], unsettled: '[]', start: async () => ({ code: 0, stdout: '{"started": false, "why": "not due"}' }) }
+  const w: World = { logged: [], judge: async () => NO_LESSON, prompts: [], tool: () => undefined, calls: [], runs: [], unsettled: '[]', start: async () => ({ code: 0, stdout: '{"started": false, "why": "not due"}' }), statuses: [] }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000', ...env })
   on('session.id', () => ({ value: `learn-session-${n}` }))
   on('session.root', () => ({ value: `/work/learn-${n}` }))
@@ -40,7 +40,10 @@ function world(on: On, env: Record<string, string> = {}): World {
   on('session.messages', () => ({ value: [] }))
   on('fs.exists', () => ({ value: true }))
   on('command.register', () => ({ value: undefined }) as never)
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', (_$, e) => {
+    w.statuses.push((e as unknown as { text?: string }).text)
+    return { value: undefined }
+  })
   on('ui.toast', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
   const owed: Record<string, unknown>[] = []
@@ -560,7 +563,59 @@ test('captures and findings together: the captures\' block comes first, and one 
   expect(of(w, 'remind')).toEqual([{ type: 'remind', captures: ['ab12cd34'], insights: ['in-1111111111111111'] }])
 })
 
-test('the first typed prompt starts an /insights run once a session, within the typed-prompt budget, and reads nothing of its reply', async ($, on) => {
+test('a start that began a run is told on the band and in the status entry, and nothing is added to the prompt', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  w.start = async () => ({ code: 0, stdout: '{"started": true, "why": "due"}' })
+  const first = await $.prompt.submit(typed('carry on'))
+  expect(said(first)).toBe('')
+  expect(w.statuses).toContain(INSIGHTS_STARTED)
+  expect(await shown()).toContain(`${NOTES.insights.label} · ${INSIGHTS_STARTED}`)
+  // Nothing was shown to a session, so no remind is written.
+  expect(of(w, 'remind')).toEqual([])
+  await $.prompt.submit(typed('and then'))
+  expect(w.statuses.filter(s => s === INSIGHTS_STARTED).length).toBe(1)
+  await ui.unmount()
+})
+
+test('a run that began beside findings is told in the same note and status entry as they are', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  const shown = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
+  w.unsettled = JSON.stringify([finding(1)])
+  w.start = async () => ({ code: 0, stdout: '{"started": true, "why": "due"}' })
+  const first = said(await $.prompt.submit(typed('carry on')))
+  expect(first).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111')
+  expect(w.statuses).toContain(`1 candidate from /insights, ${INSIGHTS_STARTED}`)
+  expect(await shown()).toContain(`${NOTES.insights.label} · 1 candidate from /insights, ${INSIGHTS_STARTED}`)
+  await ui.unmount()
+})
+
+test('a run that began is told even when the reminder\'s read fails', async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.unsettled = 'compound: not json'
+  w.start = async () => ({ code: 0, stdout: '{"started": true, "why": "due"}' })
+  expect(said(await $.prompt.submit(typed('carry on')))).toBe('')
+  expect(w.statuses).toContain(INSIGHTS_STARTED)
+  expect(of(w, 'error').map(e => e.where)).toEqual(['unsettled.parse'])
+})
+
+for (const stdout of ['{"started": false, "why": "too soon"}', '{"started": "true"}', '[compound] started: true', '']) {
+  test(`a start that began nothing, or answered something unreadable, tells nothing: ${JSON.stringify(stdout)}`, async ($, on) => {
+    const w = world(on)
+    mock.clock(on, { now: T0 })
+    w.start = async () => ({ code: 0, stdout })
+    expect(said(await $.prompt.submit(typed('carry on')))).toBe('')
+    expect(w.statuses.some(s => (s ?? '').includes(INSIGHTS_STARTED))).toBe(false)
+    expect(of(w, 'error')).toEqual([])
+  })
+}
+
+test('the first typed prompt starts an /insights run once a session, within the typed-prompt budget, and ignores a reply it cannot read', async ($, on) => {
   const w = world(on)
   mock.clock(on, { now: T0 })
   // No captures and no findings: the start is made all the same.

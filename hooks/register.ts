@@ -14,12 +14,12 @@ import {
 import { oneLine, redact } from './safe'
 import {
   askedTimes, learnedSince, mayNudge, memoOf, otherProjects, parseEvents, parseFound, parseGuards, parseGuardTools, parseHits, parseIndex, parseInventory, parseLogged, parseMet, parseMoved, parseOwed, parseScripts, parseShow,
-  parseInsights, parseTimedOut, parseUnsettled, parseUsed, settlers,
+  parseInsights, parseStarted, parseTimedOut, parseUnsettled, parseUsed, settlers,
   type Earlier, type Event, type Found, type Item, type Met,
 } from './store'
 import {
   allLines, alsoNoted, bandRow, began as checkBegan, candidatesText, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
-  greeted, GUARD_SHOW_MS, inventoried, itemsFrom, keyLines, motion, newTurn, noted, openedBy, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, phaseKey,
+  greeted, GUARD_SHOW_MS, INSIGHTS_STARTED, inventoried, itemsFrom, keyLines, motion, newTurn, noted, openedBy, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, phaseKey,
   reuseFound, reuseIdle, settledBy, stepped, synced, unfixed, watched, weakened,
   type Line, type Seg,
 } from './view'
@@ -839,13 +839,15 @@ async function gathered($: EngineInterface, sid: string, text: string, request: 
 }
 
 // Once a session, at its first typed prompt: `compound insights --start`, which starts a
-// detached /insights run when one is due and answers at once. Its reply is not read; the
-// CLI keeps the state. Never rejects.
-async function insightsStart($: EngineInterface): Promise<void> {
+// detached /insights run when one is due and answers at once. True only when its reply says
+// it began one; a reply that cannot be read is false. The CLI keeps the state. Never rejects.
+async function insightsStart($: EngineInterface): Promise<boolean> {
   try {
-    await cli($, ['insights', '--start', '--json'], undefined, [0], undefined, BUDGET.prompt)
+    const ran = await cli($, ['insights', '--start', '--json'], undefined, [0], undefined, BUDGET.prompt)
+    return ran !== undefined && parseStarted(ran.stdout)
   } catch (err) {
     await fail($, 'insights.start', err).catch(() => undefined)
+    return false
   }
 }
 
@@ -856,18 +858,27 @@ async function insightsStart($: EngineInterface): Promise<void> {
 // the two and not for both.
 async function unsettledReminder($: EngineInterface, sid: string): Promise<string> {
   if (!(await firstTime($, sid, 'unsettled'))) return ''
-  const [, ran] = await Promise.all([
+  const [started, ran] = await Promise.all([
     insightsStart($),
     projectRoot($).then(root => cli($, ['events', '--unsettled', '--project', root, '--json'], undefined, [0], undefined, BUDGET.prompt)),
   ])
-  if (ran === undefined) return ''
+  // A run the start began costs money and shows nowhere else: it is told here, once, beside
+  // the findings when there are any and on its own when there are none.
+  const run = started ? INSIGHTS_STARTED : ''
+  const runAlone = async (): Promise<string> => {
+    if (run === '') return ''
+    $.ui.status(run)
+    await paint($, (band, now) => noted(band, 'insights', run, now))
+    return ''
+  }
+  if (ran === undefined) return runAlone()
   const open = parseUnsettled(ran.stdout, sid, nowS())
   const found = parseInsights(ran.stdout, nowS())
   if (open === undefined || found === undefined) {
     await fail($, 'unsettled.parse', `compound events --unsettled --json printed something unreadable: ${ran.stdout.slice(0, 200)}`)
-    return ''
+    return runAlone()
   }
-  if (open.length === 0 && found.length === 0) return ''
+  if (open.length === 0 && found.length === 0) return runAlone()
   // The newest few captures: a long backlog is in `compound status`, not in every session's
   // first prompt. The oldest few findings: each is shown to at most three sessions, so the
   // ones listed first are the ones nearest to being told enough.
@@ -877,11 +888,13 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   await log($, { type: 'remind', ...(shown.length === 0 ? {} : { captures: shown.map(c => c.id) }), ...(told.length === 0 ? {} : { insights: told.map(f => f.id) }) })
   const owed = open.length === 0 ? '' : `${open.length} owed from earlier sessions`
   const candidates = found.length === 0 ? '' : candidatesText(found.length)
-  $.ui.status([owed, candidates].filter(s => s !== '').join(', '))
+  // The findings and a run begun now share one note: /insights is what both are about.
+  const insights = [candidates, run].filter(s => s !== '').join(', ')
+  $.ui.status([owed, insights].filter(s => s !== '').join(', '))
   // The captures' note keeps its working call; the findings are a note of their own beside it.
   await paint($, (band, now) => {
     const told = open.length === 0 ? band : noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'}`, now, shown[shown.length - 1]?.fixed ?? '')
-    return found.length === 0 ? told : open.length === 0 ? noted(told, 'insights', candidates, now) : alsoNoted(told, 'insights', candidates, now)
+    return insights === '' ? told : open.length === 0 ? noted(told, 'insights', insights, now) : alsoNoted(told, 'insights', insights, now)
   })
   const cliName = await cliPath($)
   return [unsettledContext(shown, cliName), insightContext(told, cliName)].filter(t => t !== '').join('\n\n')

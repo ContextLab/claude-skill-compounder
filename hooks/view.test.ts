@@ -1107,6 +1107,17 @@ test('findings of /insights are on the pane among what is open, with the command
   expect(boardLines({ ...older, open }, 140).length > 5).toBe(true)
 })
 
+test('a run of /insights that went wrong is a warning the pane shows by name, as the CLI reports it', async () => {
+  const status = JSON.parse(STATUS) as { open: Record<string, unknown>; health: Record<string, unknown>[] }
+  status.health.push({ check: 'insights', status: 'WARN', detail: 'last run 2026-11-20T00:00:00Z: timeout: claude did not finish within 900 seconds' })
+  const board = boardFrom(JSON.stringify(status), EVENTS, 'pane-session', 0)!
+  expect(board.health.map(h => h.check)).toEqual(['cli', 'duplicates', 'insights'])
+  expect(board.health.find(h => h.check === 'insights')?.detail).toContain('timeout')
+  const text = boardLines(board, 140).map(line => line.map(seg => seg.text).join('')).join('\n')
+  expect(text).toContain('insights')
+  expect(text).not.toContain('healthy')
+})
+
 test('a reminder\'s line in the timeline counts what it told: lessons owed, findings, or both', async () => {
   expect(eventText({ type: 'remind', captures: ['a', 'b'] })).toBe('2 lessons owed')
   expect(eventText({ type: 'remind', insights: ['in-0123456789abcdef'] })).toBe('1 candidate from /insights')

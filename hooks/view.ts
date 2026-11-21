@@ -52,6 +52,10 @@ export const NOTES: Record<CompoundNoteKind, Look> = {
 // What lists every finding of /insights with its state, under the pane's findings.
 export const INSIGHTS_COMMAND = 'compound insights'
 
+// What the band and the status entry say when the first prompt's `insights --start` began a
+// run of /insights in the background.
+export const INSIGHTS_STARTED = '/insights run started'
+
 // What the greeting says beside the counts.
 export const HINT = '/compound opens the dashboard'
 

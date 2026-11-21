@@ -241,7 +241,8 @@ attachment. [The guide](docs/guide.md#keep-a-script-that-worked) shows it.
 compound also learns from many sessions at once. Claude Code's own `/insights` command
 reads your recent sessions and names the friction in each. When a week has passed since
 the last run and at least 25 sessions have been logged, the first prompt of a session
-starts one `/insights` run in the background; no session waits for it. The friction it
+starts one `/insights` run in the background and says `/insights run started`; no session
+waits for it. The friction it
 finds in a session is offered to the next sessions in that session's project as a
 candidate lesson, and its suggested CLAUDE.md additions are offered in every project.
 Claude is asked to check each one against the project and record it or decline it; nothing
@@ -607,7 +608,7 @@ exits 1 when a row fails.
 | `duplicates` | FAIL or WARN: one name at two places | the row prints both paths; remove or rename one |
 | `lessons parse` | FAIL: a lesson does not read | the row prints the file and the problem; fix the file or run `compound rm <name>` |
 | `errors` | WARN: errors in the last 7 days | the `Open` section of the report lists each one |
-| `insights` | PASS only: when the last read of Claude Code's `/insights` output finished, or `never run` | nothing; it is informational |
+| `insights` | WARN: the last run of Claude Code's `/insights` `failed`, ended in a `timeout`, or left files compound could not read (`unreadable`); the row says which, with its message | nothing is needed; the next run is tried a week after this one started. `compound insights` shows the state |
 
 Other things you may see:
 

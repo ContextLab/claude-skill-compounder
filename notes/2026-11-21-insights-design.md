@@ -2,8 +2,9 @@
 
 Built (2026-11-21): commits 43b6ed7 to 8dd8796, then the journey, guide and README commit.
 
-Status: design, not built. When it is built, `docs/design.md` takes the description of the
-behaviour and this note stays as the record of why.
+Status: built (see the line above). `docs/design.md` describes the behaviour as it is; this
+note stays as the record of why, and where the build differs from it, the code and
+`docs/design.md` are right.
 
 ## Intent
 
@@ -250,7 +251,10 @@ Two things are kept apart: whether a finding is still **shown**, and whether it 
 
 - No toast when a harvest finishes: it finishes in no session's call, and the mod gains no
   new poll for it. The band notes the findings at the first prompt that is told about them
-  (`insights: 2 candidates`), beside the note it already makes for unsettled captures.
+  (as built: `◈ compound insights · 2 candidates from /insights`, and `◈ 2 candidates from /insights`
+  after the working call when it stands beside the note for unsettled captures). After the
+  final review, a run that the first prompt's start began is told too: the same note and the
+  status entry add `/insights run started`.
 - `compound status`, under Open: the open findings. Under the checks: the last run and its
   outcome.
 - The `/compound` pane lists them with the other open items.

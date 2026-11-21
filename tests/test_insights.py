@@ -231,7 +231,8 @@ class HarvestTest(Case):
         state = self.box.json("insights", "--json")
         self.assertEqual(state["outcome"], "ok")
         self.assertEqual(state["finished"], iso(NOW))
-        self.assertEqual(state["harvested"], {"facets": 1, "findings": 1, "report": 0, "skipped": 0, "dropped": 0})
+        self.assertEqual(state["harvested"], {"facets": 1, "findings": 1, "report": 0, "skipped": 0, "dropped": 0,
+                                              "capped": 0})
         text = self.box.run("insights")
         self.assertExit(text, 0)
         self.assertIn("ok", text.stdout)
@@ -278,6 +279,43 @@ class HarvestTest(Case):
         self.assertNotIn("None", listing.stdout)
         (line,) = [row for row in listing.stdout.splitlines() if row.startswith("in-00000000000000c3")]
         self.assertEqual(line.split()[:3], ["in-00000000000000c3", "open", "-"])
+
+    def test_a_harvest_records_at_most_100_new_findings_newest_facets_first_and_the_rest_later(self):
+        repo = self.repo()
+        sessions = ["%08x-aaaa-bbbb-cccc-%012x" % (index, index) for index in range(103)]
+        top = self.usage({one: facet(one, "Friction %d." % index) for index, one in enumerate(sessions)},
+                         {one: {"session_id": one, "project_path": repo} for one in sessions},
+                         [("Prefer rg over grep.", "It was faster."), ("Run the tests first.", "Failures hid.")])
+        # The facet of session i was written at NOW - 1000 + i: the last ones are the newest.
+        for index, one in enumerate(sessions):
+            stamp = NOW - 1000 + index
+            os.utime(os.path.join(top, "facets", one + ".json"), (stamp, stamp))
+        first = self.harvest()
+        self.assertEqual((first["new"], first["report"], first["capped"], first["outcome"]), (100, 0, 5, "ok"))
+        self.assertEqual(sorted(event["of"] for event in self.insights()), sorted(sessions[3:]))
+        state = self.box.json("insights", "--json")
+        self.assertEqual(state["harvested"]["capped"], 5)
+        self.assertIn("5 left out", self.box.run("insights").stdout)
+        second = self.box.run("insights", "--harvest")
+        self.assertExit(second, 0)
+        self.assertIn("5 new findings", second.stdout)
+        self.assertEqual(sorted(event["of"] for event in self.insights() if event["source"] == "facet"),
+                         sorted(sessions))
+        self.assertEqual(len([event for event in self.insights() if event["source"] == "report"]), 2)
+        self.assertEqual(self.harvest()["new"], 0)
+
+    def test_report_findings_count_toward_the_cap_after_the_facets(self):
+        repo = self.repo()
+        sessions = ["%08x-aaaa-bbbb-cccc-%012x" % (index, index) for index in range(99)]
+        self.usage({one: facet(one) for one in sessions},
+                   {one: {"session_id": one, "project_path": repo} for one in sessions},
+                   [("Prefer rg over grep.", "It was faster."), ("Run the tests first.", "Failures hid.")])
+        first = self.harvest()
+        self.assertEqual((first["new"], first["report"], first["capped"]), (100, 1, 1))
+        capped = self.box.run("insights", "--harvest", COMPOUND_NOW=NOW + 1)
+        self.assertExit(capped, 0)
+        self.assertIn("1 new findings (1 from the report)", capped.stdout)
+        self.assertEqual(self.harvest()["new"], 0)
 
 
 DAY = 86400
@@ -546,6 +584,25 @@ class StartTest(RunTest):
         self.assertEqual(only_config["claude_dir"], other)
         neither = self.box.json("insights", "--json", COMPOUND_CLAUDE_DIR=None)
         self.assertEqual(neither["claude_dir"], os.path.join(self.box.home, ".claude"))
+
+    def test_the_worker_s_events_are_the_insights_session_s_and_name_no_project(self):
+        # The box names a session (CLAUDE_CODE_SESSION_ID), as a session's own call would.
+        self.sessions(25)
+        self.assertEqual(self.start(), {"started": True, "why": "due"})
+        self.settle()
+        (error,) = self.errors()
+        self.assertEqual((error["where"], error["session"], error["project"]), ("insights.run", "insights", ""))
+        self.assertExit(self.box.run("insights", "--run", COMPOUND_NOW=NOW + 8 * DAY), 1)
+        last = self.errors()[-1]
+        self.assertEqual((last["where"], last["session"], last["project"]), ("insights.run", "insights", ""))
+
+    def test_without_claude_on_the_path_or_in_home_s_local_bin_the_run_says_where_it_looked(self):
+        # HOME is the box's temporary home, so ~/.local/bin/claude there does not exist.
+        self.assertFalse(os.path.lexists(os.path.join(self.box.home, ".local", "bin", "claude")))
+        self.assertExit(self.box.run("insights", "--run"), 1)
+        message = self.read_state()["message"]
+        self.assertIn("PATH", message)
+        self.assertIn(os.path.join(self.box.home, ".local", "bin", "claude"), message)
 
 
 if __name__ == "__main__":

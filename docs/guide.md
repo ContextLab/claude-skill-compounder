@@ -572,7 +572,8 @@ prompt of a session starts one run in the background. It costs one headless `/in
 A candidate is shown at the first prompt of up to three later sessions, at most three
 candidates a session, between `RECORDED-INSIGHT` markers. Claude is asked to check it and
 record a lesson or decline it. The band shows `◈ 2 candidates from /insights`. After 14
-days a candidate is no longer shown or settled.
+days a candidate is no longer shown or settled. When a session's first prompt starts a run,
+the band and the status entry say `/insights run started`.
 
 `compound insights` shows the last run and every candidate:
 
@@ -593,11 +594,14 @@ three sessions and can still be settled; `settled`; `expired`), where it came fr
 `ok`, `failed`, `timeout`, `unreadable` (Claude Code's files were not in a shape compound
 can read, and nothing was recorded) or `running`; `interrupted` means the run was killed
 before it finished, and a `message:` line says when it started. `compound status` lists
-the open candidates under `Open` and the last run under its checks.
+the open candidates under `Open` and the last run under its checks; a run that `failed`,
+ended in a `timeout` or left `unreadable` files is a warning there and in the `/compound`
+pane. A candidate about a session of another project names that project in `compound
+status`: record it in a session there, or at the user level.
 
 | To | Do this |
 |-|-|
-| record one | in a session in that project, `/compound:learn settle <id>`; a `report` candidate is recorded at the user level |
+| record one | in a session in that project, `/compound:learn settle <id>`; a `report` candidate is recorded at the user level, and so can one of another project |
 | decline one | `compound skip --settles <id> --why "<reason>"` |
 | read what you ran yourself | after typing `/insights` in a session, `compound insights --harvest` |
 | turn the runs off | `COMPOUND_INSIGHTS_DAYS=0` |
@@ -613,7 +617,8 @@ compound insights --harvest
 A facet is the record `/insights` keeps of one session. A session with no friction gives
 no candidate; `skipped` counts records compound could not read, and `dropped` the ones
 whose session has no metadata or whose project directory no longer exists. A second harvest of the same files records
-nothing again.
+nothing again. One harvest records at most 100 candidates, the newest sessions first; the
+rest are reported as `left out` and recorded by the next harvest.
 
 ## Strengthen an ineffective lesson
 

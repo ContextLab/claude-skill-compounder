@@ -36,7 +36,10 @@ whichever applies.
   should act differently, write the lesson in your own general words, quoting none of the
   finding, and pass `--settles <id>` to `compound add` in step 6. If not, decline it:
   `compound skip --settles <id> --why "..."`. A finding with `source=report` covers
-  sessions of several projects, so it is recorded with `--level user` or not at all.
+  sessions of several projects, so it is recorded with `--level user` or not at all. A
+  finding about a session of another project (`compound status` names that project) is
+  recorded in a session there, or with `--level user`; `compound add` refuses it at the
+  project level here. It can be declined from anywhere.
 - When this skill was invoked as `/compound:learn settle <id>` (the line `compound status`
   prints for an unsettled lesson), the lesson to record is that one: find the id in
   `compound events --unsettled --json` and pass `--settles <id>` in step 6.
@@ -232,7 +235,9 @@ EOF
 ```
 
 A finding of `/insights` is settled the same way, by its `in-` id, once you have checked it
-(step 1). A report finding takes `--level user`; `compound add` refuses it at any other:
+(step 1). A report finding takes `--level user`; `compound add` refuses it at any other.
+A finding about another project's session is refused at this project's level too. Either
+is recorded at the user level like this:
 
 ```bash
 compound add --name confirm-target-before-deploy --level user --settles in-0123456789abcdef \

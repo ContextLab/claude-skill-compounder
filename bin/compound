@@ -2453,6 +2453,8 @@ INSIGHT_TEXT, INSIGHT_GOAL, INSIGHT_WHY, INSIGHT_KINDS = 600, 200, 300, 8
 INSIGHT_KIND_RE = re.compile(r"^[a-z_]{1,40}$")
 INSIGHT_SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 INSIGHT_SESSION = "insights"
+# The most findings one harvest records; the rest wait for the next harvest.
+INSIGHT_HARVEST_MAX = 100
 
 
 def insights_claude_dir():
@@ -2470,6 +2472,24 @@ def insight_id(source, key):
 def insight_text(value, cap):
     """`value` masked, on one line and cut at `cap` characters."""
     return one_line(redact(value))[:cap]
+
+
+# What draws nothing (zero-width characters, bidirectional overrides), and the spellings the
+# mod's quoting is built on, with the look-alikes it reads as them (`inert` in hooks/render.ts).
+HIDDEN_CHARS = re.compile("[​-‏‪-‮⁠-⁤﻿]")
+MARKER_OPEN = re.compile("<{2,}\\s*RECORDED[\\s_\\-‐-―]*(NOTE|CAPTURE|INDEX|INSIGHT)", re.I)
+MARKER_CLOSE = re.compile("RECORDED[\\s_\\-‐-―]*(NOTE|CAPTURE|INDEX|INSIGHT)\\s*>{2,}", re.I)
+MOD_VOICE = re.compile(r"\[compound\]", re.I)
+
+
+def inert_line(value, cap):
+    """Recorded text as the CLI prints it for a reader: one line, cut at `cap` characters,
+    and unable to open or close one of the mod's quotation markers or to speak as the mod,
+    as `inert` in hooks/render.ts makes it for Claude."""
+    text = one_line(HIDDEN_CHARS.sub("", _text(value)))
+    text = MARKER_OPEN.sub(lambda match: "<<(RECORDED-%s" % match.group(1).upper(), text)
+    text = MARKER_CLOSE.sub(lambda match: "RECORDED-%s)>>" % match.group(1).upper(), text)
+    return MOD_VOICE.sub("(compound)", text)[:cap]
 
 
 def insights_lock(wait):
@@ -2625,7 +2645,8 @@ def parse_insights_report(text):
 
 def harvest_insights(events, clock):
     """What `usage-data/` holds that the log does not: {"new": [insight events], "facets",
-    "skipped", "dropped", "report", "outcome": "ok"|"unreadable", "message"}. Pure reading:
+    "skipped", "dropped", "report", "capped", "outcome": "ok"|"unreadable", "message"}. `capped`
+    is the number of new findings left for a later harvest (see INSIGHT_HARVEST_MAX). Pure reading:
     nothing is appended. An unreadable harvest offers nothing (`new` is empty) and `message`
     names the first file and key that failed; a facet or item the log already holds is not
     new. `facets` is the number of facet files looked at, `report` the new report findings."""
@@ -2639,7 +2660,8 @@ def harvest_insights(events, clock):
     stamp = iso(clock)
     problems = []
     found = []
-    result = {"new": [], "facets": 0, "skipped": 0, "dropped": 0, "report": 0, "outcome": "ok", "message": ""}
+    result = {"new": [], "facets": 0, "skipped": 0, "dropped": 0, "report": 0, "capped": 0, "outcome": "ok",
+              "message": ""}
     roots = {}
 
     def skip(rel, why):
@@ -2651,6 +2673,15 @@ def harvest_insights(events, clock):
         names = sorted(name for name in os.listdir(facets) if name.endswith(".json"))
     except OSError:
         names = []
+
+    def written(name):
+        try:
+            return os.lstat(os.path.join(facets, name)).st_mtime
+        except OSError:
+            return 0
+
+    # The newest first: when more is new than one harvest records, the newest is kept.
+    names.sort(key=written, reverse=True)
     for name in names:
         rel = os.path.join("usage-data", "facets", name)
         session = name[:-len(".json")]
@@ -2737,8 +2768,13 @@ def harvest_insights(events, clock):
         result["outcome"] = "unreadable"
     result["message"] = problems[0] if problems else ""
     if result["outcome"] == "ok":
-        result["new"] = found + reported
-        result["report"] = len(reported)
+        # At most INSIGHT_HARVEST_MAX: the newest facets first, the report's items last. What
+        # is left out is not in the log, so a later harvest finds it new.
+        kept = found[:INSIGHT_HARVEST_MAX]
+        kept_report = reported[:max(0, INSIGHT_HARVEST_MAX - len(kept))]
+        result["capped"] = len(found) + len(reported) - len(kept) - len(kept_report)
+        result["new"] = kept + kept_report
+        result["report"] = len(kept_report)
     return result
 
 
@@ -2796,7 +2832,38 @@ def insights_fail(clock, outcome, message):
     except OSError as exc:
         sys.stderr.write("compound: warning: the state file %s could not be written (%s)\n" % (
             insights_state_path(), exc.strerror or exc))
-    log_soft("error", project_root(), where="insights.run", message=message)
+    insights_error(message)
+
+
+def insights_error(message):
+    """The run's own `error` event: of the session `insights`, as its findings are, and of no
+    project, since the run reads the sessions of every project."""
+    log_soft("error", "", where="insights.run", message=message, session=INSIGHT_SESSION)
+
+
+def worker_env():
+    """The environment of the worker and of the `claude` it starts: the caller's without
+    CLAUDE_CODE_SESSION_ID, so nothing the run does is stamped as the starting session's."""
+    return {key: value for key, value in os.environ.items() if key != "CLAUDE_CODE_SESSION_ID"}
+
+
+def find_claude():
+    """(the `claude` to run, or None, and where it was looked for). `claude` on PATH, else
+    ~/.local/bin/claude when it is an executable file: a session started from a desktop
+    app may not have the shell's PATH. HOME is read from the environment, and with none
+    there is no second place to look."""
+    import shutil
+
+    found = shutil.which("claude")
+    if found:
+        return found, ""
+    home = os.environ.get("HOME", "")
+    if not home:
+        return None, "claude was not found on PATH, and HOME is not set"
+    local = os.path.join(home, ".local", "bin", "claude")
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local, ""
+    return None, "claude was not found on PATH or at %s" % local
 
 
 def start_insights(clock):
@@ -2821,7 +2888,7 @@ def start_insights(clock):
     except Exception as exc:
         return False, "could not start", masked(one_line(getattr(exc, "strerror", None) or exc))
     try:
-        subprocess.Popen([sys.executable, os.path.realpath(__file__), "insights", "--run"],
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "insights", "--run"], env=worker_env(),
                          start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
@@ -2883,15 +2950,13 @@ def run_insights(clock):
     except OSError as exc:
         sys.stderr.write("compound: the lock of /insights could not be taken: %s\n" % (exc.strerror or exc))
         return 1
-    log_soft("error", project_root(), where="insights.run",
-             message="the lock of /insights was held for %d seconds" % INSIGHTS_LOCK_WAIT)
+    insights_error("the lock of /insights was held for %d seconds" % INSIGHTS_LOCK_WAIT)
     return 1
 
 
 def run_insights_locked(clock):
     """The body of the worker, with the lock held. Whatever goes wrong ends in a written
     outcome and one `error` event, never in a `running` that nothing is running."""
-    import shutil
     import subprocess
 
     proc = None
@@ -2905,11 +2970,11 @@ def run_insights_locked(clock):
             started = int(clock)
             state.update({"started": started, "outcome": "running", "message": ""})
             write_insights_state(state)
-        program = shutil.which("claude")
+        program, missing = find_claude()
         if not program:
-            insights_fail(now(), "failed", "claude was not found on PATH")
+            insights_fail(now(), "failed", missing)
             return 1
-        env = dict(os.environ)
+        env = worker_env()
         env["COMPOUND_OFF"] = "1"
         if os.environ.get("COMPOUND_CLAUDE_DIR") or os.environ.get("CLAUDE_CONFIG_DIR"):
             env["CLAUDE_CONFIG_DIR"] = insights_claude_dir()
@@ -2938,7 +3003,7 @@ def run_insights_locked(clock):
         if not wrote:
             insights_fail(now(), "failed", "claude finished and left no usage-data/report.html newer than the start")
             return 1
-        return 0 if harvest_locked(now())[0]["outcome"] == "ok" else 1
+        return 0 if harvest_locked(now(), worker=True)[0]["outcome"] == "ok" else 1
     except Exception as exc:
         if proc is not None and proc.poll() is None:
             stop_group(proc)
@@ -2946,18 +3011,21 @@ def run_insights_locked(clock):
         return 1
 
 
-def harvest_locked(clock):
+def harvest_locked(clock, worker=False):
     """The harvest, for a caller that holds the lock: (the result of `harvest_insights`, the
-    number of events written). Records what it did in the state file."""
+    number of events written). Records what it did in the state file. In the worker its
+    `error` is the run's own, of the session `insights` and of no project."""
     events, _bad = read_events()
     result = harvest_insights(events, clock)
     if result["outcome"] == "unreadable":
-        log_soft("error", project_root(), where="insights.harvest", message=result["message"])
+        own = {"session": INSIGHT_SESSION} if worker else {}
+        log_soft("error", "" if worker else project_root(), where="insights.harvest", message=result["message"],
+                 **own)
     for event in result["new"]:
         append_event(event)
     written = len(result["new"])
     counts = {"facets": result["facets"], "findings": written - result["report"], "report": result["report"],
-              "skipped": result["skipped"], "dropped": result["dropped"]}
+              "skipped": result["skipped"], "dropped": result["dropped"], "capped": result["capped"]}
     state = read_insights_state()
     state.update({"finished": iso(clock), "outcome": result["outcome"], "message": result["message"],
                   "harvested": counts})
@@ -3002,23 +3070,28 @@ def cmd_insights(args):
         sys.stdout.write("last run: %s\noutcome: %s\n" % (
             state["finished"] or "never", state["outcome"] or "none yet"))
         if state["message"]:
-            sys.stdout.write("message: %s\n" % one_line(state["message"]))
+            sys.stdout.write("message: %s\n" % inert_line(state["message"], OPEN_TEXT * 3))
+        capped = state["harvested"].get("capped") if isinstance(state["harvested"], dict) else None
+        if isinstance(capped, int) and not isinstance(capped, bool) and capped > 0:
+            sys.stdout.write("capped: %d left out of the last harvest, which records at most %d; "
+                             "the next harvest records them\n" % (capped, INSIGHT_HARVEST_MAX))
         for row in state["findings"]:
             sys.stdout.write("%s  %-8s %-6s %s\n" % (row["id"], row["state"], row["source"] or "-",
-                                                       one_line(row["text"])[:OPEN_TEXT]))
+                                                       inert_line(row["text"], OPEN_TEXT)))
         return 0
     with insights_lock(True):
         result, written = harvest_locked(now())
     out = {"new": written, "facets": result["facets"], "skipped": result["skipped"],
-           "dropped": result["dropped"], "report": result["report"], "outcome": result["outcome"],
-           "message": result["message"]}
+           "dropped": result["dropped"], "report": result["report"], "capped": result["capped"],
+           "outcome": result["outcome"], "message": result["message"]}
     if args.json:
         emit(out)
     elif result["outcome"] == "unreadable":
-        sys.stdout.write("unreadable: %s\n" % one_line(result["message"]))
+        sys.stdout.write("unreadable: %s\n" % inert_line(result["message"], OPEN_TEXT * 3))
     else:
-        sys.stdout.write("%d new findings (%d from the report); %d facets read, %d skipped, %d dropped\n" % (
-            written, result["report"], result["facets"], result["skipped"], result["dropped"]))
+        sys.stdout.write("%d new findings (%d from the report); %d facets read, %d skipped, %d dropped%s\n" % (
+            written, result["report"], result["facets"], result["skipped"], result["dropped"],
+            "; %d left out, for the next harvest" % result["capped"] if result["capped"] else ""))
     return 0
 
 
@@ -4776,6 +4849,13 @@ def cmd_add(args):
             raise usage("%s is a finding of the /insights report, written from sessions of several projects: "
                         "record it at the user level (--level user), or decline it with `compound skip --settles`"
                         % settles)
+        # A finding about another project's session is that project's: its text must not land
+        # in this project's lessons, which can be committed files.
+        theirs = _text(kept[0].get("project")) if kept else ""
+        if theirs and target == "project" and not _same_path(theirs, project):
+            raise usage("%s is a finding about a session of %s, not of this project (%s): record it in a session "
+                        "there, or at the user level (--level user), or decline it with `compound skip --settles %s`"
+                        % (settles, one_line(theirs), one_line(project), settles))
 
     vouched_before = None
     there_before = None
@@ -6637,7 +6717,7 @@ def cmd_skip(args):
     else:
         sys.stdout.write("declined: %s\n" % event["why"])
         if settles:
-            sys.stdout.write("  settles capture %s\n" % settles)
+            sys.stdout.write("  settles %s %s\n" % ("finding" if settles.startswith("in-") else "capture", settles))
     return 0
 
 
@@ -7596,6 +7676,11 @@ def build_status():
         check("insights", "PASS", "the last run, started %s, is %s" % (
             iso(ran["started"]) if isinstance(ran.get("started"), (int, float)) else "at a time not recorded",
             ran_outcome))
+    elif ran_outcome in ("failed", "timeout", "unreadable"):
+        # A run that went wrong warns, so the pane shows it; it fails nothing.
+        check("insights", "WARN", "last run %s: %s%s" % (
+            one_line(_text(ran.get("finished"))) or "at a time not recorded", ran_outcome,
+            ": " + inert_line(ran.get("message"), OPEN_TEXT * 2) if _text(ran.get("message")).strip() else ""))
     else:
         check("insights", "PASS", "last run %s: %s" % (ran.get("finished"), ran_outcome or "none")
               if ran.get("finished") else "never run")
@@ -7633,7 +7718,7 @@ def build_status():
                           "decline": 'compound skip --settles %s --why "<reason>"' % capture_id(cap)})
 
     findings = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
-                 "text": one_line(_text(event.get("text")))[:OPEN_TEXT],
+                 "text": inert_line(event.get("text"), OPEN_TEXT),
                  "age": age_text(clock - parse_ts(event.get("ts")))}
                 for ident, (event, state) in insight_states(events, clock).items() if state == "open"]
 
@@ -7803,10 +7888,21 @@ def cmd_status(args):
             or opened["findings"]):
         out("  nothing open\n")
     for row in opened["findings"]:
+        text = inert_line(row["text"], OPEN_TEXT).rstrip(". ")
+        theirs = _text(row["project"])
+        if row["source"] != "report" and theirs and not _same_path(theirs, data["project"]):
+            # A finding about another project's session is settled in a session there, as an
+            # owed capture of that project is; from here it can be declined.
+            out("  finding      %s %s %s %s: %s. Record it in a session there with compound:learn (--settles %s), "
+                "or decline it: compound skip --settles %s --why \"...\"\n" % (
+                    row["id"], row["age"], row["source"], inert_line(os.path.basename(theirs.rstrip(os.sep)) or theirs,
+                                                                     OPEN_TEXT), text,
+                    row["id"], row["id"]))
+            continue
         # A report finding is recorded at the user level or not at all (see `compound add`).
         out("  finding      %s %s %s: %s. Check it against this project; record it with compound:learn "
             "(--settles %s%s) or decline it: compound skip --settles %s --why \"...\"\n" % (
-                row["id"], row["age"], row["source"], str(row["text"]).rstrip(". "), row["id"],
+                row["id"], row["age"], row["source"], text, row["id"],
                 " --level user" if row["source"] == "report" else "", row["id"]))
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
