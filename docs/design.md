@@ -1023,6 +1023,47 @@ quotes each capture between marker lines as recorded reference material, and tel
 to record it with the `compound:learn` skill, passing `--settles <id>`, or to decline it
 with `compound skip --settles <id> --why`. It refuses no stop.
 
+### Findings from /insights
+
+Claude Code's own `/insights` command reads many sessions and writes, under the Claude
+directory's `usage-data/`, a per-session record of the friction in each and a report. The
+Claude directory is `COMPOUND_CLAUDE_DIR`, else `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+`compound insights --harvest` turns two parts of that into `insight` events, which are
+candidate lessons and nothing more: no lesson is written from one without a session
+deciding to. None of the file shapes is documented, so the harvest reads only what it can
+check.
+
+- **A session's friction.** Each `facets/<session id>.json` whose `friction_detail` is a
+  non-empty string is one finding. Its project is the repository root of the `project_path`
+  in `session-meta/<session id>.json` (git's top level, else the directory, as a real
+  path), so a session started in a subdirectory lands where the mod looks for it. A finding
+  whose metadata is missing, or whose path is no longer a directory, is dropped. The event
+  carries `of` (the session), `kinds` (the keys of `friction_counts` that are lowercase
+  letters and `_`, at most 40 characters, at most 8), `text` (the friction detail, masked,
+  on one line, cut at 600 characters), `goal` (cut at 200) and `learned`, the lessons that
+  session wrote. A session that recorded or declined something is not dropped: a lesson
+  settles one capture, not all of a session's friction.
+- **The report's suggestions.** Each element of class `claude-md-item` in `report.html`
+  becomes a finding with `text` (its `cmd-code`) and `why` (its `cmd-why`, cut at 300), and
+  no project.
+- **Once.** A finding's `id` is derived from its source and the session id, or from the
+  text of a report item with its case and spacing normalised, so a second harvest, or next
+  week's report with the same suggestion, writes nothing again. The event's own `session`
+  is the word `insights`.
+- **Checked first, written second.** A facet is skipped, and counted, when it is not valid
+  UTF-8 JSON, is not an object, is over 1 000 000 bytes, has a `session_id` unlike its file
+  name, or has a `friction_detail`, `friction_counts` or `underlying_goal` of the wrong
+  type. When every facet read is skipped, or the report has its suggestions section and no
+  item that parses, the outcome is `unreadable`: nothing is recorded, one `error` event
+  (`where` `insights.harvest`) names the file and the key, and the state says so.
+- **One at a time.** The harvest holds a lock on `insights.lock` in `COMPOUND_HOME` from
+  reading the log to its last append, so two harvests cannot both record one finding. It
+  keeps `finished`, `outcome`, `message` and the counts of the harvest in `insights.json`
+  beside it.
+
+`insight` is a type the CLI writes: `compound log` refuses it, so no session can put a
+finding into the log by hand.
+
 ### Once, and only once
 
 A refusal never repeats. Each guard refuses a call's text once (and a lesson's pattern
@@ -1721,6 +1762,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | `retry` | `retried` | the call sent after a guard refused one; left out of Recent |
   | `met` | `met` | a failed call whose error has a signature, and the other sessions that had met it; left out of Recent |
   | `index` | `indexed` | a session was shown the index of what is recorded, at its first prompt |
+  | `insight` | `insight` | a finding read from what Claude Code's `/insights` wrote; the CLI writes it, `compound log` refuses it; left out of Recent |
 
   A lesson that did not prevent its failure is `ineffective`, and what it is owed is `to
   strengthen`. The four counters are `reused`, `guarded`, `recalled` and `used` wherever they
@@ -1766,6 +1808,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound skip --why T [--settles ID] [--evidence ID]` | With `--evidence ID`: declines the script of that snapshot, which is then not asked about again and settles nothing else; `--settles` with it is exit 2. Otherwise: declines what the session owes, or with `--settles` the capture of that id, which is required when the session has more than one unsettled capture (exit 2 otherwise, listing their ids). Run outside a session without `--settles`, it settles the project's one unsettled capture, and with several it exits 2 and lists their ids. Logs `skip`. |
 | `compound index` | The lessons a session of this project could use, as a JSON list of rows: `name`, `level`, `description`, `script` (a program sits beside it), `path`, and `project` on a lesson of another project (the project root). The lessons in force here, then the lessons of other projects the event log knows that carry a script; a lesson with a script first, then by level. Skills are left out. Writes nothing. The mod runs it at a session's first prompt (see "The index"). |
 | `compound met` | stdin `{"tool","call","error"}`: a call failed. Prints `{"sig","sessions","captured"}`: the signature of the error (null when it says nothing about the call), the number of OTHER sessions that met that signature, and whether a `capture` event already carries it. Logs `met` when there is a signature. The mod runs it (see "A failure met before"). |
+| `compound insights [--harvest]` | `--harvest` reads what Claude Code's `/insights` wrote under `usage-data/` and records each finding not yet recorded, as an `insight` event (see "Findings from /insights"); it prints `{"new","facets","skipped","dropped","report","outcome","message"}`. Without it, prints the state the last harvest left: `started`, `finished`, `outcome` (`ok` or `unreadable`, null before any harvest), `message`, `harvested`. Exit 0 either way, an unreadable harvest included. |
 | `compound log` | stdin: one event object of a type the mod writes; a type a command of the CLI writes is exit 2, with that command named. Appends it with `ts`, `session` and `project` filled in, an `id` for a `capture`, and `counted` and `ineffective` for a `recall` that does not carry them; every text in it is masked and cut. `--json` prints the event as it was written. |
 | `compound events [--since TS] [--type T] [--session S] [--project P] [--unsettled] [--limit N]` | Reads the log. `--unsettled`: only what is owed and nothing has settled, of the last 14 days: the captures, and for each session and lesson the newest `recall` marked ineffective. With `--session S` that is what session `S` owes. `--limit N`: the last `N` of what was selected. |
 | `compound status` | The report above. `--json` carries every lesson's row, the ones never used included. Exit 1 when a health check fails. |

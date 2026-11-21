@@ -964,6 +964,7 @@ for a command typed in a terminal), the project, and what the event was about.
 | `retry` | the first call of a tool after a guard refused one, and whether it is the same call |
 | `met` | a call failed with an error that has a signature, and how many other sessions had met it |
 | `index` | a session was shown the index of what is recorded, at its first prompt |
+| `insight` | a finding read from what Claude Code's `/insights` wrote, by `compound insights --harvest` |
 
 Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`,
 `--unsettled`, `--limit <n>`, and `--json` for the full objects.
@@ -987,6 +988,7 @@ Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`
 | `compound evidence` | the scripts sessions ran, kept as they ran | [Keep a script that worked](#keep-a-script-that-worked) |
 | `compound events` | read the event log | [Read the event log](#read-the-event-log) |
 | `compound status` | health, totals and what is open | [Read `compound status`](#read-compound-status) |
+| `compound insights` | read what Claude Code's `/insights` wrote and record its findings as candidates; print the outcome of the last harvest | [Findings from /insights](design.md#findings-from-insights) in the design |
 | `compound report` | what the event log says compound did | [Read `compound report`](#read-compound-report) |
 | `compound install`, `compound update`, `compound uninstall` | set the package up, move it to a newer version, take it out | the [README](../README.md#install) |
 

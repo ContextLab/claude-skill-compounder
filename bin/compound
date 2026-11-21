@@ -75,7 +75,7 @@ EVENT LOG
     fields when they are absent: `ts`, `session` (from CLAUDE_CODE_SESSION_ID) and
     `project` (the project root). `type` is required, and is one of the types the table
     below gives to the mod. A type a command of this CLI writes (`learn`, `skip`, `rm`,
-    `skill`, `promote`, `candidate`, `use`) is refused with exit 2 and the name of that
+    `skill`, `promote`, `candidate`, `use`, `met`, `insight`) is refused with exit 2 and the name of that
     command (CLI_WRITES): an event that settles a debt, or says a lesson was written,
     moved or removed, is in the log because the command ran. That keeps the log whole
     against accident and against a session settling its debt with `log`. It is no
@@ -283,6 +283,26 @@ EVENT LOG
                                     tool     string
                                     sessions int       the other sessions that had met
                                                        it when this was written
+        insight   CLI `insights`    id*      string    in-<16 hex digits>, derived from
+                                                       the source and the session id (a
+                                                       facet) or the normalised text (a
+                                                       report item): one finding is
+                                                       written once
+                                    source   string    facet | report
+                                    of       string    facet: the session it is about
+                                    kinds    [string]  facet: the keys of its
+                                                       friction_counts that are slugs
+                                                       (at most 8)
+                                    text     string    facet: its friction_detail; report:
+                                                       the suggested CLAUDE.md addition.
+                                                       Masked, one line, 600 characters
+                                    goal     string    facet: its underlying_goal, 200
+                                    learned  [string]  facet: the lessons the session it
+                                                       is about wrote
+                                    why      string    report: the reason it gives, 300
+                                    (`session` is the word `insights`. A facet's
+                                    `project` is the repository root of the session's
+                                    project_path; a report item has no `project`.)
         use       CLI `use`         lesson*  string    the skill a session invoked, as
                                                        `list` names it. The mod runs
                                                        `use` when a skill's prompt is
@@ -453,6 +473,28 @@ EVENT LOG
     one refusal. A user who keeps a lesson of their own for a mistake the pool also
     covers switches the general one off (`compound disable NAME`).
 
+INSIGHTS
+    `compound insights --harvest` reads <claude dir>/usage-data/, where the Claude directory
+    is COMPOUND_CLAUDE_DIR, else CLAUDE_CONFIG_DIR, else ~/.claude. Claude Code's /insights
+    writes it; its shapes are undocumented, so each field used is checked for type and
+    size, and a file over 1 000 000 bytes is not read.
+        facets/<session id>.json        friction_detail (string; a finding when not empty),
+                                        friction_counts (object), underlying_goal (string),
+                                        session_id (string; the file's name)
+        session-meta/<session id>.json  project_path (string; its repository root is the
+                                        finding's project; a path that is no directory, or
+                                        no file, drops the finding)
+        report.html                     elements of class `claude-md-item`, each holding an
+                                        element of class `cmd-code` (the text) and one of
+                                        class `cmd-why` (the reason); the section is the
+                                        element with id `section-features`
+    Each finding becomes one `insight` event, once. The harvest holds an flock on
+    <COMPOUND_HOME>/insights.lock from reading the log to its last append, and keeps its
+    outcome in <COMPOUND_HOME>/insights.json (`finished`, `outcome` ok | unreadable,
+    `message`, `harvested` counts). When every facet read is skipped, or the report has
+    its section and no item, the outcome is `unreadable`, one `error` event (where
+    `insights.harvest`) names the file and key, and nothing is recorded.
+
 WHAT A REPOSITORY CAN WRITE
     A project lesson is a file in a repository, and whoever can commit to it can write
     one by hand. A lesson file is therefore held to the format where it is READ:
@@ -545,12 +587,12 @@ LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn", "use")
 # Every type the table in the docstring names.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met", "index")
+               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met", "index", "insight")
 # The types a command of this CLI writes, and the command: `compound log` refuses them, so
 # an event that settles a debt or says a lesson was written, moved or removed is in the log
 # only because that command ran. `log` takes the other types, which are the mod's.
 CLI_WRITES = {"learn": "add", "skip": "skip", "rm": "rm", "skill": "skill", "promote": "promote",
-              "candidate": "promote", "use": "use", "met": "met"}
+              "candidate": "promote", "use": "use", "met": "met", "insight": "insights"}
 LOG_TYPES = tuple(kind for kind in EVENT_TYPES if kind not in CLI_WRITES)
 # The types the mod writes, or has the CLI write (`use`): the newest of them is when the
 # mod last fired.
@@ -824,6 +866,7 @@ EVENT_WORDS = {
     "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
     "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "use": "used",
     "repeat": "repeated", "error": "error", "retry": "retried", "met": "met", "index": "indexed",
+    "insight": "insight",
 }
 
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
@@ -832,7 +875,7 @@ EVENT_COLOURS = {
     "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
     "judge": DIM, "use": BLUE, "repeat": CYAN,
     "error": RED,
-    "retry": DIM, "met": DIM, "index": DIM,
+    "retry": DIM, "met": DIM, "index": DIM, "insight": DIM,
 }
 STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
 
@@ -2375,6 +2418,340 @@ def cmd_met(args):
         out["captured"] = any(event.get("type") == "capture" and event.get("sig") == sig for event in events)
         log_event("met", project_root(), sig=sig, tool=_text(given.get("tool"))[:80], sessions=out["sessions"])
     emit(out)
+    return 0
+
+
+# ----------------------------------------------------------------------------- insights
+
+# What `/insights` of Claude Code leaves under `usage-data/` is undocumented and may change,
+# so every field the harvest uses is checked for its type and bounded before anything is
+# offered. A file over INSIGHT_FILE_BYTES is not read.
+INSIGHT_FILE_BYTES = 1000000
+INSIGHT_TEXT, INSIGHT_GOAL, INSIGHT_WHY, INSIGHT_KINDS = 600, 200, 300, 8
+INSIGHT_KIND_RE = re.compile(r"^[a-z_]{1,40}$")
+INSIGHT_SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+INSIGHT_SESSION = "insights"
+
+
+def insights_claude_dir():
+    """The Claude directory `/insights` wrote to, absolute: COMPOUND_CLAUDE_DIR, else
+    CLAUDE_CONFIG_DIR, else ~/.claude."""
+    return _expand(os.environ.get("COMPOUND_CLAUDE_DIR") or os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+
+
+def insight_id(source, key):
+    import hashlib
+
+    return "in-" + hashlib.sha256((source + "\0" + key).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def insight_text(value, cap):
+    """`value` masked, on one line and cut at `cap` characters."""
+    return one_line(redact(value))[:cap]
+
+
+def insights_lock(wait):
+    """A context manager over an exclusive flock on <COMPOUND_HOME>/insights.lock, which the
+    kernel releases when the process ends. Yields True when held; False when `wait` is false
+    and another process holds it."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def held():
+        os.makedirs(home_dir(), exist_ok=True)
+        fd = os.open(os.path.join(home_dir(), "insights.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+            except BlockingIOError:
+                got = False
+            yield got
+        finally:
+            os.close(fd)
+
+    return held()
+
+
+def insights_state_path():
+    return os.path.join(home_dir(), "insights.json")
+
+
+def read_insights_state():
+    """The state file as a dict; {} when there is none or it is not an object."""
+    try:
+        with open(insights_state_path(), "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def write_insights_state(state):
+    state = dict(state)
+    if "message" in state:
+        state["message"] = masked(state["message"])
+    os.makedirs(home_dir(), exist_ok=True)
+    path = insights_state_path()
+    temp = "%s.%d.tmp" % (path, os.getpid())
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            handle.write(dumps(state, indent=2) + "\n")
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def read_insight_file(path):
+    """(parsed JSON, None), or (None, why it was not read)."""
+    import stat
+
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return None, "not a regular file"
+        if info.st_size > INSIGHT_FILE_BYTES:
+            return None, "over %d bytes, not read" % INSIGHT_FILE_BYTES
+        with open(path, "rb") as handle:
+            raw = handle.read(INSIGHT_FILE_BYTES + 1)
+        return json.loads(raw.decode("utf-8")), None
+    except (OSError, ValueError) as exc:
+        return None, "unreadable: %s" % one_line(exc)[:120]
+
+
+def insight_project(path):
+    """The repository root of the directory `path` (git's top level, else the directory),
+    as a real path; None when `path` is no directory."""
+    real = os.path.realpath(path)
+    if not os.path.isdir(real):
+        return None
+    code, top, _err = _run(["git", "rev-parse", "--show-toplevel"], cwd=real, timeout=10)
+    if code == 0 and top and os.path.isdir(top):
+        return os.path.realpath(top)
+    return real
+
+
+def parse_insights_report(text):
+    """({"section": bool, "items": [{"text", "why"}]}) from the HTML of report.html: the
+    text of each `cmd-code` and `cmd-why` inside a `claude-md-item`."""
+    from html.parser import HTMLParser
+
+    class Report(HTMLParser):
+        VOID = ("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr")
+
+        def __init__(self):
+            HTMLParser.__init__(self, convert_charrefs=True)
+            self.section = False
+            self.items = []
+            self.stack = []
+            self.item = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self.VOID:
+                return
+            attrs = dict(attrs)
+            classes = (attrs.get("class") or "").split()
+            if attrs.get("id") == "section-features":
+                self.section = True
+            role = None
+            if "claude-md-item" in classes:
+                self.section = True
+                role = "item"
+                self.item = {"code": [], "why": []}
+            elif self.item is not None and "cmd-code" in classes:
+                role = "code"
+            elif self.item is not None and "cmd-why" in classes:
+                role = "why"
+            self.stack.append((tag, role))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    gone = self.stack[index:]
+                    del self.stack[index:]
+                    if any(role == "item" for _tag, role in gone) and self.item is not None:
+                        self.items.append({"text": " ".join("".join(self.item["code"]).split()),
+                                           "why": " ".join("".join(self.item["why"]).split())})
+                        self.item = None
+                    return
+
+        def handle_data(self, data):
+            if self.item is None:
+                return
+            for _tag, role in reversed(self.stack):
+                if role in ("code", "why"):
+                    self.item[role].append(data)
+                    return
+
+    parser = Report()
+    parser.feed(text)
+    parser.close()
+    return {"section": parser.section, "items": parser.items}
+
+
+def harvest_insights(events, clock):
+    """What `usage-data/` holds that the log does not: {"new": [insight events], "facets",
+    "skipped", "dropped", "report", "outcome": "ok"|"unreadable", "message"}. Pure reading:
+    nothing is appended. An unreadable harvest offers nothing (`new` is empty) and `message`
+    names the first file and key that failed; a facet or item the log already holds is not
+    new. `facets` is the number of facet files looked at, `report` the new report findings."""
+    top = os.path.join(insights_claude_dir(), "usage-data")
+    known = set(event.get("id") for event in events if event.get("type") == "insight")
+    learned = {}
+    for event in events:
+        if event.get("type") == "learn" and _text(event.get("session")):
+            names = learned.setdefault(event["session"], [])
+            names.extend(name for name in event_names(event) if name not in names)
+    stamp = iso(clock)
+    problems = []
+    found = []
+    result = {"new": [], "facets": 0, "skipped": 0, "dropped": 0, "report": 0, "outcome": "ok", "message": ""}
+    roots = {}
+
+    def skip(rel, why):
+        result["skipped"] += 1
+        problems.append("%s: %s" % (rel, why))
+
+    facets = os.path.join(top, "facets")
+    try:
+        names = sorted(name for name in os.listdir(facets) if name.endswith(".json"))
+    except OSError:
+        names = []
+    for name in names:
+        rel = os.path.join("usage-data", "facets", name)
+        session = name[:-len(".json")]
+        result["facets"] += 1
+        data, why = read_insight_file(os.path.join(facets, name))
+        if why:
+            skip(rel, why)
+            continue
+        if not isinstance(data, dict):
+            skip(rel, "not a JSON object")
+            continue
+        if data.get("session_id") != session or not INSIGHT_SESSION_RE.match(session):
+            skip(rel, "key session_id is not the file's name")
+            continue
+        detail = data.get("friction_detail")
+        if detail is not None and not isinstance(detail, str):
+            skip(rel, "key friction_detail is not a string")
+            continue
+        if not detail or not detail.strip():
+            continue
+        counts = data.get("friction_counts")
+        if counts is not None and not isinstance(counts, dict):
+            skip(rel, "key friction_counts is not an object")
+            continue
+        goal = data.get("underlying_goal")
+        if goal is not None and not isinstance(goal, str):
+            skip(rel, "key underlying_goal is not a string")
+            continue
+        ident = insight_id("facet", session)
+        if ident in known:
+            continue
+        meta_path = os.path.join(top, "session-meta", name)
+        meta_rel = os.path.join("usage-data", "session-meta", name)
+        if not os.path.lexists(meta_path):
+            result["dropped"] += 1
+            continue
+        meta, why = read_insight_file(meta_path)
+        if why or not isinstance(meta, dict) or not isinstance(meta.get("project_path"), str) \
+                or not meta["project_path"] or "\0" in meta["project_path"]:
+            skip(meta_rel, why or "key project_path is not a path")
+            continue
+        path = meta["project_path"]
+        if path not in roots:
+            roots[path] = insight_project(path)
+        if roots[path] is None:
+            result["dropped"] += 1
+            continue
+        kinds = [key for key in (counts or {}) if INSIGHT_KIND_RE.match(key)][:INSIGHT_KINDS]
+        found.append({"ts": stamp, "type": "insight", "session": INSIGHT_SESSION, "project": roots[path],
+                      "id": ident, "source": "facet", "of": session, "kinds": kinds,
+                      "text": insight_text(detail, INSIGHT_TEXT), "goal": insight_text(goal or "", INSIGHT_GOAL),
+                      "learned": list(learned.get(session, []))})
+
+    report = os.path.join(top, "report.html")
+    reported = []
+    if os.path.lexists(report):
+        rel = os.path.join("usage-data", "report.html")
+        text = None
+        try:
+            import stat
+
+            info = os.lstat(report)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > INSIGHT_FILE_BYTES:
+                problems.append("%s: not a regular file, or over %d bytes, not read" % (rel, INSIGHT_FILE_BYTES))
+                result["outcome"] = "unreadable"
+                text = ""
+            else:
+                with open(report, "rb") as handle:
+                    text = handle.read().decode("utf-8")
+        except (OSError, ValueError) as exc:
+            problems.append("%s: unreadable: %s" % (rel, one_line(exc)[:120]))
+            result["outcome"] = "unreadable"
+            text = ""
+        parsed = parse_insights_report(text) if text else {"section": False, "items": []}
+        wanted = [item for item in parsed["items"] if item["text"]]
+        if parsed["section"] and not wanted:
+            problems.append("%s: key cmd-code: the report has its suggestions section and no item with text" % rel)
+            result["outcome"] = "unreadable"
+        seen = set()
+        for item in wanted:
+            ident = insight_id("report", " ".join(item["text"].lower().split()))
+            if ident in known or ident in seen:
+                continue
+            seen.add(ident)
+            reported.append({"ts": stamp, "type": "insight", "session": INSIGHT_SESSION, "id": ident,
+                             "source": "report", "text": insight_text(item["text"], INSIGHT_TEXT),
+                             "why": insight_text(item["why"], INSIGHT_WHY)})
+
+    if result["facets"] and result["skipped"] == result["facets"]:
+        result["outcome"] = "unreadable"
+    result["message"] = problems[0] if problems else ""
+    if result["outcome"] == "ok":
+        result["new"] = found + reported
+        result["report"] = len(reported)
+    return result
+
+
+def cmd_insights(args):
+    if not args.harvest:
+        state = {"started": None, "finished": None, "outcome": None, "message": "", "harvested": {}}
+        state.update(read_insights_state())
+        if args.json:
+            emit(state)
+            return 0
+        sys.stdout.write("last run: %s\noutcome: %s\n" % (
+            state["finished"] or "never", state["outcome"] or "none yet"))
+        if state["message"]:
+            sys.stdout.write("message: %s\n" % one_line(state["message"]))
+        return 0
+    clock = now()
+    with insights_lock(True):
+        events, _bad = read_events()
+        result = harvest_insights(events, clock)
+        if result["outcome"] == "unreadable":
+            log_soft("error", project_root(), where="insights.harvest", message=result["message"])
+        for event in result["new"]:
+            append_event(event)
+        written = len(result["new"])
+        counts = {"facets": result["facets"], "findings": written - result["report"], "report": result["report"],
+                  "skipped": result["skipped"], "dropped": result["dropped"]}
+        state = read_insights_state()
+        state.update({"finished": iso(clock), "outcome": result["outcome"], "message": result["message"],
+                      "harvested": counts})
+        write_insights_state(state)
+    out = {"new": written, "facets": result["facets"], "skipped": result["skipped"],
+           "dropped": result["dropped"], "report": result["report"], "outcome": result["outcome"],
+           "message": result["message"]}
+    if args.json:
+        emit(out)
+    elif result["outcome"] == "unreadable":
+        sys.stdout.write("unreadable: %s\n" % one_line(result["message"]))
+    else:
+        sys.stdout.write("%d new findings (%d from the report); %d facets read, %d skipped, %d dropped\n" % (
+            written, result["report"], result["facets"], result["skipped"], result["dropped"]))
     return 0
 
 
@@ -7808,6 +8185,11 @@ def build_parser():
     one.add_argument("--evidence", metavar="ID", help="the id of the recorded script being declined")
 
     command("log", cmd_log, "Append one event (a JSON object on stdin).")
+
+    one = command("insights", cmd_insights,
+                  "Findings from Claude Code's /insights: harvest what it wrote, or print the last outcome.")
+    one.add_argument("--harvest", action="store_true",
+                     help="read usage-data/ and record the findings not yet recorded")
 
     command("index", cmd_index, "The lessons a session here could use, as rows, the ones with a script first (JSON).",
             json_flag=False)
