@@ -2768,10 +2768,11 @@ def harvest_insights(events, clock):
         result["outcome"] = "unreadable"
     result["message"] = problems[0] if problems else ""
     if result["outcome"] == "ok":
-        # At most INSIGHT_HARVEST_MAX: the newest facets first, the report's items last. What
-        # is left out is not in the log, so a later harvest finds it new.
-        kept = found[:INSIGHT_HARVEST_MAX]
-        kept_report = reported[:max(0, INSIGHT_HARVEST_MAX - len(kept))]
+        # At most INSIGHT_HARVEST_MAX: the report's items first, since the next run overwrites
+        # report.html and an item left out could be lost, then the newest facets. A facet left
+        # out stays on disk and is not in the log, so a later harvest finds it new.
+        kept_report = reported[:INSIGHT_HARVEST_MAX]
+        kept = found[:INSIGHT_HARVEST_MAX - len(kept_report)]
         result["capped"] = len(found) + len(reported) - len(kept) - len(kept_report)
         result["new"] = kept + kept_report
         result["report"] = len(kept_report)

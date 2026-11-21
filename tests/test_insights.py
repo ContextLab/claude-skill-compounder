@@ -280,7 +280,7 @@ class HarvestTest(Case):
         (line,) = [row for row in listing.stdout.splitlines() if row.startswith("in-00000000000000c3")]
         self.assertEqual(line.split()[:3], ["in-00000000000000c3", "open", "-"])
 
-    def test_a_harvest_records_at_most_100_new_findings_newest_facets_first_and_the_rest_later(self):
+    def test_a_harvest_records_at_most_100_new_findings_report_first_then_newest_facets_and_the_rest_later(self):
         repo = self.repo()
         sessions = ["%08x-aaaa-bbbb-cccc-%012x" % (index, index) for index in range(103)]
         top = self.usage({one: facet(one, "Friction %d." % index) for index, one in enumerate(sessions)},
@@ -291,30 +291,33 @@ class HarvestTest(Case):
             stamp = NOW - 1000 + index
             os.utime(os.path.join(top, "facets", one + ".json"), (stamp, stamp))
         first = self.harvest()
-        self.assertEqual((first["new"], first["report"], first["capped"], first["outcome"]), (100, 0, 5, "ok"))
-        self.assertEqual(sorted(event["of"] for event in self.insights()), sorted(sessions[3:]))
+        self.assertEqual((first["new"], first["report"], first["capped"], first["outcome"]), (100, 2, 5, "ok"))
+        self.assertEqual(sorted(event["of"] for event in self.insights() if event["source"] == "facet"),
+                         sorted(sessions[5:]))
         state = self.box.json("insights", "--json")
         self.assertEqual(state["harvested"]["capped"], 5)
         self.assertIn("5 left out", self.box.run("insights").stdout)
+        # The next run overwrites report.html: the items recorded first are not lost with it.
+        write_usage_data(self.box.claude, {}, {}, [("Something else entirely.", "New.")])
         second = self.box.run("insights", "--harvest")
         self.assertExit(second, 0)
-        self.assertIn("5 new findings", second.stdout)
+        self.assertIn("6 new findings (1 from the report)", second.stdout)
         self.assertEqual(sorted(event["of"] for event in self.insights() if event["source"] == "facet"),
                          sorted(sessions))
-        self.assertEqual(len([event for event in self.insights() if event["source"] == "report"]), 2)
+        self.assertEqual(len([event for event in self.insights() if event["source"] == "report"]), 3)
         self.assertEqual(self.harvest()["new"], 0)
 
-    def test_report_findings_count_toward_the_cap_after_the_facets(self):
+    def test_report_findings_count_toward_the_cap_before_the_facets(self):
         repo = self.repo()
         sessions = ["%08x-aaaa-bbbb-cccc-%012x" % (index, index) for index in range(99)]
         self.usage({one: facet(one) for one in sessions},
                    {one: {"session_id": one, "project_path": repo} for one in sessions},
                    [("Prefer rg over grep.", "It was faster."), ("Run the tests first.", "Failures hid.")])
         first = self.harvest()
-        self.assertEqual((first["new"], first["report"], first["capped"]), (100, 1, 1))
+        self.assertEqual((first["new"], first["report"], first["capped"]), (100, 2, 1))
         capped = self.box.run("insights", "--harvest", COMPOUND_NOW=NOW + 1)
         self.assertExit(capped, 0)
-        self.assertIn("1 new findings (1 from the report)", capped.stdout)
+        self.assertIn("1 new findings (0 from the report)", capped.stdout)
         self.assertEqual(self.harvest()["new"], 0)
 
 

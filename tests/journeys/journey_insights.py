@@ -21,7 +21,9 @@ child `claude` and harvests from it.
             loads it too, and its COMPOUND_OFF=1 is what keeps it quiet). After that session
             has exited, the state says a run started (`started` set) and the worker still
             holds the lock: it outlived the session. The state is then polled, with a
-            deadline, until it leaves `running`; it must reach `ok`.
+            deadline, until it leaves `running`; it must reach `ok`. When no run started, the
+            journey prints the state file, whether the mod fired in that session, and stops
+            there (non-zero), without polling.
   b         a second session's first prompt, made while the run is under way, does not start
             another: `started` unchanged, and exactly one new `report-*.html`.
   c         `report.html`, newer than the start, is under the fresh configuration only (not
@@ -106,14 +108,18 @@ def lock_is_free(home):
 def workers(home):
     """The pids that hold this world's insights.lock open: the worker, whose argv does not
     name the home (it is `python3 .../compound insights --run`), is found by the file it
-    holds. [] when lsof is missing or nothing holds it."""
+    holds. [] when nothing holds it; None when lsof could not be asked (missing, failed or
+    timed out), so the caller can say it does not know."""
     path = os.path.join(home, "insights.lock")
     if not os.path.exists(path):
         return []
     try:
         done = subprocess.run(["lsof", "-t", path], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return None
+    # lsof exits 1 when no process has the file open, with nothing on stdout.
+    if done.returncode not in (0, 1) or (done.returncode == 1 and done.stderr.strip()):
+        return None
     return sorted(int(pid) for pid in done.stdout.split() if pid.strip().isdigit() and int(pid) != os.getpid())
 
 
@@ -127,9 +133,17 @@ def children(pid):
 
 def stop_workers(home):
     """Stops every worker of this world and the process group of each of its children (the
-    child `claude` runs in a group of its own). Returns what it stopped."""
+    child `claude` runs in a group of its own). Returns what it stopped. When lsof cannot say
+    who holds the lock, it says so and how to look by hand, and stops nothing."""
     stopped = []
-    for pid in workers(home):
+    found = workers(home)
+    if found is None:
+        path = os.path.join(home, "insights.lock")
+        print("      cleanup: lsof could not be asked who holds %s, so no worker was stopped. Check by hand: "
+              "`lsof %s` lists the worker; stop its group and its child's with `kill -TERM -<pid>` "
+              "(the child is `pgrep -P <pid>`)" % (path, path))
+        return stopped
+    for pid in found:
         for child in children(pid):
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
@@ -197,8 +211,16 @@ def costs(stream):
 
 
 def dry(w, project):
-    """What needs no model call. No `claude` is started: the days setting is 0."""
-    answer = w.cli(project, "insights", "--start", "--json", COMPOUND_CLAUDE_DIR=w.config, **SEED)
+    """What needs no model call. No `claude` can be started, by construction as in the Python
+    tests: the days setting is 0, and the call gets a HOME in the throwaway root (so there is
+    no ~/.local/bin/claude) and PATH=/usr/bin:/bin (where there is no claude)."""
+    sandbox_home = os.path.join(w.root, "dry-home")
+    os.makedirs(sandbox_home, exist_ok=True)
+    w.check("dry", "no claude in the call's PATH or its HOME's .local/bin",
+            not any(os.path.exists(os.path.join(d, "claude")) for d in ("/usr/bin", "/bin",
+                                                                       os.path.join(sandbox_home, ".local", "bin"))))
+    answer = w.cli(project, "insights", "--start", "--json", COMPOUND_CLAUDE_DIR=w.config, HOME=sandbox_home,
+                   PATH="/usr/bin:/bin", **SEED)
     w.check("dry", "insights --start under the seed environment answers disabled",
             answer.returncode == 0 and json.loads(answer.stdout or "{}").get("why") == "disabled", answer.stdout)
     w.check("dry", "it wrote no state", not os.path.exists(os.path.join(w.home, "insights.json")))
@@ -212,7 +234,7 @@ def dry(w, project):
         try:
             time.sleep(0.5)
             found = workers(w.home)
-            w.check("dry", "a process holding the lock file is found by it", holder.pid in found, found)
+            w.check("dry", "a process holding the lock file is found by it", holder.pid in (found or []), found)
             w.check("dry", "stop_workers stops it", holder.pid in stop_workers(w.home) and holder.wait(timeout=10) is not None)
         finally:
             if holder.poll() is None:
@@ -296,9 +318,20 @@ def run(w, project, args, here):
     held = not lock_is_free(w.home)
     w.show("state", [after_start])
     w.check("a", "the starting session answered", "READY" in starter.result, starter.result[:200])
-    w.check("a", "after its first prompt the state says a run started",
-            isinstance(after_start.get("started"), (int, float)) and after_start["started"] >= int(began) - 1,
-            after_start)
+    started = isinstance(after_start.get("started"), (int, float)) and after_start["started"] >= int(began) - 1
+    w.check("a", "after its first prompt the state says a run started", started, after_start)
+    if not started:
+        # Nothing to wait for: say what was seen, and stop (the caller's `finally` cleans up).
+        with open(starter.stream) as fh:
+            stream = fh.read()
+        print("      NO RUN STARTED after the starting session's first prompt; not polling.")
+        print("      state file %s: %s" % (os.path.join(w.home, "insights.json"),
+                                          json.dumps(after_start) if after_start else "absent or unreadable"))
+        print("      the mod's context in the session's stream: %s; its claims for the session: %s" % (
+            "present ([compound] seen)" if "[compound]" in stream else "absent (no [compound] in the stream)",
+            w.claims(starter.sid) or "none (the mod did not fire: was it loaded through CLAUDE_CODE_PLUGIN_DIRS?)"))
+        print("      the session's events: %s" % sorted({e.get("type") for e in w.events(project, session=starter.sid)}))
+        return
     w.check("a", "the worker outlived the session: the lock is held after the session exited, or the run "
             "finished after it", held or finished_after(after_start, ended),
             "lock held: %s; workers %s; state %s" % (held, workers(w.home), after_start))

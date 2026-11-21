@@ -1097,10 +1097,11 @@ check.
   item that parses, the outcome is `unreadable`: nothing is recorded (the findings of the
   other source are withheld too), one `error` event
   (`where` `insights.harvest`) names the file and the key, and the state says so.
-- **At most 100 at a time.** One harvest records at most 100 new findings: the facets
-  first, newest first by the modification time of their files, then the report's items.
-  What is left out is counted as `capped` and is not in the log, so the next harvest finds
-  it new and records it.
+- **At most 100 at a time.** One harvest records at most 100 new findings: the report's
+  items first, since the next run overwrites `report.html` and an item left out could be
+  lost, then the facets, newest first by the modification time of their files. What is
+  left out is counted as `capped` and is not in the log; the facet files stay, so the next
+  harvest finds them new and records them.
 - **One at a time.** The harvest holds a lock on `insights.lock` in `COMPOUND_HOME` from
   reading the log to its last append, so two harvests cannot both record one finding. It
   keeps `finished`, `outcome`, `message` and the counts of the harvest (`facets`,

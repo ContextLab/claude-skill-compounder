@@ -617,8 +617,9 @@ compound insights --harvest
 A facet is the record `/insights` keeps of one session. A session with no friction gives
 no candidate; `skipped` counts records compound could not read, and `dropped` the ones
 whose session has no metadata or whose project directory no longer exists. A second harvest of the same files records
-nothing again. One harvest records at most 100 candidates, the newest sessions first; the
-rest are reported as `left out` and recorded by the next harvest.
+nothing again. One harvest records at most 100 candidates, the report's suggestions first
+and then the newest sessions; the rest are reported as `left out` and recorded by the next
+harvest.
 
 ## Strengthen an ineffective lesson
 
