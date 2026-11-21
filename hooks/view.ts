@@ -174,6 +174,19 @@ export function noted(band: CompoundBand, kind: CompoundNoteKind, text: string, 
   return { ...band, note: { kind, text: oneLine(text, 80), at: now, ...(more === '' ? {} : { detail: more }) } }
 }
 
+// How many findings of /insights, in the words of the band, the status entry, the pane and
+// `compound events`.
+export function candidatesText(n: number): string {
+  return count(n, 'candidate from /insights', 'candidates from /insights')
+}
+
+// A second result of the moment that made the band's note: drawn beside it as a note of its
+// own, so neither displaces the other. With no note to stand beside, it is the note.
+export function alsoNoted(band: CompoundBand, kind: CompoundNoteKind, text: string, now: number): CompoundBand {
+  if (band.note === null) return noted(band, kind, text, now)
+  return { ...band, note: { ...band.note, also: { kind, text: oneLine(text, 80) } } }
+}
+
 // ---- the greeting, and a check that found nothing ---------------------------------------
 
 // The guards are among the lessons: a lesson that carries a pattern.
@@ -382,7 +395,7 @@ export function trackSegs(step: CompoundStep, compact: boolean): Seg[] {
   return out
 }
 
-type Main = { glyph: string; color: string; label: string; name: string; detail?: string; names?: readonly string[]; phase: Phase; from: 'busy' | 'note' | 'error' | 'owed' | 'weak' }
+type Main = { glyph: string; color: string; label: string; name: string; detail?: string; names?: readonly string[]; also?: { kind: CompoundNoteKind; text: string }; phase: Phase; from: 'busy' | 'note' | 'error' | 'owed' | 'weak' }
 
 function mainOf(band: CompoundBand, now: number): Main | undefined {
   const busy = liveBusy(band, now)
@@ -391,7 +404,7 @@ function mainOf(band: CompoundBand, now: number): Main | undefined {
   const phase = notePhase(band, now)
   if (band.note !== null && phase !== 'gone') {
     const look = NOTES[band.note.kind]
-    return { ...look, name: band.note.text, detail: band.note.detail ?? '', ...(band.note.names === undefined ? {} : { names: band.note.names }), phase, from: 'note' }
+    return { ...look, name: band.note.text, detail: band.note.detail ?? '', ...(band.note.names === undefined ? {} : { names: band.note.names }), ...(band.note.also === undefined ? {} : { also: band.note.also }), phase, from: 'note' }
   }
   if (band.errors > 0) return { ...ERROR, label: `${count(band.errors, 'compound error')}`, name: 'Claude is told at the next prompt', phase: 'fresh', from: 'error' }
   if (band.owed > 0) return { ...OWED, label: band.owed === 1 ? OWED.label : `${band.owed} lessons owed`, name: band.owedText ?? '', phase: 'fresh', from: 'owed' }
@@ -436,16 +449,20 @@ function bandSegs(band: CompoundBand | null | undefined, now: number, columns: n
       ]
   const name: Seg[] = main !== undefined && main.name !== '' ? [{ text: ' · ', dim: true }, { text: main.name, bold: main.phase === 'flash' }] : []
   let detail: Seg[] = main?.detail === undefined || main.detail === '' ? [] : [{ text: main.name === '' ? ' · ' : '  ', dim: true }, { text: main.detail, dim: true }]
+  const second = main?.also === undefined ? undefined : NOTES[main.also.kind]
+  let also: Seg[] = main?.also === undefined || second === undefined ? [] : [{ text: '  ', dim: true }, { text: `${second.glyph} `, color: second.color }, { text: main.also.text, color: second.color }]
   let marks = main === undefined ? [] : badges(band, main, step === 'owed')
   let track: Seg[] = step === undefined ? [] : [{ text: '   ' }, ...trackSegs(step, false)]
-  // Too wide: the track loses its words, then the detail goes, then the marks, then the
-  // track, then the name is cut; a list of names keeps as many as fit and counts the rest.
-  const total = () => width(head) + width(name) + width(detail) + width(marks) + width(track)
+  // Too wide: the track loses its words, then a second note goes, then the detail, then the
+  // marks, then the track, then the name is cut; a list of names keeps as many as fit and
+  // counts the rest.
+  const total = () => width(head) + width(name) + width(detail) + width(also) + width(marks) + width(track)
   if (total() > columns && step !== undefined) track = [{ text: '   ' }, ...trackSegs(step, true)]
+  if (total() > columns) also = []
   if (total() > columns) detail = []
   if (total() > columns) marks = []
   if (total() > columns) track = []
-  let row = [...head, ...name, ...detail, ...marks, ...track]
+  let row = [...head, ...name, ...detail, ...also, ...marks, ...track]
   if (width(row) > columns) {
     const room = columns - width(head) - 3
     const fewer = main?.names === undefined ? '' : listed(main.names, room)
@@ -532,7 +549,7 @@ export function eventText(e: Record<string, unknown>): string {
     case 'remind': {
       const owed = names(e.captures).length
       const findings = names(e.insights).length
-      return [owed > 0 || findings === 0 ? `${count(owed, 'lesson')} owed` : '', findings > 0 ? count(findings, 'insights candidate') : ''].filter(t => t !== '').join(', ')
+      return [owed > 0 || findings === 0 ? `${count(owed, 'lesson')} owed` : '', findings > 0 ? candidatesText(findings) : ''].filter(t => t !== '').join(', ')
     }
     case 'refuse':
       return str(e.why) === 'debt' ? 'lesson owed' : str(e.why) === 'strengthen' ? 'to strengthen' : str(e.why) === 'evidence' ? 'script to keep' : 'long turn'
@@ -609,8 +626,12 @@ export function boardFrom(status: string, events: string, session: string, now: 
       ineffective: list(open.ineffective).map(i => ({ ...openRow(`${str(i.name)} (recalled ${num(i.recall)} times)`, i.command), ...(str(i.name) === '' ? {} : { lesson: str(i.name) }) })),
       candidates: list(open.candidates).map(c => openRow(`${str(c.lesson)} in ${base(str(c.from))}`, c.command)),
       scripts: list(open.scripts).map(s => openRow(`${oneLine(str(s.name), 60)} (passed ${num(s.ok)}${num(s.failed) > 0 ? `, failed ${num(s.failed)}` : ''}${str(s.project) === '' ? '' : `, ${base(str(s.project))}`})`, s.command, s.decline)),
-      // A finding of /insights: its id, its text, its age and its project (a report's has none).
-      findings: list(open.findings).map(f => openRow(`${str(f.id)} ${oneLine(str(f.text), 60)} (${str(f.age)}, ${str(f.project) === '' ? 'report' : base(str(f.project))})`)),
+      // A finding of /insights: its id, its text, its age, and `report` for one of the report
+      // or the project of one about a session (when it has one).
+      findings: list(open.findings).map(f => {
+        const where = str(f.source) === 'report' ? 'report' : str(f.project) === '' ? '' : base(str(f.project))
+        return openRow(`${str(f.id)} ${oneLine(str(f.text), 60)} (${str(f.age)}${where === '' ? '' : `, ${where}`})`)
+      }),
       errors: list(open.errors).map(e => openRow(oneLine(`${str(e.where)}: ${str(e.message)}`, 100))),
       skips: list(open.skips).length,
     },
@@ -863,7 +884,7 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
   group(o.unsettled, OWED, count(o.unsettled.length, 'lesson owed', 'lessons owed'))
   group(scripts, OWED, count(scripts.length, 'script that worked and nothing keeps', 'scripts that worked and nothing keeps'))
   group(o.ineffective, WEAK, count(o.ineffective.length, 'ineffective lesson'))
-  group(findings, NOTES.insights, count(findings.length, 'insights candidate'), INSIGHTS_COMMAND)
+  group(findings, NOTES.insights, candidatesText(findings.length), INSIGHTS_COMMAND)
   group(o.candidates, eventLook('candidate'), count(o.candidates.length, 'lesson that could move to the user level', 'lessons that could move to the user level'))
   group(o.errors, ERROR, `${count(o.errors.length, 'error')} in the last 7 days`, READ_ERRORS)
   if (o.skips > 0) out.push([{ text: `  ${NOTES.declined.glyph} `, dim: true }, { text: `${count(o.skips, 'lesson')} declined`, dim: true }])

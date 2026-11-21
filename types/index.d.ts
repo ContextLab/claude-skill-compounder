@@ -28,8 +28,9 @@ export type CompoundNoteKind =
 // `text` names the thing (the lesson, the items found); `detail` is what else there is room
 // for (the call a guard stopped), and is the first to go in a narrow band. `names` are the
 // items `text` lists, so a band too narrow for the text lists as many as fit and counts the
-// rest.
-export type CompoundNote = { kind: CompoundNoteKind; text: string; at: number; detail?: string; names?: string[] }
+// rest. `also` is a second result of the same moment, drawn as a note of its own beside the
+// first (its glyph, its colour, its text) and fading with it.
+export type CompoundNote = { kind: CompoundNoteKind; text: string; at: number; detail?: string; names?: string[]; also?: { kind: CompoundNoteKind; text: string } }
 
 // Where the learn loop stands: a call failed, a later call fixed it, a lesson is owed, and
 // it was recorded or declined.

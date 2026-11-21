@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { CompoundBand } from '../types'
 import {
-  ago, bandRow, bar, began, boardFrom, boardLines, BUSY, BUSY_MAX_MS, captured, dateText, emptyBand, ended, erred, ERROR, eventLook, eventTail, eventText, eventWord, FLASH_MS, forSession,
+  alsoNoted, candidatesText, ago, bandRow, bar, began, boardFrom, boardLines, BUSY, BUSY_MAX_MS, captured, dateText, emptyBand, ended, erred, ERROR, eventLook, eventTail, eventText, eventWord, FLASH_MS, forSession,
   frameAt, FRAME_MS, FRAMES, FRESH_MS, GONE_MS, greeted, HINT, inventoried, listed, motion, newTurn, noted, NOTES, OWED, phaseAt, phaseKey, reuseFound, reuseIdle, reuseText, settledBy, stepped, synced, trackSegs,
   unfixed, watched, WATCHING, WEAK, weakened, width, WORDS,
   allLines, detailFrom, detailLines, emptyPane, failedDetail, forPane, itemsFrom, keyLines, loadingDetail, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, wrapped,
@@ -1089,11 +1089,15 @@ test('findings of /insights are on the pane among what is open, with the command
     { text: 'in-0123456789abcdef The build was rerun without its profile. (2d, alpha)' },
     { text: 'in-fedcba9876543210 Always pass --profile to ./build.sh. (1d, report)' },
   ])
+  // A row is the report's by its source, never by a missing project.
+  const unplaced = JSON.parse(JSON.stringify(status)) as typeof status
+  unplaced.open.findings = [{ id: 'in-1111111111111111', source: 'facet', project: '', text: 'No project.', age: '3d' }, { id: 'in-2222222222222222', source: 'report', project: '/work/odd', text: 'Odd.', age: '1d' }]
+  expect(boardFrom(JSON.stringify(unplaced), EVENTS, 'pane-session', 0)!.open.findings).toEqual([{ text: 'in-1111111111111111 No project. (3d)' }, { text: 'in-2222222222222222 Odd. (1d, report)' }])
   // The insights check is informational: it passes, and is not drawn as a failure or a warning.
   expect(board.health.map(h => h.check)).toEqual(['cli', 'duplicates'])
   expect(board.checks).toBe(4)
   const text = boardLines(board, 140).map(line => line.map(seg => seg.text).join('')).join('\n')
-  expect(text).toContain('2 insights candidates')
+  expect(text).toContain('2 candidates from /insights')
   expect(text).toContain('in-0123456789abcdef The build was rerun without its profile. (2d, alpha)')
   expect(text).toContain('compound insights')
   // A board kept by an earlier version of the mod has no such list, and is drawn all the same.
@@ -1105,15 +1109,28 @@ test('findings of /insights are on the pane among what is open, with the command
 
 test('a reminder\'s line in the timeline counts what it told: lessons owed, findings, or both', async () => {
   expect(eventText({ type: 'remind', captures: ['a', 'b'] })).toBe('2 lessons owed')
-  expect(eventText({ type: 'remind', insights: ['in-0123456789abcdef'] })).toBe('1 insights candidate')
-  expect(eventText({ type: 'remind', captures: ['a'], insights: ['in-0123456789abcdef', 'in-fedcba9876543210'] })).toBe('1 lesson owed, 2 insights candidates')
+  expect(eventText({ type: 'remind', insights: ['in-0123456789abcdef'] })).toBe('1 candidate from /insights')
+  expect(eventText({ type: 'remind', captures: ['a'], insights: ['in-0123456789abcdef', 'in-fedcba9876543210'] })).toBe('1 lesson owed, 2 candidates from /insights')
   expect(eventText({ type: 'remind' })).toBe('0 lessons owed')
   expect(eventLook('insight')).toEqual(NOTES.insights)
 })
 
 test('the first prompt notes the findings it was told about on the band', async () => {
   const row = (band: CompoundBand) => text(bandRow(band, T0 + 1, 100))
-  expect(row(noted(fresh(), 'insights', '2 candidates', T0))).toBe(`${NOTES.insights.glyph} compound insights · 2 candidates`)
-  // Beside the captures' note: the band shows one note, which carries both.
-  expect(row(noted(fresh(), 'unsettled', '1 lesson', T0, 'insights: 2 candidates'))).toBe('● compound owed from earlier sessions · 1 lesson  insights: 2 candidates')
+  expect(candidatesText(1)).toBe('1 candidate from /insights')
+  expect(candidatesText(3)).toBe('3 candidates from /insights')
+  // Findings alone: their own note.
+  expect(row(noted(fresh(), 'insights', candidatesText(2), T0))).toBe(`${NOTES.insights.glyph} compound insights · 2 candidates from /insights`)
+  expect(row(alsoNoted(fresh(), 'insights', candidatesText(2), T0))).toBe(`${NOTES.insights.glyph} compound insights · 2 candidates from /insights`)
+  // Beside the captures' note: it keeps the newest capture's working call, and the findings are a note of their own after it.
+  const both = alsoNoted(noted(fresh(), 'unsettled', '1 lesson', T0, './build.sh --profile dev'), 'insights', candidatesText(2), T0)
+  expect(both.note?.kind).toBe('unsettled')
+  expect(both.note?.detail).toBe('./build.sh --profile dev')
+  expect(text(bandRow(both, T0 + 1, 120))).toBe(`● compound owed from earlier sessions · 1 lesson  ./build.sh --profile dev  ${NOTES.insights.glyph} 2 candidates from /insights`)
+  // In its own colour; and where the row is narrow it goes before the working call does.
+  const segs = bandRow(both, T0 + 1, 120)
+  expect(segs.find(s => s.text === '2 candidates from /insights')?.color).toBe(NOTES.insights.color)
+  expect(text(bandRow(both, T0 + 1, 90))).toBe('● compound owed from earlier sessions · 1 lesson  ./build.sh --profile dev')
+  // It fades with the note it stands beside.
+  expect(bandRow(both, T0 + GONE_MS + 1, 100)).toEqual([])
 })

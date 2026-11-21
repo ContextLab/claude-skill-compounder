@@ -3278,8 +3278,14 @@ def event_summary(event):
         return "%s stays in %s (seen in %s)" % (", ".join(names), one_line(event.get("from", "?")),
                                                 one_line(event.get("seen_in", "?")))
     if kind == "remind":
-        ids = event.get("captures")
-        return ", ".join(str(one) for one in ids) if isinstance(ids, list) else ""
+        # What the session was told, in the words the /compound pane uses, with the ids.
+        told = []
+        for key, one, many in (("captures", "lesson owed", "lessons owed"),
+                               ("insights", "candidate from /insights", "candidates from /insights")):
+            ids = event.get(key)
+            if isinstance(ids, list) and ids:
+                told.append("%s: %s" % (plural(len(ids), one, many), ", ".join(str(i) for i in ids)))
+        return "; ".join(told)
     if kind == "promote":
         text = "%s %s -> %s" % (", ".join(names), event.get("from", "?"), event.get("to", "?"))
         if event.get("url"):

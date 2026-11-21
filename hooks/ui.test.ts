@@ -461,14 +461,15 @@ test('findings of /insights: the first prompt notes them on the band beside the 
   const band = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: BAND })
   await $.prompt.submit({ text: 'carry on', wait: false, origin: { kind: 'composer' } })
   const row = (await band.findAll({ type: 'Text' })).map(t => t.text).join('')
-  expect(row).toContain(`${NOTES.unsettled.label} · 1 lesson  insights: 2 candidates`)
-  expect(w.statuses).toContain('1 owed from earlier sessions, 2 insights candidates')
+  // The captures' note keeps its working call, and the findings are a note of their own beside it.
+  expect(row).toContain(`${NOTES.unsettled.label} · 1 lesson  ./x --y  ${NOTES.insights.glyph} 2 candidates from /insights`)
+  expect(w.statuses).toContain('1 owed from earlier sessions, 2 candidates from /insights')
   await band.unmount()
   for (const surface of SURFACES) {
     await $.command.run({ command: 'compound', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
     const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: { ...PANE, bodyColumns: 100 } })
     const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
-    expect(all).toContain('2 insights candidates')
+    expect(all).toContain('2 candidates from /insights')
     expect(all).toContain('in-0123456789abcdef The build was rerun without its profile. (2d, alpha)')
     expect(all).toContain('in-fedcba9876543210 Always pass --profile to ./build.sh. (1d, report)')
     // The insights check passes whatever it says: the pane stays healthy.

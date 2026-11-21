@@ -528,7 +528,7 @@ test('a finding of /insights is shown once, at the first typed prompt, and the r
   expect(first).toContain('skip --settles in-1111111111111111 --why "..."')
   expect(of(w, 'remind')).toEqual([{ type: 'remind', insights: ['in-1111111111111111'] }])
   // The band notes it beside what else the first prompt found.
-  expect(await shown()).toContain(`${NOTES.insights.label} · 1 candidate`)
+  expect(await shown()).toContain(`${NOTES.insights.label} · 1 candidate from /insights`)
   // The second prompt adds nothing, and logs nothing more.
   const second = await $.prompt.submit(typed('and then'))
   expect(said(second)).toBe('')
@@ -601,6 +601,29 @@ test('a start that fails is logged as an error, and the findings are shown all t
   const text = said(await $.prompt.submit(typed('carry on')))
   expect(text).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111')
   expect(of(w, 'error').map(e => e.where)).toEqual(['cli.insights'])
+})
+
+// It waits out the real budget of 5 s, so it is given 15.
+test('a start that runs out of its budget: the reminder is shown, one error is logged for the session, and it is not called again', { timeoutMs: 15000 }, async ($, on) => {
+  const w = world(on)
+  mock.clock(on, { now: T0 })
+  w.unsettled = JSON.stringify([finding(1)])
+  // The engine kills a child at its budget and the run rejects: here, in real time, as it would.
+  // The test runtime's own timer: the hooks' types declare none, as a hook has only `$.clock`.
+  const later = (globalThis as unknown as { setTimeout: (run: () => void, ms: number) => unknown }).setTimeout
+  w.start = () => new Promise((_resolve, reject) => later(() => reject(new Error('the child was killed at its budget')), BUDGET.prompt))
+  const text = said(await $.prompt.submit(typed('carry on')))
+  expect(text).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111')
+  const errors = of(w, 'error')
+  expect(errors.map(e => e.where)).toEqual(['cli.insights'])
+  expect(String(errors[0]?.message)).toContain(`did not answer within ${BUDGET.prompt} ms`)
+  // The next prompt tells Claude of the failure once, and makes no second start.
+  const second = said(await $.prompt.submit(typed('and then')))
+  expect(second).toContain('cli.insights')
+  expect(starts(w).length).toBe(1)
+  expect(of(w, 'error').length).toBe(1)
+  expect(said(await $.prompt.submit(typed('and after that')))).toBe('')
+  expect(starts(w).length).toBe(1)
 })
 
 test('with COMPOUND_OFF=1 no start is made and no finding is shown: the CLI is not called at all', async ($, on) => {

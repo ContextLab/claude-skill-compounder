@@ -18,7 +18,7 @@ import {
   type Earlier, type Event, type Found, type Item, type Met,
 } from './store'
 import {
-  allLines, bandRow, began as checkBegan, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
+  allLines, alsoNoted, bandRow, began as checkBegan, candidatesText, boardFrom, boardLines, captured, detailFrom, detailLines, emptyPane, ended as checkEnded, erred, failedDetail, firstKey, forPane, forSession, FRAME_MS,
   greeted, GUARD_SHOW_MS, inventoried, itemsFrom, keyLines, motion, newTurn, noted, openedBy, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, phaseKey,
   reuseFound, reuseIdle, settledBy, stepped, synced, unfixed, watched, weakened,
   type Line, type Seg,
@@ -876,14 +876,13 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   // One event: the CLI counts the sessions a finding was shown to from its `insights`.
   await log($, { type: 'remind', ...(shown.length === 0 ? {} : { captures: shown.map(c => c.id) }), ...(told.length === 0 ? {} : { insights: told.map(f => f.id) }) })
   const owed = open.length === 0 ? '' : `${open.length} owed from earlier sessions`
-  const candidates = found.length === 0 ? '' : `${found.length} insights ${found.length === 1 ? 'candidate' : 'candidates'}`
+  const candidates = found.length === 0 ? '' : candidatesText(found.length)
   $.ui.status([owed, candidates].filter(s => s !== '').join(', '))
-  const noteText = `${found.length} ${found.length === 1 ? 'candidate' : 'candidates'}`
-  await paint($, (band, now) =>
-    open.length === 0
-      ? noted(band, 'insights', noteText, now)
-      : noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'}`, now, found.length === 0 ? (shown[shown.length - 1]?.fixed ?? '') : `insights: ${noteText}`),
-  )
+  // The captures' note keeps its working call; the findings are a note of their own beside it.
+  await paint($, (band, now) => {
+    const told = open.length === 0 ? band : noted(band, 'unsettled', `${open.length} ${open.length === 1 ? 'lesson' : 'lessons'}`, now, shown[shown.length - 1]?.fixed ?? '')
+    return found.length === 0 ? told : open.length === 0 ? noted(told, 'insights', candidates, now) : alsoNoted(told, 'insights', candidates, now)
+  })
   const cliName = await cliPath($)
   return [unsettledContext(shown, cliName), insightContext(told, cliName)].filter(t => t !== '').join('\n\n')
 }

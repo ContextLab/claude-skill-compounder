@@ -1027,7 +1027,8 @@ export function insightContext(findings: readonly Insight[], cli: string): strin
     const why = inert(oneLine(f.why, INSIGHT_WHY))
     if (why !== '') out.push(`WHY: ${why}`)
     out.push(INSIGHT_CLOSE)
-    const learned = f.learned.map(n => flat(n, NAME_CHARS)).filter(n => n !== '')
+    // The lessons that session wrote stand outside the markers: only names that are slugs.
+    const learned = f.learned.filter(n => /^[a-z0-9][a-z0-9-]{1,62}$/.test(n))
     const id = shq(f.id)
     out.push(
       'Check it against this project or the prompt log first' +
