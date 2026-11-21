@@ -102,10 +102,14 @@ process dies; there is no stale-lock rule and no takeover by age.
 
 - `--start` takes the lock without waiting. If it cannot, a run or another starter holds it:
   `started: false`. Holding it, it checks again that a run is due, writes `started` and
-  `outcome: running` to the state file, starts the worker, and releases the lock. A second
-  starter a moment later finds a run that started now, which is not due.
-- The worker (`--run`) takes the lock without waiting and holds it for its whole life. If
-  it cannot, it exits.
+  `outcome: running` to the state file, releases the lock, and then starts the worker.
+  A second starter a moment later finds a run that started now, which is not due.
+  (Corrected after review of Task 3: the worker was first started before the lock was
+  released, and could lose the lock race to its own starter.)
+- The worker (`--run`) tries for the lock without blocking for up to 30 seconds (a harvest
+  or its starter may hold it for a moment) and holds it for its whole life. If it still
+  cannot, it exits 1 and writes one `error` event. It does not write the state without the
+  lock. (Corrected after review of Task 3.)
 - `started` is written before `claude` is spawned, so a worker that dies still counts as
   this week's run.
 - `--harvest` takes the same lock (waiting for it), reads the ids already in the log while

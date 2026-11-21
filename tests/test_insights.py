@@ -414,6 +414,10 @@ class StartTest(RunTest):
         self.sessions(25)
         self.assertEqual(self.start(), {"started": True, "why": "due"})
         state = self.read_state()
+        # `started` is written under the lock before the worker is spawned (the start path
+        # reads: write, release, spawn). A test cannot catch the moment between the write and
+        # the spawn without a fake worker, so this proves that `started` is the clock and
+        # stays it through the worker's life; it does not prove the order.
         self.assertEqual(state["started"], NOW)
         self.assertIn(state["outcome"], ("running", "failed"))
         self.assertEqual(self.settle()["started"], NOW)
@@ -431,12 +435,33 @@ class StartTest(RunTest):
         self.assertEqual(self.start(), {"started": False, "why": "too soon"})
         self.assertEqual(len(self.errors()), 1)
 
-    def test_run_exits_when_the_lock_is_held(self):
+    def test_run_gives_up_after_its_wait_and_says_the_lock_was_held(self):
+        """The one test that takes the whole wait (INSIGHTS_LOCK_WAIT, 30 s)."""
         self.hold_lock()
+        began = time.time()
         proc = self.box.run("insights", "--run")
         self.assertExit(proc, 1)
+        self.assertGreaterEqual(time.time() - began, 29)
+        self.assertFalse(os.path.exists(self.state_path()), "the state is not written without the lock")
+        (error,) = self.errors()
+        self.assertEqual(error["where"], "insights.run")
+        self.assertIn("lock", error["message"])
+
+    def test_run_waits_for_a_lock_held_for_a_moment_and_then_runs(self):
+        fd = self.hold_lock()
+        proc = subprocess.Popen([sys.executable, self.box.script, "insights", "--run"], cwd=self.box.project,
+                                env=self.box.env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True)
+        self.addCleanup(proc.kill)
+        time.sleep(1.2)
+        self.assertIsNone(proc.poll(), "the worker did not wait for the lock")
         self.assertFalse(os.path.exists(self.state_path()))
-        self.assertEqual(self.errors(), [])
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        _out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 1, err)
+        state = self.read_state()
+        self.assertEqual((state["outcome"], state["started"]), ("failed", NOW))
+        self.assertIn("claude", state["message"])
 
     def test_run_by_hand_writes_started_itself_and_exits_1_without_claude(self):
         proc = self.box.run("insights", "--run")
@@ -453,6 +478,54 @@ class StartTest(RunTest):
                          {SESSION: {"session_id": SESSION, "project_path": repo}}, [("Prefer rg.", "Faster.")])
         self.assertExit(self.box.run("insights", "--run"), 1)
         self.assertEqual([e for e in self.box.read_events() if e["type"] == "insight"], [])
+        self.assertEqual(self.read_state()["outcome"], "failed")
+
+    def test_start_exits_0_and_says_why_when_the_home_cannot_be_written(self):
+        self.sessions(25)
+        home = os.path.join(self.box.root, "a-file")
+        with open(home, "w") as handle:  # COMPOUND_HOME is a regular file
+            handle.write("not a directory")
+        answer = self.start(COMPOUND_HOME=home)
+        self.assertEqual((answer["started"], answer["why"]), (False, "could not start"))
+        self.assertTrue(answer["message"])
+        text = self.box.run("insights", "--start", COMPOUND_HOME=home)
+        self.assertExit(text, 0)
+        self.assertIn("could not start", text.stdout)
+
+    def test_start_exits_0_when_the_home_is_a_read_only_directory(self):
+        self.sessions(25)
+        os.chmod(self.box.chome, 0o500)
+        try:
+            answer = self.start()
+        finally:
+            os.chmod(self.box.chome, 0o700)
+        self.assertEqual((answer["started"], answer["why"]), (False, "could not start"))
+        self.assertEqual(self.errors(), [])
+
+    def test_a_running_outcome_with_no_lock_holder_is_reported_as_interrupted(self):
+        self.write_state(started=NOW - 3600, outcome="running", message="")
+        self.assertEqual(self.box.json("insights", "--json")["outcome"], "interrupted")
+        self.assertIn("interrupted", self.box.run("insights").stdout)
+        fd = self.hold_lock()
+        self.assertEqual(self.box.json("insights", "--json")["outcome"], "running")
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def test_a_run_by_hand_after_a_killed_one_takes_a_fresh_started(self):
+        self.write_state(started=NOW - 3600, outcome="running", message="")
+        self.assertExit(self.box.run("insights", "--run"), 1)
+        self.assertEqual(self.read_state()["started"], NOW)
+
+    def test_run_and_harvest_typed_by_hand_ignore_compound_off_and_start_does_not(self):
+        repo = os.path.join(self.box.root, "repo")
+        os.makedirs(repo)
+        git_ok("init", "-q", cwd=repo)
+        write_usage_data(self.box.claude, {SESSION: facet(SESSION)},
+                         {SESSION: {"session_id": SESSION, "project_path": repo}}, None)
+        self.sessions(30)
+        self.assertEqual(self.start(COMPOUND_OFF="1")["why"], "off")
+        harvest = self.box.json("insights", "--harvest", "--json", COMPOUND_OFF="1")
+        self.assertEqual(harvest["new"], 1)
+        self.assertExit(self.box.run("insights", "--run", COMPOUND_OFF="1"), 1)
         self.assertEqual(self.read_state()["outcome"], "failed")
 
     def test_the_state_command_prints_the_claude_directory_it_reads(self):

@@ -503,8 +503,9 @@ INSIGHTS
     (default 7; 0 is off) days have passed since the last run started, whatever its outcome,
     and COMPOUND_INSIGHTS_MIN_SESSIONS (default 25) distinct sessions are in the event log
     since then. It takes the lock without waiting, checks again under it, writes `started`
-    and outcome `running` to insights.json, starts `compound insights --run` and lets go.
-    `--run` holds the lock for its life, runs `claude -p /insights` in <COMPOUND_HOME> with
+    and outcome `running` to insights.json, lets go of the lock and starts `compound
+    insights --run`. `--run` and `--harvest` typed by hand ignore COMPOUND_OFF. `--run`
+    tries for the lock for 30 seconds (then exits 1 with an `error` event), holds it for its life, runs `claude -p /insights` in <COMPOUND_HOME> with
     COMPOUND_OFF=1 added to the environment (and CLAUDE_CONFIG_DIR when either directory
     variable is set) in a process group of its own, which is killed after 900 seconds
     (outcome `timeout`), and harvests when claude exited 0 and wrote a report.html newer
@@ -2797,28 +2798,49 @@ def insights_fail(clock, outcome, message):
 
 
 def start_insights(clock):
-    """(whether a worker was started, why). Under the lock, which is not waited for, and after
-    asking again whether a run is due, `started` is written before the worker exists."""
+    """(whether a worker was started, why, message). Under the lock, which is not waited for,
+    and after asking again whether a run is due, `started` is written; the lock is then let go
+    and the worker spawned, so the worker is not made to wait for its own starter. A second
+    starter finds the `started` already written. A home that cannot be written is "could not
+    start" with a `message`, and no event: the log is in the same place."""
     import subprocess
 
-    with insights_lock(False) as held:
-        if not held:
-            return False, "busy"
-        state = read_insights_state()
-        events, _bad = read_events()
-        due, why = insights_due(events, state, clock)
-        if not due:
-            return False, why
-        state.update({"started": int(clock), "outcome": "running", "message": ""})
-        try:
+    try:
+        with insights_lock(False) as held:
+            if not held:
+                return False, "busy", ""
+            state = read_insights_state()
+            events, _bad = read_events()
+            due, why = insights_due(events, state, clock)
+            if not due:
+                return False, why, ""
+            state.update({"started": int(clock), "outcome": "running", "message": ""})
             write_insights_state(state)
-            subprocess.Popen([sys.executable, os.path.realpath(__file__), "insights", "--run"],
-                             start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError as exc:
-            insights_fail(clock, "failed", "the worker could not be started: %s" % (exc.strerror or exc))
-            return False, "could not start"
-    return True, "due"
+    except Exception as exc:
+        return False, "could not start", masked(one_line(getattr(exc, "strerror", None) or exc))
+    try:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "insights", "--run"],
+                         start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        message = "the worker could not be started: %s" % (exc.strerror or exc)
+        insights_fail(clock, "failed", message)
+        return False, "could not start", masked(message)
+    return True, "due", ""
+
+
+def insights_outcome(state):
+    """The outcome in `state`, with a `running` that no process holds the lock for reported as
+    `interrupted`: the worker died, and the week's `started` stands."""
+    outcome = state.get("outcome")
+    if outcome == "running":
+        try:
+            with insights_lock(False) as held:
+                if held:
+                    return "interrupted"
+        except OSError:
+            pass
+    return outcome
 
 
 def stop_group(proc):
@@ -2838,20 +2860,46 @@ def stop_group(proc):
     return "", ""
 
 
+INSIGHTS_LOCK_WAIT = 30
+INSIGHTS_FRESH = 60
+
+
 def run_insights(clock):
-    """The worker: runs `claude -p /insights` and harvests what it wrote, holding the lock for
-    its whole life. Exit status 0 when both finished."""
+    """The worker: takes the lock, retrying without blocking for INSIGHTS_LOCK_WAIT seconds
+    because a harvest or its own starter may hold it for a moment, runs `claude -p /insights`
+    and harvests what it wrote, holding the lock for its whole life. Exit status 0 when both
+    finished."""
+    end = time.monotonic() + INSIGHTS_LOCK_WAIT
+    try:
+        while True:
+            with insights_lock(False) as held:
+                if held:
+                    return run_insights_locked(clock)
+            if time.monotonic() >= end:
+                break
+            time.sleep(0.2)
+    except OSError as exc:
+        sys.stderr.write("compound: the lock of /insights could not be taken: %s\n" % (exc.strerror or exc))
+        return 1
+    log_soft("error", project_root(), where="insights.run",
+             message="the lock of /insights was held for %d seconds" % INSIGHTS_LOCK_WAIT)
+    return 1
+
+
+def run_insights_locked(clock):
+    """The body of the worker, with the lock held. Whatever goes wrong ends in a written
+    outcome and one `error` event, never in a `running` that nothing is running."""
     import shutil
     import subprocess
 
-    with insights_lock(False) as held:
-        if not held:
-            sys.stderr.write("compound: a run of /insights is already going\n")
-            return 1
+    proc = None
+    try:
         state = read_insights_state()
         started = state.get("started")
-        if state.get("outcome") != "running" or not isinstance(started, (int, float)) \
-                or isinstance(started, bool):
+        if state.get("outcome") == "running" and isinstance(started, (int, float)) \
+                and not isinstance(started, bool) and 0 <= clock - started <= INSIGHTS_FRESH:
+            pass  # the `started` of the `--start` that spawned this worker
+        else:
             started = int(clock)
             state.update({"started": started, "outcome": "running", "message": ""})
             write_insights_state(state)
@@ -2866,7 +2914,7 @@ def run_insights(clock):
         try:
             proc = subprocess.Popen([program, "-p", "/insights"], cwd=home_dir(), env=env, start_new_session=True,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    universal_newlines=True)
+                                    universal_newlines=True, errors="replace")
         except OSError as exc:
             insights_fail(now(), "failed", "claude could not be started: %s" % (exc.strerror or exc))
             return 1
@@ -2889,6 +2937,11 @@ def run_insights(clock):
             insights_fail(now(), "failed", "claude finished and left no usage-data/report.html newer than the start")
             return 1
         return 0 if harvest_locked(now())[0]["outcome"] == "ok" else 1
+    except Exception as exc:
+        if proc is not None and proc.poll() is None:
+            stop_group(proc)
+        insights_fail(now(), "failed", "the run stopped on an error: %s: %s" % (type(exc).__name__, one_line(exc)[:200]))
+        return 1
 
 
 def harvest_locked(clock):
@@ -2918,11 +2971,12 @@ def cmd_insights(args):
     if args.start and args.run or (args.start or args.run) and args.harvest:
         raise usage("--start, --run and --harvest are three different things: give one")
     if args.start:
-        started, why = start_insights(now())
+        started, why, message = start_insights(now())
         if args.json:
-            emit({"started": started, "why": why})
+            emit(dict({"started": started, "why": why}, **({"message": message} if message else {})))
         else:
-            sys.stdout.write("started a run of /insights\n" if started else "not started: %s\n" % why)
+            sys.stdout.write("started a run of /insights\n" if started else "not started: %s%s\n" % (
+                why, ": " + message if message else ""))
         return 0
     if args.run:
         return run_insights(now())
@@ -2930,6 +2984,7 @@ def cmd_insights(args):
         state = {"started": None, "finished": None, "outcome": None, "message": "", "harvested": {}}
         state.update(read_insights_state())
         state["claude_dir"] = insights_claude_dir()
+        state["outcome"] = insights_outcome(state)
         events, _bad = read_events()
         state["findings"] = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
                               "state": kind, "text": _text(event.get("text"))}
@@ -7523,8 +7578,14 @@ def build_status():
           "%d in the last 7 days" % len(errors) if errors else "none in the last 7 days")
 
     ran = read_insights_state()
-    check("insights", "PASS", "last run %s: %s" % (ran.get("finished"), ran.get("outcome") or "none")
-          if ran.get("finished") else "never run")
+    ran_outcome = insights_outcome(ran)
+    if ran_outcome in ("running", "interrupted"):
+        check("insights", "PASS", "the last run, started %s, is %s" % (
+            iso(ran["started"]) if isinstance(ran.get("started"), (int, float)) else "at a time not recorded",
+            ran_outcome))
+    else:
+        check("insights", "PASS", "last run %s: %s" % (ran.get("finished"), ran_outcome or "none")
+              if ran.get("finished") else "never run")
 
     store = {}
     for level in LEVELS:

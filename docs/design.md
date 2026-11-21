@@ -1079,19 +1079,32 @@ answers `{"started": bool, "why": string}` and exits 0 whatever it answers. `why
 
 State is `insights.json` in `COMPOUND_HOME`: `started` (epoch seconds), `finished`,
 `outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`), `message` and `harvested`.
-`compound insights` also prints `claude_dir`, the Claude directory the harvest reads.
+`compound insights` also prints `claude_dir`, the Claude directory the harvest reads, and
+reports `interrupted` in place of `running` when no process holds the lock: the worker was
+killed, and the week's `started` stands. `compound status` says the same. `--run` and
+`--harvest`, typed by hand, are the user's own commands and run whatever `COMPOUND_OFF`
+says; only `--start` answers `off`.
 
 - **One run at a time, and a crash does not reset the week.** The lock is an `fcntl.flock`
   on `insights.lock` in `COMPOUND_HOME`. The kernel releases it when its holder dies, so
   there is no stale-lock rule and no takeover by age. `--start` takes the lock without
   waiting; when it cannot, a run or another starter holds it and the answer is `busy`.
-  Holding it, `--start` asks again whether a run is due, writes `started` and outcome
-  `running`, starts the worker (`compound insights --run`, in a session of its own, with no
-  terminal and not holding the lock's file) and lets go. A second starter a moment later
-  finds a run that started now, which is not due. `started` is written before the worker
-  exists, so a worker that dies still counts as this week's run.
-- **The worker** takes the lock without waiting, and exits 1 when it cannot. It holds the
-  lock for its whole life. It runs `claude -p /insights` (`claude` as found on `PATH`) with
+  Holding it, `--start` asks again whether a run is due and writes `started` and outcome
+  `running`; it then releases the lock and only then starts the worker (`compound insights
+  --run`, in a session of its own, with no terminal and not holding the lock's file), so the
+  worker is never made to wait for its own starter. A second starter a moment later finds a
+  run that started now, which is not due. `started` is written before the worker exists, so
+  a worker that dies still counts as this week's run. When the home cannot be written,
+  `--start` answers `{"started": false, "why": "could not start", "message": ...}` and
+  writes no event, since the log is in the same place; it exits 0 in every case.
+- **The worker** tries for the lock without blocking, for up to 30 seconds, because a
+  harvest (which waits for the lock) or its starter may hold it for a moment. After that it
+  exits 1 and writes one `error` event (`where` `insights.run`) saying the lock was held;
+  it writes no state without the lock. Holding it, it keeps it for its whole life. It
+  takes the `started` of the `--start` that spawned it when the state says `running` and
+  `started` is at most 60 seconds old, and writes a fresh one otherwise, so a report older
+  than this run never passes for its output. Any error it meets ends in outcome `failed`
+  and one `error` event, never in a `running` nothing is running. It runs `claude -p /insights` (`claude` as found on `PATH`) with
   `COMPOUND_HOME` as its working directory and no standard input, in a process group of
   its own. When `claude` is not on `PATH` the outcome is `failed` with a message that says
   so. After 900 seconds the whole group is killed (SIGTERM, then SIGKILL after 5 seconds)
@@ -1855,7 +1868,7 @@ The health checks, in order:
 | `duplicates` | no name is visible at two levels (FAIL for a lesson, WARN for two skills) |
 | `lessons parse` | every lesson reads: its frontmatter, its name (a slug that is the directory's name), its size, its patterns and its condition (see "What a repository can write") |
 | `errors` | the mod logged no error in the last 7 days |
-| `insights` | informational, always PASS: when the last `compound insights --harvest` finished and its outcome, or `never run` |
+| `insights` | informational, always PASS: when the last run or `compound insights --harvest` finished and its outcome, `the last run, started T, is running` or `is interrupted`, or `never run` |
 
 Under Open, `compound status` also lists each open finding (`findings` in `status --json`:
 `id`, `source`, `project`, `text`, `age`) with the two ways to settle it.

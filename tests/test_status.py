@@ -300,6 +300,14 @@ class StatusTest(Case):
         self.assertEqual(check["status"], "PASS", "informational, never a failing check")
         self.assertIn("ok", check["detail"])
 
+    def test_the_insights_row_says_interrupted_for_a_run_nothing_is_running(self):
+        os.makedirs(self.box.chome)
+        with open(os.path.join(self.box.chome, "insights.json"), "w") as handle:
+            json.dump({"started": NOW - 100, "outcome": "running"}, handle)
+        check = [one for one in self.status()["health"] if one["check"] == "insights"][0]
+        self.assertEqual(check["status"], "PASS")
+        self.assertIn("interrupted", check["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
