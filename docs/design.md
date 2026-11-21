@@ -1054,7 +1054,8 @@ check.
   UTF-8 JSON, is not an object, is over 1 000 000 bytes, has a `session_id` unlike its file
   name, or has a `friction_detail`, `friction_counts` or `underlying_goal` of the wrong
   type. When every facet read is skipped, or the report has its suggestions section and no
-  item that parses, the outcome is `unreadable`: nothing is recorded, one `error` event
+  item that parses, the outcome is `unreadable`: nothing is recorded (the findings of the
+  other source are withheld too), one `error` event
   (`where` `insights.harvest`) names the file and the key, and the state says so.
 - **One at a time.** The harvest holds a lock on `insights.lock` in `COMPOUND_HOME` from
   reading the log to its last append, so two harvests cannot both record one finding. It

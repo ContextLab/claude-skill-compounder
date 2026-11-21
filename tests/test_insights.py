@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """`compound insights`: the harvest of what Claude Code's /insights wrote under usage-data/."""
 
+import fcntl
 import json
 import os
+import subprocess
+import sys
+import time
 import unittest
 
 from test_support import NOW, Case, git_ok, iso, write_usage_data
@@ -136,6 +140,16 @@ class HarvestTest(Case):
         self.harvest()
         self.assertEqual(self.insights()[0]["kinds"], ["kind_%s" % letter for letter in "abcdefgh"])
 
+    def test_a_trailing_newline_makes_neither_a_kind_nor_a_session_id(self):
+        self.one_session(counts={"wrong\n": 1, "right": 1})
+        self.harvest()
+        self.assertEqual(self.insights()[0]["kinds"], ["right"])
+        bad = "55555555-aaaa\n"
+        top = os.path.join(self.box.claude, "usage-data", "facets")
+        with open(os.path.join(top, bad + ".json"), "w") as handle:
+            json.dump(facet(bad), handle)
+        self.assertEqual(self.harvest()["skipped"], 1)
+
     def test_text_is_one_line_masked_and_cut(self):
         self.one_session(detail=("word " * 70) + "\nsecond line password=hunter2secret " + "y" * 400, goal="g" * 500)
         self.harvest()
@@ -177,6 +191,23 @@ class HarvestTest(Case):
         (error,) = self.errors()
         self.assertIn("report.html", error["message"])
 
+    def test_an_unreadable_report_withholds_the_good_facet_findings_too(self):
+        self.one_session()
+        write_usage_data(self.box.claude, {}, {}, [])
+        result = self.harvest()
+        self.assertEqual((result["outcome"], result["new"]), ("unreadable", 0))
+        self.assertEqual(self.insights(), [])
+
+    def test_a_state_file_that_cannot_be_written_does_not_fail_a_harvest_that_recorded(self):
+        self.one_session()
+        os.makedirs(self.box.chome)
+        os.mkdir(os.path.join(self.box.chome, "insights.json"))
+        proc = self.box.run("insights", "--harvest", "--json")
+        self.assertExit(proc, 0)
+        self.assertEqual(json.loads(proc.stdout)["new"], 1)
+        self.assertIn("state file", proc.stderr)
+        self.assertEqual(len(self.insights()), 1)
+
     def test_no_usage_data_directory_is_ok_and_empty(self):
         result = self.harvest()
         self.assertEqual((result["outcome"], result["new"], result["facets"], result["report"]), ("ok", 0, 0, 0))
@@ -205,6 +236,27 @@ class HarvestTest(Case):
         self.assertExit(text, 0)
         self.assertIn("ok", text.stdout)
         self.assertTrue(os.path.exists(os.path.join(self.box.chome, "insights.lock")))
+
+    def test_a_harvest_waits_for_the_lock_and_then_records(self):
+        self.one_session()
+        os.makedirs(self.box.chome)
+        fd = os.open(os.path.join(self.box.chome, "insights.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            proc = subprocess.Popen([sys.executable, self.box.script, "insights", "--harvest", "--json"],
+                                    cwd=self.box.project, env=self.box.env(), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            self.addCleanup(proc.kill)
+            time.sleep(1.5)
+            self.assertIsNone(proc.poll(), "the harvest did not wait for the lock")
+            self.assertEqual(self.insights(), [])
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(json.loads(out)["new"], 1)
+        self.assertEqual(len(self.insights()), 1)
 
 
 if __name__ == "__main__":

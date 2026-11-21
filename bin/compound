@@ -600,7 +600,7 @@ MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge",
              "retry", "index")
 # Written to be measured (`compound report`), one for every question put to the model and
 # one for the call after a refusal: left out of `status`'s Recent.
-VERDICT_TYPES = ("judge", "retry", "met")
+VERDICT_TYPES = ("judge", "retry", "met", "insight")
 # The tools a lesson's patterns are tested against when it names none.
 MATCH_TOOLS = ("Bash",)
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -2503,8 +2503,9 @@ def write_insights_state(state):
             os.unlink(temp)
 
 
-def read_insight_file(path):
-    """(parsed JSON, None), or (None, why it was not read)."""
+def read_insight_bytes(path):
+    """(the file's bytes, None), or (None, why it was not read): a regular file of at most
+    INSIGHT_FILE_BYTES."""
     import stat
 
     try:
@@ -2514,9 +2515,19 @@ def read_insight_file(path):
         if info.st_size > INSIGHT_FILE_BYTES:
             return None, "over %d bytes, not read" % INSIGHT_FILE_BYTES
         with open(path, "rb") as handle:
-            raw = handle.read(INSIGHT_FILE_BYTES + 1)
+            return handle.read(INSIGHT_FILE_BYTES + 1), None
+    except OSError as exc:
+        return None, "unreadable: %s" % one_line(exc)[:120]
+
+
+def read_insight_file(path):
+    """(parsed JSON, None), or (None, why it was not read)."""
+    raw, why = read_insight_bytes(path)
+    if why:
+        return None, why
+    try:
         return json.loads(raw.decode("utf-8")), None
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         return None, "unreadable: %s" % one_line(exc)[:120]
 
 
@@ -2629,7 +2640,7 @@ def harvest_insights(events, clock):
         if not isinstance(data, dict):
             skip(rel, "not a JSON object")
             continue
-        if data.get("session_id") != session or not INSIGHT_SESSION_RE.match(session):
+        if data.get("session_id") != session or not INSIGHT_SESSION_RE.fullmatch(session):
             skip(rel, "key session_id is not the file's name")
             continue
         detail = data.get("friction_detail")
@@ -2665,7 +2676,7 @@ def harvest_insights(events, clock):
         if roots[path] is None:
             result["dropped"] += 1
             continue
-        kinds = [key for key in (counts or {}) if INSIGHT_KIND_RE.match(key)][:INSIGHT_KINDS]
+        kinds = [key for key in (counts or {}) if INSIGHT_KIND_RE.fullmatch(key)][:INSIGHT_KINDS]
         found.append({"ts": stamp, "type": "insight", "session": INSIGHT_SESSION, "project": roots[path],
                       "id": ident, "source": "facet", "of": session, "kinds": kinds,
                       "text": insight_text(detail, INSIGHT_TEXT), "goal": insight_text(goal or "", INSIGHT_GOAL),
@@ -2675,22 +2686,16 @@ def harvest_insights(events, clock):
     reported = []
     if os.path.lexists(report):
         rel = os.path.join("usage-data", "report.html")
-        text = None
-        try:
-            import stat
-
-            info = os.lstat(report)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > INSIGHT_FILE_BYTES:
-                problems.append("%s: not a regular file, or over %d bytes, not read" % (rel, INSIGHT_FILE_BYTES))
-                result["outcome"] = "unreadable"
-                text = ""
-            else:
-                with open(report, "rb") as handle:
-                    text = handle.read().decode("utf-8")
-        except (OSError, ValueError) as exc:
-            problems.append("%s: unreadable: %s" % (rel, one_line(exc)[:120]))
+        raw, why = read_insight_bytes(report)
+        text = ""
+        if not why:
+            try:
+                text = raw.decode("utf-8")
+            except ValueError as exc:
+                why = "unreadable: %s" % one_line(exc)[:120]
+        if why:
+            problems.append("%s: %s" % (rel, why))
             result["outcome"] = "unreadable"
-            text = ""
         parsed = parse_insights_report(text) if text else {"section": False, "items": []}
         wanted = [item for item in parsed["items"] if item["text"]]
         if parsed["section"] and not wanted:
@@ -2741,7 +2746,11 @@ def cmd_insights(args):
         state = read_insights_state()
         state.update({"finished": iso(clock), "outcome": result["outcome"], "message": result["message"],
                       "harvested": counts})
-        write_insights_state(state)
+        try:
+            write_insights_state(state)
+        except OSError as exc:
+            sys.stderr.write("compound: warning: the state file %s could not be written (%s); "
+                             "the harvest itself was done\n" % (insights_state_path(), exc.strerror or exc))
     out = {"new": written, "facets": result["facets"], "skipped": result["skipped"],
            "dropped": result["dropped"], "report": result["report"], "outcome": result["outcome"],
            "message": result["message"]}

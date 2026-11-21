@@ -220,6 +220,13 @@ class StatusTest(Case):
         recent = proc.stdout.split("Recent\n")[1].split("\nOpen")[0].strip().splitlines()
         self.assertEqual(len(recent), 10)
 
+    def test_recent_leaves_the_findings_of_insights_out(self):
+        self.box.log({"type": "guard", "lesson": "a-guard"}, COMPOUND_NOW=NOW + 1)
+        self.box.seed({"type": "insight", "session": "insights", "id": "in-0123456789abcdef", "source": "report",
+                       "text": "Prefer rg."}, COMPOUND_NOW=NOW + 2)
+        data = self.status(COMPOUND_NOW=NOW + 20)
+        self.assertEqual([event["type"] for event in data["recent"]], ["guard"])
+
     def test_recent_leaves_the_judges_verdicts_out(self):
         self.box.log({"type": "guard", "lesson": "a-guard"}, COMPOUND_NOW=NOW + 1)
         for index in range(12):
