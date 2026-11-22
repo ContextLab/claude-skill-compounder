@@ -216,11 +216,25 @@ export function greeted(band: CompoundBand, now: number): CompoundBand {
 
 // The reuse check found something: the items, by name, and how many earlier requests. The
 // session's first result also carries the greeting.
+// What the first prompt told of earlier sessions (captures owed, findings of /insights) is
+// on the band while the check's spinner turns, and would be replaced by its result unseen:
+// it stays beside the result, in short, and the greeting waits for a later result.
 export function reuseFound(band: CompoundBand, items: readonly string[], earlier: number, now: number): CompoundBand {
-  const greet = band.counts !== undefined && band.greeted !== 'full'
+  const kept = told(band, now)
+  const greet = kept === undefined && band.counts !== undefined && band.greeted !== 'full'
   const next = noted(band, 'reuse', reuseText(items, earlier), now, greet && band.counts !== undefined ? `${readyText(band.counts)} ready` : '')
   const names = items.map(i => oneLine(base(i), 80))
-  return { ...next, note: next.note === null || names.length === 0 ? next.note : { ...next.note, names }, ...(greet ? { greeted: 'full' as const } : {}) }
+  const note = next.note === null ? null : { ...next.note, ...(names.length === 0 ? {} : { names }), ...(kept === undefined ? {} : { also: kept }) }
+  return { ...next, note, ...(greet ? { greeted: 'full' as const } : {}) }
+}
+
+// The first prompt's note of what earlier sessions left, while it shows, as one short note:
+// `1 owed, 4 candidates from /insights`.
+function told(band: CompoundBand, now: number): { kind: CompoundNoteKind; text: string } | undefined {
+  const note = band.note
+  if (note === null || !noteShows(band, now) || (note.kind !== 'unsettled' && note.kind !== 'insights')) return undefined
+  const first = note.kind === 'unsettled' ? `${note.text.split(' ')[0] ?? ''} owed` : note.text
+  return { kind: note.kind, text: oneLine([first, note.also?.text ?? ''].filter(t => t !== '').join(', '), 80) }
 }
 
 // The reuse check ran and added nothing. The session's first is the greeting, with the
@@ -630,11 +644,12 @@ export function boardFrom(status: string, events: string, session: string, now: 
       ineffective: list(open.ineffective).map(i => ({ ...openRow(`${str(i.name)} (recalled ${num(i.recall)} times)`, i.command), ...(str(i.name) === '' ? {} : { lesson: str(i.name) }) })),
       candidates: list(open.candidates).map(c => openRow(`${str(c.lesson)} in ${base(str(c.from))}`, c.command)),
       scripts: list(open.scripts).map(s => openRow(`${oneLine(str(s.name), 60)} (passed ${num(s.ok)}${num(s.failed) > 0 ? `, failed ${num(s.failed)}` : ''}${str(s.project) === '' ? '' : `, ${base(str(s.project))}`})`, s.command, s.decline)),
-      // A finding of /insights: its id, its text, its age, and `report` for one of the report
-      // or the project of one about a session (when it has one).
+      // A finding of /insights: its id, its age, and `report` for one of the report or the
+      // project of one about a session (when it has one), then its text, last and cut short,
+      // so a narrow pane cuts the text and never the age or the project.
       findings: list(open.findings).map(f => {
         const where = str(f.source) === 'report' ? 'report' : str(f.project) === '' ? '' : base(str(f.project))
-        return openRow(`${str(f.id)} ${oneLine(str(f.text), 60)} (${str(f.age)}${where === '' ? '' : `, ${where}`})`)
+        return openRow(`${str(f.id)} (${str(f.age)}${where === '' ? '' : `, ${where}`}) ${oneLine(str(f.text), FINDING_TEXT)}`)
       }),
       errors: list(open.errors).map(e => openRow(oneLine(`${str(e.where)}: ${str(e.message)}`, 100))),
       skips: list(open.skips).length,
@@ -758,6 +773,10 @@ export function openedBy(key: string): string | undefined {
 export function firstKey(lines: readonly Line[]): string | undefined {
   return lines.flatMap(line => line).find(seg => seg.key !== undefined)?.key
 }
+
+// The most of a finding's text an open row shows: with its indent, id, age and a short
+// project name the row fits a pane in a 100-column terminal.
+const FINDING_TEXT = 50
 
 // What reads the errors: no command settles one, and they leave the pane after seven days.
 const READ_ERRORS = 'compound events --type error'

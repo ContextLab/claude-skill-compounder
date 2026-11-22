@@ -87,8 +87,11 @@ To look at the band and the `/compound` pane as a person sees them:
 dev/ui-check.sh    # needs vhs; spends model calls
 ```
 
-It records a real interactive session in a throwaway store and project and writes a
-screenshot of each phase to `$TMPDIR/compound-ui-check/shots`. Open the PNGs and look:
+It records two real interactive sessions in a throwaway store and project and writes a
+screenshot of each phase to `$TMPDIR/compound-ui-check/shots`. The store holds findings of
+`/insights` harvested from an invented `usage-data` tree, and the first session's first
+prompt starts a run of `/insights` that fails at once, since the throwaway Claude directory
+is not logged in (the script refuses to record when it is). Open the PNGs and look:
 the session's own pace decides which frame catches which phase. The header of
 `dev/ui-check.tape` says what it takes to get an interactive session running under vhs.
 

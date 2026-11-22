@@ -470,8 +470,8 @@ test('findings of /insights: the first prompt notes them on the band beside the 
     const ui = await $.ui.mount({ plugin: 'compound', surface, component: 'Pane', requestId: 'compound', props: { ...PANE, bodyColumns: 100 } })
     const all = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('')
     expect(all).toContain('2 candidates from /insights')
-    expect(all).toContain('in-0123456789abcdef The build was rerun without its profile. (2d, alpha)')
-    expect(all).toContain('in-fedcba9876543210 Always pass --profile to ./build.sh. (1d, report)')
+    expect(all).toContain('in-0123456789abcdef (2d, alpha) The build was rerun without its profile.')
+    expect(all).toContain('in-fedcba9876543210 (1d, report) Always pass --profile to ./build.sh.')
     // The insights check passes whatever it says: the pane stays healthy.
     expect(all).toContain('healthy')
     await ui.unmount()

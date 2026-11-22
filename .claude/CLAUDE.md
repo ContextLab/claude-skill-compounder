@@ -19,7 +19,7 @@ compound: a Claude Code mod plus a CLI. The repository root is the plugin. Read
 | `lessons/`, `skills/` | the general pool shipped to every user |
 | `tests/test_*.py` | CLI tests |
 | `tests/journeys/` | real-session drivers, run by hand |
-| `dev/ui-check.sh`, `dev/ui-check.tape` | a recorded interactive session (vhs) with a screenshot of each phase, for looking at the band and the pane |
+| `dev/ui-check.sh`, `dev/ui-check.tape` | two recorded interactive sessions (vhs) with a screenshot of each phase, for looking at the band and the pane, findings of /insights included |
 
 ## Commands
 
