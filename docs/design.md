@@ -1170,7 +1170,8 @@ says; only `--start` answers `off`.
   with neither, its environment is left alone.
 - **A run counts** when `claude` exits 0 and `usage-data/report.html` is newer than
   `started`. The worker then harvests, inside the same lock. Any other end is outcome
-  `failed` (the message is the first line of `claude`'s standard error) and one `error`
+  `failed` (the message is `claude exited N: ` and the first line of `claude`'s standard
+  error, or of its standard output when the error is empty, as for `Not logged in`) and one `error`
   event, `where` `insights.run`. `compound insights --run` run by hand writes `started`
   itself, and exits 0 when the run and the harvest finished, 1 otherwise.
 - **Cost.** A run is one headless `/insights` a week, which cost $1.73 at list price in
@@ -1209,7 +1210,7 @@ user level it is recorded from anywhere. `compound skip --settles` has neither l
 report, is listed with how to record it here; one of another project names that project
 and says to record it in a session there, or to decline it, as an owed capture of another
 project is listed. Its text, there and in `compound insights`, is one line of at most 100
-characters, and cannot open or close one of the mod's quotation markers or begin with
+characters, ending in `…` when it was cut (and then given no period of its own), and cannot open or close one of the mod's quotation markers or begin with
 `[compound]`: the CLI rewrites them as the mod's quoting does (`<<(RECORDED-INSIGHT`,
 `RECORDED-INSIGHT)>>`, `(compound)`).
 
@@ -1645,7 +1646,7 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
   | spinner | orange | `matching a recorded lesson` | a failed call is put to the judge | while it runs |
   | spinner | orange | `is this the fix?` | a success after a held failure is put to the judge | while it runs |
   | spinner | orange | `recording the lesson` | the session is running `compound add` | while it runs |
-  | `◆` | cyan | `reuse found`, the names of the items found (a script by its file name), and the number of earlier requests | the reuse check added something to the prompt | 8 s |
+  | `◆` | cyan | `reuse found`, the names of the items found (a script by its file name), and the number of earlier requests; when the first prompt's note of earlier sessions (the two rows `●` `owed from earlier sessions` and `◈` below) still shows, it stays beside, in short (`● 1 owed, 4 candidates from /insights`), and the greeting's counts wait for a later result | the reuse check added something to the prompt | 8 s |
   | `◇` | blue | `ready`, then `N lessons (M guards)` | once a session, when the first reuse check found nothing: the counts are of the listing that check read. A first prompt too short for a check gets `ready` and `/compound opens the dashboard`; when the first check finds something, its row carries the counts instead | 8 s |
   | `◇` | grey | `nothing to reuse` | a later reuse check added nothing to the prompt. Drawn dim from the start | 3 s |
   | `■` | red | `guard stopped a call`, the lesson, and the call it stopped | a guard refused a call | 8 s |
@@ -2141,9 +2142,11 @@ never touched.
   rendering and what the band and the pane show (`view.test.ts`). `ui.test.ts` mounts the
   band and the pane through the mod's hooks on the terminal and the desktop surface, with
   the CLI, the judge and the clock answered by the test. No model calls.
-- `dev/ui-check.sh`: records a real interactive session with `vhs` in a throwaway world
+- `dev/ui-check.sh`: records two real interactive sessions with `vhs` in a throwaway world
   and writes a screenshot of each phase to `$TMPDIR/compound-ui-check/shots`, for looking
-  at the band and the pane. Run by hand; it spends model calls.
+  at the band and the pane. The world holds findings of `/insights` harvested from an
+  invented `usage-data` tree and a run due, whose child fails at once because the world's
+  Claude directory is not logged in. Run by hand; it spends model calls.
 - `dev/demo.sh`: records the README's screencast and screenshots, `docs/media/demo.gif`
   and `docs/media/demo-*.png`, from real interactive sessions in a throwaway world. Run
   by hand; it spends model calls.

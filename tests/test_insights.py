@@ -159,6 +159,17 @@ class HarvestTest(Case):
         self.assertNotIn("hunter2secret", event["text"])
         self.assertLessEqual(len(event["goal"]), 200)
 
+    def test_the_listing_marks_a_cut_text_with_an_ellipsis(self):
+        long = "The build was started again and again without the profile it needed, so it never finished its slow and careful final"
+        self.one_session(detail=long + " packaging step.")
+        self.harvest()
+        line = [one for one in self.box.run("insights").stdout.splitlines() if one.startswith("in-")][0]
+        self.assertTrue(line.endswith("…"), line)
+        self.assertNotIn("packaging", line)
+        shown = line.split(" facet ", 1)[1].strip()
+        self.assertLessEqual(len(shown), 100)
+        self.assertTrue(long.startswith(shown[:-1]), shown)
+
     def test_a_secret_that_straddles_the_cut_is_masked_before_the_cut(self):
         self.one_session(detail=("word " * 118) + "password=hunter2secret")
         self.harvest()
@@ -475,6 +486,29 @@ class StartTest(RunTest):
         self.assertIn("claude", error["message"])
         self.assertEqual(self.start(), {"started": False, "why": "too soon"})
         self.assertEqual(len(self.errors()), 1)
+
+    def test_a_real_claude_that_is_not_logged_in_fails_with_what_it_printed(self):
+        """The real `claude`, under the box's temporary HOME and Claude directory, which no
+        one ever logged in to: it fails at once and prints why on standard output, and the
+        state says why rather than only its exit status."""
+        import shutil
+        real = shutil.which("claude")
+        if not real:
+            self.skipTest("no `claude` on PATH here")
+        path = os.path.dirname(real) + ":/usr/bin:/bin"
+        env = self.box.env(PATH=path, CLAUDE_CONFIG_DIR=self.box.claude)
+        # Nothing paid may start: the box's directory must say it is not logged in.
+        said = subprocess.run([real, "auth", "status", "--json"], env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=60)
+        self.assertIs(json.loads(said.stdout).get("loggedIn"), False, "the box's Claude directory is logged in")
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            self.assertNotIn(key, env)
+        self.assertExit(self.box.run("insights", "--run", PATH=path), 1)
+        state = self.read_state()
+        self.assertEqual(state["outcome"], "failed")
+        self.assertRegex(state["message"], r"^claude exited \d+: \S")
+        (error,) = self.errors()
+        self.assertEqual(error["message"], state["message"])
 
     def test_run_gives_up_after_its_wait_and_says_the_lock_was_held(self):
         """The one test that takes the whole wait (INSIGHTS_LOCK_WAIT, 30 s)."""

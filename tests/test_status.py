@@ -373,6 +373,27 @@ class StatusTest(Case):
             self.assertIsNone(re.search(r"RECORDED[\s_\-\u2010-\u2015]*(NOTE|CAPTURE|INDEX|INSIGHT)\s*>{2,}", out, re.I), out)
             self.assertNotIn("word " * 30, out)
 
+    def test_a_cut_finding_ends_in_an_ellipsis_and_one_sentence_mark(self):
+        long = "The deploy was retried with the same missing target until the operator noticed that it needed a flag"
+        self.box.seed({"type": "insight", "session": "insights", "id": "in-0123456789abcdef", "source": "facet",
+                       "project": self.box.project, "text": long + " every time."}, COMPOUND_NOW=NOW + 2)
+        self.box.seed({"type": "insight", "session": "insights", "id": "in-00000000000000aa", "source": "facet",
+                       "project": self.box.project, "text": "It ran the slow suite."}, COMPOUND_NOW=NOW + 2)
+        opened = self.box.run("status", COMPOUND_NOW=NOW + 20).stdout.split("Open")[1]
+        cut = [line for line in opened.splitlines() if "in-0123456789abcdef" in line][0]
+        whole = [line for line in opened.splitlines() if "in-00000000000000aa" in line][0]
+        self.assertIn("… Check it against this project", cut)
+        self.assertNotIn("….", cut)
+        self.assertNotIn("every time", cut)
+        shown = cut.split(": ", 1)[1].split("…")[0] + "…"
+        self.assertLessEqual(len(shown), 100)
+        self.assertTrue(long.startswith(shown[:-1]), shown)
+        self.assertIn("It ran the slow suite. Check it", whole)
+        self.assertNotIn("suite..", whole)
+        (row,) = [one for one in self.status(COMPOUND_NOW=NOW + 20)["open"]["findings"] if one["id"] == "in-0123456789abcdef"]
+        self.assertTrue(row["text"].endswith("…"), row["text"])
+        self.assertLessEqual(len(row["text"]), 100)
+
 
 if __name__ == "__main__":
     unittest.main()
