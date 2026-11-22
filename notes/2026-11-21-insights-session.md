@@ -33,8 +33,8 @@ Design: `notes/2026-11-21-insights-design.md`. Plan: `notes/2026-11-21-insights-
 1. The push waits for the user.
 2. `--config fresh` of the journey was only dry-checked (it needs a credential in the
    environment). No real finding was about the journey's own scratch project, so showing a
-   finding was proven with report findings only. Leg e's new `headless` check has not been
-   run for real (the full journey costs one paid `/insights`).
+   finding was proven with report findings only. The whole journey was run again after the
+   follow-up (26 of 26, leg e's `headless` check included).
 3. The plugin directory's ICON_MISSING warning needs artwork: a square PNG, 512 to 2048 px,
    under 2 MB, at `.claude-plugin/icon.png` or named by `icon` in `plugin.json`. Left to the
    user.

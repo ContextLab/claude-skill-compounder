@@ -19,6 +19,7 @@ jobs:
       # needs a login.
       - name: Install Claude Code
         run: |
+          set -o pipefail
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Claude Code version

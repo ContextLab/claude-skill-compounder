@@ -72,7 +72,7 @@ process group and the child's) so no `claude` is left behind. The real
 as it was before: its size and modification time are compared, never its contents.
 
 What has been run for real: the whole journey under `--config ambient` (26 of 26 checks on
-21 Nov 2026, before the `headless` check of e was added), and `--leg timeout` under
+21 Nov 2026, the `headless` check of e included), and `--leg timeout` under
 `--config ambient`. `--config fresh` has only been checked with `--dry`: it needs
 CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the environment, and has never run for real.
 
