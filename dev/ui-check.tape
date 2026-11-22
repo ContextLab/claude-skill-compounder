@@ -5,7 +5,7 @@
 # from an invented usage-data tree, a run of /insights due, a project with a deploy.sh that
 # fails without its flag) and runs this tape from that directory. It records two sessions:
 # the first (0-*) tells the findings alone and starts a run, which fails at once in that
-# world, and opens the pane; the second, after an earlier session is made to leave a fix
+# world, collapses the band and expands it again (0-collapsed, 0-expanded), and opens the pane; the second, after an earlier session is made to leave a fix
 # unsettled, tells the capture with the findings beside it and goes through the moments
 # (1-* to 5-*). The screenshots land in
 # $TMPDIR/compound-ui-check/shots; open the PNGs and look. It spends model calls, and the
@@ -62,6 +62,16 @@ Sleep 500ms
 Screenshot shots/0-insights-03.png
 Sleep 1000ms
 Screenshot shots/0-insights-04.png
+# The band collapsed (ctrl+x ctrl+a) and expanded again within the notes' life: collapsed,
+# nothing of it shows and its timer stops; expanded, the notes are drawn as they are by then.
+Ctrl+X
+Ctrl+A
+Sleep 1500ms
+Screenshot shots/0-collapsed.png
+Ctrl+X
+Ctrl+A
+Sleep 800ms
+Screenshot shots/0-expanded.png
 Sleep 1500ms
 Screenshot shots/0-insights-05.png
 Sleep 1500ms

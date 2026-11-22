@@ -52,17 +52,35 @@ Two ways to run it (`--config`, see common.py):
             finding, which is listed in every project) is shown at a later session's first
             prompt as a RECORDED-INSIGHT block with its `in-` id (read from that session's
             transcript: what a hook adds to a prompt is not in the -p stream), and that
-            session's `remind` names the id. With none listed the leg is printed as UNPROVEN, not passed.
+            session's `remind` names the id and carries `headless: true` (a `-p` session has
+            no one at its prompt, so the showing is not counted toward the finding's three).
+            With none listed the leg is printed as UNPROVEN, not passed.
   g         the wall time of the run, and what any output says of cost.
+
+`--leg timeout` runs one leg on its own, in place of all of the above: one real `compound
+insights --run` in a temporary COMPOUND_HOME with COMPOUND_INSIGHTS_TIMEOUT set to a few
+seconds (`--timeout`, default 8), so the real `claude -p /insights` is killed early. It checks
+that the outcome is `timeout`, that one `error` event has `where` `insights.run`, that no
+process of the child's process group is left (checked by group, not by name), that the lock
+is free, that nothing was harvested, and that the next `insights --start` under the default
+days answers `too soon`. Under ambient it prints how many entries under the real
+usage-data the killed run added or changed (counts only).
 
 Whatever happens, the `finally` stops a worker still running for this world (its whole
 process group and the child's) so no `claude` is left behind. The real
-`~/.claude/compound/insights.json` must be absent before and after.
+`~/.claude/compound/insights.json` (the user's own, when a run has happened there) must be
+as it was before: its size and modification time are compared, never its contents.
+
+What has been run for real: the whole journey under `--config ambient` (26 of 26 checks on
+21 Nov 2026, before the `headless` check of e was added), and `--leg timeout` under
+`--config ambient`. `--config fresh` has only been checked with `--dry`: it needs
+CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the environment, and has never run for real.
 
 `--dry` runs only what needs no model call, for the configuration given: the helpers, the
 `disabled` answer, the snapshots, the cleanup. It starts no `claude` and needs no credential.
 
 usage: journey_insights.py [--config ambient|fresh] [--model haiku] [--keep] [--deadline SECONDS] [--dry]
+                           [--leg all|timeout] [--timeout SECONDS]
 """
 import argparse
 import calendar
@@ -287,17 +305,20 @@ def loaded(stream):
 
 
 def real_guard(w):
-    """What the real store holds before the journey: the log's size and mtime, and whether a
-    state file exists. Checked again at the end."""
-    before = {"size": size(REAL_LOG), "mtime": mtime(REAL_LOG), "state": os.path.exists(REAL_STATE)}
-    w.check("real", "the real ~/.claude/compound/insights.json is absent before", not before["state"])
-    print("      the real event log: %s bytes before" % before["size"])
+    """What the real store holds before the journey: the log's size and mtime, and the size
+    and mtime of the real state file (None when there is none; it is the user's own once a
+    run has happened on this machine, and its contents are never read). Checked again at the
+    end."""
+    before = {"size": size(REAL_LOG), "mtime": mtime(REAL_LOG), "state": (size(REAL_STATE), mtime(REAL_STATE))}
+    print("      the real event log: %s bytes before; the real insights.json: %s" % (
+        before["size"], "absent" if before["state"][0] is None else "present (left as it is)"))
     return before
 
 
 def real_after(w, before, sids):
     named = real_log_naming(before["size"], sids)
-    w.check("real", "the real ~/.claude/compound/insights.json is absent after", not os.path.exists(REAL_STATE))
+    w.check("real", "the real ~/.claude/compound/insights.json is as it was (size and mtime)",
+            (size(REAL_STATE), mtime(REAL_STATE)) == before["state"])
     w.check("real", "no line the real event log gained names a session of this journey (%d sessions)" % len(sids),
             named == [], "%d named" % len(named))
     print("      the real event log: %s bytes after (other sessions of the user write to it too)" % size(REAL_LOG))
@@ -357,6 +378,9 @@ def main():
     ap.add_argument("--deadline", type=int, default=1100,
                     help="seconds to wait for the run to leave `running` (the CLI kills it at 900)")
     ap.add_argument("--dry", action="store_true", help="only what needs no model call; starts no claude")
+    ap.add_argument("--leg", choices=("all", "timeout"), default="all",
+                    help="timeout: only the leg that kills a real run at COMPOUND_INSIGHTS_TIMEOUT")
+    ap.add_argument("--timeout", type=int, default=8, help="the timeout leg's COMPOUND_INSIGHTS_TIMEOUT, in seconds")
     args = common.parse(ap)
     ambient = common.CONFIG == "ambient"
     if args.dry:
@@ -374,6 +398,19 @@ def main():
         w.finish(True if ambient else args.keep)
     if os.environ.get("COMPOUND_JOURNEY_PLUGIN"):
         raise SystemExit("journey_insights.py loads this working copy only: unset COMPOUND_JOURNEY_PLUGIN")
+    if args.leg == "timeout":
+        w = common.World("insights-timeout")
+        project = w.project("alpha")
+        here = dict(COMPOUND_CLAUDE_DIR=None) if ambient else dict(COMPOUND_CLAUDE_DIR=w.config)
+        try:
+            timeout_leg(w, project, args, here, ambient)
+        finally:
+            left = stop_workers(w.home)
+            if left:
+                print("      cleanup: stopped %d processes still running for this world" % len(left))
+            if ambient:
+                shutil.rmtree(w.root, ignore_errors=True)
+        w.finish(True if ambient else args.keep)
     w = common.World("insights")
     project = w.project("alpha", build=True)
     # ambient: no COMPOUND_CLAUDE_DIR, so the CLI reads ~/.claude, which `claude` writes to, and
@@ -389,6 +426,95 @@ def main():
             print("      cleanup: removing the temporary root (it holds findings from real sessions)")
             shutil.rmtree(w.root, ignore_errors=True)
     w.finish(True if ambient else args.keep)
+
+
+def group_left(pgid):
+    """The pids still in process group `pgid`: [] when the group is gone. Asked of the kernel
+    (kill 0) and of pgrep -g, so no process is found by its name."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return []
+    except PermissionError:
+        pass
+    done = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True, timeout=30)
+    found = [int(one) for one in done.stdout.split() if one.strip().isdigit()]
+    return found or [pgid]
+
+
+def timeout_leg(w, project, args, here, ambient):
+    """One real `compound insights --run` killed at COMPOUND_INSIGHTS_TIMEOUT=args.timeout."""
+    before = real_guard(w)
+    config = REAL_CLAUDE if ambient else w.config
+    usage = os.path.join(config, "usage-data")
+    usage_before = snapshot(usage)
+    env = w.env(project, COMPOUND_INSIGHTS_TIMEOUT=str(args.timeout), **here)
+    if ambient:
+        keys = [n for n in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN") if env.get(n)]
+        w.check("timeout", "no API key or token in the environment: the child uses the Claude CLI's own login",
+                keys == [], keys)
+        if keys:
+            print("      stopping before the run: unset %s" % ", ".join(keys))
+            real_after(w, before, [])
+            return
+    # Typed by hand, as a user would: not as a call of this session's.
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    began = time.time()
+    worker = subprocess.Popen([common.CLI, "insights", "--run"], cwd=project, env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    groups, members = set(), set()
+    try:
+        # Every child of the worker leads a group of its own (the worker starts `claude` in a
+        # new session); what each group holds is noted while the run lasts.
+        while worker.poll() is None and time.time() - began < args.timeout + 60:
+            for child in children(worker.pid):
+                groups.add(child)
+            for pgid in list(groups):
+                members.update(group_left(pgid))
+            time.sleep(0.2)
+        out, err = worker.communicate(timeout=60)
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+    took = time.time() - began
+    print("      the run took %.1f s; the child's process groups seen: %d, holding %d processes in all" % (
+        took, len(groups), len(members)))
+    w.check("timeout", "compound insights --run exited 1", worker.returncode == 1, (worker.returncode, err[-300:]))
+    w.check("timeout", "it ran a real claude for the whole timeout and stopped soon after (%d s, then up to 5 s "
+            "and the SIGKILL)" % args.timeout, args.timeout <= took <= args.timeout + 20, "%.1f s" % took)
+    state = read_state(w.home)
+    w.show("state", [shown_state(state, ambient)])
+    w.check("timeout", "the outcome is timeout", state.get("outcome") == "timeout", state.get("outcome"))
+    w.check("timeout", "its message says the timeout", "within %d seconds" % args.timeout in str(state.get("message")))
+    errors = [e for e in w.events(project, kind="error")]
+    w.check("timeout", "one error event, where insights.run, of the session insights",
+            [(e.get("where"), e.get("session")) for e in errors] == [("insights.run", "insights")],
+            [(e.get("where"), e.get("session")) for e in errors])
+    w.check("timeout", "a child process group was seen while the run lasted", bool(groups), len(groups))
+    alive = {pgid: group_left(pgid) for pgid in groups}
+    w.check("timeout", "no process of the child's process group is left (by group, not by name)",
+            all(found == [] for found in alive.values()), {k: len(v) for k, v in alive.items()})
+    w.check("timeout", "no worker of this world is left: nothing holds the lock file", workers(w.home) == [],
+            workers(w.home))
+    w.check("timeout", "the lock is free", lock_is_free(w.home))
+    w.check("timeout", "nothing was harvested: no insight event, no harvested counts",
+            w.events(project, kind="insight") == [] and not state.get("harvested"),
+            (len(w.events(project, kind="insight")), state.get("harvested")))
+    answer = w.cli(project, "insights", "--start", "--json", COMPOUND_INSIGHTS_DAYS=None,
+                   COMPOUND_INSIGHTS_MIN_SESSIONS=None, COMPOUND_INSIGHTS_TIMEOUT=None, **here)
+    w.check("timeout", "the next insights --start under the default days answers too soon",
+            answer.returncode == 0 and json.loads(answer.stdout or "{}").get("why") == "too soon", answer.stdout)
+    w.check("timeout", "that answer started nothing: the state still says timeout",
+            read_state(w.home).get("outcome") == "timeout" and lock_is_free(w.home))
+    usage_after = snapshot(usage)
+    added = [p for p in usage_after if p not in usage_before]
+    changed = [p for p in usage_after if p in usage_before and usage_before[p] != usage_after[p]]
+    print("      what the killed run left under %s: %d entries added, %d changed, %d removed (Claude Code's own "
+          "caches; left in place)" % ("the real ~/.claude/usage-data" if ambient else "the fresh usage-data",
+                                       len(added), len(changed), len([p for p in usage_before if p not in usage_after])))
+    folder, child = transcripts(config, w.home)
+    print("      the child's transcripts: %d under %s (left in place)" % (len(child), folder))
+    real_after(w, before, [name[:-len(".jsonl")] for name in child])
 
 
 def run(w, project, args, here, ambient):
@@ -573,6 +699,8 @@ def run(w, project, args, here, ambient):
                 "%d shown; transcript %s" % (len(shown), "found" if os.path.exists(transcript) else "missing"))
         w.check("e", "its remind event names that id", bool(set(named) & set(shown)),
                 "%d remind events, %d ids named" % (len(rows), len(named)))
+        w.check("e", "its remind carries headless: true (a -p session: the showing is not counted)",
+                bool(rows) and all(e.get("headless") is True for e in rows), [e.get("headless") for e in rows])
         w.check("e", "the later session answered", "READY" in later.result, later.result[:200])
     else:
         print("UNPROVEN e        no finding is listed for the scratch project: the reminder leg was not exercised "
