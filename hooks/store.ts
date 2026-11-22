@@ -467,7 +467,8 @@ export function parseUnsettled(stdout: string, session: string, now: number): Un
 // suggestion from the whole report, listed in every project. Its id goes into the commands
 // that settle it, so a row whose id is not one is not shown; `kinds` are the harvest's slugs
 // and `learned` lesson names, so anything else in either is dropped.
-export type Insight = { id: string; source: 'facet' | 'report'; kinds: string[]; text: string; goal: string; why: string; learned: string[]; age: string }
+// `project` is the repository root a facet finding's session ran in; '' for a report finding.
+export type Insight = { id: string; source: 'facet' | 'report'; project: string; kinds: string[]; text: string; goal: string; why: string; learned: string[]; age: string }
 export const INSIGHT_ID = /^in-[0-9a-f]{16}$/
 const INSIGHT_KIND = /^[a-z_]{1,40}$/
 const INSIGHT_KINDS = 8
@@ -487,7 +488,7 @@ export function parseInsights(stdout: string, now: number): Insight[] | undefine
     const source = e.source === 'facet' || e.source === 'report' ? e.source : undefined
     const text = str(e.text)
     if (e.type !== 'insight' || !INSIGHT_ID.test(id) || source === undefined || text.trim() === '') continue
-    out.push({ id, source, kinds: words(e.kinds, INSIGHT_KIND).slice(0, INSIGHT_KINDS), text, goal: str(e.goal), why: str(e.why), learned: words(e.learned, SLUG), age: ageText(now - seconds(e)) })
+    out.push({ id, source, project: str(e.project), kinds: words(e.kinds, INSIGHT_KIND).slice(0, INSIGHT_KINDS), text, goal: str(e.goal), why: str(e.why), learned: words(e.learned, SLUG), age: ageText(now - seconds(e)) })
   }
   return out
 }

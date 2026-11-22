@@ -401,8 +401,8 @@ test('unsettled captures are quoted as recorded material, each with its id and t
   expect(unsettledContext([], CLI)).toBe('')
 })
 
-const FACET: Insight = { id: 'in-0123456789abcdef', source: 'facet', kinds: ['wrong_approach'], text: 'The build was rerun three times without its profile.', goal: 'Ship the nightly build', why: '', learned: [], age: '2d' }
-const REPORT: Insight = { id: 'in-fedcba9876543210', source: 'report', kinds: [], text: 'Always pass --profile to ./build.sh.', goal: '', why: 'The profile was forgotten in several sessions.', learned: [], age: '1d' }
+const FACET: Insight = { id: 'in-0123456789abcdef', source: 'facet', project: '/work/alpha', kinds: ['wrong_approach'], text: 'The build was rerun three times without its profile.', goal: 'Ship the nightly build', why: '', learned: [], age: '2d' }
+const REPORT: Insight = { id: 'in-fedcba9876543210', source: 'report', project: '', kinds: [], text: 'Always pass --profile to ./build.sh.', goal: '', why: 'The profile was forgotten in several sessions.', learned: [], age: '1d' }
 
 test('a finding of /insights is quoted as an analysis, with its id, and the two ways to settle it', async () => {
   expect(insightContext([], CLI)).toBe('')
@@ -443,6 +443,8 @@ test('a finding of the report is recorded at the user level or not at all, and e
   expect(text).toContain('--level user')
   expect(text.split('\n').pop()).toBe(`${CLI} skip --settles in-fedcba9876543210 --why "..."`)
   expect(insightContext([FACET], CLI).includes('--level user')).toBe(false)
+  // A facet finding that names no project cannot be shown to be this project's: user level too.
+  expect(insightContext([{ ...FACET, project: '' }], CLI)).toContain('--level user (this finding names no project')
   // text 600, goal 200, why 300: a longer field ends in an ellipsis at its cap.
   const long = insightContext([{ ...FACET, text: 't'.repeat(700), goal: 'g'.repeat(300) }, { ...REPORT, why: 'w'.repeat(400) }], CLI)
   expect(long).toContain(`${'t'.repeat(599)}…`)

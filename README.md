@@ -54,7 +54,8 @@ status` reports it.
 
 **Platforms:** compound is developed on macOS. The installer, the CLI and the mod in real
 Claude Code sessions have been run there. On Linux, the tests of the CLI and the
-installer run on Ubuntu in this repository's CI; the mod in a Claude Code session on
+installer, the hook tests (`claude plugin test`) and `claude plugin validate` run on Ubuntu
+in this repository's CI; the mod in a Claude Code session on
 Linux is not tested. WSL is not tested. Native Windows is not tested, and three things
 in the code assume a Unix system: the installer is a bash script, the CLI locks files
 with `fcntl`, and `compound` is installed as a symbolic link.
@@ -538,6 +539,7 @@ These are the ones you are likely to change.
 | `COMPOUND_RECUR_LIMIT` | 2 | sessions a lesson is recalled in before it is ineffective |
 | `COMPOUND_INSIGHTS_DAYS` | 7 | days between runs of Claude Code's `/insights`, which `compound insights --start` begins when one is due; `0` turns the runs off |
 | `COMPOUND_INSIGHTS_MIN_SESSIONS` | 25 | sessions in the event log since the last run started before the next is due |
+| `COMPOUND_INSIGHTS_TIMEOUT` | 900 | seconds a run of `/insights` is given before it is stopped, with the outcome `timeout` |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | the shell a lesson for one shell is held against (`zsh`, `bash`); set it when Claude Code runs your commands in another shell than your login shell |
 | `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for that model |

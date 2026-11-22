@@ -225,8 +225,8 @@ test('findings of /insights are read from the same reply, held to their shape; c
     { ...facet, id: 'in-3333333333333333', text: '' },
   ])
   expect(parseInsights(out, now)).toEqual([
-    { id: 'in-0123456789abcdef', source: 'facet', kinds: ['wrong_approach'], text: 'The build was rerun without its profile.', goal: 'Ship the build', why: '', learned: ['build-needs-profile'], age: '2d' },
-    { id: 'in-fedcba9876543210', source: 'report', kinds: [], text: 'Always pass --profile to ./build.sh.', goal: '', why: 'It was forgotten in several sessions.', learned: [], age: '1d' },
+    { id: 'in-0123456789abcdef', source: 'facet', project: '/work/alpha', kinds: ['wrong_approach'], text: 'The build was rerun without its profile.', goal: 'Ship the build', why: '', learned: ['build-needs-profile'], age: '2d' },
+    { id: 'in-fedcba9876543210', source: 'report', project: '', kinds: [], text: 'Always pass --profile to ./build.sh.', goal: '', why: 'It was forgotten in several sessions.', learned: [], age: '1d' },
   ])
   expect(INSIGHT_ID.test('in-0123456789abcdef')).toBe(true)
   expect(INSIGHT_ID.test('in-0123456789ABCDEF')).toBe(false)

@@ -589,7 +589,8 @@ in-860285d0f021fd1f  open     report Run the test suite with `make test`, never 
 ```
 
 Each row is a candidate: its id, its state (`open` is still shown; `quiet` was shown to
-three sessions and can still be settled; `settled`; `expired`), where it came from
+three sessions with someone at them, `claude -p` runs not counted, and can still be
+settled; `settled`; `expired`), where it came from
 (`facet` for one session's friction, `report` for a suggestion) and its text. `outcome` is
 `ok`, `failed`, `timeout`, `unreadable` (Claude Code's files were not in a shape compound
 can read, and nothing was recorded) or `running`; `interrupted` means the run was killed

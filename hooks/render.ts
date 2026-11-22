@@ -1035,7 +1035,8 @@ export function insightContext(findings: readonly Insight[], cli: string): strin
         (learned.length === 0 ? '. ' : ` (that session already recorded: ${learned.join(', ')}). `) +
         'If what it describes is real and a future session should act differently, record that in your own general words, quoting none of it, ' +
         `with the compound:learn skill, passing --settles ${id}` +
-        (report ? ' and --level user (a finding of the report was drawn from sessions of several projects, so it is recorded at the user level or not at all)' : '') +
+        (report ? ' and --level user (a finding of the report was drawn from sessions of several projects, so it is recorded at the user level or not at all)'
+          : f.project.trim() === '' ? ' and --level user (this finding names no project, so it is recorded at the user level or not at all)' : '') +
         '. If not, decline it:',
       `${cli} skip --settles ${id} --why "..."`,
     )

@@ -189,6 +189,9 @@ EVENT LOG
                                     insights [string]  ids of the findings it was shown
                                                        (a finding shown to 3 sessions is
                                                        no longer listed)
+                                    headless bool      true when no one was at the
+                                                       session's prompt (`claude -p`):
+                                                       its showing is not counted
         learn     CLI `add`       lesson*  string
                                     level    string    project | user | general
                                     kind     string    lesson | skill
@@ -508,7 +511,7 @@ INSIGHTS
     tries for the lock for 30 seconds (then exits 1 with an `error` event), holds it for
     its life, runs `claude -p /insights` in <COMPOUND_HOME> with COMPOUND_OFF=1 added to
     the environment (and CLAUDE_CONFIG_DIR when either directory variable is set) in a
-    process group of its own, which is killed after 900 seconds
+    process group of its own, which is killed after COMPOUND_INSIGHTS_TIMEOUT (default 900) seconds
     (outcome `timeout`), and harvests when claude exited 0 and wrote a report.html newer
     than `started`. Otherwise the outcome is `failed`, with one `error` event (where
     `insights.run`). It exits 0 when the run and the harvest finished, 1 otherwise.
@@ -560,6 +563,7 @@ ENVIRONMENT
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
     COMPOUND_INSIGHTS_DAYS  days between runs of /insights (default 7; 0 turns them off)
     COMPOUND_INSIGHTS_MIN_SESSIONS  sessions in the log before a run is due (default 25, at least 1)
+    COMPOUND_INSIGHTS_TIMEOUT  seconds a run of /insights is given before it is killed (default 900, at least 1)
     COMPOUND_PLATFORM    the platform a lesson's `platform` is held against (default: this one)
     COMPOUND_SHELL       the shell a lesson's `shell` is held against (default: CLAUDE_CODE_SHELL, else SHELL)
     COMPOUND_REUSE_FLOOR the weight a candidate of `find --request` must reach (default 1.5)
@@ -1133,7 +1137,7 @@ KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$")
 BLOCK_RE = re.compile(r"^[>|][+-]?[0-9]?[+-]?$")
 PLAIN_FIRST = "\"'[]{}>|#&*!%@`,"
 YAML_WORDS = frozenset("true false null yes no on off y n ~".split())
-UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f  ﻿\ud800-\udfff]")
+UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ud800-\udfff]")
 
 
 def is_plain(value):
@@ -1186,8 +1190,8 @@ def _unquote(value):
 def split_frontmatter(text):
     """(bom, lines with their endings, index of the closing `---` or None, problem)."""
     bom = ""
-    if text.startswith("﻿"):
-        bom, text = "﻿", text[1:]
+    if text.startswith("\ufeff"):
+        bom, text = "\ufeff", text[1:]
     lines = text.splitlines(True)
     if not lines or lines[0].strip() != "---":
         return bom, lines, None, "no frontmatter"
@@ -2476,9 +2480,9 @@ def insight_text(value, cap):
 
 # What draws nothing (zero-width characters, bidirectional overrides), and the spellings the
 # mod's quoting is built on, with the look-alikes it reads as them (`inert` in hooks/render.ts).
-HIDDEN_CHARS = re.compile("[​-‏‪-‮⁠-⁤﻿]")
-MARKER_OPEN = re.compile("<{2,}\\s*RECORDED[\\s_\\-‐-―]*(NOTE|CAPTURE|INDEX|INSIGHT)", re.I)
-MARKER_CLOSE = re.compile("RECORDED[\\s_\\-‐-―]*(NOTE|CAPTURE|INDEX|INSIGHT)\\s*>{2,}", re.I)
+HIDDEN_CHARS = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+MARKER_OPEN = re.compile("<{2,}\\s*RECORDED[\\s_\\-\u2010-\u2015]*(NOTE|CAPTURE|INDEX|INSIGHT)", re.I)
+MARKER_CLOSE = re.compile("RECORDED[\\s_\\-\u2010-\u2015]*(NOTE|CAPTURE|INDEX|INSIGHT)\\s*>{2,}", re.I)
 MOD_VOICE = re.compile(r"\[compound\]", re.I)
 
 
@@ -2804,6 +2808,15 @@ def insights_days():
     return int(value) if re.match(r"^\d{1,9}$", value) else INSIGHTS_DAYS
 
 
+def insights_timeout():
+    """COMPOUND_INSIGHTS_TIMEOUT: the seconds a run of `claude -p /insights` is given, a whole
+    number of at least 1; anything else is the default."""
+    value = setting("COMPOUND_INSIGHTS_TIMEOUT")[0]
+    if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
+        return int(value)
+    return INSIGHTS_TIMEOUT
+
+
 def insights_min_sessions():
     value = setting("COMPOUND_INSIGHTS_MIN_SESSIONS")[0]
     if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
@@ -2913,11 +2926,18 @@ def start_insights(clock):
     return True, "due", ""
 
 
-def insights_outcome(state):
+def insights_outcome(state, clock):
     """The outcome in `state`, with a `running` that no process holds the lock for reported as
-    `interrupted`: the worker died, and the week's `started` stands."""
+    `interrupted`: the worker died, and the week's `started` stands. A `running` whose `started`
+    is at most INSIGHTS_FRESH seconds old stays `running` with the lock free: `--start` lets go
+    of the lock before the worker it spawns takes it, and the worker keeps that `started` for
+    the same INSIGHTS_FRESH seconds."""
     outcome = state.get("outcome")
     if outcome == "running":
+        started = state.get("started")
+        if isinstance(started, (int, float)) and not isinstance(started, bool) \
+                and 0 <= clock - started <= INSIGHTS_FRESH:
+            return outcome
         try:
             with insights_lock(False) as held:
                 if held:
@@ -2928,20 +2948,43 @@ def insights_outcome(state):
 
 
 def stop_group(proc):
-    """Kill the whole process group of `proc`: SIGTERM, and SIGKILL after 5 seconds."""
+    """Kill the whole process group of `proc`: SIGTERM, and SIGKILL after 5 seconds to what of
+    the group is left, whether or not `proc` itself has exited by then, since a child of `claude`
+    can outlive it. (`proc` leads its group: it was started in a session of its own.)"""
     import signal
     import subprocess
 
-    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 30)):
+    def group_alive():
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(proc.pid, 0)
+        except OSError:
+            return False
+        return True
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    end = time.monotonic() + 5
+    out, err = "", ""
+    try:
+        out, err = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    # poll() reaps `proc` once it has exited, so a zombie leader does not keep the group alive.
+    while (proc.poll() is None or group_alive()) and time.monotonic() < end:
+        time.sleep(0.1)
+    if group_alive():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass
+    if proc.poll() is None:
         try:
-            return proc.communicate(timeout=wait)
+            out, err = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
-            continue
-    return "", ""
+            pass
+    return out, err
 
 
 INSIGHTS_LOCK_WAIT = 30
@@ -3000,11 +3043,12 @@ def run_insights_locked(clock):
         except OSError as exc:
             insights_fail(now(), "failed", "claude could not be started: %s" % (exc.strerror or exc))
             return 1
+        limit = insights_timeout()
         try:
-            out, err = proc.communicate(timeout=INSIGHTS_TIMEOUT)
+            out, err = proc.communicate(timeout=limit)
         except subprocess.TimeoutExpired:
             stop_group(proc)
-            insights_fail(now(), "timeout", "claude did not finish within %d seconds" % INSIGHTS_TIMEOUT)
+            insights_fail(now(), "timeout", "claude did not finish within %d seconds" % limit)
             return 1
         report = os.path.join(insights_claude_dir(), "usage-data", "report.html")
         try:
@@ -3072,7 +3116,7 @@ def cmd_insights(args):
         state = {"started": None, "finished": None, "outcome": None, "message": "", "harvested": {}}
         state.update(read_insights_state())
         state["claude_dir"] = insights_claude_dir()
-        state["outcome"] = insights_outcome(state)
+        state["outcome"] = insights_outcome(state, now())
         if state["outcome"] == "interrupted" and not state["message"]:
             started = state.get("started")
             state["message"] = "the run started %s ended before it finished; no process holds its lock" % (
@@ -3132,8 +3176,10 @@ def insight_states(events, clock):
             if isinstance(ident, str) and ident not in found:
                 found[ident], sessions[ident] = event, set()
         elif kind == "remind":
+            # A session with no one at its prompt (`claude -p`) is shown findings, but its
+            # showing is not counted: nobody read it.
             session, named = _text(event.get("session")), event.get("insights")
-            if session and isinstance(named, list):
+            if session and isinstance(named, list) and event.get("headless") is not True:
                 for ident in named:
                     if isinstance(ident, str) and ident in sessions:
                         sessions[ident].add(session)
@@ -4868,8 +4914,13 @@ def cmd_add(args):
                         "record it at the user level (--level user), or decline it with `compound skip --settles`"
                         % settles)
         # A finding about another project's session is that project's: its text must not land
-        # in this project's lessons, which can be committed files.
+        # in this project's lessons, which can be committed files. One that names no project
+        # cannot be shown to be this project's, so it is recorded at the user level, as a
+        # report finding is.
         theirs = _text(kept[0].get("project")) if kept else ""
+        if kept and not theirs.strip() and target != "user":
+            raise usage("%s is a finding of /insights that names no project: record it at the user level "
+                        "(--level user), or decline it with `compound skip --settles %s`" % (settles, settles))
         if theirs and target == "project" and not _same_path(theirs, project):
             raise usage("%s is a finding about a session of %s, not of this project (%s): record it in a session "
                         "there, or at the user level (--level user), or decline it with `compound skip --settles %s`"
@@ -6802,7 +6853,7 @@ def cmd_events(args):
             continue
         if wanted is not None and not (isinstance(event.get("project"), str) and event["project"]
                                        and os.path.realpath(event["project"]) == wanted) \
-                and not (event.get("type") == "insight" and not event.get("project")):
+                and not (event.get("type") == "insight" and not _text(event.get("project")).strip()):
             continue
         if args.session and event.get("session") != args.session:
             continue
@@ -7689,7 +7740,7 @@ def build_status():
           "%d in the last 7 days" % len(errors) if errors else "none in the last 7 days")
 
     ran = read_insights_state()
-    ran_outcome = insights_outcome(ran)
+    ran_outcome = insights_outcome(ran, clock)
     if ran_outcome in ("running", "interrupted"):
         check("insights", "PASS", "the last run, started %s, is %s" % (
             iso(ran["started"]) if isinstance(ran.get("started"), (int, float)) else "at a time not recorded",
@@ -7907,7 +7958,7 @@ def cmd_status(args):
         out("  nothing open\n")
     for row in opened["findings"]:
         text = sentence(inert_line(row["text"], OPEN_TEXT))
-        theirs = _text(row["project"])
+        theirs = _text(row["project"]).strip()
         if row["source"] != "report" and theirs and not _same_path(theirs, data["project"]):
             # A finding about another project's session is settled in a session there, as an
             # owed capture of that project is; from here it can be declined.
@@ -7917,11 +7968,12 @@ def cmd_status(args):
                                                                      OPEN_TEXT), text,
                     row["id"], row["id"]))
             continue
-        # A report finding is recorded at the user level or not at all (see `compound add`).
+        # A report finding, and one that names no project, is recorded at the user level or
+        # not at all (see `compound add`).
         out("  finding      %s %s %s: %s Check it against this project; record it with compound:learn "
             "(--settles %s%s) or decline it: compound skip --settles %s --why \"...\"\n" % (
                 row["id"], row["age"], row["source"], text, row["id"],
-                " --level user" if row["source"] == "report" else "", row["id"]))
+                " --level user" if row["source"] == "report" or not theirs.strip() else "", row["id"]))
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
             "%s  Or decline it: %s\n" % (

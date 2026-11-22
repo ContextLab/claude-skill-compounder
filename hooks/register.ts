@@ -113,7 +113,8 @@ const INVENTORY_TTL_MS = 60000
 const OTHER_PROJECTS = 6
 // How many unsettled captures a session's first prompt is told about.
 const UNSETTLED_SHOWN = 5
-// How many findings of /insights it is shown; the CLI stops listing one after 3 sessions were.
+// How many findings of /insights it is shown; the CLI stops listing one after 3 sessions were
+// (a headless one is not counted).
 const INSIGHTS_SHOWN = 3
 // The pane's id, how long after an event its data is read again, and how many events it asks for.
 const PANE = 'compound'
@@ -188,6 +189,9 @@ let settings: { at: number; off: boolean; quiet: boolean; knobs: Knobs } | undef
 let ticker: Timer | undefined
 let ticking = false
 let drawn = ''
+// Whether the band is in view on each surface that last drew it: false while the person has
+// collapsed it there (`isCollapsed`). A surface that never said is taken to show it.
+const bandInView = new Map<string, boolean>()
 // The wait before the pane's data is read again, and how many checks were given an id.
 let boardWait: Timer | undefined
 let checks = 0
@@ -319,7 +323,7 @@ async function tick($: EngineInterface): Promise<void> {
     const band = await read($, BAND)
     const how = motion(band, now)
     const key = phaseKey(band, now)
-    if (how === 'still') stopTicker()
+    if (how === 'still' || !bandShown()) stopTicker()
     if (how === 'spin' || key !== drawn) {
       drawn = key
       await update($, FRAME, () => now)
@@ -332,9 +336,19 @@ async function tick($: EngineInterface): Promise<void> {
   }
 }
 
-// Starts the band's timer unless it runs: there is one, whatever starts it and however often.
+// Whether any surface shows the band: one that cannot collapse it says so with false, and
+// before any surface has drawn it nothing is known to hide it.
+function bandShown(): boolean {
+  if (bandInView.size === 0) return true
+  for (const shown of bandInView.values()) if (shown) return true
+  return false
+}
+
+// Starts the band's timer unless it runs or nothing of the band is in view: there is one,
+// whatever starts it and however often. A collapsed band is drawn again when it is expanded,
+// and that drawing starts the timer again when something on it still moves.
 function animate($: EngineInterface): void {
-  if (ticker !== undefined) return
+  if (ticker !== undefined || !bandShown()) return
   ticker = $.clock.every(FRAME_MS, () => {
     void tick($)
   })
@@ -851,12 +865,25 @@ async function insightsStart($: EngineInterface): Promise<boolean> {
   }
 }
 
+// Whether no one is at the session's prompt: the prompt is the SDK host's own (`claude -p`,
+// the Agent SDK) and the session draws on no surface, as in a plain `-p` run. An SDK
+// host that draws somewhere (the desktop app) has a person at it, and so does a prompt of any
+// other origin, or one whose origin is not given. Never rejects: a doubt is not headless.
+async function headless($: EngineInterface, kind: string | undefined): Promise<boolean> {
+  if (kind !== 'sdk') return false
+  try {
+    return (await $.session.surfaces()).length === 0
+  } catch {
+    return false
+  }
+}
+
 // What earlier sessions in this project fixed and neither recorded nor declined, and the
 // findings of /insights nothing has settled. Asked of the CLI at the first typed prompt of
 // a session and told once; it refuses no stop. The same claim makes the session's one
 // `insights --start`, at the same time as the read, so the prompt waits for the slower of
 // the two and not for both.
-async function unsettledReminder($: EngineInterface, sid: string): Promise<string> {
+async function unsettledReminder($: EngineInterface, sid: string, kind: string | undefined): Promise<string> {
   if (!(await firstTime($, sid, 'unsettled'))) return ''
   const [started, ran] = await Promise.all([
     insightsStart($),
@@ -884,8 +911,10 @@ async function unsettledReminder($: EngineInterface, sid: string): Promise<strin
   // ones listed first are the ones nearest to being told enough.
   const shown = open.slice(-UNSETTLED_SHOWN).map(c => ({ ...c, failed: redact(c.failed), error: redact(c.error), fixed: redact(c.fixed) }))
   const told = found.slice(0, INSIGHTS_SHOWN).map(f => ({ ...f, text: redact(f.text), goal: redact(f.goal), why: redact(f.why) }))
-  // One event: the CLI counts the sessions a finding was shown to from its `insights`.
-  await log($, { type: 'remind', ...(shown.length === 0 ? {} : { captures: shown.map(c => c.id) }), ...(told.length === 0 ? {} : { insights: told.map(f => f.id) }) })
+  // One event: the CLI counts the sessions a finding was shown to from its `insights`, and
+  // leaves out a session nobody was at (`headless`).
+  const unread = await headless($, kind)
+  await log($, { type: 'remind', ...(shown.length === 0 ? {} : { captures: shown.map(c => c.id) }), ...(told.length === 0 ? {} : { insights: told.map(f => f.id) }), ...(unread ? { headless: true } : {}) })
   const owed = open.length === 0 ? '' : `${open.length} owed from earlier sessions`
   const candidates = found.length === 0 ? '' : candidatesText(found.length)
   // The findings and a run begun now share one note: /insights is what both are about.
@@ -1092,7 +1121,7 @@ async function onPrompt($: EngineInterface, raw: string, kind: string | undefine
     await paint($, band => erred(band, 0))
   }
   try {
-    const owed = await unsettledReminder($, sid)
+    const owed = await unsettledReminder($, sid, kind)
     if (owed !== '') out.push(owed)
   } catch (err) {
     await fail($, 'unsettled', err)
@@ -2041,6 +2070,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     let sid = 'unknown'
     try {
+      bandInView.set(e.surface, e.props.isCollapsed !== true)
       if (e.props.hasSurvey) return next(e)
       const s = await readSettings($)
       if (s.off || s.quiet) return next(e)
@@ -2049,7 +2079,13 @@ export const register: Register = on => {
       await read($, FRAME)
       sid = await $.session.id()
       if (band === null || band.session !== sid) return next(e)
-      const row = bandRow(band, await $.clock.now(), e.props.bodyColumns)
+      // Collapsed, the band is still drawn, and nothing of it is on screen: its timer stops,
+      // and the drawing that expands it starts the timer again. What it shows is worked out
+      // from the time each time, so a note still within its life is drawn on expanding.
+      const now = await $.clock.now()
+      if (!bandShown()) stopTicker()
+      else if (motion(band, now) !== 'still') animate($)
+      const row = bandRow(band, now, e.props.bodyColumns)
       if (row.length === 0) return next(e)
       const { Box, Text } = $.ui.resolve(e)
       return tree(h(Box, { flexDirection: 'row' }, ...row.map(seg => h(Text, textProps(seg), seg.text))))

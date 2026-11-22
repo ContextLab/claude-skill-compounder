@@ -14,6 +14,33 @@ from test_support import NOW, Case, git_ok, iso, write_usage_data
 SESSION = "11111111-aaaa-bbbb-cccc-000000000001"
 
 
+def has_open(pid, path):
+    """Whether process `pid` has `path` open: read from /proc where there is one (Linux), else
+    from lsof (macOS). None when neither can say."""
+    import shutil
+
+    names = {path, os.path.realpath(path)}
+    fds = "/proc/%d/fd" % pid
+    if os.path.isdir("/proc/self/fd"):
+        try:
+            entries = os.listdir(fds)
+        except OSError:
+            return False
+        for entry in entries:
+            try:
+                if os.readlink(os.path.join(fds, entry)) in names:
+                    return True
+            except OSError:
+                continue
+        return False
+    lsof = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else shutil.which("lsof")
+    if not lsof:
+        return None
+    done = subprocess.run([lsof, "-a", "-p", str(pid), "-Fn"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, universal_newlines=True, timeout=60)
+    return any(line[1:] in names for line in done.stdout.splitlines() if line.startswith("n"))
+
+
 def facet(session, detail="The run kept using the wrong flag.", counts=None, goal="Build a small tool"):
     return {"underlying_goal": goal, "friction_counts": {"wrong_approach": 1} if counts is None else counts,
             "friction_detail": detail, "session_id": session}
@@ -250,18 +277,33 @@ class HarvestTest(Case):
         self.assertTrue(os.path.exists(os.path.join(self.box.chome, "insights.lock")))
 
     def test_a_harvest_waits_for_the_lock_and_then_records(self):
+        """Waiting is proved without a fixed sleep: the harvest opens the lock file only to
+        take the lock, so while this test holds it, a harvest that has the file open is in
+        flock and can go no further. The test then appends a line of its own and releases the
+        lock when it chooses; the finding must come after that line in the log."""
         self.one_session()
         os.makedirs(self.box.chome)
-        fd = os.open(os.path.join(self.box.chome, "insights.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        lock = os.path.join(self.box.chome, "insights.lock")
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             proc = subprocess.Popen([sys.executable, self.box.script, "insights", "--harvest", "--json"],
                                     cwd=self.box.project, env=self.box.env(), stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             self.addCleanup(proc.kill)
-            time.sleep(1.5)
+            # A deadline only so that a broken harvest ends the test; no timing is assumed.
+            end = time.time() + 120
+            while True:
+                self.assertIsNone(proc.poll(), "the harvest ended without waiting for the lock")
+                opened = has_open(proc.pid, lock)
+                self.assertIsNotNone(opened, "neither /proc nor lsof can say what the harvest has open")
+                if opened:
+                    break
+                self.assertLess(time.time(), end, "the harvest never reached the lock")
+                time.sleep(0.02)
             self.assertIsNone(proc.poll(), "the harvest did not wait for the lock")
             self.assertEqual(self.insights(), [])
+            self.box.seed({"type": "reuse", "session": "the-test-holds-the-lock"})
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -269,6 +311,8 @@ class HarvestTest(Case):
         self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(json.loads(out)["new"], 1)
         self.assertEqual(len(self.insights()), 1)
+        order = [event["type"] for event in self.box.read_events()]
+        self.assertEqual(order, ["reuse", "insight"])
 
     def test_the_state_command_lists_each_finding_with_its_state(self):
         self.assertEqual(self.box.json("insights", "--json")["findings"], [])
@@ -282,6 +326,60 @@ class HarvestTest(Case):
         self.assertExit(listing, 0)
         self.assertIn(event["id"], listing.stdout)
         self.assertIn("open", listing.stdout)
+
+    def test_the_cli_and_the_mod_take_out_the_same_invisible_characters(self):
+        """HIDDEN_CHARS in bin/compound and HIDDEN in hooks/safe.ts, read from their sources,
+        name one set of characters, each written as an escape; the marker look-alikes of
+        bin/compound and hooks/render.ts likewise. Then each character of the set is taken
+        out of a finding's text where the CLI prints it."""
+        import re
+        from test_support import REPO
+
+        def code_points(cls):
+            out, index = set(), 0
+            items = re.findall(r"\\u([0-9a-fA-F]{4})|(-)", cls)
+            points = [None if dash else int(hexa, 16) for hexa, dash in items]
+            while index < len(points):
+                if index + 2 < len(points) and points[index + 1] is None:
+                    out.update(range(points[index], points[index + 2] + 1))
+                    index += 3
+                else:
+                    out.add(points[index])
+                    index += 1
+            return out
+
+        with open(os.path.join(REPO, "bin", "compound"), encoding="utf-8") as handle:
+            cli = handle.read()
+        with open(os.path.join(REPO, "hooks", "safe.ts"), encoding="utf-8") as handle:
+            safe = handle.read()
+        with open(os.path.join(REPO, "hooks", "render.ts"), encoding="utf-8") as handle:
+            render = handle.read()
+        python = re.search(r'^HIDDEN_CHARS = re\.compile\("\[([^\]]*)\]"\)$', cli, re.M)
+        typescript = re.search(r"^const HIDDEN = /\[([^\]]*)\]/g$", safe, re.M)
+        self.assertIsNotNone(python, "HIDDEN_CHARS is written with escapes in bin/compound")
+        self.assertIsNotNone(typescript, "HIDDEN is written with escapes in hooks/safe.ts")
+        self.assertRegex(python.group(1), r"^(\\u[0-9a-f]{4}|-)+$")
+        hidden = code_points(python.group(1))
+        self.assertEqual(hidden, code_points(typescript.group(1)))
+        self.assertIn(0x200B, hidden)
+        self.assertIn(0xFEFF, hidden)
+        dashes_cli = re.findall(r"RECORDED\[\\\\s_\\\\-(\\u[0-9a-f]{4}-\\u[0-9a-f]{4})\]", cli)
+        dashes_mod = re.findall(r"RECORDED\[\\s_\\-(\\u[0-9a-f]{4}-\\u[0-9a-f]{4})\]", render)
+        self.assertEqual(len(dashes_cli), 2, "the CLI's two markers name their look-alike dashes as escapes")
+        self.assertEqual(set(dashes_cli), set(dashes_mod))
+        # No character of the set, nor any other that draws nothing, is written literally.
+        import unicodedata
+        self.assertEqual([hex(ord(ch)) for ch in cli if unicodedata.category(ch) in ("Cf", "Zl", "Zp")], [])
+        # Each is taken out where the CLI prints a finding.
+        for number, point in enumerate(sorted(hidden)):
+            ident = "in-%016x" % (0xd00 + number)
+            self.box.seed({"type": "insight", "session": "insights", "id": ident, "source": "report",
+                           "text": "Pre%sfer rg." % chr(point)})
+        listing = self.box.run("insights")
+        self.assertExit(listing, 0)
+        for point in hidden:
+            self.assertNotIn(chr(point), listing.stdout, hex(point))
+        self.assertEqual(listing.stdout.count("Prefer rg."), len(hidden))
 
     def test_a_finding_with_no_source_prints_a_dash_and_not_the_word_none(self):
         self.box.seed({"type": "insight", "session": "insights", "id": "in-00000000000000c3", "text": "Prefer rg."})
@@ -523,6 +621,10 @@ class StartTest(RunTest):
         self.assertIn("lock", error["message"])
 
     def test_run_waits_for_a_lock_held_for_a_moment_and_then_runs(self):
+        # The worker tries for the lock without blocking and closes the file between tries, so
+        # unlike the harvest's wait, its wait leaves nothing a test can see from outside: this
+        # one keeps a fixed sleep. On a machine slow enough that the worker has not tried within
+        # it, the test can pass without proving the wait; `has_open` cannot catch a try.
         fd = self.hold_lock()
         proc = subprocess.Popen([sys.executable, self.box.script, "insights", "--run"], cwd=self.box.project,
                                 env=self.box.env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -576,6 +678,25 @@ class StartTest(RunTest):
             os.chmod(self.box.chome, 0o700)
         self.assertEqual((answer["started"], answer["why"]), (False, "could not start"))
         self.assertEqual(self.errors(), [])
+
+    def test_a_running_outcome_started_under_a_minute_ago_is_running_with_the_lock_free(self):
+        """The gap between `--start` letting go of the lock and its worker taking it."""
+        for age in (0, 30, 60):
+            self.write_state(started=NOW - age, outcome="running", message="")
+            state = self.box.json("insights", "--json")
+            self.assertEqual((state["outcome"], state["message"]), ("running", ""), age)
+            row = [r for r in self.box.json("status", "--json")["health"] if r["check"] == "insights"][0]
+            self.assertIn("is running", row["detail"], age)
+        self.write_state(started=NOW - 61, outcome="running", message="")
+        self.assertEqual(self.box.json("insights", "--json")["outcome"], "interrupted")
+        row = [r for r in self.box.json("status", "--json")["health"] if r["check"] == "insights"][0]
+        self.assertIn("is interrupted", row["detail"])
+        # A `started` in the future is no recent start.
+        self.write_state(started=NOW + 3600, outcome="running", message="")
+        self.assertEqual(self.box.json("insights", "--json")["outcome"], "interrupted")
+        # And the clock decides, not the file's age.
+        self.write_state(started=NOW, outcome="running", message="")
+        self.assertEqual(self.box.json("insights", "--json", COMPOUND_NOW=NOW + 61)["outcome"], "interrupted")
 
     def test_a_running_outcome_with_no_lock_holder_is_reported_as_interrupted(self):
         self.write_state(started=NOW - 3600, outcome="running", message="")

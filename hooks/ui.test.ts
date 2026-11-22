@@ -205,6 +205,79 @@ test('the band spins while the reuse check runs, shows what it found, fades, and
   }
 })
 
+// The band redraws on its own only when its timer writes a frame: a spinner that does not
+// turn while the clock moves, and a note that does not fade, are a band with no timer.
+test('a collapsed band runs no timer, and expanded again it draws a note still within its life and animates again', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  w.judge = async () => {
+    await clock.sleep(500)
+    return NAMED
+  }
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, isCollapsed: true }, viewport: { columns: 100, rows: 40 } })
+  const submitted = $.prompt.submit({ text: PROMPT, wait: false, origin: { kind: 'composer' } })
+  await clock.settle()
+  // The check spins, and a tree is still returned for the collapsed band, but no frame is written.
+  expect((await ui.find({ type: 'Text', text: BUSY.reuse }))?.text).toBe(BUSY.reuse)
+  const spun = (await ui.findAll({ type: 'Text' }))[0]!.text
+  for (let i = 0; i < 3; i += 1) {
+    await clock.advance(FRAME_MS)
+    expect((await ui.findAll({ type: 'Text' }))[0]!.text).toBe(spun)
+  }
+  await clock.advance(500)
+  await submitted
+  expect(await ui.find({ type: 'Text', text: NOTES.reuse.label })).toBeDefined()
+  // Past the point where an animated note dims, the collapsed one is not drawn again.
+  await clock.advance(GONE_MS - 1500)
+  expect((await ui.find({ type: 'Text', text: NOTES.reuse.label }))?.props.dimColor).not.toBe(true)
+  // Expanded within the note's life: the note is drawn as it is now, dim, and nothing was lost.
+  await ui.redraw({ ...BAND, isCollapsed: false })
+  expect((await ui.find({ type: 'Text', text: NOTES.reuse.label }))?.props.dimColor).toBe(true)
+  expect(await ui.find({ type: 'Text', text: 'release-notes-format' })).toBeDefined()
+  // And the timer runs again: the note goes at the end of its life with no act of the test's but the clock.
+  await clock.advance(2000)
+  expect(await ui.find({ type: 'Text', text: NOTES.reuse.label })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+  const calls = w.calls.length
+  await clock.advance(3_600_000)
+  expect(w.calls.length).toBe(calls)
+  await ui.unmount()
+})
+
+test('a note whose life ends while the band is collapsed is not drawn when it is expanded', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  const ui = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, isCollapsed: true }, viewport: { columns: 100, rows: 40 } })
+  await $.prompt.submit({ text: PROMPT, wait: false, origin: { kind: 'composer' } })
+  await clock.settle()
+  expect(w.logged.some(e => e.type === 'reuse')).toBe(true)
+  await clock.advance(GONE_MS + 1000)
+  await ui.redraw({ ...BAND, isCollapsed: false })
+  expect(await ui.find({ type: 'Text', text: NOTES.reuse.label })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: BENEATH })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a band collapsed on the terminal and shown on the desktop app keeps its timer: one surface in view is enough', async ($, on) => {
+  const w = world(on)
+  const clock = mock.clock(on, { now: T0 })
+  w.judge = async () => {
+    await clock.sleep(500)
+    return NAMED
+  }
+  const terminal = await $.ui.mount({ plugin: 'compound', surface: 'terminal', component: 'AbovePrompt', props: { ...BAND, isCollapsed: true }, viewport: { columns: 100, rows: 40 } })
+  const desktop = await $.ui.mount({ plugin: 'compound', surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 100, rows: 40 } })
+  const submitted = $.prompt.submit({ text: PROMPT, wait: false, origin: { kind: 'composer' } })
+  await clock.settle()
+  const spun = (await desktop.findAll({ type: 'Text' }))[0]!.text
+  await clock.advance(FRAME_MS)
+  expect((await desktop.findAll({ type: 'Text' }))[0]!.text).not.toBe(spun)
+  await clock.advance(500)
+  await submitted
+  await terminal.unmount()
+  await desktop.unmount()
+})
+
 const hit = (name: string) => JSON.stringify({ hits: [{ name, level: 'project', path: `/p/l/${name}`, text: 'Print it with printf.' }], guards: 1 })
 const FIX = JSON.stringify({ same_goal: true, call_mistake: true, recurs: true, evidence: 'a target is required', verdict: 'FIX' })
 

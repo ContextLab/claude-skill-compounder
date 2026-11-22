@@ -358,6 +358,82 @@ class FindingSettling(Settling):
         self.assertExit(self.box.run("skip", "--settles", FINDING, "--why", "no", COMPOUND_NOW=NOW + 20), 0)
         self.assertEqual(self.box.json("insights", "--json", COMPOUND_NOW=NOW + 21)["findings"][0]["state"], "settled")
 
+    def remind_headless(self, session, offset):
+        self.box.log({"type": "remind", "insights": [FINDING], "headless": True}, CLAUDE_CODE_SESSION_ID=session,
+                     COMPOUND_NOW=NOW + offset)
+
+    def state(self, offset=20):
+        return self.box.json("insights", "--json", COMPOUND_NOW=NOW + offset)["findings"][0]["state"]
+
+    def test_three_headless_reminds_leave_a_finding_listed(self):
+        self.finding()
+        for index, session in enumerate(("p-one", "p-two", "p-three")):
+            self.remind_headless(session, 1 + index)
+        self.assertTrue(all(event.get("headless") is True for event in self.box.read_events()
+                            if event["type"] == "remind"), "compound log kept the field")
+        self.assertEqual([row["id"] for row in self.listed()], [FINDING])
+        self.assertEqual(self.state(), "open")
+
+    def test_three_interactive_reminds_make_a_finding_quiet(self):
+        self.finding()
+        for index, session in enumerate(("s-one", "s-two", "s-three")):
+            self.remind(session, 1 + index)
+        self.assertEqual(self.listed(), [])
+        self.assertEqual(self.state(), "quiet")
+
+    def test_headless_reminds_count_for_nothing_beside_interactive_ones(self):
+        self.finding()
+        self.remind("s-one", 1)
+        self.remind_headless("p-one", 2)
+        self.remind("s-two", 3)
+        self.remind_headless("p-two", 4)
+        # Two sessions with someone at them, and two without: still open.
+        self.assertEqual([row["id"] for row in self.listed()], [FINDING])
+        self.assertEqual(self.state(), "open")
+        # A session that was headless once and then interactive counts once, as interactive.
+        self.remind("p-one", 5)
+        self.assertEqual(self.listed(), [])
+        self.assertEqual(self.state(), "quiet")
+
+    def test_only_headless_true_is_left_out(self):
+        self.finding()
+        for index, (session, value) in enumerate((("s-one", False), ("s-two", "true"), ("s-three", 1))):
+            self.box.log({"type": "remind", "insights": [FINDING], "headless": value}, CLAUDE_CODE_SESSION_ID=session,
+                         COMPOUND_NOW=NOW + 1 + index)
+        self.assertEqual(self.state(), "quiet")
+
+    def facet_without_project(self, project):
+        """A facet finding whose `project` is `project`, or missing when it is None: the
+        harvest writes none, so it is written as it would be, with seed_event."""
+        event = {"ts": iso(NOW), "type": "insight", "session": "insights", "id": FINDING, "source": "facet",
+                 "text": "It used the wrong flag."}
+        if project is not None:
+            event["project"] = project
+        seed_event(self.box.events, event)
+        before = self.box.snapshot()
+        proc = self.box.run("add", "--name", "a-lesson", "--when", "Use when it matters.", "--settles", FINDING,
+                            stdin="Body.\n", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 2)
+        self.assertIn("names no project", proc.stderr)
+        self.assertIn("--level user", proc.stderr)
+        self.assertEqual(self.box.snapshot(), before)
+        # It is listed in every project, and status shows its command with --level user.
+        self.assertEqual([row["id"] for row in self.listed()], [FINDING])
+        self.assertIn("--settles %s --level user" % FINDING, self.box.run("status", COMPOUND_NOW=NOW + 10).stdout)
+        self.box.add("a-lesson", "Use when it matters.", "Body.\n", "--level", "user", "--settles", FINDING,
+                     COMPOUND_NOW=NOW + 10)
+        self.assertEqual(self.box.read_events()[-1]["settles"], FINDING)
+        self.assertEqual(self.state(11), "settled")
+
+    def test_add_records_a_facet_finding_with_an_empty_project_at_the_user_level_only(self):
+        self.facet_without_project("")
+
+    def test_add_records_a_facet_finding_with_no_project_field_at_the_user_level_only(self):
+        self.facet_without_project(None)
+
+    def test_add_records_a_facet_finding_whose_project_is_blank_at_the_user_level_only(self):
+        self.facet_without_project("   ")
+
     def test_settles_refuses_an_expired_or_unknown_finding(self):
         self.finding()
         before = self.box.snapshot()

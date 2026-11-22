@@ -25,18 +25,19 @@ type Answer = { text: string; isError?: true }
 type Run = { argv: string[]; timeoutMs: number | undefined; env: Record<string, string> }
 // `unsettled` is what the CLI answers `events --unsettled --project P`; `start` answers
 // `insights --start`, and `runs` keeps every call with its budget and environment.
-type World = { logged: Record<string, unknown>[]; judge: () => Promise<string>; prompts: string[]; tool: (command: string) => Answer | undefined; calls: string[][]; runs: Run[]; unsettled: string; start: () => Promise<{ code: number; stdout: string }>; statuses: (string | undefined)[] }
+type World = { logged: Record<string, unknown>[]; judge: () => Promise<string>; prompts: string[]; tool: (command: string) => Answer | undefined; calls: string[][]; runs: Run[]; unsettled: string; start: () => Promise<{ code: number; stdout: string }>; statuses: (string | undefined)[]; surfaces: string[] }
 
 let worlds = 0
 
 function world(on: On, env: Record<string, string> = {}): World {
   worlds += 1
   const n = worlds
-  const w: World = { logged: [], judge: async () => NO_LESSON, prompts: [], tool: () => undefined, calls: [], runs: [], unsettled: '[]', start: async () => ({ code: 0, stdout: '{"started": false, "why": "not due"}' }), statuses: [] }
+  const w: World = { logged: [], judge: async () => NO_LESSON, prompts: [], tool: () => undefined, calls: [], runs: [], unsettled: '[]', start: async () => ({ code: 0, stdout: '{"started": false, "why": "not due"}' }), statuses: [], surfaces: ['terminal'] }
   mock.env(on, { HOME: '/home/me', COMPOUND_HOME: '/home/me/compound', COMPOUND_PROMPT_MIN_CHARS: '100000', ...env })
   on('session.id', () => ({ value: `learn-session-${n}` }))
   on('session.root', () => ({ value: `/work/learn-${n}` }))
   on('session.repo', () => ({ value: null }))
+  on('session.surfaces', () => ({ value: w.surfaces as never }))
   on('session.messages', () => ({ value: [] }))
   on('fs.exists', () => ({ value: true }))
   on('command.register', () => ({ value: undefined }) as never)
@@ -538,6 +539,28 @@ test('a finding of /insights is shown once, at the first typed prompt, and the r
   expect(of(w, 'remind').length).toBe(1)
   await ui.unmount()
 })
+
+// A session nobody is at (`claude -p`: the SDK host's own prompt, and no surface to draw
+// on) is shown findings all the same, and its remind says so, so the CLI does not count it.
+const headlessCases: { name: string; kind: 'sdk' | 'composer' | 'bridge'; surfaces: string[]; headless: boolean }[] = [
+  { name: 'a -p run: the SDK host\'s prompt and no surface', kind: 'sdk', surfaces: [], headless: true },
+  { name: 'an SDK host that draws on the desktop app', kind: 'sdk', surfaces: ['desktop'], headless: false },
+  { name: 'a prompt typed at the terminal', kind: 'composer', surfaces: ['terminal'], headless: false },
+  { name: 'a typed prompt with no surface reported', kind: 'composer', surfaces: [], headless: false },
+  { name: 'a prompt from a phone through Remote Control', kind: 'bridge', surfaces: [], headless: false },
+]
+for (const c of headlessCases) {
+  test(`the remind carries headless: true exactly for a session nobody is at: ${c.name}`, async ($, on) => {
+    const w = world(on)
+    mock.clock(on, { now: T0 })
+    w.surfaces = c.surfaces
+    w.unsettled = JSON.stringify([finding(1)])
+    const text = said(await $.prompt.submit({ text: 'carry on', wait: false, origin: { kind: c.kind } }))
+    // Shown either way: a headless session may act on it.
+    expect(text).toContain('<<<RECORDED-INSIGHT id=in-1111111111111111')
+    expect(of(w, 'remind')).toEqual([{ type: 'remind', insights: ['in-1111111111111111'], ...(c.headless ? { headless: true } : {}) }])
+  })
+}
 
 test('five findings: the three oldest are shown, and the remind event names those three', async ($, on) => {
   const w = world(on)

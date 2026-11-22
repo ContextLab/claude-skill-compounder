@@ -1023,8 +1023,9 @@ At the first typed prompt of a session the mod asks the CLI for the unsettled ca
 this project and the open findings of `/insights` (`compound events --unsettled --project P
 --json`; see "Findings from /insights"). If there are any, it adds one message to that
 prompt, once per session, and writes one `remind` event, whose `captures` are the ids of
-the captures shown and whose `insights` are the ids of the findings shown (the CLI stops
-listing a finding once 3 sessions were shown it). The message quotes each capture between
+the captures shown, whose `insights` are the ids of the findings shown, and whose `headless`
+is `true` when nobody is at the session's prompt (the CLI stops
+listing a finding once 3 sessions with someone at them were shown it). The message quotes each capture between
 marker lines as recorded reference material, and tells Claude to record it with the
 `compound:learn` skill, passing `--settles <id>`, or to decline it with `compound skip
 --settles <id> --why`. It shows the newest 5 captures. It refuses no stop.
@@ -1126,7 +1127,9 @@ State is `insights.json` in `COMPOUND_HOME`: `started` (epoch seconds), `finishe
 `outcome` (`running`, `ok`, `failed`, `timeout` or `unreadable`), `message` and `harvested`.
 `compound insights` also prints `claude_dir`, the Claude directory the harvest reads, and
 reports `interrupted` in place of `running` when no process holds the lock: the worker was
-killed, and the week's `started` stands. Its `message`, when the state file holds none,
+killed, and the week's `started` stands. A `running` whose `started` is at most 60 seconds
+old is reported as `running` with the lock free, since `--start` lets go of the lock before
+the worker takes it. Its `message`, when the state file holds none,
 says when that run started and that it ended before it finished. `compound status` says
 the same. `--run` and `--harvest`, typed by hand, are the user's own commands and run whatever `COMPOUND_OFF`
 says; only `--start` answers `off`.
@@ -1159,8 +1162,9 @@ says; only `--start` answers `off`.
   its own. `claude` is the one on `PATH`, else `$HOME/.local/bin/claude` when that is an
   executable file (a session started from a desktop app may not have the shell's `PATH`;
   with no `HOME` there is no second place). When neither is there the outcome is `failed`
-  with a message that names both places. After 900 seconds the whole group is killed
-  (SIGTERM, then SIGKILL after 5 seconds) and the outcome is `timeout`.
+  with a message that names both places. After `COMPOUND_INSIGHTS_TIMEOUT` seconds (default
+  900) the whole group is killed (SIGTERM, then SIGKILL after 5 seconds to what of the group
+  is left, whether or not `claude` itself has exited by then) and the outcome is `timeout`.
 - **The child's environment** is the worker's (without `CLAUDE_CODE_SESSION_ID`) with
   `COMPOUND_OFF=1` added, so the child
   session's mod does nothing: it writes no event and makes no reuse check, and it does not
@@ -1186,7 +1190,12 @@ A finding is in one of four states, which `compound insights` names for each of 
   `--session S` lists no finding: a finding is never a session's own debt.
 - **quiet**: `remind` events of 3 distinct sessions name it (a `remind` carries
   `insights`, the ids of the findings the session was shown; two from one session count
-  once). It is no longer listed, but it can still be settled, so the third session it was
+  once). A `remind` with `headless: true` is not counted: the mod writes it when nobody is
+  at the session's prompt, which it takes to be so when the prompt is the SDK host's own
+  (`claude -p`, the Agent SDK) and the session draws on no surface, as in a plain `-p` run.
+  Such a session is still shown the findings, since it may act on them. An SDK host that
+  draws somewhere (the desktop app) is counted. A quiet finding is no longer listed, but it
+  can still be settled, so the third session it was
   shown to can still answer. Two sessions that start together can make the count 4;
   nothing is reserved to prevent that.
 - **settled**: a `learn` or a `skip` with `settles: <id>` followed it. `compound add
@@ -1204,7 +1213,11 @@ A report finding was written from sessions of several projects, so `compound add
 that session's project, and a project lesson can be a committed file, so `compound add
 --settles <id>` at the project level exits 2, naming the project it belongs to, unless
 the finding's `project` is this project's root (the two compared as real paths). At the
-user level it is recorded from anywhere. `compound skip --settles` has neither limit.
+user level it is recorded from anywhere. A finding about a session whose `project` is
+empty or missing cannot be shown to be this project's, so it is held to the user level as
+a report finding is; the harvest writes none, and the check does not rely on that. The
+reminder and `compound status` give such a finding `--level user` in the command they
+show. `compound skip --settles` has neither limit.
 
 `compound status` lists the open findings under Open. One of this project, or of the
 report, is listed with how to record it here; one of another project names that project
@@ -1696,7 +1709,13 @@ in a terminal it is dropped at the session's next typed prompt or when the minut
 
   The spinner turns ten times a second on one timer, which runs only while a spinner
   shows or a result fades: an idle band, an owed lesson and a held failure that has dimmed
-  cost no timer at all. A check
+  cost no timer at all. Nor does a band the person has collapsed (ctrl+x ctrl+a, or `[-]`;
+  Claude Code tells the band so with `isCollapsed`): it is still drawn, and nothing of it
+  is on screen, so the timer stops while no surface that draws the band shows it. A
+  surface that cannot collapse the band, or a Claude Code that does not say, counts as
+  showing it. What the band shows is worked out from the time at each drawing, so when it
+  is expanded a note still within its life is drawn as it is by then, and the timer starts
+  again if something on it still moves. A check
   whose end was never reported stops counting after a minute. The band's state is kept
   per session id, so `/clear` starts it over.
 - **Pane**: `/compound` opens a dashboard: beside the transcript in the fullscreen
@@ -2015,6 +2034,7 @@ A value of the wrong shape (not a whole number where one is expected) is the def
 | `COMPOUND_RECUR_LIMIT` | 2 | CLI | Recurrences of a lesson that count, since it was last written, that make it ineffective. One recall counts for a session. |
 | `COMPOUND_INSIGHTS_DAYS` | 7 | CLI | Days between the starts of two runs of Claude Code's `/insights`; `0` turns the runs off. Not a whole number is the default. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_INSIGHTS_MIN_SESSIONS` | 25 | CLI | Distinct sessions the event log must hold since the last run started before the next is due. At least 1; anything else is the default. Resolved like `COMPOUND_RECUR_LIMIT`. |
+| `COMPOUND_INSIGHTS_TIMEOUT` | 900 | CLI | Seconds a run of `claude -p /insights` is given before its process group is killed and the outcome is `timeout`. A whole number of at least 1; anything else is the default. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_PLATFORM` | this machine's | CLI | The platform a lesson's `platform` is held against: `darwin`, `linux`, `windows`. Resolved like `COMPOUND_RECUR_LIMIT`. For tests, and for a machine the CLI names wrongly. |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | CLI | The shell a lesson's `shell` is held against (`zsh`, `bash`), when the Bash tool's shell is not the one inferred. Resolved like `COMPOUND_RECUR_LIMIT`. |
 | `COMPOUND_MODEL` | `haiku` | mod | The model that answers the mod's three questions: an alias or a model id. |
