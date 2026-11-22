@@ -31,12 +31,36 @@ Design: `notes/2026-11-21-insights-design.md`. Plan: `notes/2026-11-21-insights-
 ## Open
 
 1. The push waits for the user.
-2. The 900 s timeout kill has no test. `--config fresh` of the journey was only dry-checked.
-   No real finding was about the journey's own scratch project, so showing a finding was
-   proven with report findings only.
-3. Parked: headless `claude -p` sessions count toward a finding's three showings.
-4. Noted, not changed: the mod ignores `isCollapsed`, so the band's timer runs while the
-   band is collapsed.
+2. `--config fresh` of the journey was only dry-checked (it needs a credential in the
+   environment). No real finding was about the journey's own scratch project, so showing a
+   finding was proven with report findings only. Leg e's new `headless` check has not been
+   run for real (the full journey costs one paid `/insights`).
+3. The plugin directory's ICON_MISSING warning needs artwork: a square PNG, 512 to 2048 px,
+   under 2 MB, at `.claude-plugin/icon.png` or named by `icon` in `plugin.json`. Left to the
+   user.
+
+## Closed on 21 Nov (follow-up)
+
+- Headless sessions: a `remind` carries `headless: true` when the prompt's origin is `sdk`
+  and `$.session.surfaces()` is empty; `insight_states` does not count it.
+- `isCollapsed`: the band's timer stops while no surface shows the band, and the drawing
+  that expands it starts it again. No minimum version change.
+- `COMPOUND_INSIGHTS_TIMEOUT` (default 900). The kill now SIGKILLs what is left of the group
+  even after `claude` itself exited. `journey_insights.py --leg timeout` ran once for real
+  under ambient: 15 of 15, 9 s, one child group of 3 processes, none left.
+- `running` under 60 s old is not reported `interrupted` with the lock free.
+- `add --settles` of a facet finding with no project: user level only.
+- `HIDDEN_CHARS` and the other invisible literals in `bin/compound` written as escapes; a
+  test compares the sets with `hooks/safe.ts` and `hooks/render.ts`.
+- The harvest's lock test proves the wait from the open lock file and the order of appends.
+- `dev/ui-check.sh` recorded once after the mod changes: the reuse result keeps
+  "1 owed, 4 candidates from /insights" beside it; the band collapsed (ctrl+x ctrl+a) shows
+  "plugin panel hidden", and expanded again redraws the note; both sessions' `remind`
+  events carry no `headless`. Nothing drawn wrong.
+- CI installs Claude Code with the native installer and runs both plugin checks: in an
+  ubuntu:24.04 container (aarch64, non-root, not logged in) both ran and passed.
+- The journey's real-store guard no longer requires the real `insights.json` to be absent
+  (it exists once a run has happened); it compares size and mtime.
 
 ## Measured
 
