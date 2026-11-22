@@ -2155,6 +2155,10 @@ never touched.
   and `hooks/decisions.test.ts` hold the rules above on guards, recalls, settling, the
   CLI's own call and publishing; `tests/test_arguments.py` and `tests/test_redaction.py`
   hold what is passed to other programs and what is written to the log.
+  `tests/test_stop_group.py` is the one that loads a copy of `bin/compound` as a module: it
+  gives `stop_group` real process groups started in sessions of their own and checks that
+  none is left, and calls `insights_timeout` in a child interpreter, since no command
+  prints the timeout and the timeout path needs a real `claude` that hangs.
   `tests/test_report.py` builds event logs with the CLI and holds
   `compound report` to them, figure by figure; `hooks/measure.test.ts` sends calls through
   the mod's hooks and checks the `retry` event that follows a refusal.

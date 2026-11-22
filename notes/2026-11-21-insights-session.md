@@ -48,6 +48,13 @@ Design: `notes/2026-11-21-insights-design.md`. Plan: `notes/2026-11-21-insights-
 - `COMPOUND_INSIGHTS_TIMEOUT` (default 900). The kill now SIGKILLs what is left of the group
   even after `claude` itself exited. `journey_insights.py --leg timeout` ran once for real
   under ambient: 15 of 15, 9 s, one child group of 3 processes, none left.
+- The kill now has an automated test, `tests/test_stop_group.py`: `stop_group` against real
+  `/bin/sh` groups (all obey SIGTERM; a child ignores it, killed by the SIGKILL after 5 s; a
+  child outlives its exited leader; a dead or finished group stopped again), and
+  `insights_timeout` parsing in a child interpreter. Passed on macOS, in ubuntu:24.04 with
+  `--init`, and in python:3.9-slim. Without an init that reaps orphans (a container run with
+  no `--init`) the killed children stay zombies, `killpg(pgid, 0)` still succeeds on Linux,
+  four of its tests fail and `stop_group` waits its full 5 s; nothing is left running.
 - `running` under 60 s old is not reported `interrupted` with the lock free.
 - `add --settles` of a facet finding with no project: user level only.
 - `HIDDEN_CHARS` and the other invisible literals in `bin/compound` written as escapes; a
