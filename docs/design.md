@@ -2181,6 +2181,8 @@ never touched.
   assert on the event log. Run by hand; they spend model calls. Each runs, by default,
   under an empty `CLAUDE_CONFIG_DIR` of its own and needs `CLAUDE_CODE_OAUTH_TOKEN` or
   `ANTHROPIC_API_KEY` in the environment; `--config ambient` uses the shell's own.
+  `tests/journeys/journey_insights.py` takes no `--config`: it always uses the shell's
+  own, so the one `/insights` run it starts reads the user's real sessions.
   `tests/journeys/journey_marketplace.py` installs a copy of the package through
   `claude plugin marketplace add` and `claude plugin install` in that configuration and
   runs sessions with no `--plugin-dir`.

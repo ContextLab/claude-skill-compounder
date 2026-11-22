@@ -31,10 +31,9 @@ Design: `notes/2026-11-21-insights-design.md`. Plan: `notes/2026-11-21-insights-
 ## Open
 
 1. The push waits for the user.
-2. `--config fresh` of the journey was only dry-checked (it needs a credential in the
-   environment). No real finding was about the journey's own scratch project, so showing a
-   finding was proven with report findings only. The whole journey was run again after the
-   follow-up (26 of 26, leg e's `headless` check included).
+2. No real finding was about the journey's own scratch project, so showing a finding was
+   proven with report findings only. The whole journey was run again after the follow-up
+   (26 of 26, leg e's `headless` check included).
 3. The plugin directory's ICON_MISSING warning needs artwork: a square PNG, 512 to 2048 px,
    under 2 MB, at `.claude-plugin/icon.png` or named by `icon` in `plugin.json`. Left to the
    user.
@@ -66,6 +65,8 @@ Design: `notes/2026-11-21-insights-design.md`. Plan: `notes/2026-11-21-insights-
   events carry no `headless`. Nothing drawn wrong.
 - CI installs Claude Code with the native installer and runs both plugin checks: in an
   ubuntu:24.04 container (aarch64, non-root, not logged in) both ran and passed.
+- `--config fresh` of `journey_insights.py` (never run for real): removed on the user's
+  decision; the journey takes no `--config` and always runs under the shell's own.
 - The journey's real-store guard no longer requires the real `insights.json` to be absent
   (it exists once a run has happened); it compares size and mtime.
 

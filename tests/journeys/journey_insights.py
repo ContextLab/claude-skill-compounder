@@ -6,22 +6,16 @@ them: by the first typed prompt of a real session. Real `claude -p` sessions and
 THIS JOURNEY SPENDS MONEY OR USAGE: one `/insights` run (it cost $1.73 at list price in the
 measured run) on top of a few short sessions on the cheapest model.
 
-Two ways to run it (`--config`, see common.py):
-
-  ambient   (how it is meant to be run) every `claude` the journey starts, the worker and
-            the child `claude -p /insights` use the user's own configuration and login
-            (`~/.claude`, no CLAUDE_CONFIG_DIR). `/insights` then reads the user's real
-            sessions and writes its report and caches under the real `~/.claude/usage-data`,
-            as it does when typed. COMPOUND_CLAUDE_DIR is left unset, so the CLI reads that
-            same directory. COMPOUND_HOME stays a temporary directory in every process: the
-            real `~/.claude/compound` (log, lessons, state, lock) is never read or written,
-            which the journey asserts. Because the harvest reads real output, the journey
-            prints counts, sources, kinds and states only: no finding text, goal, project path
-            or session id. The temporary root holds findings derived from real sessions, so
-            it is always removed at the end, whatever happened.
-  fresh     every `claude` runs under an empty configuration in the throwaway root and needs
-            a credential in the environment (common.py); `/insights` sees only the journey's
-            own sessions, and COMPOUND_CLAUDE_DIR names that configuration.
+Every `claude` the journey starts, the worker and the child `claude -p /insights` use the
+user's own configuration and login (`~/.claude`, no CLAUDE_CONFIG_DIR). `/insights` then reads
+the user's real sessions and writes its report and caches under the real
+`~/.claude/usage-data`, as it does when typed. COMPOUND_CLAUDE_DIR is left unset, so the CLI
+reads that same directory. COMPOUND_HOME stays a temporary directory in every process: the
+real `~/.claude/compound` (log, lessons, state, lock) is never read or written, which the
+journey asserts. Because the harvest reads real output, the journey prints counts, sources,
+kinds and states only: no finding text, goal, project path or session id. The temporary root
+holds findings derived from real sessions, so it is always removed at the end, whatever
+happened.
 
   load      before anything paid: the first seed session's init message lists exactly one
             `compound` plugin, this working copy; an event of that session is in the
@@ -41,10 +35,8 @@ Two ways to run it (`--config`, see common.py):
   b         a second session's first prompt, made while the run is under way, does not start
             another: `started` unchanged, and exactly one new `report-*.html` in the
             usage-data the run wrote to.
-  c         fresh: `report.html`, newer than the start, is under the fresh configuration only,
-            and every entry under the real `~/.claude/usage-data` kept its mtime. ambient: the
-            report under the real usage-data is newer than the start, and nothing was written
-            to the temporary root's configuration directories.
+  c         `report.html` under the real usage-data is newer than the start, and nothing was
+            written to the temporary root's configuration directories.
   d         no event in the temporary log is of a session other than the ones run here and
             the run's own `insights`; the child's transcripts are found and counted, and no
             line of the real event log names the child or a journey session.
@@ -63,24 +55,23 @@ seconds (`--timeout`, default 8), so the real `claude -p /insights` is killed ea
 that the outcome is `timeout`, that one `error` event has `where` `insights.run`, that no
 process of the child's process group is left (checked by group, not by name), that the lock
 is free, that nothing was harvested, and that the next `insights --start` under the default
-days answers `too soon`. Under ambient it prints how many entries under the real
-usage-data the killed run added or changed (counts only).
+days answers `too soon`. It prints how many entries under the real usage-data the killed run
+added or changed (counts only). Before the run it checks that no API key or token is in the
+environment, so the child uses the Claude CLI's own login, and stops there when one is.
 
 Whatever happens, the `finally` stops a worker still running for this world (its whole
 process group and the child's) so no `claude` is left behind. The real
 `~/.claude/compound/insights.json` (the user's own, when a run has happened there) must be
 as it was before: its size and modification time are compared, never its contents.
 
-What has been run for real: the whole journey under `--config ambient` (26 of 26 checks on
-21 Nov 2026, the `headless` check of e included), and `--leg timeout` under
-`--config ambient`. `--config fresh` has only been checked with `--dry`: it needs
-CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the environment, and has never run for real.
+What has been run for real: the whole journey (26 of 26 checks on 21 Nov 2026, the
+`headless` check of e included), and `--leg timeout` (15 of 15).
 
-`--dry` runs only what needs no model call, for the configuration given: the helpers, the
-`disabled` answer, the snapshots, the cleanup. It starts no `claude` and needs no credential.
+`--dry` runs only what needs no model call: the helpers, the `disabled` answer, the
+snapshots, the cleanup. It starts no `claude`.
 
-usage: journey_insights.py [--config ambient|fresh] [--model haiku] [--keep] [--deadline SECONDS] [--dry]
-                           [--leg all|timeout] [--timeout SECONDS]
+usage: journey_insights.py [--model haiku] [--deadline SECONDS] [--dry] [--leg all|timeout]
+                           [--timeout SECONDS]
 """
 import argparse
 import calendar
@@ -110,6 +101,11 @@ REAL_CLAUDE = os.path.join(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir), "
 REAL_USAGE = os.path.join(REAL_CLAUDE, "usage-data")
 REAL_LOG = os.path.join(REAL_CLAUDE, "compound", "events.jsonl")
 REAL_STATE = os.path.join(REAL_CLAUDE, "compound", "insights.json")
+# No COMPOUND_CLAUDE_DIR, so the CLI reads ~/.claude, which `claude` writes to, and the child
+# gets no CLAUDE_CONFIG_DIR.
+HERE = dict(COMPOUND_CLAUDE_DIR=None)
+# The starting session and the one during the run: a run is due after one logged session.
+STARTING = dict(QUIET, COMPOUND_INSIGHTS_MIN_SESSIONS="1")
 
 
 def mtime(path):
@@ -233,11 +229,9 @@ def read_state(home):
         return {}
 
 
-def shown_state(saved, private):
-    """The state as the journey prints it: under ambient its message, which can name a file
-    of a real session, is replaced by its length."""
-    if not private:
-        return saved
+def shown_state(saved):
+    """The state as the journey prints it: its message, which can name a file of a real
+    session, is replaced by its length."""
     out = {k: saved.get(k) for k in ("started", "finished", "outcome", "harvested")}
     out["message_chars"] = len(str(saved.get("message") or ""))
     return out
@@ -324,7 +318,7 @@ def real_after(w, before, sids):
     print("      the real event log: %s bytes after (other sessions of the user write to it too)" % size(REAL_LOG))
 
 
-def dry(w, project, here, ambient):
+def dry(w, project):
     """What needs no model call. No `claude` can be started, by construction as in the Python
     tests: the days setting is 0, and the call gets a HOME in the throwaway root (so there is
     no ~/.local/bin/claude) and PATH=/usr/bin:/bin (where there is no claude)."""
@@ -334,15 +328,14 @@ def dry(w, project, here, ambient):
     w.check("dry", "no claude in the call's PATH or its HOME's .local/bin",
             not any(os.path.exists(os.path.join(d, "claude")) for d in ("/usr/bin", "/bin",
                                                                        os.path.join(sandbox_home, ".local", "bin"))))
-    answer = w.cli(project, "insights", "--start", "--json", HOME=sandbox_home, PATH="/usr/bin:/bin", **here, **SEED)
+    answer = w.cli(project, "insights", "--start", "--json", HOME=sandbox_home, PATH="/usr/bin:/bin", **HERE, **SEED)
     w.check("dry", "insights --start under the seed environment answers disabled",
             answer.returncode == 0 and json.loads(answer.stdout or "{}").get("why") == "disabled", answer.stdout)
     w.check("dry", "it wrote no state", not os.path.exists(os.path.join(w.home, "insights.json")))
-    state = w.cli(project, "insights", "--json", HOME=sandbox_home, PATH="/usr/bin:/bin", **here)
+    state = w.cli(project, "insights", "--json", HOME=sandbox_home, PATH="/usr/bin:/bin", **HERE)
     data = json.loads(state.stdout or "{}") if state.returncode == 0 else {}
-    w.check("dry", "the CLI reads the Claude directory this configuration means",
-            data.get("claude_dir") == (os.path.join(sandbox_home, ".claude") if ambient else w.config),
-            data.get("claude_dir"))
+    w.check("dry", "the CLI reads the Claude directory of the call's HOME",
+            data.get("claude_dir") == os.path.join(sandbox_home, ".claude"), data.get("claude_dir"))
     w.check("dry", "the lock is free and no worker holds it", lock_is_free(w.home) and workers(w.home) == [])
     # A lock held by another process is seen as held, and its holder is found by the file.
     os.makedirs(w.home, exist_ok=True)
@@ -365,67 +358,54 @@ def dry(w, project, here, ambient):
     usage = snapshot(REAL_USAGE)
     w.check("dry", "the real usage-data snapshot is stable", snapshot(REAL_USAGE) == usage,
             "%d entries" % len(usage))
-    config = REAL_CLAUDE if ambient else w.config
-    print("      the child would leave its transcripts under %s" % transcripts(config, w.home)[0])
+    print("      the child would leave its transcripts under %s" % transcripts(REAL_CLAUDE, w.home)[0])
     real_after(w, before, [])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="haiku", help="the sessions' model (the judge is COMPOUND_MODEL)")
-    ap.add_argument("--keep", action="store_true",
-                    help="keep the throwaway root when everything passes (fresh only: under ambient it is always removed)")
     ap.add_argument("--deadline", type=int, default=1100,
                     help="seconds to wait for the run to leave `running` (the CLI kills it at 900)")
     ap.add_argument("--dry", action="store_true", help="only what needs no model call; starts no claude")
     ap.add_argument("--leg", choices=("all", "timeout"), default="all",
                     help="timeout: only the leg that kills a real run at COMPOUND_INSIGHTS_TIMEOUT")
     ap.add_argument("--timeout", type=int, default=8, help="the timeout leg's COMPOUND_INSIGHTS_TIMEOUT, in seconds")
-    args = common.parse(ap)
-    ambient = common.CONFIG == "ambient"
+    args = ap.parse_args()
+    # Every World here is made with config="ambient": the shell's own configuration.
     if args.dry:
-        # No claude runs, so no credential is needed: the world is made as an ambient one,
-        # and the fresh configuration, when asked for, is its `config` directory.
         w = common.World("insights-dry", config="ambient")
         project = w.project("alpha", build=True)
-        here = dict(COMPOUND_CLAUDE_DIR=None) if ambient else dict(COMPOUND_CLAUDE_DIR=w.config)
         try:
-            dry(w, project, here, ambient)
+            dry(w, project)
         finally:
             stop_workers(w.home)
-            if ambient:
-                shutil.rmtree(w.root, ignore_errors=True)
-        w.finish(True if ambient else args.keep)
+            shutil.rmtree(w.root, ignore_errors=True)
+        w.finish(True)
     if os.environ.get("COMPOUND_JOURNEY_PLUGIN"):
         raise SystemExit("journey_insights.py loads this working copy only: unset COMPOUND_JOURNEY_PLUGIN")
     if args.leg == "timeout":
-        w = common.World("insights-timeout")
+        w = common.World("insights-timeout", config="ambient")
         project = w.project("alpha")
-        here = dict(COMPOUND_CLAUDE_DIR=None) if ambient else dict(COMPOUND_CLAUDE_DIR=w.config)
         try:
-            timeout_leg(w, project, args, here, ambient)
+            timeout_leg(w, project, args)
         finally:
             left = stop_workers(w.home)
             if left:
                 print("      cleanup: stopped %d processes still running for this world" % len(left))
-            if ambient:
-                shutil.rmtree(w.root, ignore_errors=True)
-        w.finish(True if ambient else args.keep)
-    w = common.World("insights")
+            shutil.rmtree(w.root, ignore_errors=True)
+        w.finish(True)
+    w = common.World("insights", config="ambient")
     project = w.project("alpha", build=True)
-    # ambient: no COMPOUND_CLAUDE_DIR, so the CLI reads ~/.claude, which `claude` writes to, and
-    # the child gets no CLAUDE_CONFIG_DIR. fresh: the fresh configuration, named for both.
-    here = dict(COMPOUND_CLAUDE_DIR=None) if ambient else dict(COMPOUND_CLAUDE_DIR=w.config)
     try:
-        run(w, project, args, here, ambient)
+        run(w, project, args)
     finally:
         left = stop_workers(w.home)
         if left:
             print("      cleanup: stopped %d processes still running for this world" % len(left))
-        if ambient:
-            print("      cleanup: removing the temporary root (it holds findings from real sessions)")
-            shutil.rmtree(w.root, ignore_errors=True)
-    w.finish(True if ambient else args.keep)
+        print("      cleanup: removing the temporary root (it holds findings from real sessions)")
+        shutil.rmtree(w.root, ignore_errors=True)
+    w.finish(True)
 
 
 def group_left(pgid):
@@ -442,21 +422,18 @@ def group_left(pgid):
     return found or [pgid]
 
 
-def timeout_leg(w, project, args, here, ambient):
+def timeout_leg(w, project, args):
     """One real `compound insights --run` killed at COMPOUND_INSIGHTS_TIMEOUT=args.timeout."""
     before = real_guard(w)
-    config = REAL_CLAUDE if ambient else w.config
-    usage = os.path.join(config, "usage-data")
-    usage_before = snapshot(usage)
-    env = w.env(project, COMPOUND_INSIGHTS_TIMEOUT=str(args.timeout), **here)
-    if ambient:
-        keys = [n for n in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN") if env.get(n)]
-        w.check("timeout", "no API key or token in the environment: the child uses the Claude CLI's own login",
-                keys == [], keys)
-        if keys:
-            print("      stopping before the run: unset %s" % ", ".join(keys))
-            real_after(w, before, [])
-            return
+    usage_before = snapshot(REAL_USAGE)
+    env = w.env(project, COMPOUND_INSIGHTS_TIMEOUT=str(args.timeout), **HERE)
+    keys = [n for n in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN") if env.get(n)]
+    w.check("timeout", "no API key or token in the environment: the child uses the Claude CLI's own login",
+            keys == [], keys)
+    if keys:
+        print("      stopping before the run: unset %s" % ", ".join(keys))
+        real_after(w, before, [])
+        return
     # Typed by hand, as a user would: not as a call of this session's.
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     began = time.time()
@@ -483,7 +460,7 @@ def timeout_leg(w, project, args, here, ambient):
     w.check("timeout", "it ran a real claude for the whole timeout and stopped soon after (%d s, then up to 5 s "
             "and the SIGKILL)" % args.timeout, args.timeout <= took <= args.timeout + 20, "%.1f s" % took)
     state = read_state(w.home)
-    w.show("state", [shown_state(state, ambient)])
+    w.show("state", [shown_state(state)])
     w.check("timeout", "the outcome is timeout", state.get("outcome") == "timeout", state.get("outcome"))
     w.check("timeout", "its message says the timeout", "within %d seconds" % args.timeout in str(state.get("message")))
     errors = [e for e in w.events(project, kind="error")]
@@ -501,33 +478,29 @@ def timeout_leg(w, project, args, here, ambient):
             w.events(project, kind="insight") == [] and not state.get("harvested"),
             (len(w.events(project, kind="insight")), state.get("harvested")))
     answer = w.cli(project, "insights", "--start", "--json", COMPOUND_INSIGHTS_DAYS=None,
-                   COMPOUND_INSIGHTS_MIN_SESSIONS=None, COMPOUND_INSIGHTS_TIMEOUT=None, **here)
+                   COMPOUND_INSIGHTS_MIN_SESSIONS=None, COMPOUND_INSIGHTS_TIMEOUT=None, **HERE)
     w.check("timeout", "the next insights --start under the default days answers too soon",
             answer.returncode == 0 and json.loads(answer.stdout or "{}").get("why") == "too soon", answer.stdout)
     w.check("timeout", "that answer started nothing: the state still says timeout",
             read_state(w.home).get("outcome") == "timeout" and lock_is_free(w.home))
-    usage_after = snapshot(usage)
+    usage_after = snapshot(REAL_USAGE)
     added = [p for p in usage_after if p not in usage_before]
     changed = [p for p in usage_after if p in usage_before and usage_before[p] != usage_after[p]]
-    print("      what the killed run left under %s: %d entries added, %d changed, %d removed (Claude Code's own "
-          "caches; left in place)" % ("the real ~/.claude/usage-data" if ambient else "the fresh usage-data",
-                                       len(added), len(changed), len([p for p in usage_before if p not in usage_after])))
-    folder, child = transcripts(config, w.home)
+    print("      what the killed run left under the real ~/.claude/usage-data: %d entries added, %d changed, %d "
+          "removed (Claude Code's own caches; left in place)" % (
+              len(added), len(changed), len([p for p in usage_before if p not in usage_after])))
+    folder, child = transcripts(REAL_CLAUDE, w.home)
     print("      the child's transcripts: %d under %s (left in place)" % (len(child), folder))
     real_after(w, before, [name[:-len(".jsonl")] for name in child])
 
 
-def run(w, project, args, here, ambient):
-    private = ambient
-    config = REAL_CLAUDE if ambient else w.config
-    usage = os.path.join(config, "usage-data")
+def run(w, project, args):
     before = real_guard(w)
-    real_usage_before = snapshot(REAL_USAGE)
     sids = []
 
     # ---- load and seed, and f ----
     first = w.session(project, [common.BUILD_TASK, BUILD_AGAIN, BUILD_LAST], args.model, tools=("Bash", "Skill"),
-                      **here, **SEED)
+                      **HERE, **SEED)
     sids.append(first.sid)
     paths = loaded(first.stream)
     w.check("load", "the first session lists exactly one compound plugin, this working copy",
@@ -539,8 +512,8 @@ def run(w, project, args, here, ambient):
     if not all(w.results):
         print("      BLOCKED before anything paid: the working copy's mod and the temporary store are not proven")
         return
-    second = w.session(project, [NOTE, NOTE_AGAIN, NOTE_LAST], args.model, **here, **SEED)
-    third = w.session(project, [common.BUILD_TASK, BUILD_AGAIN], args.model, tools=("Bash", "Skill"), **here, **SEED)
+    second = w.session(project, [NOTE, NOTE_AGAIN, NOTE_LAST], args.model, **HERE, **SEED)
+    third = w.session(project, [common.BUILD_TASK, BUILD_AGAIN], args.model, tools=("Bash", "Skill"), **HERE, **SEED)
     sids += [second.sid, third.sid]
     seeded = {first.sid, second.sid, third.sid}
     failed = [c for c in first.bash() + third.bash() if c[1]]
@@ -550,7 +523,7 @@ def run(w, project, args, here, ambient):
     w.check("seed", "the note session finished", second.returncode == 0, second.result[-200:])
     w.check("f", "no seed session started a run (COMPOUND_INSIGHTS_DAYS=0): no state file",
             not os.path.exists(os.path.join(w.home, "insights.json")))
-    answer = w.cli(project, "insights", "--start", "--json", **here, **SEED)
+    answer = w.cli(project, "insights", "--start", "--json", **HERE, **SEED)
     w.check("f", "insights --start under the same environment answers disabled",
             answer.returncode == 0 and json.loads(answer.stdout or "{}").get("why") == "disabled", answer.stdout)
     logged = {e.get("session") for e in w.events(project)} & seeded
@@ -562,23 +535,16 @@ def run(w, project, args, here, ambient):
         return
 
     # ---- a: the run started by a real session's first typed prompt ----
-    reports_before = reports(usage)
-    # fresh: the mod comes through CLAUDE_CODE_PLUGIN_DIRS with the user settings of the fresh
-    # configuration, so the child loads it too. ambient: --plugin-dir, as for every session
-    # here; the child reads the user's own settings and loads what they name.
-    if ambient:
-        starting = dict(QUIET, COMPOUND_INSIGHTS_MIN_SESSIONS="1")
-        flags = {}
-    else:
-        starting = dict(QUIET, COMPOUND_INSIGHTS_MIN_SESSIONS="1", CLAUDE_CODE_PLUGIN_DIRS=common.PLUGIN)
-        flags = {"installed": True}
+    reports_before = reports(REAL_USAGE)
+    # The mod comes through --plugin-dir, as for every session here; the child reads the
+    # user's own settings and loads what they name.
     began = time.time()
-    starter = w.session(project, READY, args.model, tools=("Skill",), **flags, **here, **starting)
+    starter = w.session(project, READY, args.model, tools=("Skill",), **HERE, **STARTING)
     sids.append(starter.sid)
     ended = time.time()
     after_start = read_state(w.home)
     held = not lock_is_free(w.home)
-    w.show("state", [shown_state(after_start, private)])
+    w.show("state", [shown_state(after_start)])
     w.check("a", "the starting session answered", "READY" in starter.result, starter.result[:200])
     started = isinstance(after_start.get("started"), (int, float)) and after_start["started"] >= int(began) - 1
     w.check("a", "after its first prompt the state says a run started", started)
@@ -587,7 +553,7 @@ def run(w, project, args, here, ambient):
         with open(starter.stream) as fh:
             stream = fh.read()
         print("      NO RUN STARTED after the starting session's first prompt; not polling.")
-        print("      state file: %s" % (json.dumps(shown_state(after_start, private)) if after_start
+        print("      state file: %s" % (json.dumps(shown_state(after_start)) if after_start
                                         else "absent or unreadable"))
         print("      the mod's context in the session's stream: %s; its claims for the session: %d" % (
             "present ([compound] seen)" if "[compound]" in stream else "absent (no [compound] in the stream)",
@@ -600,7 +566,7 @@ def run(w, project, args, here, ambient):
             "lock held: %s; workers %s" % (held, workers(w.home)))
 
     # ---- b: a second session during the run ----
-    during = w.session(project, READY, args.model, tools=("Skill",), **flags, **here, **starting)
+    during = w.session(project, READY, args.model, tools=("Skill",), **HERE, **STARTING)
     sids.append(during.sid)
     w.check("b", "a second session's first prompt during the run did not start another: started unchanged",
             read_state(w.home).get("started") == after_start.get("started"))
@@ -622,42 +588,31 @@ def run(w, project, args, here, ambient):
     if not seen or seen[-1] != last.get("outcome"):
         seen.append(last.get("outcome"))
     took = time.time() - began
-    w.show("state", [shown_state(last, private)])
+    w.show("state", [shown_state(last)])
     w.check("a", "the state went from running to ok", seen[:1] == ["running"] and last.get("outcome") == "ok",
             " -> ".join(str(s) for s in seen))
     w.check("a", "the lock is free and no worker is left", lock_is_free(w.home) and workers(w.home) == [],
             workers(w.home))
-    new_reports = [name for name in reports(usage) if name not in reports_before]
+    new_reports = [name for name in reports(REAL_USAGE) if name not in reports_before]
     w.check("b", "exactly one /insights ran: one new report-*.html", len(new_reports) == 1,
             "%d new" % len(new_reports))
     print("      the second session's own events: %s" % sorted(
         {e.get("type") for e in w.events(project, session=during.sid)}))
 
     # ---- c ----
-    report = os.path.join(usage, "report.html")
-    w.check("c", "a report.html newer than the start is in the usage-data the child wrote (%s)" % (
-        "the real ~/.claude" if ambient else "the fresh configuration"),
+    report = os.path.join(REAL_USAGE, "report.html")
+    w.check("c", "a report.html newer than the start is in the usage-data the child wrote (the real ~/.claude)",
             (mtime(report) or 0) >= int(after_start.get("started") or began))
-    if ambient:
-        w.check("c", "nothing was written to the temporary root's configuration directories",
-                os.listdir(w.config) == [] and not os.path.exists(os.path.join(w.claude, "usage-data"))
-                and not os.path.exists(os.path.join(w.home, "usage-data")))
-    else:
-        w.check("c", "none under the world's default Claude directory or under COMPOUND_HOME",
-                not os.path.exists(os.path.join(w.claude, "usage-data"))
-                and not os.path.exists(os.path.join(w.home, "usage-data")))
-        real_usage_after = snapshot(REAL_USAGE)
-        changed = [p for p in set(real_usage_before) | set(real_usage_after)
-                   if real_usage_before.get(p) != real_usage_after.get(p)]
-        w.check("c", "every entry under the real usage-data kept its mtime (%d entries)" % len(real_usage_before),
-                changed == [], "%d changed" % len(changed))
+    w.check("c", "nothing was written to the temporary root's configuration directories",
+            os.listdir(w.config) == [] and not os.path.exists(os.path.join(w.claude, "usage-data"))
+            and not os.path.exists(os.path.join(w.home, "usage-data")))
 
     # ---- d ----
     sessions = {e.get("session") for e in w.events(project)}
     ours = seeded | {starter.sid, during.sid, "insights"}
     w.check("d", "the temporary log holds no event of the child session (it ran with COMPOUND_OFF=1)",
             sessions <= ours, "%d other sessions" % len(sessions - ours))
-    folder, child = transcripts(config, w.home)
+    folder, child = transcripts(REAL_CLAUDE, w.home)
     child_sids = [name[:-len(".jsonl")] for name in child]
     print("      the child's transcripts: %d under %s (Claude Code's own; left in place)" % (len(child), folder))
     w.check("d", "the child's session wrote nothing to the temporary log",
@@ -665,7 +620,7 @@ def run(w, project, args, here, ambient):
     sids += child_sids
 
     # ---- e ----
-    now = json.loads(w.cli(project, "insights", "--json", **here).stdout or "{}")
+    now = json.loads(w.cli(project, "insights", "--json", **HERE).stdout or "{}")
     findings = now.get("findings") or []
     print("      harvested: %s" % json.dumps((now.get("harvested") or {})))
     print("      findings by source and state: %s" % json.dumps(
@@ -678,13 +633,13 @@ def run(w, project, args, here, ambient):
     print("      open findings listed for the scratch project: %d (%d about its sessions)" % (
         len(listed), sum(1 for f in listed if f.get("source") == "facet")))
     if listed:
-        later = w.session(project, READY, args.model, tools=("Skill",), **here, **QUIET)
+        later = w.session(project, READY, args.model, tools=("Skill",), **HERE, **QUIET)
         sids.append(later.sid)
         rows = w.events(project, session=later.sid, kind="remind")
         named = [i for e in rows for i in (e.get("insights") or [])]
         # What a hook adds to a typed prompt is not in the -p stream; Claude Code keeps it in
         # the session's transcript, <config>/projects/<slug of the project>/<session id>.jsonl.
-        transcript = os.path.join(config, "projects", slug(project), later.sid + ".jsonl")
+        transcript = os.path.join(REAL_CLAUDE, "projects", slug(project), later.sid + ".jsonl")
         try:
             with open(transcript, encoding="utf-8", errors="replace") as fh:
                 added = fh.read()
@@ -713,7 +668,7 @@ def run(w, project, args, here, ambient):
           "sessions reported %.4f USD in all (starting session %s, second %s)" % (
               sum(sum(costs(s.stream)) for s in spent), costs(starter.stream), costs(during.stream)))
     print("      the journey's own session transcripts are Claude Code's, under %s (left in place)" % os.path.join(
-        config, "projects", slug(project)))
+        REAL_CLAUDE, "projects", slug(project)))
     real_after(w, before, sids)
 
 
