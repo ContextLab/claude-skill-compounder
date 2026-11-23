@@ -1632,6 +1632,7 @@ add` wrote, without its `origin` (what `compound promote --to general` publishes
 | `macos-gnu-only-commands` | lesson | `platform: darwin` | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails |
 | `pip-externally-managed` | lesson | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
 | `proposal-ships-the-working-fix` | lesson | everywhere | recalled when a locally working fix is proposed upstream or to a shared pool |
+| `gemini-via-agy-cli` | guard | everywhere | stops a call to the `gemini` CLI, which exits at login with IneligibleTierError; the Antigravity CLI `agy` takes its place |
 
 What each lesson in the table is meant to be is also written down beside the tests, in
 `tests/pool/lessons/<name>.json`: its pins, in the form `compound promote --to general
