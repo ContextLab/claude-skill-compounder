@@ -544,6 +544,9 @@ WHAT A REPOSITORY CAN WRITE
     (UTF-16). A destination the environment names (COMPOUND_UPSTREAM,
     COMPOUND_UPSTREAM_GIT) is published to only when `--upstream` names it too, and
     the lesson is written into a real directory of the clone, never through a link.
+    A lesson is proposed with its pins (`--pins`, see PIN_KEYS): they are checked
+    against the lesson and against the cloned pool, whose files are read as data and
+    never run, and are published with it as tests/pool/lessons/<name>.json.
 
     A value from outside is never an option of a program this file runs: every program
     is started from an argument vector with no shell, a ref, an owner/repo and a git
@@ -6382,6 +6385,227 @@ def _must(argv, cwd=None, what=None):
     return out
 
 
+# What a lesson of the general pool is meant to be is written down beside the pool's
+# tests, one file a lesson (tests/pool/lessons/<name>.json), and the pool's suite holds
+# every shipped lesson to its file. A proposal carries its own.
+PIN_KEYS = ("kind", "platform", "shell", "stops", "passes")
+PIN_STOPS = 5
+PIN_PASSES = 8
+PIN_BYTES = 256 * 1024
+PIN_SUMMARY_CHARS = 300
+PIN_GUARD_SECONDS = 2.0
+PIN_HELP = ("A pin file is one JSON object with exactly these keys: \"kind\" (\"guard\" for a lesson with a "
+            "`match`, \"lesson\" for one without), \"platform\" and \"shell\" (the lists the lesson's own header "
+            "carries; [] is everywhere), \"stops\" (for a guard, at least %d commands it must stop) and \"passes\" "
+            "(for a guard, at least %d commands that look alike and must run; both are [] for a lesson)" % (
+                PIN_STOPS, PIN_PASSES))
+# Where the pool's documents list its lessons: (file, the heading the table is under).
+POOL_TABLES = (("README.md", "### The lessons that ship with compound"), ("docs/design.md", "## The general pool"))
+PLATFORM_WORDS = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
+
+
+def pin_shape_problems(data):
+    """What keeps `data` from being a pin file, as a list of sentences without a full stop."""
+    if not isinstance(data, dict):
+        return ["it is not a JSON object"]
+    out = []
+    if sorted(data) != sorted(PIN_KEYS):
+        missing = [key for key in PIN_KEYS if key not in data]
+        extra = sorted(one_line(key)[:40] for key in data if key not in PIN_KEYS)
+        if missing:
+            out.append("it lacks %s" % ", ".join("`%s`" % key for key in missing))
+        if extra:
+            out.append("it has keys a pin file does not: %s" % ", ".join(extra))
+        return out
+    if data["kind"] not in ("lesson", "guard"):
+        out.append("`kind` is neither \"lesson\" nor \"guard\"")
+    for key in ("platform", "shell", "stops", "passes"):
+        value = data[key]
+        if not isinstance(value, list) or not all(isinstance(one, str) and one for one in value):
+            out.append("`%s` is not a list of non-empty strings" % key)
+        elif len(set(value)) != len(value):
+            out.append("`%s` names one entry twice" % key)
+    if out:
+        return out
+    if data["kind"] == "lesson" and (data["stops"] or data["passes"]):
+        out.append("a lesson with no pattern stops nothing, so its `stops` and `passes` are []")
+    if data["kind"] == "guard" and len(data["stops"]) < PIN_STOPS:
+        out.append("a guard needs at least %d `stops` and it has %d" % (PIN_STOPS, len(data["stops"])))
+    if data["kind"] == "guard" and len(data["passes"]) < PIN_PASSES:
+        out.append("a guard needs at least %d `passes` and it has %d" % (PIN_PASSES, len(data["passes"])))
+    return out
+
+
+def read_pins(path):
+    """The pins in the file `--pins` names. Anything that is not a pin file is exit 2."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(PIN_BYTES + 1)
+    except OSError as exc:
+        raise usage("--pins %s cannot be read (%s)" % (sh_quote(one_line(path)[:200]), exc.strerror or exc))
+    if len(raw) > PIN_BYTES:
+        raise usage("--pins %s is larger than %d bytes" % (sh_quote(one_line(path)[:200]), PIN_BYTES))
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise usage("--pins %s does not read as JSON (%s). %s" % (
+            sh_quote(one_line(path)[:200]), one_line(exc)[:120], PIN_HELP))
+    problems = pin_shape_problems(data)
+    if problems:
+        raise usage("--pins %s is not a pin file: %s. %s" % (
+            sh_quote(one_line(path)[:200]), "; ".join(problems), PIN_HELP))
+    return dict((key, data[key]) for key in PIN_KEYS)
+
+
+def pins_text(pins):
+    """A pin file's bytes: the keys in PIN_KEYS order, two spaces of indent, one final newline."""
+    return json.dumps(dict((key, pins[key]) for key in PIN_KEYS), indent=2, ensure_ascii=False) + "\n"
+
+
+def summary_problem(summary):
+    """Why `summary` cannot be a cell of the pool's tables, or None."""
+    if not summary.strip():
+        return "it is empty"
+    if "\n" in summary or "\r" in summary or CONTROL_CHARS.search(summary):
+        return "it is more than one line"
+    if "|" in summary:
+        return "it holds a `|`, which ends a table cell"
+    if len(summary) > PIN_SUMMARY_CHARS:
+        return "it is %d characters long, and a summary may be %d" % (len(summary), PIN_SUMMARY_CHARS)
+    return None
+
+
+def stopped_by(guards, command):
+    """(indexes of `guards` that stop the Bash command, indexes that did not finish).
+    `guards` is a list of pattern lists, matched as `check` matches them."""
+    hits, unfinished, never = run_guards(guards, command, time.monotonic() + PIN_GUARD_SECONDS, shell=True)
+    return hits, unfinished + never
+
+
+def pin_problems(item, pins):
+    """Where the lesson is not what its pins say, as a list of sentences. Nothing but the
+    lesson and the pins is read."""
+    out = []
+    kind = "guard" if item["match"] else "lesson"
+    if pins["kind"] != kind:
+        out.append("the pins say `%s` and the lesson is a %s: it has %s `match`" % (
+            pins["kind"], kind, "a" if item["match"] else "no"))
+    for key in ("platform", "shell"):
+        if sorted(pins[key]) != sorted(item[key]):
+            out.append("the pins say `%s` %s and the lesson's header says %s" % (
+                key, json.dumps(sorted(pins[key])), json.dumps(sorted(item[key]))))
+    if kind == "guard" and pins["kind"] == "guard":
+        for command in pins["stops"]:
+            hits, late = stopped_by([item["match"]], command)
+            if late:
+                out.append("the pattern did not finish on %s" % json.dumps(command))
+            elif not hits:
+                out.append("the pins say it stops %s and its pattern does not" % json.dumps(command))
+        for command in pins["passes"]:
+            hits, late = stopped_by([item["match"]], command)
+            if late:
+                out.append("the pattern did not finish on %s" % json.dumps(command))
+            elif hits:
+                out.append("the pins say %s runs and its pattern stops it" % json.dumps(command))
+    return out
+
+
+def _pool_json(path):
+    """A JSON file of a cloned pool, as data, or None when it is not there or does not read."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(PUBLISH_BYTES + 1)
+        return json.loads(raw.decode("utf-8")) if len(raw) <= PUBLISH_BYTES else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def pool_problems(clone, name, item, pins):
+    """Where the lesson and its pins do not fit the pool cloned at `clone`, as a list of
+    sentences. The pool's files are read as data and nothing of the clone is run: the
+    everyday commands no shipped pattern may stop (tests/pool/ordinary.json), the pins of
+    the lessons already there, and their patterns."""
+    out = []
+    pool = os.path.join(clone, "tests", "pool")
+    theirs = {}
+    try:
+        entries = sorted(os.listdir(os.path.join(pool, "lessons")))
+    except OSError:
+        entries = []
+    for entry in entries:
+        data = _pool_json(os.path.join(pool, "lessons", entry))
+        if entry.endswith(".json") and entry[:-5] != name and not pin_shape_problems(data):
+            theirs[entry[:-5]] = data
+    if item["match"]:
+        ordinary = _pool_json(os.path.join(pool, "ordinary.json"))
+        commands = [(command, "an everyday command of the pool (tests/pool/ordinary.json)")
+                    for command in (ordinary if isinstance(ordinary, list) else []) if isinstance(command, str)]
+        for other, pin in sorted(theirs.items()):
+            commands += [(command, "a command the pins of `%s` hold" % other) for command in pin["stops"] + pin["passes"]]
+        for command, what in commands:
+            hits, late = stopped_by([item["match"]], command)
+            if hits or late:
+                out.append("its pattern %s %s, %s" % ("stops" if hits else "did not finish on", json.dumps(command), what))
+    others = []
+    try:
+        shipped = sorted(os.listdir(os.path.join(clone, "lessons")))
+    except OSError:
+        shipped = []
+    for entry in shipped:
+        directory = os.path.join(clone, "lessons", entry)
+        if entry.startswith(".") or entry == name or os.path.islink(directory) or not os.path.isdir(directory):
+            continue
+        if os.path.islink(os.path.join(directory, "SKILL.md")) or not os.path.isfile(os.path.join(directory, "SKILL.md")):
+            continue
+        other = _load_item("general", "lesson", directory, False)
+        if not other["_problem"] and other["match"]:
+            others.append(other)
+    for command in pins["stops"] + pins["passes"]:
+        hits, _late = stopped_by([other["match"] for other in others], command)
+        for index in hits:
+            out.append("the pool's `%s` stops %s, a command of these pins" % (others[index]["name"], json.dumps(command)))
+    return out
+
+
+def applies_cells(pins):
+    """(`macOS, zsh` for the README, `platform: darwin`, `shell: zsh` in code marks for the design)."""
+    words = [PLATFORM_WORDS.get(one, one) for one in pins["platform"]] + list(pins["shell"])
+    code = ["`platform: %s`" % one for one in pins["platform"]] + ["`shell: %s`" % one for one in pins["shell"]]
+    return ", ".join(words) or "everywhere", ", ".join(code) or "everywhere"
+
+
+def table_row_added(text, heading, name, pins, summary):
+    """`text` with the lesson's row at the end of the lessons table under `heading`, or None
+    when the document has no such table. A table of three columns is the README's (Lesson,
+    Applies, What it does) and one of four the design's (Lesson, Form, Applies where,
+    Stops or answers)."""
+    lines = text.split("\n")
+    words, code = applies_cells(pins)
+    rows = {3: "| `%s` | %s | %s |" % (name, words, summary),
+            4: "| `%s` | %s | %s | %s |" % (name, pins["kind"], code, summary)}
+    under = False
+    for index, line in enumerate(lines):
+        if line.strip() == heading:
+            under = True
+            continue
+        if not under:
+            continue
+        if line.startswith("#") and line.lstrip("#").startswith(" ") and len(line) - len(line.lstrip("#")) <= len(heading) - len(heading.lstrip("#")):
+            return None
+        if line.startswith("| Lesson |"):
+            row = rows.get(line.strip().strip("|").count("|") + 1)
+            last = index
+            while last + 1 < len(lines) and lines[last + 1].startswith("|"):
+                last += 1
+            if row is None or any(cells.startswith("| `%s` |" % name) for cells in lines[index:last + 1]):
+                return None
+            lines.insert(last + 1, row)
+            return "\n".join(lines)
+    return None
+
+
 def cmd_promote(args):
     project = project_root()
     item = find_item(project, args.name)
@@ -6390,6 +6614,8 @@ def cmd_promote(args):
         raise usage("--auto, --seen-in and --as go with --to user only")
     if args.to != "general" and args.upstream is not None:
         raise usage("--upstream goes with --to general only")
+    if args.to != "general" and (args.pins is not None or args.summary is not None):
+        raise usage("--pins and --summary go with --to general only")
     if args.to == "user":
         if item["level"] != "project":
             raise usage("%r is already at the %s level" % (name, item["level"]))
@@ -6537,6 +6763,25 @@ def cmd_promote(args):
                         name, one_line(destination), UPSTREAM_DEFAULT, variable, sh_quote(destination)))
     files, excluded = _lesson_files(item["path"])
     skill_md = published_text(item)
+    # A LESSON IS PROPOSED WITH ITS PINS. The pool's suite holds every shipped lesson to a
+    # statement, made apart from the lesson, of what it is meant to be; a lesson that
+    # arrives without one fails that suite whatever it says. So the statement is asked
+    # for here, checked against the lesson here, and published with it.
+    if item["kind"] != "lesson" and (args.pins is not None or args.summary is not None):
+        raise usage("--pins and --summary go with a lesson; %r is a skill" % name)
+    pins = read_pins(args.pins) if args.pins is not None else None
+    summary = args.summary.strip() if args.summary is not None else None
+    if summary is not None and summary_problem(args.summary):
+        raise usage("--summary cannot be a row of the pool's tables: %s" % summary_problem(args.summary))
+    pin_path = "tests/pool/lessons/%s.json" % name
+    unpinned = []
+    if item["kind"] == "lesson":
+        if pins is None:
+            unpinned.append("it has no pins (--pins FILE)")
+        if summary is None:
+            unpinned.append("it has no one-line summary for the pool's tables (--summary TEXT)")
+        if pins is not None:
+            unpinned += pin_problems(item, pins)
 
     import shutil
     import tempfile
@@ -6548,16 +6793,33 @@ def cmd_promote(args):
         os.makedirs(staging)
         unpublishable = stage_files(item, files, skill_md, staging)
         secrets = secret_findings(staging)
+        if pins is not None or summary is not None:
+            # The pins and the summary are published too, and are read like the lesson.
+            beside = os.path.join(work, "pins")
+            os.makedirs(beside)
+            for label, words in (("the pins", pins_text(pins) if pins is not None else ""), ("the summary", summary or "")):
+                with open(os.path.join(beside, "text"), "w", encoding="utf-8", newline="") as handle:
+                    handle.write(words)
+                secrets += ["%s: %s" % (label, finding.split(": ", 1)[1]) for finding in secret_findings(beside)]
         title = "Add %s: %s" % (item["kind"], name)
         body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
             item["kind"], name, item["description"])
         if item["match"]:
             body += "\nGuard patterns:\n" + "".join("- `%s`\n" % pattern for pattern in item["match"])
         body += "\nFiles:\n" + "".join("- `%s/%s/%s`\n" % (subdir, name, rel) for rel in files)
+        if pins is not None:
+            body += "- `%s`\n" % pin_path
         body += "\nThe text:\n\n```\n%s\n```\n" % item["_body"].strip()
+        if summary is not None:
+            body += "\nIn the pool's tables: %s\n" % summary
+        if pins is not None:
+            body += "\nThe pins (`%s`), which the pool's suite holds the lesson to:\n\n```json\n%s```\n" % (
+                pin_path, pins_text(pins))
         plan = {
             "name": name, "from": item["level"], "to": "general", "upstream": remote or upstream,
-            "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
+            "branch": branch,
+            "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files] + ([pin_path] if pins is not None else []),
+            "pins": pins, "summary": summary, "unpinned": unpinned, "tables": [],
             "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
             "skill_md": skill_md, "excluded": excluded, "secrets": secrets, "unpublishable": unpublishable,
             "confirm": confirm,
@@ -6570,10 +6832,16 @@ def cmd_promote(args):
             raise usage("%r was not proposed: %s. A file is scanned whole before it is published, and one that "
                         "cannot be is not published. Fix or remove it and run again" % (
                             name, "; ".join(unpublishable)))
+        if unpinned and args.yes:
+            raise usage("%r was not proposed: %s. The pool's tests hold every lesson to its pins, so a lesson is "
+                        "proposed with them. Nothing was sent. %s" % (name, "; ".join(unpinned), PIN_HELP))
         if not args.yes:
             if args.json:
                 emit(plan)
             else:
+                if unpinned:
+                    sys.stdout.write("NOT PROPOSABLE as it is: %s. --yes will refuse it.\n%s.\n" % (
+                        "; ".join(unpinned), PIN_HELP))
                 if secrets:
                     sys.stdout.write("NOT PUBLISHABLE as it is: it looks like it holds a credential (%s), and --yes "
                                      "will refuse it.\n" % "; ".join(secrets))
@@ -6631,6 +6899,36 @@ def cmd_promote(args):
             os.makedirs(os.path.dirname(os.path.join(target, rel)), exist_ok=True)
             shutil.copy2(os.path.join(staging, rel), os.path.join(target, rel))
         _must(["git", "add", "--", os.path.join(subdir, name)], cwd=clone)
+        if pins is not None:
+            misfit = pool_problems(clone, name, item, pins)
+            if misfit:
+                raise usage("%r was not proposed: it does not fit the pool at %s: %s. Nothing was pushed" % (
+                    name, one_line(remote or upstream), "; ".join(misfit)))
+            pin_dir = os.path.join(clone, "tests", "pool", "lessons")
+            os.makedirs(pin_dir, exist_ok=True)
+            if os.path.realpath(pin_dir) != os.path.join(os.path.realpath(clone), "tests", "pool", "lessons"):
+                raise failure("tests/pool/lessons in %s is a symbolic link, so nothing was written into it and "
+                              "nothing was pushed" % (remote or upstream))
+            if os.path.lexists(os.path.join(pin_dir, name + ".json")):
+                raise failure("%s already exists in %s" % (pin_path, remote or upstream))
+            with open(os.path.join(pin_dir, name + ".json"), "w", encoding="utf-8", newline="") as handle:
+                handle.write(pins_text(pins))
+            _must(["git", "add", "--", pin_path], cwd=clone)
+            # The pool's documents list every lesson it ships: the row goes in with the lesson.
+            for rel, heading in POOL_TABLES:
+                document = os.path.join(clone, rel)
+                if os.path.islink(document) or not os.path.isfile(document) or \
+                        os.path.realpath(document) != os.path.join(os.path.realpath(clone), rel):
+                    continue
+                with open(document, encoding="utf-8", newline="") as handle:
+                    before = handle.read()
+                after = table_row_added(before, heading, name, pins, summary)
+                if after is None:
+                    continue
+                with open(document, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(after)
+                _must(["git", "add", "--", rel], cwd=clone)
+                plan["tables"].append(rel)
         _must(["git", "commit", "-m", title], cwd=clone, what="git commit")
         if remote:
             _must(["git", "push", "--quiet", "origin", "--", branch], cwd=clone, what="git push")
@@ -8696,6 +8994,13 @@ def build_parser():
                      help="with --to general: confirms a destination the environment names (COMPOUND_UPSTREAM, "
                           "COMPOUND_UPSTREAM_GIT), word for word; --yes publishes nowhere but the package's own "
                           "pool without it")
+    one.add_argument("--pins", metavar="FILE",
+                     help="with --to general, for a lesson: a JSON file that says what the lesson is meant to be "
+                          "(kind, platform, shell, and for a guard the commands it stops and the ones it passes); "
+                          "it is checked against the lesson and published as tests/pool/lessons/<name>.json")
+    one.add_argument("--summary", metavar="TEXT",
+                     help="with --to general, for a lesson: one line for the pool's tables in README.md and "
+                          "docs/design.md")
     one.add_argument("--as", dest="rename", metavar="NEWNAME", help="with --to user: rename while moving")
     one.add_argument("--auto", action="store_true",
                      help="with --to user: leave a lesson git tracks where it is (exit 3) and log a candidate")

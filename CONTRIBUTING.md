@@ -10,9 +10,30 @@ the user level. If it is still a project lesson, move it first with `compound pr
 <name> --to user`. Then:
 
 ```bash
-compound promote <name> --to general        # prints the plan, writes nothing
-compound promote <name> --to general --yes  # forks, pushes a branch, opens the pull request
+compound promote <name> --to general --pins pins.json --summary "one line for the tables"        # prints the plan, writes nothing
+compound promote <name> --to general --pins pins.json --summary "one line for the tables" --yes  # forks, pushes a branch, opens the pull request
 ```
+
+`pins.json` says what the lesson is meant to be, apart from the lesson itself:
+
+```json
+{
+  "kind": "guard",
+  "platform": [],
+  "shell": ["zsh"],
+  "stops": ["echo =====", "ls; echo ====", "..."],
+  "passes": ["echo '====='", "echo done", "..."]
+}
+```
+
+`kind` is `guard` for a lesson with a `match` and `lesson` for one without. `platform`
+and `shell` repeat the lesson's header (`[]` is everywhere). A guard names at least 5
+commands it must stop and at least 8 that look alike and must run; a lesson leaves both
+lists empty. The command checks the pins against the lesson, and against the pool it
+clones, before it pushes: a guard that stops an everyday command, or a command another
+lesson's pins hold, is refused with the command named. It then commits the lesson, the
+pins (as `tests/pool/lessons/<name>.json`) and a row in the lessons tables of `README.md`
+and `docs/design.md`, which is what the suite checks a shipped lesson against.
 
 Read the plan before adding `--yes`: it prints the files and the pull request text that
 will be published. The [user guide](docs/guide.md#propose-a-lesson-to-the-general-pool)

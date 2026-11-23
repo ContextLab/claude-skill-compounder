@@ -9,7 +9,7 @@ import json
 import os
 import unittest
 
-from test_support import Case
+from test_support import Case, echo_pin_flags
 
 NO_UPSTREAM = "compound-test-invalid/no-such-repository"
 
@@ -89,6 +89,7 @@ class PromoteGeneralTest(Case):
             handle.write("#!/bin/sh\necho fixed\n")
         self.box.add("zsh-equals-word", "Use when a zsh line has a bare equals word.", "Quote the word.\n",
                      "--level", "user", "--match", r"echo\s+=+", "--attach", source, "--unrun")
+        self.pins = echo_pin_flags(self.box.root)
 
     def test_the_dry_run_prints_the_plan_and_writes_nothing_anywhere(self):
         before = self.box.snapshot()
@@ -169,7 +170,7 @@ class PromoteGeneralTest(Case):
         named here does not exist, so no pull request could be opened even by a gh that
         was somehow logged in."""
         before = self.box.snapshot()
-        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", NO_UPSTREAM,
+        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", NO_UPSTREAM, *self.pins,
                             COMPOUND_UPSTREAM=NO_UPSTREAM, GH_TOKEN=None, GITHUB_TOKEN=None)
         self.assertExit(proc, 1)
         self.assertRegex(proc.stderr, r"`gh` is not (on PATH|authenticated)|cannot read")
@@ -180,7 +181,7 @@ class PromoteGeneralTest(Case):
         self.assertTrue(os.path.isfile(os.path.join(self.box.lesson_dir("zsh-equals-word", "user"), "SKILL.md")))
 
     def test_yes_with_an_empty_path_names_gh(self):
-        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", NO_UPSTREAM,
+        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", NO_UPSTREAM, *self.pins,
                             COMPOUND_UPSTREAM=NO_UPSTREAM, PATH="")
         self.assertExit(proc, 1)
         self.assertIn("`gh` is not on PATH", proc.stderr)

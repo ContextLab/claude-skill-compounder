@@ -406,10 +406,26 @@ A user-level lesson that would help anyone can be proposed to the general pool. 
 opens a public pull request against the compound repository. It happens only when you
 ask for it: Claude is told to offer it to you and not to run it.
 
+A lesson is proposed with its pins: a small JSON file that says, apart from the lesson,
+what the lesson is meant to be. The pool's tests hold every shipped lesson to its pins,
+so a proposal without them is refused. For a lesson with no `match`:
+
+```json
+{"kind": "lesson", "platform": [], "shell": [], "stops": [], "passes": []}
+```
+
+`platform` and `shell` repeat the lesson's own header, and `[]` means everywhere. For a
+guard (a lesson with a `match`), `kind` is `guard`, `stops` lists at least 5 commands the
+pattern must stop, and `passes` at least 8 that look alike and must run. A command is
+read as `compound check` reads a Bash call, so `git commit -m 'echo ===='` mentions a
+command and does not call it. You also give one line for the pool's tables with
+`--summary`.
+
 First look at the plan. This writes nothing:
 
 ```bash
-compound promote python3-no-tomllib-use-tomli --to general
+compound promote python3-no-tomllib-use-tomli --to general \
+  --pins pins.json --summary "recalled when \`import tomllib\` fails on Python 3.10 or older"
 ```
 
 ```
@@ -419,17 +435,27 @@ Plan (nothing has been written; run again with --yes to do it):
   from     : /Users/me/.claude/compound/lessons/python3-no-tomllib-use-tomli (user level)
   files    :
     lessons/python3-no-tomllib-use-tomli/SKILL.md
+    tests/pool/lessons/python3-no-tomllib-use-tomli.json
   excluded : nothing
   PR title : Add lesson: python3-no-tomllib-use-tomli
   ...
 ```
 
-The plan prints every file and the full pull request text. Read it. Then, to fork, push
-a branch and open the pull request:
+The plan prints every file and the full pull request text. Read it. When the pins are
+missing or do not agree with the lesson, its first line says `NOT PROPOSABLE as it is`
+and why. Then, to fork, push a branch and open the pull request, run the same command
+with `--yes`:
 
 ```bash
-compound promote python3-no-tomllib-use-tomli --to general --yes
+compound promote python3-no-tomllib-use-tomli --to general \
+  --pins pins.json --summary "recalled when \`import tomllib\` fails on Python 3.10 or older" --yes
 ```
+
+Before it pushes, the command holds the lesson and its pins against the pool it cloned:
+a guard that stops an everyday command, or a command another lesson's pins hold, is
+refused and the command is named. What it commits is the lesson, its pins as
+`tests/pool/lessons/<name>.json`, and a row for the lesson in the tables of `README.md`
+and `docs/design.md`.
 
 That publishes to the package's own pool. If `COMPOUND_UPSTREAM` or
 `COMPOUND_UPSTREAM_GIT` names another place, `--yes` alone sends nothing: the plan and

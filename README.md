@@ -344,8 +344,8 @@ with compound installed gets them.
 
 ### The lessons that ship with compound
 
-The general pool holds seven lessons. Each one applies only on the platform or in the shell
-it is about, so on Linux with bash the first five do nothing:
+These are the lessons of the general pool. One that is about a platform or a shell applies
+only there, so on Linux with bash the ones marked zsh or macOS do nothing:
 
 | Lesson | Applies | What it does |
 |-|-|-|
@@ -490,7 +490,7 @@ each one with its output.
 | read one lesson | `compound show <name>` |
 | turn a lesson into a skill | `compound skill <name>` |
 | move a lesson to the user level | `compound promote <name> --to user` |
-| propose a lesson to the general pool | `compound promote <name> --to general` prints the plan and writes nothing. Add `--yes` to open the pull request. |
+| propose a lesson to the general pool | `compound promote <name> --to general --pins FILE --summary TEXT` prints the plan and writes nothing. Add `--yes` to open the pull request. The pins say what the lesson is meant to be; see the [user guide](docs/guide.md#propose-a-lesson-to-the-general-pool). |
 | decline a lesson that is owed | tell Claude it is not worth keeping, or run `compound skip --why "<reason>"` in a terminal in that project (with several owed, add `--settles <id>`) |
 | strengthen an ineffective lesson | add a pattern: `compound add --update --name <name> --match '<regex>'` |
 | remove a lesson | `compound rm <name>` (`--force` for a skill) |

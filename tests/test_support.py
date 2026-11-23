@@ -388,3 +388,26 @@ class SupportTest(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# What `compound promote --to general` asks of a lesson: its pins (see "The general pool"
+# in docs/design.md) and one line for the pool's tables.
+ECHO_STOPS = ["echo ==", "echo ===", "ls; echo ====", "true && echo =====", "echo  ======"]
+ECHO_PASSES = ["echo done", "ls -la", "git status", "printf x", "pwd", "echo a", "cat f", "true"]
+
+
+def pin_flags(directory, name="pins.json", summary="what the lesson is for", **pins):
+    """("--pins", FILE, "--summary", TEXT) for a promote call. The file is written into
+    `directory`: a lesson's pins with no pattern unless `kind`, `platform`, `shell`,
+    `stops` or `passes` says otherwise."""
+    data = {"kind": "lesson", "platform": [], "shell": [], "stops": [], "passes": []}
+    data.update(pins)
+    path = os.path.join(directory, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    return ("--pins", path, "--summary", summary)
+
+
+def echo_pin_flags(directory, **pins):
+    """The same for a guard whose pattern is `echo\\s+=+`."""
+    return pin_flags(directory, **dict(dict(kind="guard", stops=ECHO_STOPS, passes=ECHO_PASSES), **pins))

@@ -18,6 +18,7 @@ compound: a Claude Code mod plus a CLI. The repository root is the plugin. Read
 | `skills/learn`, `skills/reuse` | the two procedures the mod sends Claude to |
 | `lessons/`, `skills/` | the general pool shipped to every user |
 | `tests/test_*.py` | CLI tests |
+| `tests/pool/` | what each shipped lesson is meant to be (`lessons/<name>.json`, its pins) and the everyday commands no shipped pattern may stop (`ordinary.json`); `promote --to general --pins` publishes a lesson's pins there |
 | `tests/journeys/` | real-session drivers, run by hand |
 | `dev/icon.py`, `.claude-plugin/icon.png` | the icon and the script that draws it (SVG on standard output; `rsvg-convert` makes the PNG) |
 | `dev/ui-check.sh`, `dev/ui-check.tape` | two recorded interactive sessions (vhs) with a screenshot of each phase, for looking at the band and the pane, findings of /insights included |

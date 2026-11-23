@@ -137,8 +137,10 @@ prints the lessons whose pattern hits.
 - `user`: it is about the machine, the shell or a tool, and would apply in any of this
   user's projects (a zsh quirk, a macOS command that differs from Linux, how `gh` behaves).
 - `general` is never chosen here. A lesson reaches the shared pool only through
-  `compound promote <name> --to general`, which opens a public pull request. Propose it to
-  the user and run it only after the user explicitly says yes.
+  `compound promote <name> --to general --pins FILE --summary TEXT`, which opens a public
+  pull request. Propose it to the user and run it only after the user explicitly says yes.
+  The pins are the lesson's kind, platform, shell and, for a guard, at least 5 commands it
+  must stop and 8 it must not; run it without `--yes` first and read what the plan says.
 
 A lesson exists once, at one level. It is moved when its reach grows, never copied.
 

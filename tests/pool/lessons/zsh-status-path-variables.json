@@ -1,0 +1,40 @@
+{
+  "kind": "guard",
+  "platform": [],
+  "shell": [
+    "zsh"
+  ],
+  "stops": [
+    "status=$?",
+    "make; status=$?; echo $status",
+    "path=/tmp/x && ls $path",
+    "for path in a b; do echo $path; done",
+    "f(){ local path=$1; cat $path; }",
+    "echo /tmp | read -r path",
+    "if true; then status=1; fi",
+    "make\nstatus=$?\necho $status",
+    "export path=/tmp/x",
+    "find . -name '*.py' | while read -r path; do wc -l \"$path\"; done",
+    "while IFS= read -r path; do echo \"$path\"; done < files.txt",
+    "make || status=1",
+    "ls | while read status; do echo $status; done"
+  ],
+  "passes": [
+    "git status",
+    "exit_status=$?",
+    "file_path=/tmp/x",
+    "PATH=/usr/bin:$PATH ls",
+    "curl 'https://h/x?path=1&status=2'",
+    "./configure --path=/usr --status=ok",
+    "rc=$?; echo $rc",
+    "for p in a b; do echo $p; done",
+    "python3 -c \"import os; print(os.path)\"",
+    "kubectl get pods -o jsonpath='{.status}'",
+    "python3 -c \"open(path='x')\"",
+    "echo 'please read path docs'",
+    "grep -n 'for path in' build.sh",
+    "gh pr view --json status=1",
+    "docker ps --filter status=running",
+    "while read -r line; do echo $line; done < f"
+  ]
+}

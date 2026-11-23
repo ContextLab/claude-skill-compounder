@@ -1400,6 +1400,38 @@ staging copy is removed when the command ends. It is a lower bound: a secret wit
 recognisable shape is not found, and the plan prints the text to be published so it can
 be read.
 
+**A lesson is proposed with its pins.** The pool's suite holds every shipped lesson to a
+statement, written apart from the lesson, of what it is meant to be (see "The general
+pool"), so `promote <name> --to general` asks for that statement: `--pins FILE` names a
+JSON object with exactly the keys `kind` (`guard` for a lesson with a `match`, `lesson`
+for one without), `platform` and `shell` (the lists in the lesson's header; `[]` is
+everywhere), `stops` (for a guard, at least 5 commands it must stop) and `passes` (for a
+guard, at least 8 commands that look alike and must run; both are `[]` for a lesson), and
+`--summary TEXT` gives the one line that goes into the pool's tables (no line break, no
+`|`, at most 300 characters). A file that is not that is exit 2. The pins are checked
+against the lesson with nothing else read: the kind, the two lists, and each command,
+matched as `compound check` matches a Bash call, so a mention of a command inside a
+quoted string or a here-document is not a call of it. The plan lists what is missing or
+wrong under `unpinned`, prints it first, and carries `pins` and `summary`; with
+`unpinned` not empty `--yes` exits 2 before anything is cloned. The pins and the summary
+are published, so they are read for the shape of a credential like the lesson's files and
+reported under `secrets` as `the pins` and `the summary`. `--pins` and `--summary` go
+with a lesson: with a skill, or with `--to user`, either is exit 2, and a skill is
+proposed without them.
+
+After the clone and before the commit, the lesson and its pins are held against the pool
+they would join. The pool's files are read as data and nothing in the clone is run. With
+a `match`, the lesson must stop none of the everyday commands in the pool's
+`tests/pool/ordinary.json` and no command the pins of another lesson there hold; and no
+guard already in the pool's `lessons/` may stop a command of these pins. A misfit is
+exit 2, names each command, and pushes nothing. Then the pins are written to
+`tests/pool/lessons/<name>.json` (keys in the order above, two spaces of indent), never
+through a symbolic link and never over a file that is there, and a row for the lesson is
+added to the end of the lessons table of the pool's `README.md` (the one under the
+heading "The lessons that ship with compound") and of its `docs/design.md` (under "The
+general pool"), where the pool has those tables. The reply's `tables` names the documents that got a row. One
+commit holds the lesson, its pins and the rows.
+
 **Where it is published is never the environment's word alone.** `--yes` with nothing
 else publishes to the package's own pool. `COMPOUND_UPSTREAM` and
 `COMPOUND_UPSTREAM_GIT` name another destination, and a variable is set out of sight: by
@@ -1601,7 +1633,17 @@ add` wrote, without its `origin` (what `compound promote --to general` publishes
 | `pip-externally-managed` | lesson | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
 | `proposal-ships-the-working-fix` | lesson | everywhere | recalled when a locally working fix is proposed upstream or to a shared pool |
 
-Three of the seven are guards. `macos-gnu-only-commands` is recalled and stops nothing:
+What each lesson in the table is meant to be is also written down beside the tests, in
+`tests/pool/lessons/<name>.json`: its pins, in the form `compound promote --to general
+--pins` takes and publishes. `tests/test_general_pool.py` holds the pool to them: every
+directory in `lessons/` has a pin file and every pin file a directory; each lesson reads
+as the kind, platform and shell its pins say; each guard stops every command under
+`stops`, alone among the shipped guards, and none under `passes`; a lesson applies on a
+platform and in a shell exactly where its pins say; and no shipped pattern stops a command
+in `tests/pool/ordinary.json`. `tests/test_pins.py` proposes a guard into a copy of the
+checkout and runs that copy's pool and documentation tests on the branch.
+
+`macos-gnu-only-commands` is recalled and stops nothing:
 on a Mac with Homebrew's coreutils `timeout` is installed and the call is right, and a
 pattern is tested against the command's text and cannot look at `PATH`. For the same
 reason `sed-in-place-bsd` assumes the stock tool: where `sed` is GNU sed the guarded call
@@ -1987,7 +2029,7 @@ it leaves a tracked lesson where it is. Errors go to stderr.
 | `compound check [--guards]` | stdin `{"tool","input"}`, and `"cwd"`, the directory a Bash call would run in. Prints `{"hits":[{name,level,path,text}]}` for the guards in force that apply to that tool and match: every one of them, since no guard yields to another (see "Several guards on one call"). A Bash command is matched on its command text (see "And of a command, its command text"). A hit of a lesson's probe carries `"sure": true` and `"words"`, the words at fault; without `cwd` no probe runs. A guard that did not finish matching in `COMPOUND_CHECK_BUDGET_MS` is named under `"timed_out"`, and one the time ran out before under `"unchecked"`. `--guards` adds `"guards"`, the number of lessons in force that carry a `match`, and `"tools"`, the tools they apply to. |
 | `compound skill N` | Moves a lesson to the skills directory of its level. Logs `skill`. |
 | `compound use N` | Counts one use of the skill `N`, which is what Claude Code calls the skill a session invoked: a bare name for a skill of the project or the user level, `compound:NAME` for a skill of this package. Logs `use` for a skill `compound list` shows, except the package's `learn` and `reuse`. Any other name writes nothing; the exit status is 0 either way and `--json` says `used`. The mod runs it (see "A skill that is used"). |
-| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes] [--upstream DESTINATION]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential and `unpublishable` each file that cannot be read or is too large to scan; with `--yes` forks, pushes a branch and opens the pull request (or, with `COMPOUND_UPSTREAM_GIT`, pushes the branch there with git alone), or exits 2 when either list is not empty. `--upstream DESTINATION` confirms a destination the environment names: when `COMPOUND_UPSTREAM` or `COMPOUND_UPSTREAM_GIT` names one that is not the package's own pool, `--yes` exits 2 unless `--upstream` gives the same value, and a value that is not the destination is exit 2 (see "Where it is published"). The plan carries the words to add under `confirm`. Logs `promote` when it moved or proposed something. |
+| `compound promote N --to user\|general [--as NEWNAME] [--auto [--seen-in P]] [--yes] [--upstream DESTINATION] [--pins FILE] [--summary TEXT]` | `user`: moves it, under `NEWNAME` when `--as` is given; refuses (exit 2) a name under which another project holds a different lesson, and prints the `--as` command. With `--auto`, a lesson git tracks is left in place: exit 3 and a `candidate` event, with `--seen-in` naming the project it applied in; a refusal for the name logs a `candidate` too. `general`: prints the plan, with `secrets` naming each file that looks like it holds a credential and `unpublishable` each file that cannot be read or is too large to scan; `--pins FILE` and `--summary TEXT` give a lesson's pins and its line in the pool's tables, and the plan lists under `unpinned` what is missing or does not agree with the lesson (see "A lesson is proposed with its pins"); with `--yes` forks, writes the lesson, its pins and its table rows, pushes a branch and opens the pull request (or, with `COMPOUND_UPSTREAM_GIT`, pushes the branch there with git alone), or exits 2 when `secrets`, `unpublishable` or `unpinned` is not empty, or when the lesson does not fit the pool that was cloned. `--upstream DESTINATION` confirms a destination the environment names: when `COMPOUND_UPSTREAM` or `COMPOUND_UPSTREAM_GIT` names one that is not the package's own pool, `--yes` exits 2 unless `--upstream` gives the same value, and a value that is not the destination is exit 2 (see "Where it is published"). The plan carries the words to add under `confirm`. Logs `promote` when it moved or proposed something. |
 | `compound rm N [--force]` | Removes a lesson. A skill is removed only with `--force`. Nothing in the general pool is removed: the refusal names `compound disable`. Logs `rm`. |
 | `compound disable N` | Switches the general lesson `N` off for this user (see "The general pool"). Exit 2 for a lesson that is not in the general pool. Logs nothing. |
 | `compound enable N` | Switches it back on. |
