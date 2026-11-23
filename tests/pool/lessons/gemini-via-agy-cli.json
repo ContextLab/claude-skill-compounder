@@ -1,0 +1,26 @@
+{
+  "kind": "guard",
+  "platform": [],
+  "shell": [],
+  "stops": [
+    "gemini -p 'describe this video'",
+    "cd /tmp && gemini -p hi",
+    "cat notes.md | gemini -p summarize",
+    "out=$(gemini -p question)",
+    "for f in a b; do gemini -p \"$f\"; done",
+    "gemini",
+    "ls; gemini --version"
+  ],
+  "passes": [
+    "agy --add-dir /tmp --print-timeout 600s -p 'describe /tmp/a.mp4' </dev/null",
+    "echo gemini",
+    "grep -rn gemini src/",
+    "git commit -m 'switch from gemini to agy'",
+    "which gemini",
+    "npm install -g @google/gemini-cli",
+    "gemini-cli --version",
+    "cat gemini.md",
+    "export GEMINI_API_KEY=placeholder",
+    "pip install google-generativeai"
+  ]
+}
