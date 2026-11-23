@@ -10,9 +10,30 @@ the user level. If it is still a project lesson, move it first with `compound pr
 <name> --to user`. Then:
 
 ```bash
-compound promote <name> --to general        # prints the plan, writes nothing
-compound promote <name> --to general --yes  # forks, pushes a branch, opens the pull request
+compound promote <name> --to general --pins pins.json --summary "one line for the tables"        # prints the plan, writes nothing
+compound promote <name> --to general --pins pins.json --summary "one line for the tables" --yes  # forks, pushes a branch, opens the pull request
 ```
+
+`pins.json` says what the lesson is meant to be, apart from the lesson itself:
+
+```json
+{
+  "kind": "guard",
+  "platform": [],
+  "shell": ["zsh"],
+  "stops": ["echo =====", "ls; echo ====", "..."],
+  "passes": ["echo '====='", "echo done", "..."]
+}
+```
+
+`kind` is `guard` for a lesson with a `match` and `lesson` for one without. `platform`
+and `shell` repeat the lesson's header (`[]` is everywhere). A guard names at least 5
+commands it must stop and at least 8 that look alike and must run; a lesson leaves both
+lists empty. The command checks the pins against the lesson, and against the pool it
+clones, before it pushes: a guard that stops an everyday command, or a command another
+lesson's pins hold, is refused with the command named. It then commits the lesson, the
+pins (as `tests/pool/lessons/<name>.json`) and a row in the lessons tables of `README.md`
+and `docs/design.md`, which is what the suite checks a shipped lesson against.
 
 Read the plan before adding `--yes`: it prints the files and the pull request text that
 will be published. The [user guide](docs/guide.md#propose-a-lesson-to-the-general-pool)
@@ -32,6 +53,10 @@ npx tsc --noEmit -p .          # the hooks type-check; needs .claude-plugin/type
 python3 tests/journeys/journey_guard.py   # real sessions; spends model calls
 ```
 
+CI (`.github/workflows/ci.yml`) installs Claude Code with its native installer and runs
+`claude plugin validate --strict .`, `claude plugin test .` and `./run_tests.sh` on Ubuntu
+and macOS; neither plugin check needs a login.
+
 The journeys are in `tests/journeys/`. Each runs real `claude -p` sessions against a
 throwaway store, prints one PASS or FAIL line per check and exits non-zero when one
 fails. They spend model calls, so they are run by hand and never by `run_tests.sh`.
@@ -43,7 +68,8 @@ comes from your own `~/.claude`: no login, settings or installed plugins. That
 configuration is not logged in, so the journey needs a credential in the environment,
 `CLAUDE_CODE_OAUTH_TOKEN` (made by `claude setup-token`) or `ANTHROPIC_API_KEY`, and
 stops before it starts anything without one. `--config ambient` runs under the
-configuration your shell already has.
+configuration your shell already has. The `/insights` journey below is the exception: it
+always runs under your shell's configuration and takes no `--config`.
 
 | Script | What it drives |
 |-|-|
@@ -54,6 +80,7 @@ configuration your shell already has.
 | `journey_stop.py` | Moment 5: an owed lesson refuses one stop, declining it settles it, and a long turn is asked once whether it learned anything. |
 | `journey_strengthen.py` | A lesson recalled after its failure came back is marked ineffective, and the session must strengthen it or decline before it stops. |
 | `journey_unsettled.py` | A capture an earlier session left unsettled is raised at the next session's first prompt and settled by its id. |
+| `journey_insights.py` | Findings from Claude Code's `/insights`, with the run started the way a user's machine starts it: three seed sessions, then the first typed prompt of a real session starts the one `/insights` run in the background (it spends usage: one run cost $1.73 at list price). It takes no `--config` and always runs under the configuration your shell already has (the CLI's own login; `/insights` reads your real sessions and writes under `~/.claude/usage-data`, while `COMPOUND_HOME` stays temporary and the real `~/.claude/compound` is checked untouched; only counts are printed), and it has no `--keep`: its throwaway directory holds findings from your real sessions and is always removed. Checks that the working copy's mod answered, that a run started and outlived its session and reached `ok`, that a second session started none, where the report landed, that the child wrote no event, and that a later first prompt shows a finding between `RECORDED-INSIGHT` markers, with a `remind` that says the `-p` session was `headless` (UNPROVEN when none is listed). `--leg timeout` runs only one real `compound insights --run` with `COMPOUND_INSIGHTS_TIMEOUT` set to a few seconds, and checks that the run is killed (outcome `timeout`, one `error`, no process of the child's group left, the lock free, nothing harvested, the next start `too soon`). `--dry` runs the parts that need no model call. The whole journey, its `headless` check included, and `--leg timeout` have been run for real. |
 | `journey_marketplace.py` | The package installed through Claude Code's plugin marketplace in a fresh configuration, with no `--plugin-dir`: the install enables it and leaves the real `~/.claude` untouched, and in real sessions the prompt, tool-call and stop hooks fire and the mod calls the CLI beside it. `--source OWNER/REPO` installs from that GitHub repository instead of a local copy. Needs `--config fresh`. |
 | `journey_claims.py` | With a claims directory that cannot be made, the mod refuses nothing and logs one `error`. |
 | `journey_error.py` | A failure of the mod itself is logged, reported at the next prompt, each failure once; `COMPOUND_OFF=1` writes nothing. |
@@ -86,8 +113,11 @@ To look at the band and the `/compound` pane as a person sees them:
 dev/ui-check.sh    # needs vhs; spends model calls
 ```
 
-It records a real interactive session in a throwaway store and project and writes a
-screenshot of each phase to `$TMPDIR/compound-ui-check/shots`. Open the PNGs and look:
+It records two real interactive sessions in a throwaway store and project and writes a
+screenshot of each phase to `$TMPDIR/compound-ui-check/shots`. The store holds findings of
+`/insights` harvested from an invented `usage-data` tree, and the first session's first
+prompt starts a run of `/insights` that fails at once, since the throwaway Claude directory
+is not logged in (the script refuses to record when it is). Open the PNGs and look:
 the session's own pace decides which frame catches which phase. The header of
 `dev/ui-check.tape` says what it takes to get an interactive session running under vhs.
 

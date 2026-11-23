@@ -15,7 +15,7 @@ import subprocess
 import sys
 import unittest
 
-from test_support import Case, git_ok
+from test_support import Case, git_ok, pin_flags
 
 
 def call(command, tool="Bash"):
@@ -214,6 +214,7 @@ class PoolCase(BoundaryCase):
 
     def setUp(self):
         BoundaryCase.setUp(self)
+        self.pins = pin_flags(self.box.root)
         self.git_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                         "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
                         "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
@@ -256,7 +257,7 @@ class PoolLinkTest(PoolCase):
         os.makedirs(landing)
         upstream = self.pool("hostile", lambda seedrepo: os.symlink(landing, os.path.join(seedrepo, "lessons")))
         self.box.add("plain-note", "Use when plain.", "Body.\n", "--level", "user")
-        proc = self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", upstream,
+        proc = self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", upstream, *self.pins,
                             COMPOUND_UPSTREAM_GIT=upstream, **self.git_env)
         self.assertEqual(os.listdir(landing), [], "the lesson was written outside the clone")
         self.assertExit(proc, 1)
@@ -272,7 +273,7 @@ class PoolLinkTest(PoolCase):
             os.symlink(landing, os.path.join(seedrepo, "lessons", "plain-note"))
         upstream = self.pool("dangling", build)
         self.box.add("plain-note", "Use when plain.", "Body.\n", "--level", "user")
-        proc = self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", upstream,
+        proc = self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", upstream, *self.pins,
                             COMPOUND_UPSTREAM_GIT=upstream, **self.git_env)
         self.assertFalse(os.path.lexists(landing), "the lesson was written where the link leads")
         self.assertExit(proc, 1)
@@ -309,7 +310,7 @@ class DestinationTest(PoolCase):
     def test_named_on_the_command_line_too_it_is_published_there(self):
         upstream = self.plain_pool()
         self.box.add("plain-note", "Use when plain.", "Body.\n", "--level", "user")
-        proc = self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", upstream, "--json",
+        proc = self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", upstream, "--json", *self.pins,
                             COMPOUND_UPSTREAM_GIT=upstream, **self.git_env)
         self.assertExit(proc, 0)
         self.assertEqual(sorted(self.branches(upstream)), ["compound/lesson-plain-note", "main"])

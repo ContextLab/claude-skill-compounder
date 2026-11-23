@@ -44,9 +44,17 @@ export const NOTES: Record<CompoundNoteKind, Look> = {
   nudge: { glyph: '?', color: 'suggestion', label: 'asked whether anything was learned' },
   used: { glyph: '▸', color: 'suggestion', label: 'skill used' },
   repeat: { glyph: '↻', color: 'cyan', label: 'asked before' },
+  insights: { glyph: '◈', color: 'suggestion', label: 'insights' },
   ready: { glyph: '◇', color: 'suggestion', label: 'ready' },
   idle: { glyph: '◇', color: 'inactive', label: 'nothing to reuse' },
 }
+
+// What lists every finding of /insights with its state, under the pane's findings.
+export const INSIGHTS_COMMAND = 'compound insights'
+
+// What the band and the status entry say when the first prompt's `insights --start` began a
+// run of /insights in the background.
+export const INSIGHTS_STARTED = '/insights run started'
 
 // What the greeting says beside the counts.
 export const HINT = '/compound opens the dashboard'
@@ -76,6 +84,7 @@ const EVENTS: Record<string, Look> = {
   rm: NOTES.removed,
   use: NOTES.used,
   repeat: NOTES.repeat,
+  insight: NOTES.insights,
   error: ERROR,
 }
 
@@ -106,6 +115,7 @@ export const WORDS: Record<string, string> = {
   retry: 'retried',
   met: 'met',
   index: 'indexed',
+  insight: 'insight',
 }
 
 export function eventWord(type: string): string {
@@ -168,6 +178,19 @@ export function noted(band: CompoundBand, kind: CompoundNoteKind, text: string, 
   return { ...band, note: { kind, text: oneLine(text, 80), at: now, ...(more === '' ? {} : { detail: more }) } }
 }
 
+// How many findings of /insights, in the words of the band, the status entry, the pane and
+// `compound events`.
+export function candidatesText(n: number): string {
+  return count(n, 'candidate from /insights', 'candidates from /insights')
+}
+
+// A second result of the moment that made the band's note: drawn beside it as a note of its
+// own, so neither displaces the other. With no note to stand beside, it is the note.
+export function alsoNoted(band: CompoundBand, kind: CompoundNoteKind, text: string, now: number): CompoundBand {
+  if (band.note === null) return noted(band, kind, text, now)
+  return { ...band, note: { ...band.note, also: { kind, text: oneLine(text, 80) } } }
+}
+
 // ---- the greeting, and a check that found nothing ---------------------------------------
 
 // The guards are among the lessons: a lesson that carries a pattern.
@@ -193,11 +216,25 @@ export function greeted(band: CompoundBand, now: number): CompoundBand {
 
 // The reuse check found something: the items, by name, and how many earlier requests. The
 // session's first result also carries the greeting.
+// What the first prompt told of earlier sessions (captures owed, findings of /insights) is
+// on the band while the check's spinner turns, and would be replaced by its result unseen:
+// it stays beside the result, in short, and the greeting waits for a later result.
 export function reuseFound(band: CompoundBand, items: readonly string[], earlier: number, now: number): CompoundBand {
-  const greet = band.counts !== undefined && band.greeted !== 'full'
+  const kept = told(band, now)
+  const greet = kept === undefined && band.counts !== undefined && band.greeted !== 'full'
   const next = noted(band, 'reuse', reuseText(items, earlier), now, greet && band.counts !== undefined ? `${readyText(band.counts)} ready` : '')
   const names = items.map(i => oneLine(base(i), 80))
-  return { ...next, note: next.note === null || names.length === 0 ? next.note : { ...next.note, names }, ...(greet ? { greeted: 'full' as const } : {}) }
+  const note = next.note === null ? null : { ...next.note, ...(names.length === 0 ? {} : { names }), ...(kept === undefined ? {} : { also: kept }) }
+  return { ...next, note, ...(greet ? { greeted: 'full' as const } : {}) }
+}
+
+// The first prompt's note of what earlier sessions left, while it shows, as one short note:
+// `1 owed, 4 candidates from /insights`.
+function told(band: CompoundBand, now: number): { kind: CompoundNoteKind; text: string } | undefined {
+  const note = band.note
+  if (note === null || !noteShows(band, now) || (note.kind !== 'unsettled' && note.kind !== 'insights')) return undefined
+  const first = note.kind === 'unsettled' ? `${note.text.split(' ')[0] ?? ''} owed` : note.text
+  return { kind: note.kind, text: oneLine([first, note.also?.text ?? ''].filter(t => t !== '').join(', '), 80) }
 }
 
 // The reuse check ran and added nothing. The session's first is the greeting, with the
@@ -376,7 +413,7 @@ export function trackSegs(step: CompoundStep, compact: boolean): Seg[] {
   return out
 }
 
-type Main = { glyph: string; color: string; label: string; name: string; detail?: string; names?: readonly string[]; phase: Phase; from: 'busy' | 'note' | 'error' | 'owed' | 'weak' }
+type Main = { glyph: string; color: string; label: string; name: string; detail?: string; names?: readonly string[]; also?: { kind: CompoundNoteKind; text: string }; phase: Phase; from: 'busy' | 'note' | 'error' | 'owed' | 'weak' }
 
 function mainOf(band: CompoundBand, now: number): Main | undefined {
   const busy = liveBusy(band, now)
@@ -385,7 +422,7 @@ function mainOf(band: CompoundBand, now: number): Main | undefined {
   const phase = notePhase(band, now)
   if (band.note !== null && phase !== 'gone') {
     const look = NOTES[band.note.kind]
-    return { ...look, name: band.note.text, detail: band.note.detail ?? '', ...(band.note.names === undefined ? {} : { names: band.note.names }), phase, from: 'note' }
+    return { ...look, name: band.note.text, detail: band.note.detail ?? '', ...(band.note.names === undefined ? {} : { names: band.note.names }), ...(band.note.also === undefined ? {} : { also: band.note.also }), phase, from: 'note' }
   }
   if (band.errors > 0) return { ...ERROR, label: `${count(band.errors, 'compound error')}`, name: 'Claude is told at the next prompt', phase: 'fresh', from: 'error' }
   if (band.owed > 0) return { ...OWED, label: band.owed === 1 ? OWED.label : `${band.owed} lessons owed`, name: band.owedText ?? '', phase: 'fresh', from: 'owed' }
@@ -430,16 +467,20 @@ function bandSegs(band: CompoundBand | null | undefined, now: number, columns: n
       ]
   const name: Seg[] = main !== undefined && main.name !== '' ? [{ text: ' · ', dim: true }, { text: main.name, bold: main.phase === 'flash' }] : []
   let detail: Seg[] = main?.detail === undefined || main.detail === '' ? [] : [{ text: main.name === '' ? ' · ' : '  ', dim: true }, { text: main.detail, dim: true }]
+  const second = main?.also === undefined ? undefined : NOTES[main.also.kind]
+  let also: Seg[] = main?.also === undefined || second === undefined ? [] : [{ text: '  ', dim: true }, { text: `${second.glyph} `, color: second.color }, { text: main.also.text, color: second.color }]
   let marks = main === undefined ? [] : badges(band, main, step === 'owed')
   let track: Seg[] = step === undefined ? [] : [{ text: '   ' }, ...trackSegs(step, false)]
-  // Too wide: the track loses its words, then the detail goes, then the marks, then the
-  // track, then the name is cut; a list of names keeps as many as fit and counts the rest.
-  const total = () => width(head) + width(name) + width(detail) + width(marks) + width(track)
+  // Too wide: the track loses its words, then a second note goes, then the detail, then the
+  // marks, then the track, then the name is cut; a list of names keeps as many as fit and
+  // counts the rest.
+  const total = () => width(head) + width(name) + width(detail) + width(also) + width(marks) + width(track)
   if (total() > columns && step !== undefined) track = [{ text: '   ' }, ...trackSegs(step, true)]
+  if (total() > columns) also = []
   if (total() > columns) detail = []
   if (total() > columns) marks = []
   if (total() > columns) track = []
-  let row = [...head, ...name, ...detail, ...marks, ...track]
+  let row = [...head, ...name, ...detail, ...also, ...marks, ...track]
   if (width(row) > columns) {
     const room = columns - width(head) - 3
     const fewer = main?.names === undefined ? '' : listed(main.names, room)
@@ -523,8 +564,11 @@ export function eventText(e: Record<string, unknown>): string {
       return e.ineffective === true ? `${lesson} (ineffective)` : lesson
     case 'capture':
       return oneLine(str(e.fixed), 120)
-    case 'remind':
-      return `${count(names(e.captures).length, 'lesson')} owed`
+    case 'remind': {
+      const owed = names(e.captures).length
+      const findings = names(e.insights).length
+      return [owed > 0 || findings === 0 ? `${count(owed, 'lesson')} owed` : '', findings > 0 ? candidatesText(findings) : ''].filter(t => t !== '').join(', ')
+    }
     case 'refuse':
       return str(e.why) === 'debt' ? 'lesson owed' : str(e.why) === 'strengthen' ? 'to strengthen' : str(e.why) === 'evidence' ? 'script to keep' : 'long turn'
     case 'learn':
@@ -600,6 +644,13 @@ export function boardFrom(status: string, events: string, session: string, now: 
       ineffective: list(open.ineffective).map(i => ({ ...openRow(`${str(i.name)} (recalled ${num(i.recall)} times)`, i.command), ...(str(i.name) === '' ? {} : { lesson: str(i.name) }) })),
       candidates: list(open.candidates).map(c => openRow(`${str(c.lesson)} in ${base(str(c.from))}`, c.command)),
       scripts: list(open.scripts).map(s => openRow(`${oneLine(str(s.name), 60)} (passed ${num(s.ok)}${num(s.failed) > 0 ? `, failed ${num(s.failed)}` : ''}${str(s.project) === '' ? '' : `, ${base(str(s.project))}`})`, s.command, s.decline)),
+      // A finding of /insights: its id, its age, and `report` for one of the report or the
+      // project of one about a session (when it has one), then its text, last and cut short,
+      // so a narrow pane cuts the text and never the age or the project.
+      findings: list(open.findings).map(f => {
+        const where = str(f.source) === 'report' ? 'report' : str(f.project) === '' ? '' : base(str(f.project))
+        return openRow(`${str(f.id)} (${str(f.age)}${where === '' ? '' : `, ${where}`}) ${oneLine(str(f.text), FINDING_TEXT)}`)
+      }),
       errors: list(open.errors).map(e => openRow(oneLine(`${str(e.where)}: ${str(e.message)}`, 100))),
       skips: list(open.skips).length,
     },
@@ -723,6 +774,10 @@ export function firstKey(lines: readonly Line[]): string | undefined {
   return lines.flatMap(line => line).find(seg => seg.key !== undefined)?.key
 }
 
+// The most of a finding's text an open row shows: with its indent, id, age and a short
+// project name the row fits a pane in a 100-column terminal.
+const FINDING_TEXT = 50
+
 // What reads the errors: no command settles one, and they leave the pane after seven days.
 const READ_ERRORS = 'compound events --type error'
 const COMMAND_INDENT = '      '
@@ -829,7 +884,8 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
   // What waits for someone comes before the tables: the pane may show only its top rows.
   const o = board.open
   const scripts = o.scripts ?? []
-  const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length + scripts.length
+  const findings = o.findings ?? []
+  const waiting = o.unsettled.length + o.ineffective.length + o.candidates.length + o.errors.length + scripts.length + findings.length
   out.push([], ...flow([[{ text: 'Open', bold: true }], ...(waiting === 0 ? words('nothing waits for anyone', { dim: true }, '  ') : [])], columns, '  '))
   // Under each row, the command that settles it, whole: broken at its spaces where the pane
   // is narrow, never cut. The second way to settle a row is shown where there is room for it.
@@ -851,6 +907,7 @@ function boardRows(board: CompoundBoard | null | undefined, columns: number, eve
   group(o.unsettled, OWED, count(o.unsettled.length, 'lesson owed', 'lessons owed'))
   group(scripts, OWED, count(scripts.length, 'script that worked and nothing keeps', 'scripts that worked and nothing keeps'))
   group(o.ineffective, WEAK, count(o.ineffective.length, 'ineffective lesson'))
+  group(findings, NOTES.insights, candidatesText(findings.length), INSIGHTS_COMMAND)
   group(o.candidates, eventLook('candidate'), count(o.candidates.length, 'lesson that could move to the user level', 'lessons that could move to the user level'))
   group(o.errors, ERROR, `${count(o.errors.length, 'error')} in the last 7 days`, READ_ERRORS)
   if (o.skips > 0) out.push([{ text: `  ${NOTES.declined.glyph} `, dim: true }, { text: `${count(o.skips, 'lesson')} declined`, dim: true }])

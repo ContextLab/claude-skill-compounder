@@ -15,7 +15,7 @@ import json
 import os
 import unittest
 
-from test_support import NOW, Case, git_ok, seed_event
+from test_support import NOW, Case, echo_pin_flags, git_ok, pin_flags, seed_event
 
 ECHO = r"(^\s*|[;&|(]\s*|\b(?:do|then|else)\s+)echo\s+=+"
 MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "repeat", "error", "retry")
@@ -437,6 +437,8 @@ class PublishScanTest(Case):
     def setUp(self):
         Case.setUp(self)
         self.upstream = os.path.join(self.box.root, "upstream.git")
+        self.pins = pin_flags(self.box.root)
+        self.echo_pins = echo_pin_flags(self.box.root, name="echo-pins.json")
         seedrepo = os.path.join(self.box.root, "seed")
         os.makedirs(os.path.join(seedrepo, "lessons"))
         with open(os.path.join(seedrepo, "lessons", ".gitkeep"), "w") as handle:
@@ -518,7 +520,8 @@ class PublishScanTest(Case):
         plan = self.box.json("promote", "zsh-equals-word", "--to", "general", "--json")
         self.assertEqual((plan["secrets"], plan["unpublishable"]), ([], []))
         before = self.box.snapshot(self.box.chome)
-        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", self.upstream, "--json", **self.git_env)
+        proc = self.box.run("promote", "zsh-equals-word", "--to", "general", "--yes", "--upstream", self.upstream, "--json",
+                            *self.echo_pins, **self.git_env)
         self.assertExit(proc, 0)
         done = json.loads(proc.stdout)
         branch = "compound/lesson-zsh-equals-word"
@@ -532,7 +535,7 @@ class PublishScanTest(Case):
         tree = git_ok("ls-tree", "-r", branch, cwd=self.upstream).splitlines()
         self.assertEqual(sorted(line.split("\t")[1] for line in tree),
                          ["lessons/.gitkeep", "lessons/taken-name/SKILL.md", base + "SKILL.md", base + "fix.sh",
-                          base + "table.bin"])
+                          base + "table.bin", "tests/pool/lessons/zsh-equals-word.json"])
         modes = {line.split("\t")[1]: line.split()[0] for line in tree}
         self.assertEqual((modes[base + "fix.sh"], modes[base + "table.bin"]), ("100755", "100644"))
         # The lesson stays where it was, and one `promote` event was logged.
@@ -551,7 +554,7 @@ class PublishScanTest(Case):
         os.makedirs(scratch)
         before = self.box.snapshot()
         self.assertExit(self.box.run("promote", "plain-note", "--to", "general", TMPDIR=scratch), 0)
-        self.assertExit(self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", self.upstream, TMPDIR=scratch,
+        self.assertExit(self.box.run("promote", "plain-note", "--to", "general", "--yes", "--upstream", self.upstream, *self.pins, TMPDIR=scratch,
                                      **self.git_env), 0)
         self.assertEqual(os.listdir(scratch), [], "the staging copy and the clone were left behind")
         after = self.box.snapshot()
@@ -561,7 +564,7 @@ class PublishScanTest(Case):
 
     def test_a_name_the_pool_already_holds_is_refused_and_nothing_is_pushed(self):
         self.box.add("taken-name", "Use when mine.", "My own.\n", "--level", "user")
-        proc = self.box.run("promote", "taken-name", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env)
+        proc = self.box.run("promote", "taken-name", "--to", "general", "--yes", "--upstream", self.upstream, *self.pins, **self.git_env)
         self.assertExit(proc, 1)
         self.assertIn("lessons/taken-name already exists", proc.stderr)
         self.assertEqual(self.branches(), ["main"])
@@ -579,7 +582,8 @@ class PublishScanTest(Case):
         plan = self.box.json("promote", "linked-note", "--to", "general", "--json")
         self.assertEqual(plan["files"], ["lessons/linked-note/SKILL.md"])
         self.assertEqual(plan["excluded"], [".evidence.json", "fix.sh"])
-        self.assertExit(self.box.run("promote", "linked-note", "--to", "general", "--yes", "--upstream", self.upstream, **self.git_env), 0)
+        self.assertExit(self.box.run("promote", "linked-note", "--to", "general", "--yes", "--upstream", self.upstream, *self.pins,
+                                     **self.git_env), 0)
         tree = git_ok("ls-tree", "-r", "--name-only", "compound/lesson-linked-note", cwd=self.upstream).splitlines()
         self.assertNotIn("lessons/linked-note/fix.sh", tree)
 

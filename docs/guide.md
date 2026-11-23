@@ -406,10 +406,26 @@ A user-level lesson that would help anyone can be proposed to the general pool. 
 opens a public pull request against the compound repository. It happens only when you
 ask for it: Claude is told to offer it to you and not to run it.
 
+A lesson is proposed with its pins: a small JSON file that says, apart from the lesson,
+what the lesson is meant to be. The pool's tests hold every shipped lesson to its pins,
+so a proposal without them is refused. For a lesson with no `match`:
+
+```json
+{"kind": "lesson", "platform": [], "shell": [], "stops": [], "passes": []}
+```
+
+`platform` and `shell` repeat the lesson's own header, and `[]` means everywhere. For a
+guard (a lesson with a `match`), `kind` is `guard`, `stops` lists at least 5 commands the
+pattern must stop, and `passes` at least 8 that look alike and must run. A command is
+read as `compound check` reads a Bash call, so `git commit -m 'echo ===='` mentions a
+command and does not call it. You also give one line for the pool's tables with
+`--summary`.
+
 First look at the plan. This writes nothing:
 
 ```bash
-compound promote python3-no-tomllib-use-tomli --to general
+compound promote python3-no-tomllib-use-tomli --to general \
+  --pins pins.json --summary "recalled when \`import tomllib\` fails on Python 3.10 or older"
 ```
 
 ```
@@ -419,17 +435,27 @@ Plan (nothing has been written; run again with --yes to do it):
   from     : /Users/me/.claude/compound/lessons/python3-no-tomllib-use-tomli (user level)
   files    :
     lessons/python3-no-tomllib-use-tomli/SKILL.md
+    tests/pool/lessons/python3-no-tomllib-use-tomli.json
   excluded : nothing
   PR title : Add lesson: python3-no-tomllib-use-tomli
   ...
 ```
 
-The plan prints every file and the full pull request text. Read it. Then, to fork, push
-a branch and open the pull request:
+The plan prints every file and the full pull request text. Read it. When the pins are
+missing or do not agree with the lesson, its first line says `NOT PROPOSABLE as it is`
+and why. Then, to fork, push a branch and open the pull request, run the same command
+with `--yes`:
 
 ```bash
-compound promote python3-no-tomllib-use-tomli --to general --yes
+compound promote python3-no-tomllib-use-tomli --to general \
+  --pins pins.json --summary "recalled when \`import tomllib\` fails on Python 3.10 or older" --yes
 ```
+
+Before it pushes, the command holds the lesson and its pins against the pool it cloned:
+a guard that stops an everyday command, or a command another lesson's pins hold, is
+refused and the command is named. What it commits is the lesson, its pins as
+`tests/pool/lessons/<name>.json`, and a row for the lesson in the tables of `README.md`
+and `docs/design.md`.
 
 That publishes to the package's own pool. If `COMPOUND_UPSTREAM` or
 `COMPOUND_UPSTREAM_GIT` names another place, `--yes` alone sends nothing: the plan and
@@ -556,6 +582,71 @@ compound events --unsettled
 
 Each row is a lesson owed: how long ago, the start of the session's id, the project and
 the call that worked. `compound status` prints the id each one is settled by.
+
+## Candidates from /insights
+
+Claude Code's `/insights` command reads your recent sessions and writes what it found under
+`~/.claude/usage-data/`. compound runs it for you: when at least 7 days have passed since
+the last run started and at least 25 sessions are in the event log since then, the first
+prompt of a session starts one run in the background. It costs one headless `/insights`
+(one run cost $1.73 at list price). compound then reads two things from what it wrote:
+
+- the friction `/insights` named in one session, which becomes a candidate in that
+  session's project;
+- the CLAUDE.md additions its report suggests, which become candidates in every project.
+
+A candidate is shown at the first prompt of up to three later sessions, at most three
+candidates a session, between `RECORDED-INSIGHT` markers. Claude is asked to check it and
+record a lesson or decline it. The band shows `◈ 2 candidates from /insights`. After 14
+days a candidate is no longer shown or settled. When a session's first prompt starts a run,
+the band and the status entry say `/insights run started`.
+
+`compound insights` shows the last run and every candidate:
+
+```bash
+compound insights
+```
+
+```
+last run: 2026-11-21T21:16:46Z
+outcome: ok
+in-96a72ee6f0c92a07  open     facet  Claude ran the release script without its --channel flag three times before reading its usage line.
+in-860285d0f021fd1f  open     report Run the test suite with `make test`, never `pytest` directly.
+```
+
+Each row is a candidate: its id, its state (`open` is still shown; `quiet` was shown to
+three sessions with someone at them, `claude -p` runs not counted, and can still be
+settled; `settled`; `expired`), where it came from
+(`facet` for one session's friction, `report` for a suggestion) and its text. `outcome` is
+`ok`, `failed`, `timeout`, `unreadable` (Claude Code's files were not in a shape compound
+can read, and nothing was recorded) or `running`; `interrupted` means the run was killed
+before it finished, and a `message:` line says when it started. `compound status` lists
+the open candidates under `Open` and the last run under its checks; a run that `failed`,
+ended in a `timeout` or left `unreadable` files is a warning there and in the `/compound`
+pane. A candidate about a session of another project names that project in `compound
+status`: record it in a session there, or at the user level.
+
+| To | Do this |
+|-|-|
+| record one | in a session in that project, `/compound:learn settle <id>`; a `report` candidate is recorded at the user level, and so can one of another project |
+| decline one | `compound skip --settles <id> --why "<reason>"` |
+| read what you ran yourself | after typing `/insights` in a session, `compound insights --harvest` |
+| turn the runs off | `COMPOUND_INSIGHTS_DAYS=0` |
+
+```bash
+compound insights --harvest
+```
+
+```
+2 new findings (1 from the report); 2 facets read, 0 skipped, 0 dropped
+```
+
+A facet is the record `/insights` keeps of one session. A session with no friction gives
+no candidate; `skipped` counts records compound could not read, and `dropped` the ones
+whose session has no metadata or whose project directory no longer exists. A second harvest of the same files records
+nothing again. One harvest records at most 100 candidates, the report's suggestions first
+and then the newest sessions; the rest are reported as `left out` and recorded by the next
+harvest.
 
 ## Strengthen an ineffective lesson
 
@@ -964,6 +1055,7 @@ for a command typed in a terminal), the project, and what the event was about.
 | `retry` | the first call of a tool after a guard refused one, and whether it is the same call |
 | `met` | a call failed with an error that has a signature, and how many other sessions had met it |
 | `index` | a session was shown the index of what is recorded, at its first prompt |
+| `insight` | a finding read from what Claude Code's `/insights` wrote, by `compound insights --harvest` |
 
 Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`,
 `--unsettled`, `--limit <n>`, and `--json` for the full objects.
@@ -987,6 +1079,7 @@ Filters: `--type <type>`, `--session <id>`, `--project <path>`, `--since <time>`
 | `compound evidence` | the scripts sessions ran, kept as they ran | [Keep a script that worked](#keep-a-script-that-worked) |
 | `compound events` | read the event log | [Read the event log](#read-the-event-log) |
 | `compound status` | health, totals and what is open | [Read `compound status`](#read-compound-status) |
+| `compound insights` | read what Claude Code's `/insights` wrote and record its findings as candidates; print the outcome of the last run and every candidate | [Candidates from /insights](#candidates-from-insights) |
 | `compound report` | what the event log says compound did | [Read `compound report`](#read-compound-report) |
 | `compound install`, `compound update`, `compound uninstall` | set the package up, move it to a newer version, take it out | the [README](../README.md#install) |
 

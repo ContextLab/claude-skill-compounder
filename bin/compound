@@ -75,7 +75,7 @@ EVENT LOG
     fields when they are absent: `ts`, `session` (from CLAUDE_CODE_SESSION_ID) and
     `project` (the project root). `type` is required, and is one of the types the table
     below gives to the mod. A type a command of this CLI writes (`learn`, `skip`, `rm`,
-    `skill`, `promote`, `candidate`, `use`) is refused with exit 2 and the name of that
+    `skill`, `promote`, `candidate`, `use`, `met`, `insight`) is refused with exit 2 and the name of that
     command (CLI_WRITES): an event that settles a debt, or says a lesson was written,
     moved or removed, is in the log because the command ran. That keeps the log whole
     against accident and against a session settling its debt with `log`. It is no
@@ -186,13 +186,19 @@ EVENT LOG
         remind    mod               captures [string]  ids of the unsettled captures a
                                                        session was told about at its
                                                        first prompt
-        learn     CLI `add`         lesson*  string
+                                    insights [string]  ids of the findings it was shown
+                                                       (a finding shown to 3 sessions is
+                                                       no longer listed)
+                                    headless bool      true when no one was at the
+                                                       session's prompt (`claude -p`):
+                                                       its showing is not counted
+        learn     CLI `add`       lesson*  string
                                     level    string    project | user | general
                                     kind     string    lesson | skill
                                     path     string    the lesson's directory
                                     guard    bool      it has a match
                                     update   bool      --update rewrote it
-                                    settles* string    --settles: the capture it settles
+                                    settles* string    --settles: the capture or finding it settles
                                     evidence [string]  the ids of the snapshots its
                                                        attached scripts are (see
                                                        EVIDENCE)
@@ -209,7 +215,7 @@ EVENT LOG
         rm        CLI `rm`          lesson*  string
                                     level    string    project | user
         skip      CLI `skip`        why*     string
-                                    settles* string    --settles: the capture it settles
+                                    settles* string    --settles: the capture or finding it settles
                                     evidence* string   --evidence: the snapshot whose
                                                        script it declines; such an
                                                        event settles nothing
@@ -283,6 +289,26 @@ EVENT LOG
                                     tool     string
                                     sessions int       the other sessions that had met
                                                        it when this was written
+        insight   CLI `insights`    id*      string    in-<16 hex digits>, derived from
+                                                       the source and the session id (a
+                                                       facet) or the normalised text (a
+                                                       report item): one finding is
+                                                       written once
+                                    source   string    facet | report
+                                    of       string    facet: the session it is about
+                                    kinds    [string]  facet: the keys of its
+                                                       friction_counts that are slugs
+                                                       (at most 8)
+                                    text     string    facet: its friction_detail; report:
+                                                       the suggested CLAUDE.md addition.
+                                                       Masked, one line, 600 characters
+                                    goal     string    facet: its underlying_goal, 200
+                                    learned  [string]  facet: the lessons the session it
+                                                       is about wrote
+                                    why      string    report: the reason it gives, 300
+                                    (`session` is the word `insights`. A facet's
+                                    `project` is the repository root of the session's
+                                    project_path; a report item has no `project`.)
         use       CLI `use`         lesson*  string    the skill a session invoked, as
                                                        `list` names it. The mod runs
                                                        `use` when a skill's prompt is
@@ -453,6 +479,43 @@ EVENT LOG
     one refusal. A user who keeps a lesson of their own for a mistake the pool also
     covers switches the general one off (`compound disable NAME`).
 
+INSIGHTS
+    `compound insights --harvest` reads <claude dir>/usage-data/, where the Claude directory
+    is COMPOUND_CLAUDE_DIR, else CLAUDE_CONFIG_DIR, else ~/.claude. Claude Code's /insights
+    writes it; its shapes are undocumented, so each field used is checked for type and
+    size, and a file over 1 000 000 bytes is not read.
+        facets/<session id>.json        friction_detail (string; a finding when not empty),
+                                        friction_counts (object), underlying_goal (string),
+                                        session_id (string; the file's name)
+        session-meta/<session id>.json  project_path (string; its repository root is the
+                                        finding's project; a path that is no directory, or
+                                        no file, drops the finding)
+        report.html                     elements of class `claude-md-item`, each holding an
+                                        element of class `cmd-code` (the text) and one of
+                                        class `cmd-why` (the reason); the section is the
+                                        element with id `section-features`
+    Each finding becomes one `insight` event, once. The harvest holds an flock on
+    <COMPOUND_HOME>/insights.lock from reading the log to its last append, and keeps its
+    outcome in <COMPOUND_HOME>/insights.json (`finished`, `outcome` ok | unreadable,
+    `message`, `harvested` counts). When every facet read is skipped, or the report has
+    its section and no item, the outcome is `unreadable`, one `error` event (where
+    `insights.harvest`) names the file and key, and nothing is recorded.
+    `compound insights --start` starts a run in the background when one is due, and answers
+    {"started", "why"} (why: off, disabled, too soon, too few sessions, busy or due) with
+    exit 0 in every case. A run is due when COMPOUND_OFF is not 1, COMPOUND_INSIGHTS_DAYS
+    (default 7; 0 is off) days have passed since the last run started, whatever its outcome,
+    and COMPOUND_INSIGHTS_MIN_SESSIONS (default 25) distinct sessions are in the event log
+    since then. It takes the lock without waiting, checks again under it, writes `started`
+    and outcome `running` to insights.json, lets go of the lock and starts `compound
+    insights --run`. `--run` and `--harvest` typed by hand ignore COMPOUND_OFF. `--run`
+    tries for the lock for 30 seconds (then exits 1 with an `error` event), holds it for
+    its life, runs `claude -p /insights` in <COMPOUND_HOME> with COMPOUND_OFF=1 added to
+    the environment (and CLAUDE_CONFIG_DIR when either directory variable is set) in a
+    process group of its own, which is killed after COMPOUND_INSIGHTS_TIMEOUT (default 900) seconds
+    (outcome `timeout`), and harvests when claude exited 0 and wrote a report.html newer
+    than `started`. Otherwise the outcome is `failed`, with one `error` event (where
+    `insights.run`). It exits 0 when the run and the harvest finished, 1 otherwise.
+
 WHAT A REPOSITORY CAN WRITE
     A project lesson is a file in a repository, and whoever can commit to it can write
     one by hand. A lesson file is therefore held to the format where it is READ:
@@ -481,6 +544,9 @@ WHAT A REPOSITORY CAN WRITE
     (UTF-16). A destination the environment names (COMPOUND_UPSTREAM,
     COMPOUND_UPSTREAM_GIT) is published to only when `--upstream` names it too, and
     the lesson is written into a real directory of the clone, never through a link.
+    A lesson is proposed with its pins (`--pins`, see PIN_KEYS): they are checked
+    against the lesson and against the cloned pool, whose files are read as data and
+    never run, and are published with it as tests/pool/lessons/<name>.json.
 
     A value from outside is never an option of a program this file runs: every program
     is started from an argument vector with no shell, a ref, an owner/repo and a git
@@ -498,6 +564,9 @@ ENVIRONMENT
     COMPOUND_NOW         pins the clock: epoch seconds or an ISO 8601 time
     COMPOUND_CHECK_BUDGET_MS  wall-clock budget of one `check`, default 500
     COMPOUND_RECUR_LIMIT recurrences before a lesson is ineffective (default 2)
+    COMPOUND_INSIGHTS_DAYS  days between runs of /insights (default 7; 0 turns them off)
+    COMPOUND_INSIGHTS_MIN_SESSIONS  sessions in the log before a run is due (default 25, at least 1)
+    COMPOUND_INSIGHTS_TIMEOUT  seconds a run of /insights is given before it is killed (default 900, at least 1)
     COMPOUND_PLATFORM    the platform a lesson's `platform` is held against (default: this one)
     COMPOUND_SHELL       the shell a lesson's `shell` is held against (default: CLAUDE_CODE_SHELL, else SHELL)
     COMPOUND_REUSE_FLOOR the weight a candidate of `find --request` must reach (default 1.5)
@@ -518,7 +587,8 @@ ENVIRONMENT
 
     COMPOUND_RECUR_LIMIT and COMPOUND_OFF are shared with the mod, which reads them in
     a session where Claude Code has applied the `env` block of its settings. Run from
-    a terminal the CLI has no such environment, so it resolves each of the two from
+    a terminal the CLI has no such environment, so it resolves each of the two (and the
+    two insights settings, which only the CLI reads) from
     the process environment first, then from `env` in <claude dir>/settings.json,
     then the default (see `setting`). COMPOUND_PLATFORM and COMPOUND_SHELL are resolved
     the same way, so a terminal and a session agree on which lessons apply.
@@ -545,20 +615,21 @@ LEVELS = ("project", "user", "general")
 COUNT_TYPES = ("reuse", "guard", "recall", "learn", "use")
 # Every type the table in the docstring names.
 EVENT_TYPES = ("reuse", "guard", "recall", "capture", "remind", "learn", "skill", "rm", "skip", "refuse",
-               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met", "index")
+               "nudge", "judge", "promote", "candidate", "use", "repeat", "error", "retry", "met", "index", "insight")
 # The types a command of this CLI writes, and the command: `compound log` refuses them, so
 # an event that settles a debt or says a lesson was written, moved or removed is in the log
 # only because that command ran. `log` takes the other types, which are the mod's.
 CLI_WRITES = {"learn": "add", "skip": "skip", "rm": "rm", "skill": "skill", "promote": "promote",
-              "candidate": "promote", "use": "use", "met": "met"}
+              "candidate": "promote", "use": "use", "met": "met", "insight": "insights"}
 LOG_TYPES = tuple(kind for kind in EVENT_TYPES if kind not in CLI_WRITES)
 # The types the mod writes, or has the CLI write (`use`): the newest of them is when the
 # mod last fired.
 MOD_TYPES = ("reuse", "guard", "recall", "capture", "remind", "refuse", "nudge", "judge", "use", "repeat", "error",
              "retry", "index")
-# Written to be measured (`compound report`), one for every question put to the model and
-# one for the call after a refusal: left out of `status`'s Recent.
-VERDICT_TYPES = ("judge", "retry", "met")
+# Left out of `status`'s Recent: the types written to be measured (`compound report`), one
+# for every question put to the model, one for the call after a refusal and one for a
+# failure met, and the findings of /insights, which `status` lists under Open.
+VERDICT_TYPES = ("judge", "retry", "met", "insight")
 # The tools a lesson's patterns are tested against when it names none.
 MATCH_TOOLS = ("Bash",)
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -824,6 +895,7 @@ EVENT_WORDS = {
     "refuse": "refused", "learn": "recorded", "skip": "declined", "nudge": "asked", "promote": "moved",
     "candidate": "candidate", "skill": "skill", "rm": "removed", "judge": "judged", "use": "used",
     "repeat": "repeated", "error": "error", "retry": "retried", "met": "met", "index": "indexed",
+    "insight": "insight",
 }
 
 BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN = "1", "2", "31", "32", "33", "34", "35", "36"
@@ -832,7 +904,7 @@ EVENT_COLOURS = {
     "learn": GREEN, "skip": DIM, "nudge": BLUE, "promote": BLUE, "candidate": DIM, "skill": BLUE, "rm": DIM,
     "judge": DIM, "use": BLUE, "repeat": CYAN,
     "error": RED,
-    "retry": DIM, "met": DIM, "index": DIM,
+    "retry": DIM, "met": DIM, "index": DIM, "insight": DIM,
 }
 STATUS_COLOURS = {"PASS": GREEN, "WARN": YELLOW, "FAIL": RED}
 
@@ -1068,7 +1140,7 @@ KEY_RE = re.compile(r"^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$")
 BLOCK_RE = re.compile(r"^[>|][+-]?[0-9]?[+-]?$")
 PLAIN_FIRST = "\"'[]{}>|#&*!%@`,"
 YAML_WORDS = frozenset("true false null yes no on off y n ~".split())
-UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f  ﻿\ud800-\udfff]")
+UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ud800-\udfff]")
 
 
 def is_plain(value):
@@ -1121,8 +1193,8 @@ def _unquote(value):
 def split_frontmatter(text):
     """(bom, lines with their endings, index of the closing `---` or None, problem)."""
     bom = ""
-    if text.startswith("﻿"):
-        bom, text = "﻿", text[1:]
+    if text.startswith("\ufeff"):
+        bom, text = "\ufeff", text[1:]
     lines = text.splitlines(True)
     if not lines or lines[0].strip() != "---":
         return bom, lines, None, "no frontmatter"
@@ -2378,10 +2450,767 @@ def cmd_met(args):
     return 0
 
 
+# ----------------------------------------------------------------------------- insights
+
+# What `/insights` of Claude Code leaves under `usage-data/` is undocumented and may change,
+# so every field the harvest uses is checked for its type and bounded before anything is
+# offered. A file over INSIGHT_FILE_BYTES is not read.
+INSIGHT_FILE_BYTES = 1000000
+INSIGHT_TEXT, INSIGHT_GOAL, INSIGHT_WHY, INSIGHT_KINDS = 600, 200, 300, 8
+INSIGHT_KIND_RE = re.compile(r"^[a-z_]{1,40}$")
+INSIGHT_SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+INSIGHT_SESSION = "insights"
+# The most findings one harvest records; the rest wait for the next harvest.
+INSIGHT_HARVEST_MAX = 100
+
+
+def insights_claude_dir():
+    """The Claude directory `/insights` wrote to, absolute: COMPOUND_CLAUDE_DIR, else
+    CLAUDE_CONFIG_DIR, else ~/.claude."""
+    return _expand(os.environ.get("COMPOUND_CLAUDE_DIR") or os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+
+
+def insight_id(source, key):
+    import hashlib
+
+    return "in-" + hashlib.sha256((source + "\0" + key).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def insight_text(value, cap):
+    """`value` masked, on one line and cut at `cap` characters."""
+    return one_line(redact(value))[:cap]
+
+
+# What draws nothing (zero-width characters, bidirectional overrides), and the spellings the
+# mod's quoting is built on, with the look-alikes it reads as them (`inert` in hooks/render.ts).
+HIDDEN_CHARS = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+MARKER_OPEN = re.compile("<{2,}\\s*RECORDED[\\s_\\-\u2010-\u2015]*(NOTE|CAPTURE|INDEX|INSIGHT)", re.I)
+MARKER_CLOSE = re.compile("RECORDED[\\s_\\-\u2010-\u2015]*(NOTE|CAPTURE|INDEX|INSIGHT)\\s*>{2,}", re.I)
+MOD_VOICE = re.compile(r"\[compound\]", re.I)
+
+
+def inert_line(value, cap):
+    """Recorded text as the CLI prints it for a reader: one line, cut at `cap` characters,
+    and unable to open or close one of the mod's quotation markers or to speak as the mod,
+    as `inert` in hooks/render.ts makes it for Claude. Text that was cut ends in an ellipsis,
+    within `cap`, so the cut shows."""
+    text = one_line(HIDDEN_CHARS.sub("", _text(value)))
+    text = MARKER_OPEN.sub(lambda match: "<<(RECORDED-%s" % match.group(1).upper(), text)
+    text = MARKER_CLOSE.sub(lambda match: "RECORDED-%s)>>" % match.group(1).upper(), text)
+    text = MOD_VOICE.sub("(compound)", text)
+    if len(text) <= cap:
+        return text
+    return text[:max(0, cap - 1)].rstrip() + ELLIPSIS
+
+
+ELLIPSIS = "…"
+
+
+def sentence(text):
+    """`text` ended as a sentence: a period added unless it already ends in one or in the
+    ellipsis of a cut."""
+    text = text.rstrip()
+    return text if text.endswith((".", ELLIPSIS)) else text + "."
+
+
+def insights_lock(wait):
+    """A context manager over an exclusive flock on <COMPOUND_HOME>/insights.lock, which the
+    kernel releases when the process ends. Yields True when held; False when `wait` is false
+    and another process holds it."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def held():
+        os.makedirs(home_dir(), exist_ok=True)
+        fd = os.open(os.path.join(home_dir(), "insights.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+            except BlockingIOError:
+                got = False
+            yield got
+        finally:
+            os.close(fd)
+
+    return held()
+
+
+def insights_state_path():
+    return os.path.join(home_dir(), "insights.json")
+
+
+def read_insights_state():
+    """The state file as a dict; {} when there is none or it is not an object."""
+    try:
+        with open(insights_state_path(), "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def write_insights_state(state):
+    state = dict(state)
+    if "message" in state:
+        state["message"] = masked(state["message"])
+    os.makedirs(home_dir(), exist_ok=True)
+    path = insights_state_path()
+    temp = "%s.%d.tmp" % (path, os.getpid())
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            handle.write(dumps(state, indent=2) + "\n")
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def read_insight_bytes(path):
+    """(the file's bytes, None), or (None, why it was not read): a regular file of at most
+    INSIGHT_FILE_BYTES."""
+    import stat
+
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return None, "not a regular file"
+        if info.st_size > INSIGHT_FILE_BYTES:
+            return None, "over %d bytes, not read" % INSIGHT_FILE_BYTES
+        with open(path, "rb") as handle:
+            return handle.read(INSIGHT_FILE_BYTES + 1), None
+    except OSError as exc:
+        return None, "unreadable: %s" % one_line(exc)[:120]
+
+
+def read_insight_file(path):
+    """(parsed JSON, None), or (None, why it was not read)."""
+    raw, why = read_insight_bytes(path)
+    if why:
+        return None, why
+    try:
+        return json.loads(raw.decode("utf-8")), None
+    except ValueError as exc:
+        return None, "unreadable: %s" % one_line(exc)[:120]
+
+
+def insight_project(path):
+    """The repository root of the directory `path` (git's top level, else the directory),
+    as a real path; None when `path` is no directory."""
+    real = os.path.realpath(path)
+    if not os.path.isdir(real):
+        return None
+    code, top, _err = _run(["git", "rev-parse", "--show-toplevel"], cwd=real, timeout=10)
+    if code == 0 and top and os.path.isdir(top):
+        return os.path.realpath(top)
+    return real
+
+
+def parse_insights_report(text):
+    """({"section": bool, "items": [{"text", "why"}]}) from the HTML of report.html: the
+    text of each `cmd-code` and `cmd-why` inside a `claude-md-item`."""
+    from html.parser import HTMLParser
+
+    class Report(HTMLParser):
+        VOID = ("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr")
+
+        def __init__(self):
+            HTMLParser.__init__(self, convert_charrefs=True)
+            self.section = False
+            self.items = []
+            self.stack = []
+            self.item = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self.VOID:
+                return
+            attrs = dict(attrs)
+            classes = (attrs.get("class") or "").split()
+            if attrs.get("id") == "section-features":
+                self.section = True
+            role = None
+            if "claude-md-item" in classes:
+                self.section = True
+                role = "item"
+                self.item = {"code": [], "why": []}
+            elif self.item is not None and "cmd-code" in classes:
+                role = "code"
+            elif self.item is not None and "cmd-why" in classes:
+                role = "why"
+            self.stack.append((tag, role))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    gone = self.stack[index:]
+                    del self.stack[index:]
+                    if any(role == "item" for _tag, role in gone) and self.item is not None:
+                        self.items.append({"text": " ".join("".join(self.item["code"]).split()),
+                                           "why": " ".join("".join(self.item["why"]).split())})
+                        self.item = None
+                    return
+
+        def handle_data(self, data):
+            if self.item is None:
+                return
+            for _tag, role in reversed(self.stack):
+                if role in ("code", "why"):
+                    self.item[role].append(data)
+                    return
+
+    parser = Report()
+    parser.feed(text)
+    parser.close()
+    return {"section": parser.section, "items": parser.items}
+
+
+def harvest_insights(events, clock):
+    """What `usage-data/` holds that the log does not: {"new": [insight events], "facets",
+    "skipped", "dropped", "report", "capped", "outcome": "ok"|"unreadable", "message"}. `capped`
+    is the number of new findings left for a later harvest (see INSIGHT_HARVEST_MAX). Pure reading:
+    nothing is appended. An unreadable harvest offers nothing (`new` is empty) and `message`
+    names the first file and key that failed; a facet or item the log already holds is not
+    new. `facets` is the number of facet files looked at, `report` the new report findings."""
+    top = os.path.join(insights_claude_dir(), "usage-data")
+    known = set(event.get("id") for event in events if event.get("type") == "insight")
+    learned = {}
+    for event in events:
+        if event.get("type") == "learn" and _text(event.get("session")):
+            names = learned.setdefault(event["session"], [])
+            names.extend(name for name in event_names(event) if name not in names)
+    stamp = iso(clock)
+    problems = []
+    found = []
+    result = {"new": [], "facets": 0, "skipped": 0, "dropped": 0, "report": 0, "capped": 0, "outcome": "ok",
+              "message": ""}
+    roots = {}
+
+    def skip(rel, why):
+        result["skipped"] += 1
+        problems.append("%s: %s" % (rel, why))
+
+    facets = os.path.join(top, "facets")
+    try:
+        names = sorted(name for name in os.listdir(facets) if name.endswith(".json"))
+    except OSError:
+        names = []
+
+    def written(name):
+        try:
+            return os.lstat(os.path.join(facets, name)).st_mtime
+        except OSError:
+            return 0
+
+    # The newest first: when more is new than one harvest records, the newest is kept.
+    names.sort(key=written, reverse=True)
+    for name in names:
+        rel = os.path.join("usage-data", "facets", name)
+        session = name[:-len(".json")]
+        result["facets"] += 1
+        data, why = read_insight_file(os.path.join(facets, name))
+        if why:
+            skip(rel, why)
+            continue
+        if not isinstance(data, dict):
+            skip(rel, "not a JSON object")
+            continue
+        if data.get("session_id") != session or not INSIGHT_SESSION_RE.fullmatch(session):
+            skip(rel, "key session_id is not the file's name")
+            continue
+        detail = data.get("friction_detail")
+        if detail is not None and not isinstance(detail, str):
+            skip(rel, "key friction_detail is not a string")
+            continue
+        if not detail or not detail.strip():
+            continue
+        counts = data.get("friction_counts")
+        if counts is not None and not isinstance(counts, dict):
+            skip(rel, "key friction_counts is not an object")
+            continue
+        goal = data.get("underlying_goal")
+        if goal is not None and not isinstance(goal, str):
+            skip(rel, "key underlying_goal is not a string")
+            continue
+        ident = insight_id("facet", session)
+        if ident in known:
+            continue
+        meta_path = os.path.join(top, "session-meta", name)
+        meta_rel = os.path.join("usage-data", "session-meta", name)
+        if not os.path.lexists(meta_path):
+            result["dropped"] += 1
+            continue
+        meta, why = read_insight_file(meta_path)
+        if why or not isinstance(meta, dict) or not isinstance(meta.get("project_path"), str) \
+                or not meta["project_path"] or "\0" in meta["project_path"]:
+            skip(meta_rel, why or "key project_path is not a path")
+            continue
+        path = meta["project_path"]
+        if path not in roots:
+            roots[path] = insight_project(path)
+        if roots[path] is None:
+            result["dropped"] += 1
+            continue
+        kinds = [key for key in (counts or {}) if INSIGHT_KIND_RE.fullmatch(key)][:INSIGHT_KINDS]
+        found.append({"ts": stamp, "type": "insight", "session": INSIGHT_SESSION, "project": roots[path],
+                      "id": ident, "source": "facet", "of": session, "kinds": kinds,
+                      "text": insight_text(detail, INSIGHT_TEXT), "goal": insight_text(goal or "", INSIGHT_GOAL),
+                      "learned": list(learned.get(session, []))})
+
+    report = os.path.join(top, "report.html")
+    reported = []
+    if os.path.lexists(report):
+        rel = os.path.join("usage-data", "report.html")
+        raw, why = read_insight_bytes(report)
+        text = ""
+        if not why:
+            try:
+                text = raw.decode("utf-8")
+            except ValueError as exc:
+                why = "unreadable: %s" % one_line(exc)[:120]
+        if why:
+            problems.append("%s: %s" % (rel, why))
+            result["outcome"] = "unreadable"
+        parsed = parse_insights_report(text) if text else {"section": False, "items": []}
+        wanted = [item for item in parsed["items"] if item["text"]]
+        if parsed["section"] and not wanted:
+            problems.append("%s: key cmd-code: the report has its suggestions section and no item with text" % rel)
+            result["outcome"] = "unreadable"
+        seen = set()
+        for item in wanted:
+            ident = insight_id("report", " ".join(item["text"].lower().split()))
+            if ident in known or ident in seen:
+                continue
+            seen.add(ident)
+            reported.append({"ts": stamp, "type": "insight", "session": INSIGHT_SESSION, "id": ident,
+                             "source": "report", "text": insight_text(item["text"], INSIGHT_TEXT),
+                             "why": insight_text(item["why"], INSIGHT_WHY)})
+
+    if result["facets"] and result["skipped"] == result["facets"]:
+        result["outcome"] = "unreadable"
+    result["message"] = problems[0] if problems else ""
+    if result["outcome"] == "ok":
+        # At most INSIGHT_HARVEST_MAX: the report's items first, since the next run overwrites
+        # report.html and an item left out could be lost, then the newest facets. A facet left
+        # out stays on disk and is not in the log, so a later harvest finds it new.
+        kept_report = reported[:INSIGHT_HARVEST_MAX]
+        kept = found[:INSIGHT_HARVEST_MAX - len(kept_report)]
+        result["capped"] = len(found) + len(reported) - len(kept) - len(kept_report)
+        result["new"] = kept + kept_report
+        result["report"] = len(kept_report)
+    return result
+
+
+INSIGHTS_TIMEOUT = 900
+INSIGHTS_DAYS, INSIGHTS_MIN_SESSIONS = 7, 25
+
+
+def insights_days():
+    """COMPOUND_INSIGHTS_DAYS, resolved as COMPOUND_RECUR_LIMIT is: a whole number, `0` for off;
+    anything else is the default."""
+    value = setting("COMPOUND_INSIGHTS_DAYS")[0]
+    return int(value) if re.match(r"^\d{1,9}$", value) else INSIGHTS_DAYS
+
+
+def insights_timeout():
+    """COMPOUND_INSIGHTS_TIMEOUT: the seconds a run of `claude -p /insights` is given, a whole
+    number of at least 1; anything else is the default."""
+    value = setting("COMPOUND_INSIGHTS_TIMEOUT")[0]
+    if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
+        return int(value)
+    return INSIGHTS_TIMEOUT
+
+
+def insights_min_sessions():
+    value = setting("COMPOUND_INSIGHTS_MIN_SESSIONS")[0]
+    if re.match(r"^\d{1,9}$", value) and int(value) >= 1:
+        return int(value)
+    return INSIGHTS_MIN_SESSIONS
+
+
+def insights_due(events, state, clock):
+    """(whether a run is due, why): `off` (COMPOUND_OFF is 1), `disabled` (COMPOUND_INSIGHTS_DAYS
+    is 0), `too soon` (the last run started less than that many days ago, whatever its outcome),
+    `too few sessions` (fewer than COMPOUND_INSIGHTS_MIN_SESSIONS distinct sessions in the log
+    since it started, or since the start of the log) or `due`."""
+    if setting("COMPOUND_OFF")[0] == "1":
+        return False, "off"
+    days = insights_days()
+    if days == 0:
+        return False, "disabled"
+    started = state.get("started")
+    started = started if isinstance(started, (int, float)) and not isinstance(started, bool) else None
+    if started is not None and clock - started < days * 86400:
+        return False, "too soon"
+    sessions = set()
+    for event in events:
+        session = _text(event.get("session"))
+        if not session or session == INSIGHT_SESSION:
+            continue
+        stamp = parse_ts(event.get("ts"))
+        if stamp is not None and (started is None or stamp >= started):
+            sessions.add(session)
+    if len(sessions) < insights_min_sessions():
+        return False, "too few sessions"
+    return True, "due"
+
+
+def insights_fail(clock, outcome, message):
+    """Record a run that did not produce a report: the state and one `error` event."""
+    state = read_insights_state()
+    state.update({"finished": iso(clock), "outcome": outcome, "message": message})
+    try:
+        write_insights_state(state)
+    except OSError as exc:
+        sys.stderr.write("compound: warning: the state file %s could not be written (%s)\n" % (
+            insights_state_path(), exc.strerror or exc))
+    insights_error(message)
+
+
+def insights_error(message):
+    """The run's own `error` event: of the session `insights`, as its findings are, and of no
+    project, since the run reads the sessions of every project."""
+    log_soft("error", "", where="insights.run", message=message, session=INSIGHT_SESSION)
+
+
+def worker_env():
+    """The environment of the worker and of the `claude` it starts: the caller's without
+    CLAUDE_CODE_SESSION_ID, so nothing the run does is stamped as the starting session's."""
+    return {key: value for key, value in os.environ.items() if key != "CLAUDE_CODE_SESSION_ID"}
+
+
+def find_claude():
+    """(the `claude` to run, or None, and where it was looked for). `claude` on PATH, else
+    ~/.local/bin/claude when it is an executable file: a session started from a desktop
+    app may not have the shell's PATH. HOME is read from the environment, and with none
+    there is no second place to look."""
+    import shutil
+
+    found = shutil.which("claude")
+    if found:
+        return found, ""
+    home = os.environ.get("HOME", "")
+    if not home:
+        return None, "claude was not found on PATH, and HOME is not set"
+    local = os.path.join(home, ".local", "bin", "claude")
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local, ""
+    return None, "claude was not found on PATH or at %s" % local
+
+
+def start_insights(clock):
+    """(whether a worker was started, why, message). Under the lock, which is not waited for,
+    and after asking again whether a run is due, `started` is written; the lock is then let go
+    and the worker spawned, so the worker is not made to wait for its own starter. A second
+    starter finds the `started` already written. A home that cannot be written is "could not
+    start" with a `message`, and no event: the log is in the same place."""
+    import subprocess
+
+    try:
+        with insights_lock(False) as held:
+            if not held:
+                return False, "busy", ""
+            state = read_insights_state()
+            events, _bad = read_events()
+            due, why = insights_due(events, state, clock)
+            if not due:
+                return False, why, ""
+            state.update({"started": int(clock), "outcome": "running", "message": ""})
+            write_insights_state(state)
+    except Exception as exc:
+        return False, "could not start", masked(one_line(getattr(exc, "strerror", None) or exc))
+    try:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "insights", "--run"], env=worker_env(),
+                         start_new_session=True, close_fds=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        message = "the worker could not be started: %s" % (exc.strerror or exc)
+        insights_fail(clock, "failed", message)
+        return False, "could not start", masked(message)
+    return True, "due", ""
+
+
+def insights_outcome(state, clock):
+    """The outcome in `state`, with a `running` that no process holds the lock for reported as
+    `interrupted`: the worker died, and the week's `started` stands. A `running` whose `started`
+    is at most INSIGHTS_FRESH seconds old stays `running` with the lock free: `--start` lets go
+    of the lock before the worker it spawns takes it, and the worker keeps that `started` for
+    the same INSIGHTS_FRESH seconds."""
+    outcome = state.get("outcome")
+    if outcome == "running":
+        started = state.get("started")
+        if isinstance(started, (int, float)) and not isinstance(started, bool) \
+                and 0 <= clock - started <= INSIGHTS_FRESH:
+            return outcome
+        try:
+            with insights_lock(False) as held:
+                if held:
+                    return "interrupted"
+        except OSError:
+            pass
+    return outcome
+
+
+def stop_group(proc):
+    """Kill the whole process group of `proc`: SIGTERM, and SIGKILL after 5 seconds to what of
+    the group is left, whether or not `proc` itself has exited by then, since a child of `claude`
+    can outlive it. (`proc` leads its group: it was started in a session of its own.)"""
+    import signal
+    import subprocess
+
+    def group_alive():
+        try:
+            os.killpg(proc.pid, 0)
+        except OSError:
+            return False
+        return True
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    end = time.monotonic() + 5
+    out, err = "", ""
+    try:
+        out, err = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    # poll() reaps `proc` once it has exited, so a zombie leader does not keep the group alive.
+    while (proc.poll() is None or group_alive()) and time.monotonic() < end:
+        time.sleep(0.1)
+    if group_alive():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if proc.poll() is None:
+        try:
+            out, err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+    return out, err
+
+
+INSIGHTS_LOCK_WAIT = 30
+INSIGHTS_FRESH = 60
+
+
+def run_insights(clock):
+    """The worker: takes the lock, retrying without blocking for INSIGHTS_LOCK_WAIT seconds
+    because a harvest or its own starter may hold it for a moment, runs `claude -p /insights`
+    and harvests what it wrote, holding the lock for its whole life. Exit status 0 when both
+    finished."""
+    end = time.monotonic() + INSIGHTS_LOCK_WAIT
+    try:
+        while True:
+            with insights_lock(False) as held:
+                if held:
+                    return run_insights_locked(clock)
+            if time.monotonic() >= end:
+                break
+            time.sleep(0.2)
+    except OSError as exc:
+        sys.stderr.write("compound: the lock of /insights could not be taken: %s\n" % (exc.strerror or exc))
+        return 1
+    insights_error("the lock of /insights was held for %d seconds" % INSIGHTS_LOCK_WAIT)
+    return 1
+
+
+def run_insights_locked(clock):
+    """The body of the worker, with the lock held. Whatever goes wrong ends in a written
+    outcome and one `error` event, never in a `running` that nothing is running."""
+    import subprocess
+
+    proc = None
+    try:
+        state = read_insights_state()
+        started = state.get("started")
+        if state.get("outcome") == "running" and isinstance(started, (int, float)) \
+                and not isinstance(started, bool) and 0 <= clock - started <= INSIGHTS_FRESH:
+            pass  # the `started` of the `--start` that spawned this worker
+        else:
+            started = int(clock)
+            state.update({"started": started, "outcome": "running", "message": ""})
+            write_insights_state(state)
+        program, missing = find_claude()
+        if not program:
+            insights_fail(now(), "failed", missing)
+            return 1
+        env = worker_env()
+        env["COMPOUND_OFF"] = "1"
+        if os.environ.get("COMPOUND_CLAUDE_DIR") or os.environ.get("CLAUDE_CONFIG_DIR"):
+            env["CLAUDE_CONFIG_DIR"] = insights_claude_dir()
+        try:
+            proc = subprocess.Popen([program, "-p", "/insights"], cwd=home_dir(), env=env, start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    universal_newlines=True, errors="replace")
+        except OSError as exc:
+            insights_fail(now(), "failed", "claude could not be started: %s" % (exc.strerror or exc))
+            return 1
+        limit = insights_timeout()
+        try:
+            out, err = proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            stop_group(proc)
+            insights_fail(now(), "timeout", "claude did not finish within %d seconds" % limit)
+            return 1
+        report = os.path.join(insights_claude_dir(), "usage-data", "report.html")
+        try:
+            wrote = os.stat(report).st_mtime >= started
+        except OSError:
+            wrote = False
+        if proc.returncode != 0:
+            # `claude -p` prints some of its failures (`Not logged in`) on standard output.
+            lines = (err or "").strip().splitlines() or (out or "").strip().splitlines()
+            said = masked(one_line(lines[0]))[:OPEN_TEXT * 2] if lines else ""
+            insights_fail(now(), "failed", "claude exited %d: %s" % (proc.returncode, said) if said
+                          else "claude exited %d" % proc.returncode)
+            return 1
+        if not wrote:
+            insights_fail(now(), "failed", "claude finished and left no usage-data/report.html newer than the start")
+            return 1
+        return 0 if harvest_locked(now(), worker=True)[0]["outcome"] == "ok" else 1
+    except Exception as exc:
+        if proc is not None and proc.poll() is None:
+            stop_group(proc)
+        insights_fail(now(), "failed", "the run stopped on an error: %s: %s" % (type(exc).__name__, one_line(exc)[:200]))
+        return 1
+
+
+def harvest_locked(clock, worker=False):
+    """The harvest, for a caller that holds the lock: (the result of `harvest_insights`, the
+    number of events written). Records what it did in the state file. In the worker its
+    `error` is the run's own, of the session `insights` and of no project."""
+    events, _bad = read_events()
+    result = harvest_insights(events, clock)
+    if result["outcome"] == "unreadable":
+        own = {"session": INSIGHT_SESSION} if worker else {}
+        log_soft("error", "" if worker else project_root(), where="insights.harvest", message=result["message"],
+                 **own)
+    for event in result["new"]:
+        append_event(event)
+    written = len(result["new"])
+    counts = {"facets": result["facets"], "findings": written - result["report"], "report": result["report"],
+              "skipped": result["skipped"], "dropped": result["dropped"], "capped": result["capped"]}
+    state = read_insights_state()
+    state.update({"finished": iso(clock), "outcome": result["outcome"], "message": result["message"],
+                  "harvested": counts})
+    try:
+        write_insights_state(state)
+    except OSError as exc:
+        sys.stderr.write("compound: warning: the state file %s could not be written (%s); "
+                         "the harvest itself was done\n" % (insights_state_path(), exc.strerror or exc))
+    return result, written
+
+
+def cmd_insights(args):
+    if args.start and args.run or (args.start or args.run) and args.harvest:
+        raise usage("--start, --run and --harvest are three different things: give one")
+    if args.start:
+        started, why, message = start_insights(now())
+        if args.json:
+            emit(dict({"started": started, "why": why}, **({"message": message} if message else {})))
+        else:
+            sys.stdout.write("started a run of /insights\n" if started else "not started: %s%s\n" % (
+                why, ": " + message if message else ""))
+        return 0
+    if args.run:
+        return run_insights(now())
+    if not args.harvest:
+        state = {"started": None, "finished": None, "outcome": None, "message": "", "harvested": {}}
+        state.update(read_insights_state())
+        state["claude_dir"] = insights_claude_dir()
+        state["outcome"] = insights_outcome(state, now())
+        if state["outcome"] == "interrupted" and not state["message"]:
+            started = state.get("started")
+            state["message"] = "the run started %s ended before it finished; no process holds its lock" % (
+                iso(started) if isinstance(started, (int, float)) and not isinstance(started, bool)
+                else "at a time not recorded")
+        events, _bad = read_events()
+        state["findings"] = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
+                              "state": kind, "text": _text(event.get("text"))}
+                             for ident, (event, kind) in insight_states(events, now()).items()]
+        if args.json:
+            emit(state)
+            return 0
+        sys.stdout.write("last run: %s\noutcome: %s\n" % (
+            state["finished"] or "never", state["outcome"] or "none yet"))
+        if state["message"]:
+            sys.stdout.write("message: %s\n" % inert_line(state["message"], OPEN_TEXT * 3))
+        capped = state["harvested"].get("capped") if isinstance(state["harvested"], dict) else None
+        if isinstance(capped, int) and not isinstance(capped, bool) and capped > 0:
+            sys.stdout.write("capped: %d left out of the last harvest, which records at most %d; "
+                             "the next harvest records them\n" % (capped, INSIGHT_HARVEST_MAX))
+        for row in state["findings"]:
+            sys.stdout.write("%s  %-8s %-6s %s\n" % (row["id"], row["state"], row["source"] or "-",
+                                                       inert_line(row["text"], OPEN_TEXT)))
+        return 0
+    with insights_lock(True):
+        result, written = harvest_locked(now())
+    out = {"new": written, "facets": result["facets"], "skipped": result["skipped"],
+           "dropped": result["dropped"], "report": result["report"], "capped": result["capped"],
+           "outcome": result["outcome"], "message": result["message"]}
+    if args.json:
+        emit(out)
+    elif result["outcome"] == "unreadable":
+        sys.stdout.write("unreadable: %s\n" % inert_line(result["message"], OPEN_TEXT * 3))
+    else:
+        sys.stdout.write("%d new findings (%d from the report); %d facets read, %d skipped, %d dropped%s\n" % (
+            written, result["report"], result["facets"], result["skipped"], result["dropped"],
+            "; %d left out, for the next harvest" % result["capped"] if result["capped"] else ""))
+    return 0
+
+
+# A finding is listed for the reminder until 3 distinct sessions were told it (it is then
+# "quiet", and can still be settled), until a `learn` or `skip` settles it, or until
+# UNSETTLED_DAYS have passed since the harvest wrote it ("expired").
+INSIGHT_SHOWN_SESSIONS = 3
+
+
+def insight_states(events, clock):
+    """{finding id: (the `insight` event, its state)} for every finding in `events`, in one
+    pass over them. The state is "open" (still listed for the reminder), "quiet" (told to INSIGHT_SHOWN_SESSIONS
+    distinct sessions, so no longer listed, but still settleable), "settled", or "expired"
+    (older than UNSETTLED_DAYS, counted from the harvest, so neither listed nor settleable)."""
+    found, sessions, settled = {}, {}, set()
+    for event in events:
+        kind = event.get("type")
+        if kind == "insight":
+            ident = event.get("id")
+            if isinstance(ident, str) and ident not in found:
+                found[ident], sessions[ident] = event, set()
+        elif kind == "remind":
+            # A session with no one at its prompt (`claude -p`) is shown findings, but its
+            # showing is not counted: nobody read it.
+            session, named = _text(event.get("session")), event.get("insights")
+            if session and isinstance(named, list) and event.get("headless") is not True:
+                for ident in named:
+                    if isinstance(ident, str) and ident in sessions:
+                        sessions[ident].add(session)
+        elif kind in ("learn", "skip"):
+            ident = _text(event.get("settles"))
+            if ident in found:
+                settled.add(ident)
+    out = {}
+    for ident, event in found.items():
+        stamp = parse_ts(event.get("ts"))
+        if ident in settled:
+            state = "settled"
+        elif stamp is None or clock - stamp > UNSETTLED_DAYS * 86400:
+            state = "expired"
+        elif len(sessions[ident]) >= INSIGHT_SHOWN_SESSIONS:
+            state = "quiet"
+        else:
+            state = "open"
+        out[ident] = (event, state)
+    return out
+
+
 def settled_by(debt, event):
     """Whether `event`, later in the log than `debt`, settles it. THE definition of
     settled: every reader goes through `unsettled`, which asks this."""
     kind = event.get("type")
+    if _text(event.get("settles")).startswith("in-"):
+        return False  # it settles a finding, and nothing else
     if kind == "skip" and event.get("evidence"):
         return False
     session = _text(event.get("session"))
@@ -2440,13 +3269,20 @@ def unsettled_captures(events, clock=None):
 
 
 def check_settles(value, events):
-    """The id `--settles` names, or Fail(2) when no unsettled capture has it."""
+    """The id `--settles` names, or Fail(2) when it is neither an unsettled capture nor a
+    finding that can still be settled (open or quiet)."""
     if value is None:
         return None
     owed = [capture_id(cap) for cap in unsettled_captures(events)]
-    if value not in owed:
-        raise usage("--settles %r names no unsettled capture (see `compound events --unsettled`%s)" % (
-            one_line(value)[:40], "; unsettled: " + ", ".join(owed[-8:]) if owed else "; there is none"))
+    if value in owed:
+        return value
+    findings = [ident for ident, (_event, state) in insight_states(events, now()).items()
+                if state in ("open", "quiet")]
+    if value not in findings:
+        listed = owed[-8:] + findings[-8:]
+        raise usage("--settles %r names no unsettled capture or finding (see `compound events --unsettled` "
+                    "and `compound insights`%s)" % (
+                        one_line(value)[:40], "; unsettled: " + ", ".join(listed) if listed else "; there is none"))
     return value
 
 
@@ -2589,8 +3425,14 @@ def event_summary(event):
         return "%s stays in %s (seen in %s)" % (", ".join(names), one_line(event.get("from", "?")),
                                                 one_line(event.get("seen_in", "?")))
     if kind == "remind":
-        ids = event.get("captures")
-        return ", ".join(str(one) for one in ids) if isinstance(ids, list) else ""
+        # What the session was told, in the words the /compound pane uses, with the ids.
+        told = []
+        for key, one, many in (("captures", "lesson owed", "lessons owed"),
+                               ("insights", "candidate from /insights", "candidates from /insights")):
+            ids = event.get(key)
+            if isinstance(ids, list) and ids:
+                told.append("%s: %s" % (plural(len(ids), one, many), ", ".join(str(i) for i in ids)))
+        return "; ".join(told)
     if kind == "promote":
         text = "%s %s -> %s" % (", ".join(names), event.get("from", "?"), event.get("to", "?"))
         if event.get("url"):
@@ -4067,6 +4909,25 @@ def cmd_add(args):
     existing = [item for item in items if item["name"] == name]
     events, _bad = read_events()
     settles = settling(args.settles, events)
+    if settles and settles.startswith("in-"):
+        target = existing[0]["level"] if args.update and existing else args.level
+        kept = insight_states(events, now()).get(settles)
+        if kept and kept[0].get("source") == "report" and target != "user":
+            raise usage("%s is a finding of the /insights report, written from sessions of several projects: "
+                        "record it at the user level (--level user), or decline it with `compound skip --settles`"
+                        % settles)
+        # A finding about another project's session is that project's: its text must not land
+        # in this project's lessons, which can be committed files. One that names no project
+        # cannot be shown to be this project's, so it is recorded at the user level, as a
+        # report finding is.
+        theirs = _text(kept[0].get("project")) if kept else ""
+        if kept and not theirs.strip() and target != "user":
+            raise usage("%s is a finding of /insights that names no project: record it at the user level "
+                        "(--level user), or decline it with `compound skip --settles %s`" % (settles, settles))
+        if theirs and target == "project" and not _same_path(theirs, project):
+            raise usage("%s is a finding about a session of %s, not of this project (%s): record it in a session "
+                        "there, or at the user level (--level user), or decline it with `compound skip --settles %s`"
+                        % (settles, one_line(theirs), one_line(project), settles))
 
     vouched_before = None
     there_before = None
@@ -5524,6 +6385,227 @@ def _must(argv, cwd=None, what=None):
     return out
 
 
+# What a lesson of the general pool is meant to be is written down beside the pool's
+# tests, one file a lesson (tests/pool/lessons/<name>.json), and the pool's suite holds
+# every shipped lesson to its file. A proposal carries its own.
+PIN_KEYS = ("kind", "platform", "shell", "stops", "passes")
+PIN_STOPS = 5
+PIN_PASSES = 8
+PIN_BYTES = 256 * 1024
+PIN_SUMMARY_CHARS = 300
+PIN_GUARD_SECONDS = 2.0
+PIN_HELP = ("A pin file is one JSON object with exactly these keys: \"kind\" (\"guard\" for a lesson with a "
+            "`match`, \"lesson\" for one without), \"platform\" and \"shell\" (the lists the lesson's own header "
+            "carries; [] is everywhere), \"stops\" (for a guard, at least %d commands it must stop) and \"passes\" "
+            "(for a guard, at least %d commands that look alike and must run; both are [] for a lesson)" % (
+                PIN_STOPS, PIN_PASSES))
+# Where the pool's documents list its lessons: (file, the heading the table is under).
+POOL_TABLES = (("README.md", "### The lessons that ship with compound"), ("docs/design.md", "## The general pool"))
+PLATFORM_WORDS = {"darwin": "macOS", "linux": "Linux", "windows": "Windows"}
+
+
+def pin_shape_problems(data):
+    """What keeps `data` from being a pin file, as a list of sentences without a full stop."""
+    if not isinstance(data, dict):
+        return ["it is not a JSON object"]
+    out = []
+    if sorted(data) != sorted(PIN_KEYS):
+        missing = [key for key in PIN_KEYS if key not in data]
+        extra = sorted(one_line(key)[:40] for key in data if key not in PIN_KEYS)
+        if missing:
+            out.append("it lacks %s" % ", ".join("`%s`" % key for key in missing))
+        if extra:
+            out.append("it has keys a pin file does not: %s" % ", ".join(extra))
+        return out
+    if data["kind"] not in ("lesson", "guard"):
+        out.append("`kind` is neither \"lesson\" nor \"guard\"")
+    for key in ("platform", "shell", "stops", "passes"):
+        value = data[key]
+        if not isinstance(value, list) or not all(isinstance(one, str) and one for one in value):
+            out.append("`%s` is not a list of non-empty strings" % key)
+        elif len(set(value)) != len(value):
+            out.append("`%s` names one entry twice" % key)
+    if out:
+        return out
+    if data["kind"] == "lesson" and (data["stops"] or data["passes"]):
+        out.append("a lesson with no pattern stops nothing, so its `stops` and `passes` are []")
+    if data["kind"] == "guard" and len(data["stops"]) < PIN_STOPS:
+        out.append("a guard needs at least %d `stops` and it has %d" % (PIN_STOPS, len(data["stops"])))
+    if data["kind"] == "guard" and len(data["passes"]) < PIN_PASSES:
+        out.append("a guard needs at least %d `passes` and it has %d" % (PIN_PASSES, len(data["passes"])))
+    return out
+
+
+def read_pins(path):
+    """The pins in the file `--pins` names. Anything that is not a pin file is exit 2."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(PIN_BYTES + 1)
+    except OSError as exc:
+        raise usage("--pins %s cannot be read (%s)" % (sh_quote(one_line(path)[:200]), exc.strerror or exc))
+    if len(raw) > PIN_BYTES:
+        raise usage("--pins %s is larger than %d bytes" % (sh_quote(one_line(path)[:200]), PIN_BYTES))
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise usage("--pins %s does not read as JSON (%s). %s" % (
+            sh_quote(one_line(path)[:200]), one_line(exc)[:120], PIN_HELP))
+    problems = pin_shape_problems(data)
+    if problems:
+        raise usage("--pins %s is not a pin file: %s. %s" % (
+            sh_quote(one_line(path)[:200]), "; ".join(problems), PIN_HELP))
+    return dict((key, data[key]) for key in PIN_KEYS)
+
+
+def pins_text(pins):
+    """A pin file's bytes: the keys in PIN_KEYS order, two spaces of indent, one final newline."""
+    return json.dumps(dict((key, pins[key]) for key in PIN_KEYS), indent=2, ensure_ascii=False) + "\n"
+
+
+def summary_problem(summary):
+    """Why `summary` cannot be a cell of the pool's tables, or None."""
+    if not summary.strip():
+        return "it is empty"
+    if "\n" in summary or "\r" in summary or CONTROL_CHARS.search(summary):
+        return "it is more than one line"
+    if "|" in summary:
+        return "it holds a `|`, which ends a table cell"
+    if len(summary) > PIN_SUMMARY_CHARS:
+        return "it is %d characters long, and a summary may be %d" % (len(summary), PIN_SUMMARY_CHARS)
+    return None
+
+
+def stopped_by(guards, command):
+    """(indexes of `guards` that stop the Bash command, indexes that did not finish).
+    `guards` is a list of pattern lists, matched as `check` matches them."""
+    hits, unfinished, never = run_guards(guards, command, time.monotonic() + PIN_GUARD_SECONDS, shell=True)
+    return hits, unfinished + never
+
+
+def pin_problems(item, pins):
+    """Where the lesson is not what its pins say, as a list of sentences. Nothing but the
+    lesson and the pins is read."""
+    out = []
+    kind = "guard" if item["match"] else "lesson"
+    if pins["kind"] != kind:
+        out.append("the pins say `%s` and the lesson is a %s: it has %s `match`" % (
+            pins["kind"], kind, "a" if item["match"] else "no"))
+    for key in ("platform", "shell"):
+        if sorted(pins[key]) != sorted(item[key]):
+            out.append("the pins say `%s` %s and the lesson's header says %s" % (
+                key, json.dumps(sorted(pins[key])), json.dumps(sorted(item[key]))))
+    if kind == "guard" and pins["kind"] == "guard":
+        for command in pins["stops"]:
+            hits, late = stopped_by([item["match"]], command)
+            if late:
+                out.append("the pattern did not finish on %s" % json.dumps(command))
+            elif not hits:
+                out.append("the pins say it stops %s and its pattern does not" % json.dumps(command))
+        for command in pins["passes"]:
+            hits, late = stopped_by([item["match"]], command)
+            if late:
+                out.append("the pattern did not finish on %s" % json.dumps(command))
+            elif hits:
+                out.append("the pins say %s runs and its pattern stops it" % json.dumps(command))
+    return out
+
+
+def _pool_json(path):
+    """A JSON file of a cloned pool, as data, or None when it is not there or does not read."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(PUBLISH_BYTES + 1)
+        return json.loads(raw.decode("utf-8")) if len(raw) <= PUBLISH_BYTES else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def pool_problems(clone, name, item, pins):
+    """Where the lesson and its pins do not fit the pool cloned at `clone`, as a list of
+    sentences. The pool's files are read as data and nothing of the clone is run: the
+    everyday commands no shipped pattern may stop (tests/pool/ordinary.json), the pins of
+    the lessons already there, and their patterns."""
+    out = []
+    pool = os.path.join(clone, "tests", "pool")
+    theirs = {}
+    try:
+        entries = sorted(os.listdir(os.path.join(pool, "lessons")))
+    except OSError:
+        entries = []
+    for entry in entries:
+        data = _pool_json(os.path.join(pool, "lessons", entry))
+        if entry.endswith(".json") and entry[:-5] != name and not pin_shape_problems(data):
+            theirs[entry[:-5]] = data
+    if item["match"]:
+        ordinary = _pool_json(os.path.join(pool, "ordinary.json"))
+        commands = [(command, "an everyday command of the pool (tests/pool/ordinary.json)")
+                    for command in (ordinary if isinstance(ordinary, list) else []) if isinstance(command, str)]
+        for other, pin in sorted(theirs.items()):
+            commands += [(command, "a command the pins of `%s` hold" % other) for command in pin["stops"] + pin["passes"]]
+        for command, what in commands:
+            hits, late = stopped_by([item["match"]], command)
+            if hits or late:
+                out.append("its pattern %s %s, %s" % ("stops" if hits else "did not finish on", json.dumps(command), what))
+    others = []
+    try:
+        shipped = sorted(os.listdir(os.path.join(clone, "lessons")))
+    except OSError:
+        shipped = []
+    for entry in shipped:
+        directory = os.path.join(clone, "lessons", entry)
+        if entry.startswith(".") or entry == name or os.path.islink(directory) or not os.path.isdir(directory):
+            continue
+        if os.path.islink(os.path.join(directory, "SKILL.md")) or not os.path.isfile(os.path.join(directory, "SKILL.md")):
+            continue
+        other = _load_item("general", "lesson", directory, False)
+        if not other["_problem"] and other["match"]:
+            others.append(other)
+    for command in pins["stops"] + pins["passes"]:
+        hits, _late = stopped_by([other["match"] for other in others], command)
+        for index in hits:
+            out.append("the pool's `%s` stops %s, a command of these pins" % (others[index]["name"], json.dumps(command)))
+    return out
+
+
+def applies_cells(pins):
+    """(`macOS, zsh` for the README, `platform: darwin`, `shell: zsh` in code marks for the design)."""
+    words = [PLATFORM_WORDS.get(one, one) for one in pins["platform"]] + list(pins["shell"])
+    code = ["`platform: %s`" % one for one in pins["platform"]] + ["`shell: %s`" % one for one in pins["shell"]]
+    return ", ".join(words) or "everywhere", ", ".join(code) or "everywhere"
+
+
+def table_row_added(text, heading, name, pins, summary):
+    """`text` with the lesson's row at the end of the lessons table under `heading`, or None
+    when the document has no such table. A table of three columns is the README's (Lesson,
+    Applies, What it does) and one of four the design's (Lesson, Form, Applies where,
+    Stops or answers)."""
+    lines = text.split("\n")
+    words, code = applies_cells(pins)
+    rows = {3: "| `%s` | %s | %s |" % (name, words, summary),
+            4: "| `%s` | %s | %s | %s |" % (name, pins["kind"], code, summary)}
+    under = False
+    for index, line in enumerate(lines):
+        if line.strip() == heading:
+            under = True
+            continue
+        if not under:
+            continue
+        if line.startswith("#") and line.lstrip("#").startswith(" ") and len(line) - len(line.lstrip("#")) <= len(heading) - len(heading.lstrip("#")):
+            return None
+        if line.startswith("| Lesson |"):
+            row = rows.get(line.strip().strip("|").count("|") + 1)
+            last = index
+            while last + 1 < len(lines) and lines[last + 1].startswith("|"):
+                last += 1
+            if row is None or any(cells.startswith("| `%s` |" % name) for cells in lines[index:last + 1]):
+                return None
+            lines.insert(last + 1, row)
+            return "\n".join(lines)
+    return None
+
+
 def cmd_promote(args):
     project = project_root()
     item = find_item(project, args.name)
@@ -5532,6 +6614,8 @@ def cmd_promote(args):
         raise usage("--auto, --seen-in and --as go with --to user only")
     if args.to != "general" and args.upstream is not None:
         raise usage("--upstream goes with --to general only")
+    if args.to != "general" and (args.pins is not None or args.summary is not None):
+        raise usage("--pins and --summary go with --to general only")
     if args.to == "user":
         if item["level"] != "project":
             raise usage("%r is already at the %s level" % (name, item["level"]))
@@ -5679,6 +6763,25 @@ def cmd_promote(args):
                         name, one_line(destination), UPSTREAM_DEFAULT, variable, sh_quote(destination)))
     files, excluded = _lesson_files(item["path"])
     skill_md = published_text(item)
+    # A LESSON IS PROPOSED WITH ITS PINS. The pool's suite holds every shipped lesson to a
+    # statement, made apart from the lesson, of what it is meant to be; a lesson that
+    # arrives without one fails that suite whatever it says. So the statement is asked
+    # for here, checked against the lesson here, and published with it.
+    if item["kind"] != "lesson" and (args.pins is not None or args.summary is not None):
+        raise usage("--pins and --summary go with a lesson; %r is a skill" % name)
+    pins = read_pins(args.pins) if args.pins is not None else None
+    summary = args.summary.strip() if args.summary is not None else None
+    if summary is not None and summary_problem(args.summary):
+        raise usage("--summary cannot be a row of the pool's tables: %s" % summary_problem(args.summary))
+    pin_path = "tests/pool/lessons/%s.json" % name
+    unpinned = []
+    if item["kind"] == "lesson":
+        if pins is None:
+            unpinned.append("it has no pins (--pins FILE)")
+        if summary is None:
+            unpinned.append("it has no one-line summary for the pool's tables (--summary TEXT)")
+        if pins is not None:
+            unpinned += pin_problems(item, pins)
 
     import shutil
     import tempfile
@@ -5690,16 +6793,33 @@ def cmd_promote(args):
         os.makedirs(staging)
         unpublishable = stage_files(item, files, skill_md, staging)
         secrets = secret_findings(staging)
+        if pins is not None or summary is not None:
+            # The pins and the summary are published too, and are read like the lesson.
+            beside = os.path.join(work, "pins")
+            os.makedirs(beside)
+            for label, words in (("the pins", pins_text(pins) if pins is not None else ""), ("the summary", summary or "")):
+                with open(os.path.join(beside, "text"), "w", encoding="utf-8", newline="") as handle:
+                    handle.write(words)
+                secrets += ["%s: %s" % (label, finding.split(": ", 1)[1]) for finding in secret_findings(beside)]
         title = "Add %s: %s" % (item["kind"], name)
         body = "Proposes the %s `%s` for the general pool.\n\nWhen it applies: %s\n" % (
             item["kind"], name, item["description"])
         if item["match"]:
             body += "\nGuard patterns:\n" + "".join("- `%s`\n" % pattern for pattern in item["match"])
         body += "\nFiles:\n" + "".join("- `%s/%s/%s`\n" % (subdir, name, rel) for rel in files)
+        if pins is not None:
+            body += "- `%s`\n" % pin_path
         body += "\nThe text:\n\n```\n%s\n```\n" % item["_body"].strip()
+        if summary is not None:
+            body += "\nIn the pool's tables: %s\n" % summary
+        if pins is not None:
+            body += "\nThe pins (`%s`), which the pool's suite holds the lesson to:\n\n```json\n%s```\n" % (
+                pin_path, pins_text(pins))
         plan = {
             "name": name, "from": item["level"], "to": "general", "upstream": remote or upstream,
-            "branch": branch, "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files],
+            "branch": branch,
+            "files": ["%s/%s/%s" % (subdir, name, rel) for rel in files] + ([pin_path] if pins is not None else []),
+            "pins": pins, "summary": summary, "unpinned": unpinned, "tables": [],
             "title": title, "body": body, "source": item["path"], "dry_run": not args.yes,
             "skill_md": skill_md, "excluded": excluded, "secrets": secrets, "unpublishable": unpublishable,
             "confirm": confirm,
@@ -5712,10 +6832,16 @@ def cmd_promote(args):
             raise usage("%r was not proposed: %s. A file is scanned whole before it is published, and one that "
                         "cannot be is not published. Fix or remove it and run again" % (
                             name, "; ".join(unpublishable)))
+        if unpinned and args.yes:
+            raise usage("%r was not proposed: %s. The pool's tests hold every lesson to its pins, so a lesson is "
+                        "proposed with them. Nothing was sent. %s" % (name, "; ".join(unpinned), PIN_HELP))
         if not args.yes:
             if args.json:
                 emit(plan)
             else:
+                if unpinned:
+                    sys.stdout.write("NOT PROPOSABLE as it is: %s. --yes will refuse it.\n%s.\n" % (
+                        "; ".join(unpinned), PIN_HELP))
                 if secrets:
                     sys.stdout.write("NOT PUBLISHABLE as it is: it looks like it holds a credential (%s), and --yes "
                                      "will refuse it.\n" % "; ".join(secrets))
@@ -5773,6 +6899,36 @@ def cmd_promote(args):
             os.makedirs(os.path.dirname(os.path.join(target, rel)), exist_ok=True)
             shutil.copy2(os.path.join(staging, rel), os.path.join(target, rel))
         _must(["git", "add", "--", os.path.join(subdir, name)], cwd=clone)
+        if pins is not None:
+            misfit = pool_problems(clone, name, item, pins)
+            if misfit:
+                raise usage("%r was not proposed: it does not fit the pool at %s: %s. Nothing was pushed" % (
+                    name, one_line(remote or upstream), "; ".join(misfit)))
+            pin_dir = os.path.join(clone, "tests", "pool", "lessons")
+            os.makedirs(pin_dir, exist_ok=True)
+            if os.path.realpath(pin_dir) != os.path.join(os.path.realpath(clone), "tests", "pool", "lessons"):
+                raise failure("tests/pool/lessons in %s is a symbolic link, so nothing was written into it and "
+                              "nothing was pushed" % (remote or upstream))
+            if os.path.lexists(os.path.join(pin_dir, name + ".json")):
+                raise failure("%s already exists in %s" % (pin_path, remote or upstream))
+            with open(os.path.join(pin_dir, name + ".json"), "w", encoding="utf-8", newline="") as handle:
+                handle.write(pins_text(pins))
+            _must(["git", "add", "--", pin_path], cwd=clone)
+            # The pool's documents list every lesson it ships: the row goes in with the lesson.
+            for rel, heading in POOL_TABLES:
+                document = os.path.join(clone, rel)
+                if os.path.islink(document) or not os.path.isfile(document) or \
+                        os.path.realpath(document) != os.path.join(os.path.realpath(clone), rel):
+                    continue
+                with open(document, encoding="utf-8", newline="") as handle:
+                    before = handle.read()
+                after = table_row_added(before, heading, name, pins, summary)
+                if after is None:
+                    continue
+                with open(document, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(after)
+                _must(["git", "add", "--", rel], cwd=clone)
+                plan["tables"].append(rel)
         _must(["git", "commit", "-m", title], cwd=clone, what="git commit")
         if remote:
             _must(["git", "push", "--quiet", "origin", "--", branch], cwd=clone, what="git push")
@@ -5928,7 +7084,7 @@ def cmd_skip(args):
     else:
         sys.stdout.write("declined: %s\n" % event["why"])
         if settles:
-            sys.stdout.write("  settles capture %s\n" % settles)
+            sys.stdout.write("  settles %s %s\n" % ("finding" if settles.startswith("in-") else "capture", settles))
     return 0
 
 
@@ -5981,15 +7137,21 @@ def cmd_events(args):
             raise usage("--since %r is neither epoch seconds nor an ISO 8601 time" % args.since)
     events, bad = read_events()
     if args.unsettled:
-        events = [dict(event, id=capture_id(event)) if event.get("type") == "capture" else event
-                  for event in unsettled(events, now())]
+        clock = now()
+        owed = [dict(event, id=capture_id(event)) if event.get("type") == "capture" else event
+                for event in unsettled(events, clock)]
+        # The findings still to be shown follow what is owed. A session's own debts are never one.
+        findings = [] if args.session else [event for event, state in insight_states(events, clock).values()
+                                            if state == "open"]
+        events = owed + findings
     wanted = os.path.realpath(_expand(args.project)) if args.project else None
     out = []
     for event in events:
         if args.type and event.get("type") != args.type:
             continue
         if wanted is not None and not (isinstance(event.get("project"), str) and event["project"]
-                                       and os.path.realpath(event["project"]) == wanted):
+                                       and os.path.realpath(event["project"]) == wanted) \
+                and not (event.get("type") == "insight" and not _text(event.get("project")).strip()):
             continue
         if args.session and event.get("session") != args.session:
             continue
@@ -5998,7 +7160,12 @@ def cmd_events(args):
             if stamp is None or stamp < since:
                 continue
         out.append(event)
-    if args.limit:
+    if args.limit and args.unsettled:
+        # What is owed first, then the findings that fit after it.
+        owed = [event for event in out if event.get("type") != "insight"][-args.limit:]
+        room = args.limit - len(owed)
+        out = owed + ([event for event in out if event.get("type") == "insight"][-room:] if room > 0 else [])
+    elif args.limit:
         out = out[-args.limit:]
     if bad:
         sys.stderr.write("compound: %d line(s) of %s do not parse and were skipped\n" % (bad, events_path()))
@@ -6870,6 +8037,21 @@ def build_status():
     check("errors", "WARN" if errors else "PASS",
           "%d in the last 7 days" % len(errors) if errors else "none in the last 7 days")
 
+    ran = read_insights_state()
+    ran_outcome = insights_outcome(ran, clock)
+    if ran_outcome in ("running", "interrupted"):
+        check("insights", "PASS", "the last run, started %s, is %s" % (
+            iso(ran["started"]) if isinstance(ran.get("started"), (int, float)) else "at a time not recorded",
+            ran_outcome))
+    elif ran_outcome in ("failed", "timeout", "unreadable"):
+        # A run that went wrong warns, so the pane shows it; it fails nothing.
+        check("insights", "WARN", "last run %s: %s%s" % (
+            one_line(_text(ran.get("finished"))) or "at a time not recorded", ran_outcome,
+            ": " + inert_line(ran.get("message"), OPEN_TEXT * 2) if _text(ran.get("message")).strip() else ""))
+    else:
+        check("insights", "PASS", "last run %s: %s" % (ran.get("finished"), ran_outcome or "none")
+              if ran.get("finished") else "never run")
+
     store = {}
     for level in LEVELS:
         mine = [row for row in rows if row["level"] == level]
@@ -6901,6 +8083,11 @@ def build_status():
                           # What settles it, as the report prints it and the pane shows it.
                           "command": "/compound:learn settle %s" % capture_id(cap),
                           "decline": 'compound skip --settles %s --why "<reason>"' % capture_id(cap)})
+
+    findings = [{"id": ident, "source": event.get("source"), "project": event.get("project", ""),
+                 "text": inert_line(event.get("text"), OPEN_TEXT),
+                 "age": age_text(clock - parse_ts(event.get("ts")))}
+                for ident, (event, state) in insight_states(events, clock).items() if state == "open"]
 
     candidates = []
     for event in events:
@@ -6960,6 +8147,7 @@ def build_status():
             "recurring": [{"name": row["name"], "level": row["level"], "path": row["path"],
                            "recall": row["counts"]["recall"]} for row in rows if row["recurring"] and active(row)],
             "unsettled": unsettled,
+            "findings": findings,
             "candidates": candidates,
             # The scripts sessions ran that are owed a decision, of the last UNSETTLED_DAYS days.
             "scripts": [{"id": row["id"], "name": row["name"], "path": row["path"], "project": row["project"],
@@ -7063,8 +8251,27 @@ def cmd_status(args):
     head("Open")
     opened = data["open"]
     if not (opened["ineffective"] or opened["skips"] or opened["errors"] or data["unparseable"]
-            or opened["unsettled"] or opened["candidates"] or opened["recurring"] or opened["scripts"]):
+            or opened["unsettled"] or opened["candidates"] or opened["recurring"] or opened["scripts"]
+            or opened["findings"]):
         out("  nothing open\n")
+    for row in opened["findings"]:
+        text = sentence(inert_line(row["text"], OPEN_TEXT))
+        theirs = _text(row["project"]).strip()
+        if row["source"] != "report" and theirs and not _same_path(theirs, data["project"]):
+            # A finding about another project's session is settled in a session there, as an
+            # owed capture of that project is; from here it can be declined.
+            out("  finding      %s %s %s %s: %s Record it in a session there with compound:learn (--settles %s), "
+                "or decline it: compound skip --settles %s --why \"...\"\n" % (
+                    row["id"], row["age"], row["source"], inert_line(os.path.basename(theirs.rstrip(os.sep)) or theirs,
+                                                                     OPEN_TEXT), text,
+                    row["id"], row["id"]))
+            continue
+        # A report finding, and one that names no project, is recorded at the user level or
+        # not at all (see `compound add`).
+        out("  finding      %s %s %s: %s Check it against this project; record it with compound:learn "
+            "(--settles %s%s) or decline it: compound skip --settles %s --why \"...\"\n" % (
+                row["id"], row["age"], row["source"], text, row["id"],
+                " --level user" if row["source"] == "report" or not theirs.strip() else "", row["id"]))
     for row in opened["unsettled"]:
         out("  owed         %s %s %s: `%s` failed, `%s` worked. Record it in a session there: "
             "%s  Or decline it: %s\n" % (
@@ -7787,6 +8994,13 @@ def build_parser():
                      help="with --to general: confirms a destination the environment names (COMPOUND_UPSTREAM, "
                           "COMPOUND_UPSTREAM_GIT), word for word; --yes publishes nowhere but the package's own "
                           "pool without it")
+    one.add_argument("--pins", metavar="FILE",
+                     help="with --to general, for a lesson: a JSON file that says what the lesson is meant to be "
+                          "(kind, platform, shell, and for a guard the commands it stops and the ones it passes); "
+                          "it is checked against the lesson and published as tests/pool/lessons/<name>.json")
+    one.add_argument("--summary", metavar="TEXT",
+                     help="with --to general, for a lesson: one line for the pool's tables in README.md and "
+                          "docs/design.md")
     one.add_argument("--as", dest="rename", metavar="NEWNAME", help="with --to user: rename while moving")
     one.add_argument("--auto", action="store_true",
                      help="with --to user: leave a lesson git tracks where it is (exit 3) and log a candidate")
@@ -7808,6 +9022,15 @@ def build_parser():
     one.add_argument("--evidence", metavar="ID", help="the id of the recorded script being declined")
 
     command("log", cmd_log, "Append one event (a JSON object on stdin).")
+
+    one = command("insights", cmd_insights,
+                  "Findings from Claude Code's /insights: start a run when one is due, harvest what it wrote, or print the last outcome.")
+    one.add_argument("--harvest", action="store_true",
+                     help="read usage-data/ and record the findings not yet recorded")
+    one.add_argument("--start", action="store_true",
+                     help="start a run of /insights in the background when one is due")
+    one.add_argument("--run", action="store_true",
+                     help="the worker --start starts: run /insights, then harvest what it wrote")
 
     command("index", cmd_index, "The lessons a session here could use, as rows, the ones with a script first (JSON).",
             json_flag=False)

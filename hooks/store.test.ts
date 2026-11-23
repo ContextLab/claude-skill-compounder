@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, settlers, otherProjects, askedTimes, memoOf, parseEarlier, parseUsed, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
+import { bodyOf, learnedSince, mayNudge, parseGuards, parseGuardTools, parseLeft, parseMoved, parseOwed, parseUnsettled, parseInsights, parseStarted, INSIGHT_ID, settlers, otherProjects, askedTimes, memoOf, parseEarlier, parseUsed, parseEvents, parseFound, parseHits, parseInventory, parseShow, parseTimedOut, seconds, type Event } from './store'
 
 test('the inventory is the list the CLI prints, with unknown rows dropped', async () => {
   const out = JSON.stringify([
@@ -209,6 +209,48 @@ test('unsettled captures are read from the CLI, leaving out this session\'s own'
   expect(parseUnsettled(out, 'mine', now)).toEqual([{ id: 'aaaa1111', age: '2d', failed: 'f', error: 'e', fixed: 'x' }])
   expect(parseUnsettled('[]', 'mine', now)).toEqual([])
   expect(parseUnsettled('compound: error', 'mine', now)).toBe(undefined)
+})
+
+test('findings of /insights are read from the same reply, held to their shape; captures stay out of them and they stay out of captures', async () => {
+  const now = Date.UTC(2026, 10, 21) / 1000
+  const facet = { type: 'insight', id: 'in-0123456789abcdef', ts: '2026-11-19T00:00:00Z', session: 'insights', source: 'facet', project: '/work/alpha', kinds: ['wrong_approach', 'Bad-Kind', 'two\nlines', 7, 'x'.repeat(41)], text: 'The build was rerun without its profile.', goal: 'Ship the build', learned: ['build-needs-profile', 'Not A Slug', 'two\nlines', 3] }
+  const report = { type: 'insight', id: 'in-fedcba9876543210', ts: '2026-11-20T00:00:00Z', session: 'insights', source: 'report', text: 'Always pass --profile to ./build.sh.', why: 'It was forgotten in several sessions.' }
+  const out = JSON.stringify([
+    { type: 'capture', id: 'aaaa1111', ts: '2026-11-19T00:00:00Z', session: 'old', failed: 'f', error: 'e', fixed: 'x' },
+    facet,
+    report,
+    { ...facet, id: 'in-xyz' },
+    { ...facet, id: 'in-1111111111111111', source: 'transcript' },
+    { ...facet, id: 'in-2222222222222222', type: 'capture' },
+    { ...facet, id: 'in-3333333333333333', text: '' },
+  ])
+  expect(parseInsights(out, now)).toEqual([
+    { id: 'in-0123456789abcdef', source: 'facet', project: '/work/alpha', kinds: ['wrong_approach'], text: 'The build was rerun without its profile.', goal: 'Ship the build', why: '', learned: ['build-needs-profile'], age: '2d' },
+    { id: 'in-fedcba9876543210', source: 'report', project: '', kinds: [], text: 'Always pass --profile to ./build.sh.', goal: '', why: 'It was forgotten in several sessions.', learned: [], age: '1d' },
+  ])
+  expect(INSIGHT_ID.test('in-0123456789abcdef')).toBe(true)
+  expect(INSIGHT_ID.test('in-0123456789ABCDEF')).toBe(false)
+  // At most eight kinds, as the harvest keeps.
+  const many = JSON.stringify([{ ...facet, kinds: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] }])
+  expect(parseInsights(many, now)?.[0]?.kinds).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
+  // parseUnsettled still reads captures only: the row typed `capture` is one, whatever its id.
+  expect(parseUnsettled(out, 'mine', now)?.map(c => c.id)).toEqual(['aaaa1111', 'in-2222222222222222'])
+  expect(parseInsights('[]', now)).toEqual([])
+  expect(parseInsights('compound: error', now)).toBe(undefined)
+  expect(parseInsights('[{"type":"insight"', now)).toBe(undefined)
+  // An object with no `type`, as `insights --start` prints, is no row: the reply holds no finding.
+  expect(parseInsights('{"started":true}', now)).toEqual([])
+})
+
+test('the reply of insights --start says a run began only when its started is the value true', async () => {
+  expect(parseStarted('{"started": true, "why": "due"}')).toBe(true)
+  expect(parseStarted('{"started": false, "why": "too soon"}')).toBe(false)
+  expect(parseStarted('{"started": "true"}')).toBe(false)
+  expect(parseStarted('{"started": 1}')).toBe(false)
+  expect(parseStarted('[{"started": true}]')).toBe(false)
+  expect(parseStarted('[compound] this reply is never read')).toBe(false)
+  expect(parseStarted('')).toBe(false)
+  expect(parseStarted('null')).toBe(false)
 })
 
 test('a lesson left in place by the automatic move is read with the project that holds it', async () => {

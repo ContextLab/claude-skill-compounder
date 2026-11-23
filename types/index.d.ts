@@ -22,13 +22,15 @@ export type CompoundNoteKind =
   | 'nudge'
   | 'used'
   | 'repeat'
+  | 'insights'
   | 'ready'
   | 'idle'
 // `text` names the thing (the lesson, the items found); `detail` is what else there is room
 // for (the call a guard stopped), and is the first to go in a narrow band. `names` are the
 // items `text` lists, so a band too narrow for the text lists as many as fit and counts the
-// rest.
-export type CompoundNote = { kind: CompoundNoteKind; text: string; at: number; detail?: string; names?: string[] }
+// rest. `also` is a second result of the same moment, drawn as a note of its own beside the
+// first (its glyph, its colour, its text) and fading with it.
+export type CompoundNote = { kind: CompoundNoteKind; text: string; at: number; detail?: string; names?: string[]; also?: { kind: CompoundNoteKind; text: string } }
 
 // Where the learn loop stands: a call failed, a later call fixed it, a lesson is owed, and
 // it was recorded or declined.
@@ -79,9 +81,10 @@ export type CompoundBoard = {
   levels: CompoundLevel[]
   lessons: CompoundLesson[]
   recent: CompoundRecent[]
-  // `scripts`: the scripts a session ran until they worked that nothing keeps. Absent on a
-  // board kept by an earlier version of the mod.
-  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number; scripts?: CompoundOpen[] }
+  // `scripts`: the scripts a session ran until they worked that nothing keeps. `findings`:
+  // the findings of /insights still open. Each is absent on a board kept by an earlier
+  // version of the mod.
+  open: { unsettled: CompoundOpen[]; ineffective: CompoundOpen[]; candidates: CompoundOpen[]; errors: CompoundOpen[]; skips: number; scripts?: CompoundOpen[]; findings?: CompoundOpen[] }
   // Why the CLI could not be read, when it could not.
   problem: string
 }

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import unittest
 
-from test_support import NOW, Case
+from test_support import NOW, Case, iso, seed_event
 
 
 class LogTest(Case):
@@ -313,6 +313,93 @@ class IneffectiveTest(Case):
         path = os.path.join(self.box.lesson_dir("flaky"), "SKILL.md")
         os.utime(path, (NOW + 300, NOW + 300))
         self.assertFalse(self.row()["ineffective"])
+
+
+class FindingsListedTest(Case):
+    def finding(self, ident="in-0000000000000001", source="facet", offset=0, **fields):
+        event = {"type": "insight", "session": "insights", "id": ident, "source": source, "text": "It used the wrong flag."}
+        if source == "report":
+            event["project"] = ""
+            event["why"] = "A reason."
+        event.update(fields)
+        if source == "report" and not event["project"]:
+            del event["project"]
+        return self.seed_insight(event, offset)
+
+    def seed_insight(self, event, offset):
+        out = dict(event, ts=iso(NOW + offset), type="insight")
+        seed_event(self.box.events, out)  # as written: box.seed would give a report item a project
+        return out
+
+    def listed(self, *flags, **kw):
+        kw.setdefault("COMPOUND_NOW", NOW + 100)
+        return [row for row in self.box.json("events", "--unsettled", "--json", *flags, **kw)
+                if row["type"] == "insight"]
+
+    def test_unsettled_lists_a_projects_findings_and_every_report_finding(self):
+        elsewhere = os.path.join(self.box.root, "elsewhere")
+        os.makedirs(elsewhere)
+        mine = self.finding("in-00000000000000a1", project=self.box.project)
+        self.finding("in-00000000000000b2", project=elsewhere)
+        report = self.finding("in-00000000000000c3", source="report")
+        rows = self.listed("--project", self.box.project)
+        self.assertEqual([row["id"] for row in rows], [mine["id"], report["id"]])
+        self.assertEqual(rows[0]["type"], "insight")
+        self.assertEqual([row["id"] for row in self.listed("--project", elsewhere)],
+                         ["in-00000000000000b2", report["id"]])
+        self.assertEqual(len(self.listed()), 3)
+
+    def test_unsettled_for_a_session_lists_no_finding(self):
+        self.finding(project=self.box.project)
+        self.assertEqual(self.listed("--session", "insights"), [])
+        self.assertEqual(self.listed("--session", "s-one"), [])
+        self.assertEqual(len(self.listed()), 1)
+
+    def test_a_finding_named_by_reminds_of_three_sessions_is_no_longer_listed(self):
+        found = self.finding(project=self.box.project)
+        for offset, session in ((1, "s-one"), (2, "s-one"), (3, "s-two")):
+            self.box.log({"type": "remind", "insights": [found["id"]]}, CLAUDE_CODE_SESSION_ID=session,
+                         COMPOUND_NOW=NOW + offset)
+        self.assertEqual([row["id"] for row in self.listed()], [found["id"]], "two sessions: still shown")
+        self.box.log({"type": "remind", "insights": [found["id"], "in-ffffffffffffffff"]},
+                     CLAUDE_CODE_SESSION_ID="s-three", COMPOUND_NOW=NOW + 4)
+        self.assertEqual(self.listed(), [])
+
+    def test_the_reminders_the_mod_writes_close_a_finding_for_its_project_after_three_sessions(self):
+        # The shape the mod sends at a first prompt, through the real `compound log`: a capture's
+        # id and a finding's id, each session its own.
+        found = self.finding("in-0123456789abcdef", project=self.box.project)
+        report = self.finding("in-fedcba9876543210", source="report")
+        for offset, session in ((1, "s-one"), (2, "s-two")):
+            self.box.log({"type": "remind", "captures": ["ab12cd34"], "insights": [found["id"], report["id"]]},
+                         CLAUDE_CODE_SESSION_ID=session, COMPOUND_NOW=NOW + offset)
+        written = [e for e in self.box.read_events() if e["type"] == "remind"]
+        self.assertEqual([e["insights"] for e in written], [[found["id"], report["id"]]] * 2, "kept as sent, masking and all")
+        self.assertEqual([row["id"] for row in self.listed("--project", self.box.project)], [found["id"], report["id"]],
+                         "two sessions: still listed")
+        self.box.log({"type": "remind", "insights": [found["id"]]}, CLAUDE_CODE_SESSION_ID="s-three",
+                     COMPOUND_NOW=NOW + 3)
+        self.assertEqual([row["id"] for row in self.listed("--project", self.box.project)], [report["id"]])
+
+    def test_a_reminders_line_says_what_it_named_captures_findings_or_both(self):
+        for offset, event in enumerate(({"type": "remind", "captures": ["ab12cd34", "ef56ab78"]},
+                                        {"type": "remind", "insights": ["in-0123456789abcdef"]},
+                                        {"type": "remind", "captures": ["ab12cd34"],
+                                         "insights": ["in-0123456789abcdef", "in-fedcba9876543210"]})):
+            self.box.log(event, COMPOUND_NOW=NOW + offset)
+        proc = self.box.run("events", "--type", "remind", COMPOUND_NOW=NOW + 10)
+        self.assertExit(proc, 0)
+        lines = proc.stdout.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].endswith("2 lessons owed: ab12cd34, ef56ab78"), lines[0])
+        self.assertTrue(lines[1].endswith("1 candidate from /insights: in-0123456789abcdef"), lines[1])
+        self.assertTrue(lines[2].endswith("1 lesson owed: ab12cd34; 2 candidates from /insights: "
+                                          "in-0123456789abcdef, in-fedcba9876543210"), lines[2])
+
+    def test_a_finding_older_than_the_window_is_not_listed(self):
+        self.finding(project=self.box.project)
+        self.assertEqual(len(self.listed(COMPOUND_NOW=NOW + 13 * 86400)), 1)
+        self.assertEqual(self.listed(COMPOUND_NOW=NOW + 15 * 86400), [])
 
 
 if __name__ == "__main__":

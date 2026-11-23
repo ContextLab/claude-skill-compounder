@@ -1,8 +1,13 @@
 # A real interactive session, recorded with vhs, to LOOK at the band and the pane.
 #
 # Run it with dev/ui-check.sh, which builds a throwaway world in $TMPDIR/compound-ui-check
-# (a store with one guard and one ordinary lesson, a project with a deploy.sh that fails
-# without its flag) and runs this tape from that directory. The screenshots land in
+# (a store with one guard and one ordinary lesson and four findings of /insights harvested
+# from an invented usage-data tree, a run of /insights due, a project with a deploy.sh that
+# fails without its flag) and runs this tape from that directory. It records two sessions:
+# the first (0-*) tells the findings alone and starts a run, which fails at once in that
+# world, collapses the band and expands it again (0-collapsed, 0-expanded), and opens the pane; the second, after an earlier session is made to leave a fix
+# unsettled, tells the capture with the findings beside it and goes through the moments
+# (1-* to 5-*). The screenshots land in
 # $TMPDIR/compound-ui-check/shots; open the PNGs and look. It spends model calls, and the
 # session's own pace and wording decide which frame catches which phase: read them, do
 # not diff them. vhs writes the screenshots only when the whole tape has run, so the tape
@@ -34,6 +39,10 @@ Set WaitTimeout 60s
 Hide
 Type ". ./env.sh && cd $UI_PROJECT && clear" Enter
 Show
+
+# Session one: the store holds four findings of /insights and no capture owed, and a run of
+# /insights is due, so the first prompt tells the findings alone and starts a run, whose
+# child is not logged in and fails at once. The notes fade after 8 seconds.
 Type "claude --plugin-dir $UI_PLUGIN --model haiku --setting-sources project --allowedTools Bash" Enter
 Wait+Screen /trust this folder|Claude Code v/
 Sleep 1s
@@ -41,8 +50,87 @@ Down
 Enter
 Sleep 5s
 Screenshot shots/00-start.png
+Type "Reply with one short sentence saying you are ready. Run no command and use no tool."
+Enter
+Sleep 300ms
+Screenshot shots/0-insights-00.png
+Sleep 300ms
+Screenshot shots/0-insights-01.png
+Sleep 400ms
+Screenshot shots/0-insights-02.png
+Sleep 500ms
+Screenshot shots/0-insights-03.png
+Sleep 1000ms
+Screenshot shots/0-insights-04.png
+# The band collapsed (ctrl+x ctrl+a) and expanded again within the notes' life: collapsed,
+# nothing of it shows and its timer stops; expanded, the notes are drawn as they are by then.
+Ctrl+X
+Ctrl+A
+Sleep 1500ms
+Screenshot shots/0-collapsed.png
+Ctrl+X
+Ctrl+A
+Sleep 800ms
+Screenshot shots/0-expanded.png
+Sleep 1500ms
+Screenshot shots/0-insights-05.png
+Sleep 1500ms
+Screenshot shots/0-insights-06.png
+Sleep 1500ms
+Screenshot shots/0-insights-07.png
+Sleep 1500ms
+Screenshot shots/0-insights-08.png
+Sleep 1500ms
+Screenshot shots/0-insights-09.png
+Sleep 2000ms
+Screenshot shots/0-insights-10.png
+Sleep 3000ms
+Screenshot shots/0-insights-11.png
 
-# Moment 1: a substantial prompt is checked for reusable work.
+# The pane once the worker has failed: the findings under Open, and the insights check
+# among the warnings, the failed run's message under the errors; then the report as text,
+# whose health rows (the insights WARN among them) scroll above the frame: `compound status`
+# run in the world after the recording prints them.
+# After a short turn Claude Code may offer "Teach auto mode about your environment?",
+# with Yes selected: Escape cancels it, or does nothing at an empty prompt, so the tape
+# sends it either way before typing anything more.
+Sleep 10s
+Escape
+Sleep 1s
+Type "/compound"
+Sleep 1s
+Enter
+Sleep 8s
+Screenshot shots/0-pane.png
+Type "/compound status"
+Sleep 1s
+Enter
+Sleep 6s
+Screenshot shots/0-status-text.png
+Sleep 500ms
+Escape
+Sleep 500ms
+Ctrl+C
+Ctrl+C
+# What is typed next is a shell command: it must not reach a session that is still open,
+# which would run it. Once Claude Code has exited, the last line is the shell's bare prompt.
+Wait+Line /^\$ *$/
+
+# Session two: an earlier session left a fix unsettled, so its first prompt tells the
+# capture with the findings beside it; the run started minutes ago, so none is due.
+Hide
+Type "sh $UI_WORLD/later.sh && clear" Enter
+Show
+Type "claude --plugin-dir $UI_PLUGIN --model haiku --setting-sources project --allowedTools Bash" Enter
+Wait+Screen /trust this folder|Claude Code v/
+Sleep 1s
+Down
+Enter
+Sleep 5s
+Screenshot shots/00-start-2.png
+
+# Moment 1: a substantial prompt is checked for reusable work. As the session's first
+# prompt it also tells the capture owed and, beside it, the findings of /insights.
 Type "Write the release notes for version 2.1 of this project, which fixes three parser bugs, in the format this project uses, and print them here. Do not create any file."
 Enter
 Sleep 300ms
