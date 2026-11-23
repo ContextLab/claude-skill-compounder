@@ -20,7 +20,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 SCRIPT = os.path.join(REPO, "bin", "compound")
 NOW = 1790000000  # 2026-09-21T14:13:20Z
 # The event types `compound log` refuses: each is written by a command of the CLI.
-CLI_TYPES = ("learn", "skip", "rm", "skill", "promote", "candidate", "use", "met")
+CLI_TYPES = ("learn", "skip", "rm", "skill", "promote", "candidate", "use", "met", "insight")
 BASE_PATH = "/usr/bin:/bin"
 
 
@@ -251,6 +251,30 @@ class Case(unittest.TestCase):
                              proc.returncode, code, proc.stdout, proc.stderr))
 
 
+def write_usage_data(claude_dir, facets, meta, report_items):
+    """Write a `usage-data/` tree as Claude Code's /insights writes one, with invented text.
+
+    `facets` and `meta` map a session id to the dict written as `facets/<id>.json` and
+    `session-meta/<id>.json`; `report_items` is a list of (text, why) pairs written as the
+    `claude-md-item` elements of `report.html`, inside `<section id="section-features">`;
+    `None` writes no `report.html`, and an empty list writes the section with no item in it.
+    Returns the `usage-data` directory."""
+    top = os.path.join(claude_dir, "usage-data")
+    for sub, files in (("facets", facets), ("session-meta", meta)):
+        os.makedirs(os.path.join(top, sub), exist_ok=True)
+        for session, body in files.items():
+            with open(os.path.join(top, sub, session + ".json"), "w", encoding="utf-8") as handle:
+                json.dump(body, handle)
+    if report_items is None:
+        return top
+    items = "".join(
+        '<div class="claude-md-item"><code class="cmd-code">%s</code><div class="cmd-why">%s</div></div>' % (text, why)
+        for text, why in report_items)
+    with open(os.path.join(top, "report.html"), "w", encoding="utf-8") as handle:
+        handle.write('<!doctype html><html><body><section id="section-features">%s</section></body></html>' % items)
+    return top
+
+
 def git(*args, **kw):
     cwd = kw.pop("cwd", None)
     env = dict(os.environ)
@@ -305,7 +329,7 @@ class SupportTest(Case):
         with open(SCRIPT) as handle:
             text = handle.read()
         allowed = {"json", "os", "re", "sys", "time", "datetime", "subprocess", "shutil", "fcntl",
-                   "tempfile", "argparse", "select", "stat", "math", "hashlib", "shlex", "glob"}
+                   "tempfile", "argparse", "select", "stat", "math", "hashlib", "shlex", "glob", "contextlib", "signal"}
         import re as _re
         found = set(_re.findall(r"^\s*import (\w+)", text, _re.M))
         found |= set(_re.findall(r"^\s*from (\w+) import", text, _re.M))
@@ -364,3 +388,26 @@ class SupportTest(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# What `compound promote --to general` asks of a lesson: its pins (see "The general pool"
+# in docs/design.md) and one line for the pool's tables.
+ECHO_STOPS = ["echo ==", "echo ===", "ls; echo ====", "true && echo =====", "echo  ======"]
+ECHO_PASSES = ["echo done", "ls -la", "git status", "printf x", "pwd", "echo a", "cat f", "true"]
+
+
+def pin_flags(directory, name="pins.json", summary="what the lesson is for", **pins):
+    """("--pins", FILE, "--summary", TEXT) for a promote call. The file is written into
+    `directory`: a lesson's pins with no pattern unless `kind`, `platform`, `shell`,
+    `stops` or `passes` says otherwise."""
+    data = {"kind": "lesson", "platform": [], "shell": [], "stops": [], "passes": []}
+    data.update(pins)
+    path = os.path.join(directory, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    return ("--pins", path, "--summary", summary)
+
+
+def echo_pin_flags(directory, **pins):
+    """The same for a guard whose pattern is `echo\\s+=+`."""
+    return pin_flags(directory, **dict(dict(kind="guard", stops=ECHO_STOPS, passes=ECHO_PASSES), **pins))

@@ -1,0 +1,38 @@
+{
+  "kind": "guard",
+  "platform": [
+    "darwin"
+  ],
+  "shell": [],
+  "stops": [
+    "sed -i 's/foo/bar/' f.txt",
+    "sed -i \"s|a|b|g\" src/*.py",
+    "find . -name '*.md' | xargs sed -i 's/x/y/'",
+    "sed -E -i 's/a+/b/' f",
+    "sed -i '3d' f.txt",
+    "sed -i -e 's/a/b/' f",
+    "sed -i '/^#/d' f",
+    "cd src\nsed -i 's/a/b/' f",
+    "find . -name '*.txt' -exec sed -i 's/a/b/' {} +",
+    "sed -Ei 's/a+/b/' f",
+    "ls *.md | xargs -n 1 sed -i 's/x/y/'",
+    "git ls-files | xargs -I {} sed -i 's/x/y/' {}",
+    "sudo sed -i 's/a/b/' /etc/hosts"
+  ],
+  "passes": [
+    "sed -i '' 's/foo/bar/' f.txt",
+    "sed -i.bak 's/foo/bar/' f.txt",
+    "sed -n '1,5p' f",
+    "sed 's/a/b/' f > g",
+    "sed -E 's/-i s/x/' f",
+    "gsed -i 's/a/b/' f",
+    "perl -pi -e 's/a/b/' f",
+    "echo 'used -i s/x/y/'",
+    "sed -i'' -e 's/a/b/' f",
+    "sed -i \"\" 's/a/b/' f",
+    "grep -n \"sed -i 's/a/b/'\" notes.md",
+    "git commit -m \"do not run sed -i 's/a/b/' on macOS\"",
+    "sed -E -i '' 's/a+/b/' f",
+    "sed -i.bak -e 's/a/b/' f && rm f.bak"
+  ]
+}

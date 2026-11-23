@@ -41,14 +41,15 @@ class AddTest(Case):
         self.box.add("first-lesson")
         events = self.box.read_events()
         self.assertEqual(len(events), 1)
+        with open(os.path.join(self.box.lesson_dir("first-lesson"), "SKILL.md"), "rb") as handle:
+            written = handle.read()
         self.assertEqual(events[0], {
             "ts": "2026-09-21T14:13:20Z", "type": "learn", "session": "sess-0001-aaaa",
             "project": self.box.project, "lesson": "first-lesson", "level": "project",
             "kind": "lesson", "path": self.box.lesson_dir("first-lesson"),
             "guard": False, "update": False,
             # What the command vouches for: each file of the lesson as it left it.
-            "files": {"SKILL.md": hashlib.sha256(
-                open(os.path.join(self.box.lesson_dir("first-lesson"), "SKILL.md"), "rb").read()).hexdigest()}})
+            "files": {"SKILL.md": hashlib.sha256(written).hexdigest()}})
 
     def test_level_defaults_to_project_and_user_is_honoured(self):
         self.box.add("at-project")

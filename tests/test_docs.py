@@ -397,7 +397,7 @@ class PoolTest(unittest.TestCase):
     def test_the_readme_shows_every_health_row(self):
         readme = read("README.md")
         checks = [cells[0].strip("`") for cells in table_rows(read("docs", "design.md"), "The health checks, in order:")]
-        self.assertEqual(len(checks), 10, checks)
+        self.assertEqual(len(checks), 11, checks)
         sample = readme.split("Right after install, the report looks like this", 1)[1].split("```", 2)[1]
         trouble = readme.split("## Troubleshooting", 1)[1].split("\n## ", 1)[0]
         for name in checks:

@@ -389,57 +389,33 @@ class SameSubjectTest(PoolCase):
 
 # ---------------------------------------------------------------------------- the shipped pool
 
-GUARDS = {
-    "zsh-equals-not-found": (
-        ["echo =====", "ls; echo ====== ; pwd", "make && echo ==== && make test", "echo -e ====\nls",
-         "cd /tmp\necho ==========\nls", "for f in a b; do echo ====; cat $f; done", "x=$(echo ===)",
-         "if true; then echo ==; fi", "true || echo ===="],
-        ["echo '====='", "echo \"=== done ===\"", "printf '%s\\n' '====='", "echo a=b", "FOO==bar echo hi",
-         "grep -c '^echo ==' file", "echo --- step 2", "python3 -c 'print(1 == 2)'", "echo =", "echo = done",
-         "bash -c 'echo ====='", "git commit -m 'echo ==== fails in zsh'", "grep -rn 'echo ====' notes/"]),
-    "zsh-status-path-variables": (
-        ["status=$?", "make; status=$?; echo $status", "path=/tmp/x && ls $path",
-         "for path in a b; do echo $path; done", "f(){ local path=$1; cat $path; }", "echo /tmp | read -r path",
-         "if true; then status=1; fi", "make\nstatus=$?\necho $status", "export path=/tmp/x",
-         "find . -name '*.py' | while read -r path; do wc -l \"$path\"; done",
-         "while IFS= read -r path; do echo \"$path\"; done < files.txt", "make || status=1",
-         "ls | while read status; do echo $status; done"],
-        ["git status", "exit_status=$?", "file_path=/tmp/x", "PATH=/usr/bin:$PATH ls",
-         "curl 'https://h/x?path=1&status=2'", "./configure --path=/usr --status=ok",
-         "rc=$?; echo $rc", "for p in a b; do echo $p; done", "python3 -c \"import os; print(os.path)\"",
-         "kubectl get pods -o jsonpath='{.status}'", "python3 -c \"open(path='x')\"",
-         "echo 'please read path docs'", "grep -n 'for path in' build.sh", "gh pr view --json status=1",
-         "docker ps --filter status=running", "while read -r line; do echo $line; done < f"]),
-    "sed-in-place-bsd": (
-        ["sed -i 's/foo/bar/' f.txt", "sed -i \"s|a|b|g\" src/*.py", "find . -name '*.md' | xargs sed -i 's/x/y/'",
-         "sed -E -i 's/a+/b/' f", "sed -i '3d' f.txt", "sed -i -e 's/a/b/' f", "sed -i '/^#/d' f",
-         "cd src\nsed -i 's/a/b/' f", "find . -name '*.txt' -exec sed -i 's/a/b/' {} +", "sed -Ei 's/a+/b/' f",
-         "ls *.md | xargs -n 1 sed -i 's/x/y/'", "git ls-files | xargs -I {} sed -i 's/x/y/' {}",
-         "sudo sed -i 's/a/b/' /etc/hosts"],
-        ["sed -i '' 's/foo/bar/' f.txt", "sed -i.bak 's/foo/bar/' f.txt", "sed -n '1,5p' f", "sed 's/a/b/' f > g",
-         "sed -E 's/-i s/x/' f", "gsed -i 's/a/b/' f", "perl -pi -e 's/a/b/' f", "echo 'used -i s/x/y/'",
-         "sed -i'' -e 's/a/b/' f", "sed -i \"\" 's/a/b/' f", "grep -n \"sed -i 's/a/b/'\" notes.md",
-         "git commit -m \"do not run sed -i 's/a/b/' on macOS\"", "sed -E -i '' 's/a+/b/' f",
-         "sed -i.bak -e 's/a/b/' f && rm f.bak"]),
-}
+# What the pool is meant to be is written down once per lesson, in tests/pool/lessons/<name>.json:
+# the kind (`guard` when it carries a pattern, `lesson` when it does not), the platforms and
+# the shells it applies on (an empty list is everywhere), and for a guard the commands it
+# must stop and the ones it must let run. A proposal carries its own file (`compound promote
+# --to general --pins`), so a lesson with no pins, or pins with no lesson, fails here.
+# tests/pool/ordinary.json holds everyday commands no shipped pattern may stop.
+POOL = os.path.join(REPO, "tests", "pool")
+PIN_KEYS = ["kind", "passes", "platform", "shell", "stops"]
 
-ORDINARY = [
-    "git status", "git log --oneline -5", "git diff --stat HEAD~1", "git commit -m 'Fix the status path'",
-    "ls -la", "ls src/*.py", "grep -rn 'timeout' src/", "grep -E '^path=' config.ini",
-    "curl -s 'https://example.com/api?path=1&status=2'", "curl -fsSL https://example.com/install.sh | bash",
-    "sed -i '' 's/foo/bar/' file.txt", "sed -i.bak 's/foo/bar/' file.txt", "sed -n '1,20p' README.md",
-    "gtimeout 5 ./run.sh", "cat <<'EOF' > notes.md\nA note that mentions timeout 30 and sed -i in passing.\nEOF",
-    "python3 -m pytest tests/ --timeout 60", "python3 -c \"import os; print(os.path.join('a', 'b'))\"",
-    "npm test -- --timeout=10000", "echo '====='", "echo \"=== done ===\"", "printf '%s\\n' '====='",
-    "echo done", "export PATH=\"$HOME/.local/bin:$PATH\"", "rc=$?; echo $rc", "for f in *.md; do wc -l \"$f\"; done",
-    "find . -name '*.py' -newer setup.py", "pip install 'requests[socks]'", "python3 -m venv .venv",
-    "make test && make lint", "docker ps --filter status=exited", "kubectl get pods -o jsonpath='{.items[*].status.phase}'",
-    "cd /tmp && pwd", "mkdir -p build/out", "rm -f build/out.o", "cat package.json | head -20",
-    "date +%F", "stat -f %z file.txt", "wc -l < file.txt", "tar -czf out.tgz src", "ssh host 'uptime'",
-    "gh pr view 12 --json state,statusCheckRollup", "jq '.status' result.json", "./run_tests.sh",
-    "while read -r line; do echo \"$line\"; done < file.txt", "PATH=/usr/bin:/bin ls",
-    "test -f status.txt && cat status.txt", "awk -F= '/^path/ {print $2}' config.ini",
-]
+
+def read_json(*parts):
+    with open(os.path.join(POOL, *parts), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+PINS = dict((entry[:-len(".json")], read_json("lessons", entry))
+            for entry in sorted(os.listdir(os.path.join(POOL, "lessons"))) if entry.endswith(".json"))
+SHIPPED = dict((name, (pin["kind"], pin["platform"], pin["shell"])) for name, pin in PINS.items())
+GUARDS = dict((name, (pin["stops"], pin["passes"])) for name, pin in PINS.items() if pin["kind"] == "guard")
+ORDINARY = read_json("ordinary.json")
+
+
+def meant_on(name, platform, shell):
+    """Whether the pins say the lesson applies on that platform and in that shell."""
+    _kind, platforms, shells = SHIPPED[name]
+    return (not platforms or platform in platforms) and (not shells or shell in shells)
+
 
 # What `macos-gnu-only-commands` is about. It is recalled when one of them fails and stops
 # none of them: on a Mac with Homebrew's coreutils `timeout` is there, and the call is right.
@@ -447,16 +423,6 @@ GNU_ONLY = ["timeout 60 npm test", "cd x && timeout 10s make", "out=$(timeout 5 
             "timeout -k 5 30 ./run.sh", "ls |timeout 3 cat", "cd /tmp\ntimeout 30 ./run.sh",
             "for i in 1 2; do timeout 5 ./try.sh; done", "timeout --signal=KILL 10 ./run.sh",
             "date -d yesterday +%F", "grep -P '\\d+' f", "stat -c %s f"]
-
-SHIPPED = {
-    "macos-gnu-only-commands": ("lesson", ["darwin"], []),
-    "pip-externally-managed": ("lesson", [], []),
-    "proposal-ships-the-working-fix": ("lesson", [], []),
-    "sed-in-place-bsd": ("guard", ["darwin"], []),
-    "zsh-equals-not-found": ("guard", [], ["zsh"]),
-    "zsh-no-matches-found": ("lesson", [], ["zsh"]),
-    "zsh-status-path-variables": ("guard", [], ["zsh"]),
-}
 
 
 class ShippedPoolTest(PoolCase):
@@ -492,8 +458,31 @@ class ShippedPoolTest(PoolCase):
         self.assertEqual((parse["status"], parse["detail"]), ("PASS", "every lesson reads"))
         duplicates = [row for row in status["health"] if row["check"] == "duplicates"][0]
         self.assertEqual(duplicates["status"], "PASS")
-        self.assertEqual(status["store"]["general"]["lessons"], 7)
-        self.assertEqual(status["store"]["general"]["guards"], 3)
+        self.assertEqual(status["store"]["general"]["lessons"], len(SHIPPED))
+        self.assertEqual(status["store"]["general"]["guards"], len(GUARDS))
+
+    def test_every_pin_file_is_whole(self):
+        self.assertEqual(sorted(os.listdir(POOL)), ["lessons", "ordinary.json"])
+        self.assertEqual(sorted(os.listdir(os.path.join(POOL, "lessons"))), sorted(name + ".json" for name in PINS))
+        self.assertGreaterEqual(len(PINS), 7)
+        for name, pin in sorted(PINS.items()):
+            self.assertEqual(sorted(pin), PIN_KEYS, name)
+            self.assertIn(pin["kind"], ("lesson", "guard"), name)
+            for key in ("platform", "shell", "stops", "passes"):
+                self.assertIsInstance(pin[key], list, (name, key))
+                self.assertTrue(all(isinstance(one, str) and one for one in pin[key]), (name, key))
+                self.assertEqual(len(pin[key]), len(set(pin[key])), (name, key))
+            if pin["kind"] == "lesson":
+                self.assertEqual((pin["stops"], pin["passes"]), ([], []), name)
+        # The seven the package began with are still what they were meant to be.
+        for name, row in (("macos-gnu-only-commands", ("lesson", ["darwin"], [])),
+                          ("pip-externally-managed", ("lesson", [], [])),
+                          ("proposal-ships-the-working-fix", ("lesson", [], [])),
+                          ("sed-in-place-bsd", ("guard", ["darwin"], [])),
+                          ("zsh-equals-not-found", ("guard", [], ["zsh"])),
+                          ("zsh-no-matches-found", ("lesson", [], ["zsh"])),
+                          ("zsh-status-path-variables", ("guard", [], ["zsh"]))):
+            self.assertEqual(SHIPPED[name], row, name)
 
     def test_a_shipped_lesson_carries_no_origin_and_is_as_the_cli_writes_it(self):
         """The file is what `compound promote --to general` publishes: rewriting it at the
@@ -549,13 +538,19 @@ class ShippedPoolTest(PoolCase):
 
     def test_no_shipped_guard_applies_where_its_command_is_right(self):
         """bash on Linux: every call the guards stop on macOS and zsh runs unrefused."""
+        there = sorted(name for name in SHIPPED if meant_on(name, "linux", "bash"))
+        for name in ("pip-externally-managed", "proposal-ships-the-working-fix"):
+            self.assertIn(name, there)
+        for name in ("macos-gnu-only-commands", "sed-in-place-bsd", "zsh-equals-not-found", "zsh-no-matches-found",
+                     "zsh-status-path-variables"):
+            self.assertNotIn(name, there)
         reply = self.check("echo ====", script=SCRIPT, **BASH_LINUX)
-        self.assertEqual((reply["hits"], reply["guards"]), ([], 0))
+        self.assertEqual((reply["hits"], reply["guards"]), ([], len([name for name in there if name in GUARDS])))
         for name, (yes, _no) in sorted(GUARDS.items()):
             for command in yes:
-                self.assertEqual(self.shipped_hits(command, **BASH_LINUX), [], command)
+                self.assertEqual(self.shipped_hits(command, **BASH_LINUX), [name] if name in there else [], command)
         pool = self.pool(**BASH_LINUX)
-        self.assertEqual(sorted(name for name, row in pool.items() if row["applies"]), ["pip-externally-managed", "proposal-ships-the-working-fix"])
+        self.assertEqual(sorted(name for name, row in pool.items() if row["applies"]), there)
         # zsh on Linux: the zsh guards apply, the macOS ones do not.
         self.assertEqual(self.shipped_hits("echo ====", COMPOUND_PLATFORM="linux"), ["zsh-equals-not-found"])
         self.assertEqual(self.shipped_hits("timeout 5 make", COMPOUND_PLATFORM="linux"), [])

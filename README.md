@@ -54,7 +54,8 @@ status` reports it.
 
 **Platforms:** compound is developed on macOS. The installer, the CLI and the mod in real
 Claude Code sessions have been run there. On Linux, the tests of the CLI and the
-installer run on Ubuntu in this repository's CI; the mod in a Claude Code session on
+installer, the hook tests (`claude plugin test`) and `claude plugin validate` run on Ubuntu
+in this repository's CI; the mod in a Claude Code session on
 Linux is not tested. WSL is not tested. Native Windows is not tested, and three things
 in the code assume a Unix system: the installer is a bash script, the CLI locks files
 with `fcntl`, and `compound` is installed as a symbolic link.
@@ -95,6 +96,7 @@ Health
   PASS  duplicates      every name exists once
   PASS  lessons parse   every lesson reads
   PASS  errors          none in the last 7 days
+  PASS  insights        never run
 
 Compound interest
   nothing yet: the log holds no reuse, guard, recall or lesson
@@ -237,6 +239,18 @@ to record it or decline it. A lesson recorded that way carries the copy that ran
 script rewritten from memory, and a program that was never run is refused as an
 attachment. [The guide](docs/guide.md#keep-a-script-that-worked) shows it.
 
+compound also learns from many sessions at once. Claude Code's own `/insights` command
+reads your recent sessions and names the friction in each. When a week has passed since
+the last run and at least 25 sessions have been logged, the first prompt of a session
+starts one `/insights` run in the background and says `/insights run started`; no session
+waits for it. The friction it
+finds in a session is offered to the next sessions in that session's project as a
+candidate lesson, and its suggested CLAUDE.md additions are offered in every project.
+Claude is asked to check each one against the project and record it or decline it; nothing
+is written unless a session decides to. One run cost $1.73 at list price in the one
+measured run. `COMPOUND_INSIGHTS_DAYS=0` turns the runs off. [The
+guide](docs/guide.md#candidates-from-insights) shows what a run leaves.
+
 Recorded text is always shown to Claude as a quoted note to weigh. It is never passed on
 as an instruction.
 
@@ -330,8 +344,8 @@ with compound installed gets them.
 
 ### The lessons that ship with compound
 
-The general pool holds seven lessons. Each one applies only on the platform or in the shell
-it is about, so on Linux with bash the first five do nothing:
+These are the lessons of the general pool. One that is about a platform or a shell applies
+only there, so on Linux with bash the ones marked zsh or macOS do nothing:
 
 | Lesson | Applies | What it does |
 |-|-|-|
@@ -476,7 +490,7 @@ each one with its output.
 | read one lesson | `compound show <name>` |
 | turn a lesson into a skill | `compound skill <name>` |
 | move a lesson to the user level | `compound promote <name> --to user` |
-| propose a lesson to the general pool | `compound promote <name> --to general` prints the plan and writes nothing. Add `--yes` to open the pull request. |
+| propose a lesson to the general pool | `compound promote <name> --to general --pins FILE --summary TEXT` prints the plan and writes nothing. Add `--yes` to open the pull request. The pins say what the lesson is meant to be; see the [user guide](docs/guide.md#propose-a-lesson-to-the-general-pool). |
 | decline a lesson that is owed | tell Claude it is not worth keeping, or run `compound skip --why "<reason>"` in a terminal in that project (with several owed, add `--settles <id>`) |
 | strengthen an ineffective lesson | add a pattern: `compound add --update --name <name> --match '<regex>'` |
 | remove a lesson | `compound rm <name>` (`--force` for a skill) |
@@ -523,6 +537,9 @@ These are the ones you are likely to change.
 | `COMPOUND_NUDGE_COOLDOWN` | 1800 | seconds between those questions |
 | `COMPOUND_EVIDENCE_MIN_RUNS` | 3 | passing runs of a script that takes no arguments before Claude is asked to record or decline it |
 | `COMPOUND_RECUR_LIMIT` | 2 | sessions a lesson is recalled in before it is ineffective |
+| `COMPOUND_INSIGHTS_DAYS` | 7 | days between runs of Claude Code's `/insights`, which `compound insights --start` begins when one is due; `0` turns the runs off |
+| `COMPOUND_INSIGHTS_MIN_SESSIONS` | 25 | sessions in the event log since the last run started before the next is due |
+| `COMPOUND_INSIGHTS_TIMEOUT` | 900 | seconds a run of `/insights` is given before it is stopped, with the outcome `timeout` |
 | `COMPOUND_SHELL` | the file name of `CLAUDE_CODE_SHELL`, else of `SHELL` | the shell a lesson for one shell is held against (`zsh`, `bash`); set it when Claude Code runs your commands in another shell than your login shell |
 | `COMPOUND_MODEL` | `haiku` | model that answers compound's questions |
 | `COMPOUND_JUDGE_TIMEOUT` | 10 | seconds to wait for that model |
@@ -534,6 +551,11 @@ These are the ones you are likely to change.
 
 compound asks a small model (`haiku` by default) a few short questions. The calls use
 the same account as your session.
+
+`compound insights --start` runs Claude Code's `/insights` headless in the background at
+most once a week, and only when at least 25 sessions have been logged since the last run:
+one run, which cost $1.73 at list price in the one measured run. `COMPOUND_INSIGHTS_DAYS=0` or
+`COMPOUND_OFF=1` turns it off.
 
 | When | Model calls | Added time |
 |-|-|-|
@@ -588,6 +610,7 @@ exits 1 when a row fails.
 | `duplicates` | FAIL or WARN: one name at two places | the row prints both paths; remove or rename one |
 | `lessons parse` | FAIL: a lesson does not read | the row prints the file and the problem; fix the file or run `compound rm <name>` |
 | `errors` | WARN: errors in the last 7 days | the `Open` section of the report lists each one |
+| `insights` | WARN: the last run of Claude Code's `/insights` `failed`, ended in a `timeout`, or left files compound could not read (`unreadable`); the row says which, with its message | nothing is needed; the next run is tried a week after this one started. `compound insights` shows the state |
 
 Other things you may see:
 

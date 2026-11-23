@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { CompoundBand } from '../types'
 import {
-  ago, bandRow, bar, began, boardFrom, boardLines, BUSY, BUSY_MAX_MS, captured, dateText, emptyBand, ended, erred, ERROR, eventLook, eventTail, eventText, eventWord, FLASH_MS, forSession,
+  alsoNoted, candidatesText, ago, bandRow, bar, began, boardFrom, boardLines, BUSY, BUSY_MAX_MS, captured, dateText, emptyBand, ended, erred, ERROR, eventLook, eventTail, eventText, eventWord, FLASH_MS, forSession,
   frameAt, FRAME_MS, FRAMES, FRESH_MS, GONE_MS, greeted, HINT, inventoried, listed, motion, newTurn, noted, NOTES, OWED, phaseAt, phaseKey, reuseFound, reuseIdle, reuseText, settledBy, stepped, synced, trackSegs,
   unfixed, watched, WATCHING, WEAK, weakened, width, WORDS,
   allLines, detailFrom, detailLines, emptyPane, failedDetail, forPane, itemsFrom, keyLines, loadingDetail, openKey, paneAll, paneBack, paneItems, paneOpening, paneRead, wrapped,
@@ -1075,4 +1075,99 @@ test('a script that worked and that nothing keeps is on the pane with the two co
   const { scripts: _gone, ...open } = older.open
   expect(boardLines({ ...older, open }, 140).length > 5).toBe(true)
   expect(older.open.scripts).toEqual([])
+})
+
+test('findings of /insights are on the pane among what is open, with the command that lists them; the insights check breaks nothing', async () => {
+  const status = JSON.parse(STATUS) as { open: Record<string, unknown>; health: Record<string, unknown>[] }
+  status.open.findings = [
+    { id: 'in-0123456789abcdef', source: 'facet', project: '/work/alpha', text: 'The build was rerun without its profile.', age: '2d' },
+    { id: 'in-fedcba9876543210', source: 'report', project: '', text: 'Always pass --profile to ./build.sh.', age: '1d' },
+  ]
+  status.health.push({ check: 'insights', status: 'PASS', detail: 'the last run, started 2026-11-20T00:00:00Z, is interrupted' })
+  const board = boardFrom(JSON.stringify(status), EVENTS, 'pane-session', 0)!
+  expect(board.open.findings).toEqual([
+    { text: 'in-0123456789abcdef (2d, alpha) The build was rerun without its profile.' },
+    { text: 'in-fedcba9876543210 (1d, report) Always pass --profile to ./build.sh.' },
+  ])
+  // A row is the report's by its source, never by a missing project.
+  const unplaced = JSON.parse(JSON.stringify(status)) as typeof status
+  unplaced.open.findings = [{ id: 'in-1111111111111111', source: 'facet', project: '', text: 'No project.', age: '3d' }, { id: 'in-2222222222222222', source: 'report', project: '/work/odd', text: 'Odd.', age: '1d' }]
+  expect(boardFrom(JSON.stringify(unplaced), EVENTS, 'pane-session', 0)!.open.findings).toEqual([{ text: 'in-1111111111111111 (3d) No project.' }, { text: 'in-2222222222222222 (1d, report) Odd.' }])
+  // The insights check is informational: it passes, and is not drawn as a failure or a warning.
+  expect(board.health.map(h => h.check)).toEqual(['cli', 'duplicates'])
+  expect(board.checks).toBe(4)
+  const text = boardLines(board, 140).map(line => line.map(seg => seg.text).join('')).join('\n')
+  expect(text).toContain('2 candidates from /insights')
+  expect(text).toContain('in-0123456789abcdef (2d, alpha) The build was rerun without its profile.')
+  expect(text).toContain('compound insights')
+  // A long finding is cut in its text, which comes last, so the row fits a pane in a
+  // 100-column terminal with its age and project whole.
+  const long = JSON.parse(JSON.stringify(status)) as typeof status
+  long.open.findings = [{ id: 'in-3333333333333333', source: 'facet', project: '/work/project', age: '47s',
+    text: 'The release notes were written as one paragraph of bullets although this project lists one change per line.' }]
+  const row = (boardFrom(JSON.stringify(long), EVENTS, 'pane-session', 0)!.open.findings ?? [])[0]!
+  expect(row.text.startsWith('in-3333333333333333 (47s, project) The release notes')).toBe(true)
+  expect(row.text.endsWith('\u2026')).toBe(true)
+  const drawn = boardLines(boardFrom(JSON.stringify(long), EVENTS, 'pane-session', 0)!, 97).map(line => line.map(seg => seg.text).join(''))
+  const line = drawn.find(l => l.includes('in-3333333333333333'))!
+  expect(line.length).toBeLessThanOrEqual(92)
+  // A board kept by an earlier version of the mod has no such list, and is drawn all the same.
+  const older = boardFrom(STATUS, EVENTS, 'pane-session', 0)!
+  expect(older.open.findings).toEqual([])
+  const { findings: _gone, ...open } = older.open
+  expect(boardLines({ ...older, open }, 140).length > 5).toBe(true)
+})
+
+test('a run of /insights that went wrong is a warning the pane shows by name, as the CLI reports it', async () => {
+  const status = JSON.parse(STATUS) as { open: Record<string, unknown>; health: Record<string, unknown>[] }
+  status.health.push({ check: 'insights', status: 'WARN', detail: 'last run 2026-11-20T00:00:00Z: timeout: claude did not finish within 900 seconds' })
+  const board = boardFrom(JSON.stringify(status), EVENTS, 'pane-session', 0)!
+  expect(board.health.map(h => h.check)).toEqual(['cli', 'duplicates', 'insights'])
+  expect(board.health.find(h => h.check === 'insights')?.detail).toContain('timeout')
+  const text = boardLines(board, 140).map(line => line.map(seg => seg.text).join('')).join('\n')
+  expect(text).toContain('insights')
+  expect(text).not.toContain('healthy')
+})
+
+test('a reminder\'s line in the timeline counts what it told: lessons owed, findings, or both', async () => {
+  expect(eventText({ type: 'remind', captures: ['a', 'b'] })).toBe('2 lessons owed')
+  expect(eventText({ type: 'remind', insights: ['in-0123456789abcdef'] })).toBe('1 candidate from /insights')
+  expect(eventText({ type: 'remind', captures: ['a'], insights: ['in-0123456789abcdef', 'in-fedcba9876543210'] })).toBe('1 lesson owed, 2 candidates from /insights')
+  expect(eventText({ type: 'remind' })).toBe('0 lessons owed')
+  expect(eventLook('insight')).toEqual(NOTES.insights)
+})
+
+test('the first prompt notes the findings it was told about on the band', async () => {
+  const row = (band: CompoundBand) => text(bandRow(band, T0 + 1, 100))
+  expect(candidatesText(1)).toBe('1 candidate from /insights')
+  expect(candidatesText(3)).toBe('3 candidates from /insights')
+  // Findings alone: their own note.
+  expect(row(noted(fresh(), 'insights', candidatesText(2), T0))).toBe(`${NOTES.insights.glyph} compound insights · 2 candidates from /insights`)
+  expect(row(alsoNoted(fresh(), 'insights', candidatesText(2), T0))).toBe(`${NOTES.insights.glyph} compound insights · 2 candidates from /insights`)
+  // Beside the captures' note: it keeps the newest capture's working call, and the findings are a note of their own after it.
+  const both = alsoNoted(noted(fresh(), 'unsettled', '1 lesson', T0, './build.sh --profile dev'), 'insights', candidatesText(2), T0)
+  expect(both.note?.kind).toBe('unsettled')
+  expect(both.note?.detail).toBe('./build.sh --profile dev')
+  expect(text(bandRow(both, T0 + 1, 120))).toBe(`● compound owed from earlier sessions · 1 lesson  ./build.sh --profile dev  ${NOTES.insights.glyph} 2 candidates from /insights`)
+  // In its own colour; and where the row is narrow it goes before the working call does.
+  const segs = bandRow(both, T0 + 1, 120)
+  expect(segs.find(s => s.text === '2 candidates from /insights')?.color).toBe(NOTES.insights.color)
+  expect(text(bandRow(both, T0 + 1, 90))).toBe('● compound owed from earlier sessions · 1 lesson  ./build.sh --profile dev')
+  // It fades with the note it stands beside.
+  expect(bandRow(both, T0 + GONE_MS + 1, 100)).toEqual([])
+})
+
+test('a reuse found at the first prompt keeps what that prompt told of earlier sessions beside it', async () => {
+  // The reminder's note is painted while the check's spinner turns; the check's result used
+  // to replace it before it was ever drawn.
+  const both = alsoNoted(noted(inventoried(fresh(), 9, 4), 'unsettled', '1 lesson', T0, 'python3 -m unittest'), 'insights', candidatesText(4), T0)
+  const found = reuseFound(both, ['release-notes-format'], 0, T0 + 3000)
+  expect(text(bandRow(found, T0 + 3001, 100))).toBe('◆ compound reuse found · release-notes-format  ● 1 owed, 4 candidates from /insights')
+  // The greeting waits: its counts are not spent on a row that had no room for them.
+  expect(found.greeted).toBeUndefined()
+  const alone = reuseFound(noted(fresh(), 'insights', `${candidatesText(1)}, /insights run started`, T0), ['release-notes-format'], 0, T0 + 3000)
+  expect(text(bandRow(alone, T0 + 3001, 100))).toBe(`◆ compound reuse found · release-notes-format  ${NOTES.insights.glyph} 1 candidate from /insights, /insights run started`)
+  // A reminder already gone is not brought back, and a reuse note is never carried.
+  expect(reuseFound(both, ['x'], 0, T0 + GONE_MS + 1).note?.also).toBeUndefined()
+  expect(reuseFound(reuseFound(fresh(), ['a'], 0, T0), ['b'], 0, T0 + 1).note?.also).toBeUndefined()
 })

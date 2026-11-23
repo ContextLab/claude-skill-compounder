@@ -1,0 +1,33 @@
+{
+  "kind": "guard",
+  "platform": [],
+  "shell": [
+    "zsh"
+  ],
+  "stops": [
+    "echo =====",
+    "ls; echo ====== ; pwd",
+    "make && echo ==== && make test",
+    "echo -e ====\nls",
+    "cd /tmp\necho ==========\nls",
+    "for f in a b; do echo ====; cat $f; done",
+    "x=$(echo ===)",
+    "if true; then echo ==; fi",
+    "true || echo ===="
+  ],
+  "passes": [
+    "echo '====='",
+    "echo \"=== done ===\"",
+    "printf '%s\\n' '====='",
+    "echo a=b",
+    "FOO==bar echo hi",
+    "grep -c '^echo ==' file",
+    "echo --- step 2",
+    "python3 -c 'print(1 == 2)'",
+    "echo =",
+    "echo = done",
+    "bash -c 'echo ====='",
+    "git commit -m 'echo ==== fails in zsh'",
+    "grep -rn 'echo ====' notes/"
+  ]
+}
