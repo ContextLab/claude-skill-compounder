@@ -300,9 +300,42 @@ class PublishedWithItsPinsTest(PinCase):
         upstream = self.pool(build=build)
         proc = self.promote("plain-note", upstream, *pin_flags(self.box.root))
         self.assertExit(proc, 1)
-        self.assertIn("is a symbolic link", proc.stderr)
+        self.assertIn("a symbolic link", proc.stderr)
         self.assertEqual(os.listdir(landing), [])
         self.assertEqual(self.branches(upstream), ["main"])
+
+    def test_a_pool_whose_tests_is_a_link_gets_no_directory_made_through_it(self):
+        """Not even an empty one: each part of the path is looked at before it is made."""
+        for depth, parts in enumerate((("tests",), ("tests", "pool"))):
+            landing = os.path.join(self.box.root, "landing-%d" % depth)
+            os.makedirs(landing)
+
+            def build(seedrepo, parts=parts, landing=landing):
+                os.makedirs(os.path.join(seedrepo, *parts[:-1]), exist_ok=True)
+                os.symlink(landing, os.path.join(seedrepo, *parts))
+
+            upstream = self.pool("linked-%d" % depth, build=build)
+            proc = self.promote("zsh-equals-word", upstream, *self.zsh_flags())
+            self.assertExit(proc, 1)
+            self.assertIn("a symbolic link", proc.stderr)
+            self.assertEqual(os.listdir(landing), [], "something was made where the link leads")
+            self.assertEqual(self.branches(upstream), [ "main"])
+
+    def test_pins_of_the_pool_behind_a_link_are_not_read(self):
+        """A pool cannot have this command read a file from elsewhere on the machine as
+        its pins and repeat a command from it."""
+        elsewhere = os.path.join(self.box.root, "elsewhere")
+        self.write(elsewhere, "ordinary.json", json.dumps(["echo ==== zzmarker"]))
+
+        def build(seedrepo):
+            os.makedirs(os.path.join(seedrepo, "tests"))
+            os.symlink(elsewhere, os.path.join(seedrepo, "tests", "pool"))
+
+        upstream = self.pool(build=build)
+        proc = self.promote("zsh-equals-word", upstream, *self.zsh_flags())
+        self.assertExit(proc, 1)
+        self.assertNotIn("zzmarker", proc.stderr + proc.stdout)
+        self.assertEqual(sorted(os.listdir(elsewhere)), ["ordinary.json"])
 
 
 class PinsFitThePoolTest(PinCase):
