@@ -356,6 +356,7 @@ only there, so on Linux with bash the ones marked zsh or macOS do nothing:
 | `macos-gnu-only-commands` | macOS | recalled when `timeout`, `date -d`, `grep -P` or `stat -c` fails: a stock Mac has the BSD tools. It stops no call |
 | `pip-externally-managed` | everywhere | recalled when `pip install` fails with "externally-managed-environment" |
 | `proposal-ships-the-working-fix` | everywhere | recalled when a fix that works locally is proposed upstream or to a shared pool: the proposal ships the working form (a hook stays a hook), not a softer reminder |
+| `verify-transient-before-waiting` | everywhere | recalled when a failure looks transient and the plan is to rerun, retry or wait: a rerun counts only if it passes, so what the failure depends on is tested first |
 
 `compound list` shows them with the rest. One that does not apply on your machine is
 flagged `not here`.
