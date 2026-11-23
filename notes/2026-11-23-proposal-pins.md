@@ -58,6 +58,22 @@ no platform or shell condition, which the last assertion had no room for.
   shipped lesson's directory to `SKILL.md` alone. `promote` does not refuse it.
 - A lesson with a `probe` and no `match` is pinned as `lesson`.
 
+## After the first push
+
+The automated review of the first commit found that `promote` called `os.makedirs` on
+`tests/pool/lessons` in the clone before checking for a link, so a pool whose `tests` was
+a symbolic link got empty directories made where the link led. `_clone_dir` now looks at
+each part before it is entered or made, and `pool_problems` reads the pool's pins only
+through it. Two tests in `tests/test_pins.py` cover it.
+
 ## State
 
-See the end of this file for the commits and what happened to #46 and #47.
+- `main`: the change and the link fix are pushed.
+- #46 and #47 were completed in place on their branches: `main` merged in, the pin file
+  added under `tests/pool/lessons/`, and a row added to each table. Both passed
+  `test_general_pool.py` and `test_docs.py` locally before the push; the pull requests
+  show what CI said.
+- #47 is a guard with no platform or shell condition: it stops every call to `gemini`
+  for every user. Whether that belongs in the general pool is a question for the merge.
+- Both pull requests add a row after the last row of the same two tables, so the second
+  one merged will conflict there and needs its rows moved.

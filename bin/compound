@@ -6510,6 +6510,25 @@ def pin_problems(item, pins):
     return out
 
 
+def _clone_dir(clone, parts, create=False):
+    """The directory `parts` of the clone, or None when it is not there. Each part is
+    looked at before the next is entered and before anything is made: one that is a
+    symbolic link, or is not a directory, is None, so nothing is read or written where a
+    link of the cloned repository leads. With `create`, a part that is missing is made."""
+    path = clone
+    for part in parts:
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            return None
+        if not os.path.lexists(path):
+            if not create:
+                return None
+            os.mkdir(path)
+        elif not os.path.isdir(path):
+            return None
+    return path
+
+
 def _pool_json(path):
     """A JSON file of a cloned pool, as data, or None when it is not there or does not read."""
     if os.path.islink(path) or not os.path.isfile(path):
@@ -6528,18 +6547,19 @@ def pool_problems(clone, name, item, pins):
     everyday commands no shipped pattern may stop (tests/pool/ordinary.json), the pins of
     the lessons already there, and their patterns."""
     out = []
-    pool = os.path.join(clone, "tests", "pool")
+    pool = _clone_dir(clone, ("tests", "pool"))
+    pinned = _clone_dir(clone, ("tests", "pool", "lessons"))
     theirs = {}
     try:
-        entries = sorted(os.listdir(os.path.join(pool, "lessons")))
+        entries = sorted(os.listdir(pinned)) if pinned else []
     except OSError:
         entries = []
     for entry in entries:
-        data = _pool_json(os.path.join(pool, "lessons", entry))
+        data = _pool_json(os.path.join(pinned, entry))
         if entry.endswith(".json") and entry[:-5] != name and not pin_shape_problems(data):
             theirs[entry[:-5]] = data
     if item["match"]:
-        ordinary = _pool_json(os.path.join(pool, "ordinary.json"))
+        ordinary = _pool_json(os.path.join(pool, "ordinary.json")) if pool else None
         commands = [(command, "an everyday command of the pool (tests/pool/ordinary.json)")
                     for command in (ordinary if isinstance(ordinary, list) else []) if isinstance(command, str)]
         for other, pin in sorted(theirs.items()):
@@ -6550,7 +6570,7 @@ def pool_problems(clone, name, item, pins):
                 out.append("its pattern %s %s, %s" % ("stops" if hits else "did not finish on", json.dumps(command), what))
     others = []
     try:
-        shipped = sorted(os.listdir(os.path.join(clone, "lessons")))
+        shipped = sorted(os.listdir(os.path.join(clone, "lessons"))) if _clone_dir(clone, ("lessons",)) else []
     except OSError:
         shipped = []
     for entry in shipped:
@@ -6904,11 +6924,13 @@ def cmd_promote(args):
             if misfit:
                 raise usage("%r was not proposed: it does not fit the pool at %s: %s. Nothing was pushed" % (
                     name, one_line(remote or upstream), "; ".join(misfit)))
-            pin_dir = os.path.join(clone, "tests", "pool", "lessons")
-            os.makedirs(pin_dir, exist_ok=True)
-            if os.path.realpath(pin_dir) != os.path.join(os.path.realpath(clone), "tests", "pool", "lessons"):
-                raise failure("tests/pool/lessons in %s is a symbolic link, so nothing was written into it and "
-                              "nothing was pushed" % (remote or upstream))
+            # Looked at part by part BEFORE anything is made: through a link, even an empty
+            # directory would land outside the clone.
+            pin_dir = _clone_dir(clone, ("tests", "pool", "lessons"), create=True)
+            if pin_dir is None:
+                raise failure("tests/pool/lessons in %s is not a directory of its own (a part of the path is a "
+                              "symbolic link or a file), so nothing was written into it and nothing was pushed"
+                              % (remote or upstream))
             if os.path.lexists(os.path.join(pin_dir, name + ".json")):
                 raise failure("%s already exists in %s" % (pin_path, remote or upstream))
             with open(os.path.join(pin_dir, name + ".json"), "w", encoding="utf-8", newline="") as handle:

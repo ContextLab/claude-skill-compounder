@@ -1426,7 +1426,8 @@ a `match`, the lesson must stop none of the everyday commands in the pool's
 guard already in the pool's `lessons/` may stop a command of these pins. A misfit is
 exit 2, names each command, and pushes nothing. Then the pins are written to
 `tests/pool/lessons/<name>.json` (keys in the order above, two spaces of indent), never
-through a symbolic link and never over a file that is there, and a row for the lesson is
+over a file that is there and never through a symbolic link: each part of that path is
+looked at before it is entered or made, and the pool's pins behind a link are not read, and a row for the lesson is
 added to the end of the lessons table of the pool's `README.md` (the one under the
 heading "The lessons that ship with compound") and of its `docs/design.md` (under "The
 general pool"), where the pool has those tables. The reply's `tables` names the documents that got a row. One
